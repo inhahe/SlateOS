@@ -109,6 +109,7 @@ SCRCAP = "gui/desktop/src/screen_capture.rs"
 SNAP = "gui/desktop/src/snap.rs"
 DISP = "gui/desktop/src/display_settings.rs"
 A11Y = "gui/desktop/src/accessibility_settings.rs"
+FOCUS = "gui/desktop/src/focus_assist.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -16938,6 +16939,738 @@ DEFECTS = [
         [
             'every_site_draws_the_role_it_claims',
             'green_means_on_and_the_accent_means_chosen',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the tray icon keeps its own Mocha base',
+        FOCUS,
+        [
+            ('            color: readable_on(color),',
+             '            color: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_tray_icon_is_inked_for_its_own_pill',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the title keeps its own Mocha text',
+        FOCUS,
+        [
+            ('            text: "Focus Assist".to_string(),\n            font_size: 18.0,\n            color: p.text,',
+             '            text: "Focus Assist".to_string(),\n            font_size: 18.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the engaged Current line keeps its own Mocha blue',
+        FOCUS,
+        [
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
+             '            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                Color::from_hex(0x89B4FA)\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_current_line_is_quiet_when_off_and_never_the_accent',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the quiet Current line keeps its own Mocha subtext0',
+        FOCUS,
+        [
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
+             '            color: if mode == FocusMode::Off {\n                Color::from_hex(0xA6ADC8)\n            } else {\n                p.blue\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_current_line_is_quiet_when_off_and_never_the_accent',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the suppressed-count line keeps its own Mocha overlay0',
+        FOCUS,
+        [
+            ('                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.overlay0,',
+             '                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the chosen row's background keeps its own Mocha surface0",
+        FOCUS,
+        [
+            ('            let bg = if selected { p.surface0 } else { p.mantle };',
+             '            let bg = if selected { Color::from_hex(0x313244) } else { p.mantle };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the unchosen rows' background keeps its own Mocha mantle",
+        FOCUS,
+        [
+            ('            let bg = if selected { p.surface0 } else { p.mantle };',
+             '            let bg = if selected { p.surface0 } else { Color::from_hex(0x181825) };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the unchosen rows' icon keeps its own Mocha subtext0",
+        FOCUS,
+        [
+            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
+             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { Color::from_hex(0xA6ADC8) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the chosen row's label keeps its own Mocha text",
+        FOCUS,
+        [
+            ('                font_size: 13.0,\n                color: if selected { p.text } else { p.subtext0 },',
+             '                font_size: 13.0,\n                color: if selected { Color::from_hex(0xCDD6F4) } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a row's description keeps its own Mocha overlay0",
+        FOCUS,
+        [
+            ('                text: m.description().to_string(),\n                font_size: 10.0,\n                color: p.overlay0,',
+             '                text: m.description().to_string(),\n                font_size: 10.0,\n                color: Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Automatic Rules heading keeps its own Mocha text',
+        FOCUS,
+        [
+            ('            text: "Automatic Rules".to_string(),\n            font_size: 14.0,\n            color: p.text,',
+             '            text: "Automatic Rules".to_string(),\n            font_size: 14.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the empty-state line keeps its own Mocha overlay0',
+        FOCUS,
+        [
+            ('                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.overlay0,',
+             '                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a rule's row keeps its own Mocha surface0",
+        FOCUS,
+        [
+            ('                    height: 28.0,\n                    color: p.surface0,',
+             '                    height: 28.0,\n                    color: Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: a rule's label keeps its own Mocha text",
+        FOCUS,
+        [
+            ('                    text: rule.label(),\n                    font_size: 12.0,\n                    color: p.text,',
+             '                    text: rule.label(),\n                    font_size: 12.0,\n                    color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a rule's mode keeps its own Mocha overlay0",
+        FOCUS,
+        [
+            ('                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+             '                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the mild-silence hue keeps its own Mocha blue',
+        FOCUS,
+        [
+            ('            Self::PriorityOnly => Some(p.blue),',
+             '            Self::PriorityOnly => Some(Color::from_hex(0x89B4FA)),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the alarms-only hue keeps its own Mocha yellow',
+        FOCUS,
+        [
+            ('            Self::AlarmsOnly => Some(p.yellow),',
+             '            Self::AlarmsOnly => Some(Color::from_hex(0xF9E2AF)),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the total-silence hue keeps its own Mocha red',
+        FOCUS,
+        [
+            ('            Self::TotalSilence => Some(p.red),',
+             '            Self::TotalSilence => Some(Color::from_hex(0xF38BA8)),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the tray icon is body text rather than the legible answer',
+        FOCUS,
+        [
+            ('            color: readable_on(color),',
+             '            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_tray_icon_is_inked_for_its_own_pill',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the tray icon is the panel colour, which is right in Mocha by luck',
+        FOCUS,
+        [
+            ('            color: readable_on(color),',
+             '            color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_tray_icon_is_inked_for_its_own_pill',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the tray icon is read off the accent instead of off the pill',
+        FOCUS,
+        [
+            ('            color: readable_on(color),',
+             '            color: readable_on(p.accent),'),
+        ],
+        ["desktop"],
+        # Not the mode-change sweep, though the ink is now a constant function
+        # of the accent: that test wears Mauve, whose Mocha and Latte values
+        # sit on opposite sides of readable_on's step, so the ink still differs
+        # between the two renders -- for the wrong reason, which is precisely
+        # what a "did anything change?" test cannot tell apart from the right
+        # one.
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_tray_icon_is_inked_for_its_own_pill',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the tray icon is read off the panel instead of off the pill',
+        FOCUS,
+        [
+            ('            color: readable_on(color),',
+             '            color: readable_on(p.base),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_tray_icon_is_inked_for_its_own_pill',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the title drops to the quiet rung',
+        FOCUS,
+        [
+            ('            text: "Focus Assist".to_string(),\n            font_size: 18.0,\n            color: p.text,',
+             '            text: "Focus Assist".to_string(),\n            font_size: 18.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the engaged Current line follows the accent',
+        FOCUS,
+        [
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
+             '            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.accent\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_current_line_is_quiet_when_off_and_never_the_accent',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the chosen row's icon is blue again, as it was before the split",
+        FOCUS,
+        [
+            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
+             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.blue } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the chosen row's icon is body text and marks nothing",
+        FOCUS,
+        [
+            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
+             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.text } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the unchosen rows' label is as loud as the chosen one's",
+        FOCUS,
+        [
+            ('                font_size: 13.0,\n                color: if selected { p.text } else { p.subtext0 },',
+             '                font_size: 13.0,\n                color: if selected { p.text } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the chosen row's label is as quiet as the unchosen ones'",
+        FOCUS,
+        [
+            ('                font_size: 13.0,\n                color: if selected { p.text } else { p.subtext0 },',
+             '                font_size: 13.0,\n                color: if selected { p.subtext0 } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a row's description climbs above its rung",
+        FOCUS,
+        [
+            ('                text: m.description().to_string(),\n                font_size: 10.0,\n                color: p.overlay0,',
+             '                text: m.description().to_string(),\n                font_size: 10.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the suppressed-count line is as loud as the title',
+        FOCUS,
+        [
+            ('                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.overlay0,',
+             '                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_suppressed_line_is_overlay_and_only_drawn_when_there_is_one',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the Automatic Rules heading stops being a heading',
+        FOCUS,
+        [
+            ('            text: "Automatic Rules".to_string(),\n            font_size: 14.0,\n            color: p.text,',
+             '            text: "Automatic Rules".to_string(),\n            font_size: 14.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: a rule's label sinks to the faintest rung",
+        FOCUS,
+        [
+            ('                    text: rule.label(),\n                    font_size: 12.0,\n                    color: p.text,',
+             '                    text: rule.label(),\n                    font_size: 12.0,\n                    color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a rule's mode is as loud as its label",
+        FOCUS,
+        [
+            ('                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+             '                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a rule's row sinks to the page behind it",
+        FOCUS,
+        [
+            ('                    height: 28.0,\n                    color: p.surface0,',
+             '                    height: 28.0,\n                    color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the unchosen rows are lifted to the chosen one's rung",
+        FOCUS,
+        [
+            ('            let bg = if selected { p.surface0 } else { p.mantle };',
+             '            let bg = if selected { p.surface0 } else { p.surface0 };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the chosen row sinks to the unchosen ones' rung",
+        FOCUS,
+        [
+            ('            let bg = if selected { p.surface0 } else { p.mantle };',
+             '            let bg = if selected { p.mantle } else { p.mantle };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the empty-state line is as loud as the heading above it',
+        FOCUS,
+        [
+            ('                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.overlay0,',
+             '                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the mild-silence hue drifts to a neighbouring colour',
+        FOCUS,
+        [
+            ('            Self::PriorityOnly => Some(p.blue),',
+             '            Self::PriorityOnly => Some(p.lavender),'),
+        ],
+        ["desktop"],
+        [
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: all three mode hues follow the accent, so the scale says nothing',
+        FOCUS,
+        [
+            ('            Self::PriorityOnly => Some(p.blue),',
+             '            Self::PriorityOnly => Some(p.accent),'),
+            ('            Self::AlarmsOnly => Some(p.yellow),',
+             '            Self::AlarmsOnly => Some(p.accent),'),
+            ('            Self::TotalSilence => Some(p.red),',
+             '            Self::TotalSilence => Some(p.accent),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'settings_render_not_empty',
+            'settings_render_with_rules',
+            'the_current_line_is_quiet_when_off_and_never_the_accent',
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+            'the_suppressed_line_is_overlay_and_only_drawn_when_there_is_one',
+            'the_tray_icon_is_inked_for_its_own_pill',
+            'tray_indicator_hidden_when_off',
+            'tray_indicator_shown_when_active',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the alarms-only and total-silence hues are swapped',
+        FOCUS,
+        [
+            ('            Self::AlarmsOnly => Some(p.yellow),',
+             '            Self::AlarmsOnly => Some(p.red),'),
+            ('            Self::TotalSilence => Some(p.red),',
+             '            Self::TotalSilence => Some(p.yellow),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: two modes share a rung of the severity scale',
+        FOCUS,
+        [
+            ('            Self::AlarmsOnly => Some(p.yellow),',
+             '            Self::AlarmsOnly => Some(p.blue),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: Off is given a hue, so the tray shows an indicator for no focus at all',
+        FOCUS,
+        [
+            ('            Self::Off => None,',
+             '            Self::Off => Some(p.overlay0),'),
+        ],
+        ["desktop"],
+        [
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+            'tray_indicator_hidden_when_off',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a row's icon and label colours are traded",
+        FOCUS,
+        [
+            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
+             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.text } else { p.subtext0 },'),
+            ('                font_size: 13.0,\n                color: if selected { p.text } else { p.subtext0 },',
+             '                font_size: 13.0,\n                color: if selected { p.accent } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the Current line's engaged and quiet branches are swapped",
+        FOCUS,
+        [
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
+             '            color: if mode == FocusMode::Off {\n                p.blue\n            } else {\n                p.subtext0\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_current_line_is_quiet_when_off_and_never_the_accent',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the row background's chosen and unchosen branches are swapped",
+        FOCUS,
+        [
+            ('            let bg = if selected { p.surface0 } else { p.mantle };',
+             '            let bg = if selected { p.mantle } else { p.surface0 };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the row icon's chosen and unchosen branches are swapped",
+        FOCUS,
+        [
+            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
+             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.subtext0 } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the picker offers its modes in a different order than FocusMode::ALL',
+        FOCUS,
+        [
+            ('    pub const ALL: [Self; 4] = [\n        Self::Off,\n        Self::PriorityOnly,',
+             '    pub const ALL: [Self; 4] = [\n        Self::PriorityOnly,\n        Self::Off,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the settings page rebuilds the palette from the mode and loses the accent',
+        FOCUS,
+        [
+            ('    pub fn render_settings(&self, p: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {\n        let mut commands = Vec::new();',
+             '    pub fn render_settings(&self, p: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {\n        let p = &Palette::for_mode(p.light);\n        let mut commands = Vec::new();'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the tray is handed a palette of its own instead of the caller's",
+        FOCUS,
+        [
+            ('    pub fn render_tray_indicator(&self, p: &Palette, x: f32, y: f32) -> Vec<RenderCommand> {\n        let mut commands = Vec::new();',
+             '    pub fn render_tray_indicator(&self, p: &Palette, x: f32, y: f32) -> Vec<RenderCommand> {\n        let p = &Palette::for_mode(false);\n        let mut commands = Vec::new();'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_tray_icon_is_inked_for_its_own_pill',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: every row reads as the chosen one',
+        FOCUS,
+        [
+            ('            let selected = self.manual_mode == *m;',
+             '            let selected = self.manual_mode == *m || true;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: no row ever reads as chosen',
+        FOCUS,
+        [
+            ('            let selected = self.manual_mode == *m;',
+             '            let selected = self.manual_mode == *m && false;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the suppressed-count line is drawn when nothing was suppressed',
+        FOCUS,
+        [
+            ('        if self.is_active() && self.suppressed_count > 0 {',
+             '        if self.is_active() || self.suppressed_count == 0 {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_suppressed_line_is_overlay_and_only_drawn_when_there_is_one',
         ],
     ),
 ]

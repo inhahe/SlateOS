@@ -50401,7 +50401,7 @@ guarantee, and on Windows the failure mode would be a sharing violation in
 whichever of the two processes lost the race. Wait for `[run-timeout] child
 exited` before running any cargo command against the same target directory.
 
-**Part 2 progress. 39 of 49 modules converted.**
+**Part 2 progress. 40 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -52888,6 +52888,109 @@ exited` before running any cargo command against the same target directory.
       module 38 the four narrowest tests were sole on 8 between them, and here
       the two narrowest are sole on 5. The broad test finds that *something*
       moved; only the narrow one says the switch stopped meaning "on".
+
+- [x] `focus_assist.rs` — 9 constants over 15 colour sites, done 2026-08-23.
+  Forty-one tests in the module (nine new), harness defects Ax62–Zx63
+  (fifty-two).
+  - **The near-black-on-accent bug again — but this time illegible in all
+    three states at once.** The tray pill is the module's only always-visible
+    surface, and it was lettered with a hard-coded `BASE` (`#1E1E2E`) on
+    whichever hue codes the current mode. In Mocha that is fine. In Latte it
+    measures **3.02:1 on blue, 3.12:1 on yellow and 3.13:1 on red** — every
+    active mode below the 4.5:1 floor simultaneously, which is worse than the
+    single failing pair the previous modules had. The ink is now
+    `readable_on(fill)`, which lifts all three to ≈4.85:1.
+    - This is the fourth module in which the *same* constant-named-for-a-value
+      hid the *same* class of bug, and the fourth time the light render is what
+      named it. The bug is not that someone chose a bad colour; it is that
+      `BASE` is a name for `#1E1E2E` rather than a name for "the ink that can
+      be read on this fill", so the site could not express the thing it
+      actually needed.
+  - **A severity code is not a theme, so the mode hues do not follow the
+    accent.** Blue, yellow and red here mean "a little silence", "more" and
+    "total" — three rungs of one scale. A user who sets a green accent gets a
+    green *picker*, because that marks a choice, but the rungs stay put: a
+    wrong colour is hard to read, whereas a uniform one says nothing at all.
+    `the_mode_hues_are_a_severity_code_and_never_the_accent` pins both halves —
+    the exact ordered scale, and that no two rungs collide.
+  - **The `derived` parameter was not needed, but the fixture had to be an
+    instrument.** Every colour this module draws is a plain role, so the
+    membership sweep accepts everything with `derived: &[]`. That makes the
+    sweep *structurally blind* to any defect that swaps one role for another —
+    including "every mode hue follows the accent", the single worst defect the
+    module can have. What catches it is the fixture: `accented()` asserts that
+    the off-palette accent it installs is equal to no role *and* to no mode
+    hue, so the assertion fires inside every one of the twelve tests that use
+    it. Lesson 21 (an off-palette fixture must be off the *instruments* too)
+    turned out to be the whole coverage for that defect.
+  - **A site nothing renders is a site nothing checks** — caught before the
+    defects were written, not by them. "No automatic rules configured" is drawn
+    only by a manager with *no* rules, and the busy fixture has one, so neither
+    the membership sweep, nor the deleted-constant table, nor the ordered pin
+    ever reached that line. A fixture rich enough to exercise four picker rows
+    and a suppressed-count line is exactly the fixture that silences the
+    empty state. Fixed by adding a second, deliberately *empty* render to all
+    three, which is also the only render in which `Off` is the chosen row —
+    and that second pin is what later caught the `FocusMode::ALL` permutation.
+  - **Preflight then sweep: 52 build / 0 do not / 0 not applied, then 52
+    caught, 0 escaped, 0 never asked, 0 under-caught, 0 under-declared** —
+    clean on the first run, the first module to need no reconciliation. That is
+    not luck: the pre-sweep declaration review (module 38's institutionalised
+    lesson) found the one error by reading, an *over*-declaration on the
+    tray-ink defect, roughly twenty-five minutes before the run would have
+    found it. Reading the test beats running it for a third consecutive module.
+  - **Lesson 22, applied rather than learned.** Module 39 discovered that a
+    test which derives its index from the renderer's own list cannot see that
+    list permuted. Here the picker test walks `FocusMode::ALL.iter()
+    .enumerate()` and asserts the lit row is `i` — permute `ALL` and the
+    expectation permutes with it. The defect "the picker offers its modes in a
+    different order than `FocusMode::ALL`" was therefore declared to be caught
+    by exactly *one* test, the ordered pin, and the sweep confirmed it: caught
+    by 1. The pin sees it only because its second fixture writes out
+    `[true, false, false, false]` — an expectation composed by hand, not read
+    from the list under test. `FocusMode::ALL`'s own doc comment now states
+    this limit at the definition, where the next person to write a test against
+    it will read it.
+  - **The catcher census**, from the fifty-two:
+    `every_site_draws_the_role_it_claims` 48 and **sole on 9**;
+    `every_colour_the_module_draws_comes_from_its_palette` 20, sole on none;
+    `none_of_the_nine_deleted_constants_is_still_drawn` 20, sole on none;
+    `every_site_changes_when_the_mode_does` 15, sole on none;
+    `the_picker_marks_the_chosen_row_with_the_accent` 15, sole on none;
+    `the_mode_hues_are_a_severity_code_and_never_the_accent` 8 and sole on 1;
+    `the_tray_icon_is_inked_for_its_own_pill` 7, sole on none;
+    `the_current_line_is_quiet_when_off_and_never_the_accent` 5, sole on none;
+    `the_suppressed_line_is_overlay_and_only_drawn_when_there_is_one` 3, sole
+    on none; then four pre-existing tests: `tray_indicator_hidden_when_off` 2,
+    and `settings_render_not_empty`, `settings_render_with_rules` and
+    `tray_indicator_shown_when_active` 1 each — all sole on none.
+    - **A pre-existing test caught something on its own merit for the first
+      time in six modules**, and it is worth being precise about which. Of the
+      four, three caught exactly one defect apiece — the same defect, "all
+      three mode hues follow the accent" — and they caught it *only* because
+      they were re-signed to take `accented(false)` and the fixture's assertion
+      fired inside them. Those three assert `!cmds.is_empty()` and
+      `cmds.len() > 10`; they check nothing about colour and proved nothing
+      about colour. The genuine catch is `tray_indicator_hidden_when_off`,
+      whose own `assert!(cmds.is_empty())` is what sees "Off is given a hue, so
+      the tray shows an indicator for no focus at all". One real pre-existing
+      catch in six modules is the honest number, and the distinction matters:
+      counting the other three would credit the tests for the fixture's work.
+    - The ordered pin's 48-of-52 and sole-on-9 both beat module 39's record,
+      and for the same reason — fifteen sites that are almost all plain role
+      reads. The countervailing observation is unchanged, and this module
+      supplies the sharpest example of it yet. The pin *does* catch "all three
+      mode hues follow the accent" — but only incidentally, because the busy
+      fixture happens to sit in Alarms Only and the pin therefore happens to
+      assert the tray pill is `p.yellow`. Change that fixture's mode to `Off`,
+      which draws no pill at all, and the pin's coverage of the module's worst
+      defect vanishes silently, while
+      `the_mode_hues_are_a_severity_code_and_never_the_accent` — which asserts
+      the scale itself, in both modes, for every mode — keeps it regardless.
+      A pin is an assertion about one render, and it is only as good as the
+      fixture underneath it; a narrow test is an assertion about the rule, and
+      survives the fixture changing. That is why the pin's ever-growing share
+      of the census is not an argument for writing only pins.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

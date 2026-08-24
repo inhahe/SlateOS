@@ -110,6 +110,7 @@ use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::quote;
+use coreutils::stdfd;
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
@@ -329,7 +330,15 @@ struct Job {
     squeeze: Option<Box<[bool; 256]>>,
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
         Ok(request) => request,

@@ -73,7 +73,7 @@ use coreutils::human::{Opts, default_block_size, human_readable};
 use coreutils::pathname::{base_len, last_component, last_component_offset};
 use coreutils::quote::{Mb, Style, next_mb, os_bytes, quote, quoteaf, quotef};
 #[cfg(unix)]
-use coreutils::stdfd::Stream;
+use coreutils::stdfd::{self, Stream};
 use coreutils::vercmp::version;
 use coreutils::xnum::{self, Status, strtol_fatal};
 use modechange::{
@@ -5257,8 +5257,17 @@ fn stat_of(meta: &std::fs::Metadata) -> Stat {
     }
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 #[cfg(unix)]
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 2)
+}
+
+#[cfg(unix)]
+fn run_main() -> ExitCode {
     use std::io::IsTerminal;
 
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();

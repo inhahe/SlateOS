@@ -5231,8 +5231,17 @@ fn split_nul(buf: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 #[cfg(unix)]
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+#[cfg(unix)]
+fn run_main() -> ExitCode {
     if std::env::var_os("FIND_BLOCK_SIZE").is_some() {
         diag!(
             "find: The environment variable FIND_BLOCK_SIZE is not supported, the only thing \

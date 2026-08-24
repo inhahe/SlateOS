@@ -58,7 +58,7 @@ use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::human::{Opts, default_block_size, human_readable};
 use coreutils::quote::{os_bytes, quote, quoteaf, quotef};
 #[cfg(unix)]
-use coreutils::stdfd::Stream;
+use coreutils::stdfd::{self, Stream};
 // Only [`RealTree`] turns a byte path back into an `OsString`, and it is the
 // half of this file that the Windows development host does not compile — so
 // importing this unconditionally is an unused import there and a needed one on
@@ -1109,8 +1109,17 @@ fn slurp(name: &[u8]) -> io::Result<Vec<u8>> {
     std::fs::read(os_from_bytes(name))
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 #[cfg(unix)]
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+#[cfg(unix)]
+fn run_main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     let env = Environment {
         du_block_size: std::env::var_os("DU_BLOCK_SIZE").map(|v| os_bytes(&v).into_owned()),

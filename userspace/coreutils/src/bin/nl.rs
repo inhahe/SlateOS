@@ -53,6 +53,7 @@
 use coreutils::diag;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{quote, quotef_os};
+use coreutils::stdfd;
 use coreutils::xnum;
 use ere::{Regex, bre};
 use std::ffi::OsString;
@@ -199,7 +200,15 @@ enum Request {
     Version,
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         Ok(Request::Help) => {
@@ -970,8 +979,17 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
             }
         };
         match number_stream(BufReader::new(reader), &mut numberer, &mut out) {
-            Ok(true) => {}
-            Ok(false) => ok = false,
+            Ok(Outcome::Complete) => {}
+            Ok(Outcome::Overflow) => {
+                // Upstream calls `error (EXIT_FAILURE, …)` from inside the
+                // print, so the lines already numbered stay written and
+                // nothing after them is. The flush is what keeps them ahead of
+                // the message; a failure of it is reported by the funnel in
+                // `main`, since this path is already exiting 1 regardless.
+                let _ = out.flush();
+                diag!("nl: line number overflow");
+                return ExitCode::from(1);
+            }
             Err(e) => {
                 let _ = out.flush();
                 diag!("nl: {}", errno_text(&e));
@@ -995,33 +1013,43 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
     }
 }
 
-/// One input. Returns false when the input could not be read to its end, which
-/// makes `nl` exit 1 without abandoning the remaining operands.
+/// How one input ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Outcome {
+    /// Numbered to the end of the input.
+    Complete,
+    /// The line counter ran past `intmax_t`, so nothing further can be
+    /// numbered — not the rest of this input, and not the operands after it.
+    Overflow,
+}
+
+/// Number one input.
+///
+/// An input that could not be read to its end comes back as `Err`; the caller
+/// reports it and stops, which is what upstream's `error (EXIT_FAILURE, …)`
+/// does at the same point.
 fn number_stream(
     input: impl BufRead,
     numberer: &mut Numberer<'_>,
     out: &mut impl Write,
-) -> io::Result<bool> {
+) -> io::Result<Outcome> {
     let mut reader = Reader::new(input);
     let mut line: Vec<u8> = Vec::new();
     while reader.next_line(&mut line) {
         match check_section(&line, &numberer.options.section_delimiter) {
-            Section::Text => {
-                if !numberer.text(&line, out)? {
-                    // The counter ran past `intmax_t`. Upstream calls
-                    // `error (EXIT_FAILURE, …)` from inside the print, so the
-                    // lines already written stay written and nothing further is.
-                    out.flush()?;
-                    diag!("nl: line number overflow");
-                    std::process::exit(1);
-                }
-            }
+            // Reported by the caller rather than here, because the status has
+            // to leave through `main` for the `close_stderr` funnel to see it:
+            // `process::exit` from this depth would skip it, and an `nl` whose
+            // own overflow message could not be written would then be
+            // indistinguishable from one that had printed it.
+            Section::Text if !numberer.text(&line, out)? => return Ok(Outcome::Overflow),
+            Section::Text => {}
             section => numberer.section(section, out)?,
         }
     }
     match reader.failure {
         Some(e) => Err(e),
-        None => Ok(true),
+        None => Ok(Outcome::Complete),
     }
 }
 

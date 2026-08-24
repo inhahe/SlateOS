@@ -11,13 +11,13 @@ use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::{quoteaf_os, quotef_os};
+use coreutils::stdfd;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 #[cfg(not(test))]
 use std::io::Write;
 use std::io::{self, BufRead};
-use std::process;
 use std::process::ExitCode;
 
 // -------------------------------------------------------------------------
@@ -1036,6 +1036,8 @@ enum StmtResult {
     Return(Decimal),
     Break,
     Continue,
+    /// `quit` was executed: the session is over, at whatever depth this is.
+    Quit,
 }
 
 /// What a loop should do after running its body once.
@@ -1044,6 +1046,24 @@ enum LoopFlow {
     Continue,
     Break,
     Return(Decimal),
+    /// `quit` in the body: unwind out of the loop and out of everything.
+    Quit,
+}
+
+/// Whether the caller of [`Interpreter::run`] has any more work to do.
+///
+/// `quit` is carried back as a value rather than taken with `process::exit`,
+/// because the exit status is decided in `main`: exiting from inside the
+/// interpreter skips [`stdfd::close_stderr`], so a `quit` that followed output
+/// which could not be written would report success. Measured — GNU `bc` gives
+/// status 1 for `printf 'print "hi"\nquit\n' | bc > /dev/full`, reaching the
+/// same place by having `exit(3)` run the `atexit` handler that we do not have.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Session {
+    /// Keep reading.
+    Continue,
+    /// `quit` was executed: stop, without evaluating anything more.
+    Quit,
 }
 
 /// Something that makes the rest of the current statement meaningless.
@@ -1062,6 +1082,15 @@ enum RuntimeError {
     UndefinedFunction(String),
     /// `l(x)` for `x <= 0`, where the logarithm is not defined over the reals.
     LogOfNonPositive,
+    /// Not an error: `quit` inside a called function.
+    ///
+    /// A `quit` in a statement position comes back as [`StmtResult::Quit`], but
+    /// `define f() { quit }` puts one under an *expression* — `f() + 1` — and
+    /// the only channel that unwinds an expression is this one. It is never
+    /// printed: [`Interpreter::run`] stops on it instead, exactly as it stops
+    /// on `StmtResult::Quit`, and the `Display` arm below exists only because
+    /// the trait requires it to be total.
+    Quit,
 }
 
 impl From<DecimalError> for RuntimeError {
@@ -1076,6 +1105,7 @@ impl std::fmt::Display for RuntimeError {
             Self::Math(e) => write!(f, "{e}"),
             Self::UndefinedFunction(name) => write!(f, "undefined function {name}"),
             Self::LogOfNonPositive => f.write_str("log of non-positive number"),
+            Self::Quit => f.write_str("quit"),
         }
     }
 }
@@ -1250,16 +1280,26 @@ impl Interpreter {
     /// expression discard the rest of a script; the alternative in the other
     /// direction, resuming inside the failed statement, is not available — the
     /// value it needed does not exist. See `design-decisions.md` §323.
-    fn run(&mut self, stmts: &[Stmt]) {
+    ///
+    /// The return value distinguishes the two ways this can stop early. A stray
+    /// `break` ends the *program text* it was given but leaves the session
+    /// alive; `quit` ends the session, and the caller must not read the next
+    /// line, let alone evaluate it.
+    fn run(&mut self, stmts: &[Stmt]) -> Session {
         for stmt in stmts {
             match self.exec_stmt(stmt) {
                 Ok(StmtResult::Normal) => {}
+                // Not a diagnostic, and not printed as one: `quit` under an
+                // expression has no other way out of `eval`. See
+                // [`RuntimeError::Quit`].
+                Ok(StmtResult::Quit) | Err(RuntimeError::Quit) => return Session::Quit,
                 // `break`, `continue` or `return` outside any enclosing
                 // construct ends the program, as there is nothing to return to.
-                Ok(_) => return,
+                Ok(_) => return Session::Continue,
                 Err(e) => diag!("Runtime error: {e}"),
             }
         }
+        Session::Continue
     }
 
     fn exec_stmt(&mut self, stmt: &Stmt) -> Result<StmtResult, RuntimeError> {
@@ -1319,6 +1359,7 @@ impl Interpreter {
                         LoopFlow::Continue => {}
                         LoopFlow::Break => break,
                         LoopFlow::Return(v) => return Ok(StmtResult::Return(v)),
+                        LoopFlow::Quit => return Ok(StmtResult::Quit),
                     }
                 }
                 Ok(StmtResult::Normal)
@@ -1337,6 +1378,7 @@ impl Interpreter {
                         LoopFlow::Continue => {}
                         LoopFlow::Break => break,
                         LoopFlow::Return(v) => return Ok(StmtResult::Return(v)),
+                        LoopFlow::Quit => return Ok(StmtResult::Quit),
                     }
                     if let Some(step_expr) = step {
                         self.eval(step_expr)?;
@@ -1353,9 +1395,9 @@ impl Interpreter {
             }
             Stmt::Break => Ok(StmtResult::Break),
             Stmt::Continue => Ok(StmtResult::Continue),
-            Stmt::Quit => {
-                process::exit(0);
-            }
+            // Returned rather than taken with `process::exit`, so that the
+            // status still passes through the `close_stderr` funnel in `main`.
+            Stmt::Quit => Ok(StmtResult::Quit),
             Stmt::FuncDef(name, params, auto_vars, body) => {
                 self.funcs.insert(
                     name.clone(),
@@ -1392,6 +1434,7 @@ impl Interpreter {
                 StmtResult::Break => return Ok(LoopFlow::Break),
                 StmtResult::Continue => return Ok(LoopFlow::Continue),
                 StmtResult::Return(v) => return Ok(LoopFlow::Return(v)),
+                StmtResult::Quit => return Ok(LoopFlow::Quit),
             }
         }
         Ok(LoopFlow::Continue)
@@ -1650,6 +1693,13 @@ impl Interpreter {
                     break;
                 }
                 Ok(StmtResult::Break | StmtResult::Continue) => break,
+                // The frame below is still torn down first — a `quit` must not
+                // leave the caller's variables shadowed by the callee's, since
+                // the session may yet print something from them on the way out.
+                Ok(StmtResult::Quit) => {
+                    outcome = Err(RuntimeError::Quit);
+                    break;
+                }
                 Err(e) => {
                     outcome = Err(e);
                     break;
@@ -2287,7 +2337,15 @@ impl Trouble {
 // Main entry point
 // -------------------------------------------------------------------------
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     // `args_os`, not `args`: `env::args()` panics on an argument that is not
     // UTF-8, so `bc $'caf\xe9.bc'` aborted before the file name could even be
     // reported. A path may hold every byte but `/` and NUL.
@@ -2331,8 +2389,13 @@ fn main() -> ExitCode {
         // only safe one: a later file that uses a function an unreadable
         // earlier file was to have defined would otherwise compute a wrong
         // answer rather than report the missing file.
-        if let Err(trouble) = eval_input(&mut interp, input) {
-            return trouble.report();
+        match eval_input(&mut interp, input) {
+            Err(trouble) => return trouble.report(),
+            // `bc -e quit -e 'print "x"'` prints nothing, and neither does a
+            // file operand after one that quit: `quit` ends the run, not just
+            // the text it appeared in.
+            Ok(Session::Quit) => return ExitCode::SUCCESS,
+            Ok(Session::Continue) => {}
         }
     }
 
@@ -2346,7 +2409,7 @@ fn main() -> ExitCode {
 }
 
 /// Run one `-e` expression or one file operand.
-fn eval_input(interp: &mut Interpreter, input: &Input) -> Result<(), Trouble> {
+fn eval_input(interp: &mut Interpreter, input: &Input) -> Result<Session, Trouble> {
     // The second element is what to blame if the bytes turn out not to be
     // UTF-8, which for `-e` is the command line rather than any file.
     let (text, blame) = match input {
@@ -2362,13 +2425,12 @@ fn eval_input(interp: &mut Interpreter, input: &Input) -> Result<(), Trouble> {
     let text = String::from_utf8(text).map_err(|_| blame)?;
     let mut parser = Parser::new(&text);
     let stmts = parser.parse_program();
-    interp.run(&stmts);
-    Ok(())
+    Ok(interp.run(&stmts))
 }
 
 /// The interactive/pipe session: read until EOF, evaluating each construct as
 /// soon as its braces balance.
-fn eval_stdin(interp: &mut Interpreter, stdin: &io::Stdin) -> Result<(), Trouble> {
+fn eval_stdin(interp: &mut Interpreter, stdin: &io::Stdin) -> Result<Session, Trouble> {
     let mut handle = stdin.lock();
     let mut buffer = String::new();
 
@@ -2402,7 +2464,11 @@ fn eval_stdin(interp: &mut Interpreter, stdin: &io::Stdin) -> Result<(), Trouble
             let input = std::mem::take(&mut buffer);
             let mut parser = Parser::new(&input);
             let stmts = parser.parse_program();
-            interp.run(&stmts);
+            // `quit` stops the read loop as well as the evaluation: the rest of
+            // the script is not the next thing to run, it is nothing at all.
+            if interp.run(&stmts) == Session::Quit {
+                return Ok(Session::Quit);
+            }
         }
     }
 
@@ -2410,9 +2476,9 @@ fn eval_stdin(interp: &mut Interpreter, stdin: &io::Stdin) -> Result<(), Trouble
     if !buffer.is_empty() {
         let mut parser = Parser::new(&buffer);
         let stmts = parser.parse_program();
-        interp.run(&stmts);
+        return Ok(interp.run(&stmts));
     }
-    Ok(())
+    Ok(Session::Continue)
 }
 
 // -------------------------------------------------------------------- parsing

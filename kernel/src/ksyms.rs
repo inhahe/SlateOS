@@ -477,9 +477,7 @@ fn parse_elf_symbols(elf: &'static [u8]) -> Option<usize> {
     }
 
     let sym_count = sym_size / sym_entsize;
-    let Some(strtab) = elf.get(strtab_offset..strtab_offset + strtab_size) else {
-        return None;
-    };
+    let strtab = elf.get(strtab_offset..strtab_offset + strtab_size)?;
 
     // Size `entries` by counting what will actually be kept, rather than
     // guessing from `sym_count`.

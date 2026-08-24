@@ -195,6 +195,15 @@ struct State {
     total_files_compressed: u64,
     /// Whether initialized.
     initialized: bool,
+    /// Whether a [`flush`] is in progress on some CPU.
+    ///
+    /// The flush itself runs with `STATE` *unlocked* — it writes through the
+    /// VFS, and this lock may not be held across that (see `STATE`). The flag
+    /// takes over the exclusion the lock used to provide: a second CPU
+    /// entering `flush` returns 0 rather than re-querying the same events and
+    /// appending them a second time, since the cursor that would have told it
+    /// they were already written is not advanced until the writes finish.
+    flushing: bool,
 }
 
 impl State {
@@ -218,11 +227,71 @@ impl State {
             total_bytes_saved_by_compression: 0,
             total_files_compressed: 0,
             initialized: false,
+            flushing: false,
         }
     }
 }
 
+/// Persistence bookkeeping: config, per-namespace cursors, counters.
+///
+/// **Never enter the VFS while holding this.** Every write here goes through
+/// `Vfs::append`/`rename`/`remove`, which resolve through the filesystem's own
+/// lock — and the VFS holds that lock across content generation, which for
+/// procfs reaches back into arbitrary module-global state. The live order is
+/// `filesystem lock -> module state`, so `STATE -> filesystem lock` is an
+/// AB/BA inversion that wedges two CPUs. Snapshot what the I/O needs, drop the
+/// guard, do the I/O, then retake and write the bookkeeping back by cursor
+/// name. `scripts/check-vfs-under-lock.py` enforces this.
 static STATE: Mutex<State> = Mutex::new(State::new());
+
+/// Clears [`State::flushing`] however [`flush`] leaves — including the early
+/// returns for "no new events" and any future `?`.
+///
+/// Declared before the locals that hold `STATE` guards so that it drops
+/// *after* them: taking the lock in `drop` while a guard is still live would
+/// deadlock against ourselves.
+struct FlushGuard;
+
+impl Drop for FlushGuard {
+    fn drop(&mut self) {
+        STATE.lock().flushing = false;
+    }
+}
+
+/// A log file on disk, as surveyed by [`prune`].
+struct LogFile {
+    path: String,
+    size: u64,
+    /// How many rotations back this file is: `0` is the file currently being
+    /// written, `1` the most recent rotation, and so on up to
+    /// `max_rotated_files`. Higher is older, and older is pruned first.
+    ///
+    /// This is carried explicitly rather than recovered from the path because
+    /// the path does not order correctly: as strings, `combined.1.jsonl` sorts
+    /// before `combined.jsonl`, and `combined.10.jsonl` sorts between `.1` and
+    /// `.2`.
+    age: u32,
+}
+
+/// One cursor's share of a flush, applied back to `STATE` after the I/O.
+struct CursorOutcome {
+    /// Identifies the cursor to write back to. A name, not an index: the
+    /// cursor vector is re-looked-up after the lock is retaken, and holding a
+    /// reference (or a position) into it across the VFS call is exactly the
+    /// dangling-reference hazard this restructuring exists to avoid.
+    name: String,
+    /// Bytes appended to the live file.
+    bytes_written: u64,
+    /// Events appended.
+    events: u64,
+    /// Whether the file was rotated after the append.
+    rotated: bool,
+    /// Bytes the rotation's compression saved, and whether it ran.
+    compress_saved: u64,
+    compress_ops: u64,
+    /// Newest sequence number this cursor consumed.
+    newest_seq: u64,
+}
 
 // ---------------------------------------------------------------------------
 // Initialization
@@ -235,13 +304,26 @@ pub fn init() {
 
 /// Initialize with a custom configuration.
 pub fn init_with_config(config: RotationConfig) {
-    let mut state = STATE.lock();
-    if state.initialized {
+    // Cheap early out. The real check is the second one, below, under the
+    // lock we actually install under.
+    if STATE.lock().initialized {
         return;
     }
 
-    // Create the log directory if it doesn't exist.
+    // Create the log directory if it doesn't exist. Deliberately with no lock
+    // held -- see `STATE`'s doc comment. The result is discarded because every
+    // outcome is survivable: the directory already existing is the common
+    // case, and a genuine failure surfaces later as a failed append rather
+    // than silently disabling logging at boot.
     let _ = crate::fs::Vfs::mkdir(&config.log_dir);
+
+    let mut state = STATE.lock();
+    // Re-check: another CPU may have completed initialisation while the mkdir
+    // ran unlocked. Its cursors are already installed, and pushing ours on top
+    // would duplicate every namespace.
+    if state.initialized {
+        return;
+    }
 
     // Set up cursors based on mode.
     match config.mode {
@@ -350,13 +432,31 @@ fn json_escape_into(dst: &mut String, s: &str) {
 ///
 /// Returns the number of events flushed.
 pub fn flush() -> KernelResult<usize> {
-    let mut state = STATE.lock();
-    if !state.initialized || !state.config.enabled {
-        return Ok(0);
-    }
+    // Claim the flush and take everything the I/O needs, then get out of the
+    // lock: the appends and rotations below go through the VFS, which `STATE`
+    // may not be held across (see the static's doc comment).
+    let (config, after_seq, snapshot) = {
+        let mut state = STATE.lock();
+        if !state.initialized || !state.config.enabled {
+            return Ok(0);
+        }
+        if state.flushing {
+            // Another CPU is already writing these same events out.
+            return Ok(0);
+        }
+        state.flushing = true;
+        let snapshot: Vec<(String, u64)> = state
+            .cursors
+            .iter()
+            .map(|c| (c.name.clone(), c.current_size))
+            .collect();
+        (state.config.clone(), state.global_last_flushed, snapshot)
+    };
+    // Set up after the flag and before any other `STATE` guard in this
+    // function, so it drops last and never takes the lock recursively.
+    let _flushing = FlushGuard;
 
-    let after_seq = state.global_last_flushed;
-    let min_sev = state.config.min_persist_severity;
+    let min_sev = config.min_persist_severity;
 
     // Query new events since last flush.
     //
@@ -375,78 +475,66 @@ pub fn flush() -> KernelResult<usize> {
         return Ok(0);
     }
 
-    let log_dir = state.config.log_dir.clone();
-    let mode = state.config.mode;
-    let max_file_size = state.config.max_file_size;
-    let max_rotated = state.config.max_rotated_files;
-    let compression = state.config.compression;
+    let log_dir = config.log_dir.clone();
+    let max_file_size = config.max_file_size;
+    let max_rotated = config.max_rotated_files;
+    let compression = config.compression;
 
     let mut total_flushed = 0usize;
-    let mut total_compress_saved: u64 = 0;
-    let mut total_compress_ops: u64 = 0;
+    // What to write back once the I/O is done and the lock is retaken.
+    let mut outcomes: Vec<CursorOutcome> = Vec::new();
 
-    // Track total bytes written across the flush for deferred update to
-    // state.total_bytes (can't mutate state while cursor borrows state.cursors).
-    let mut total_bytes_batch: u64 = 0;
-
-    match mode {
+    match config.mode {
         RotationMode::Combined => {
             // All events go to combined.jsonl.
-            if let Some(cursor) = state.cursors.first_mut() {
+            if let Some((name, start_size)) = snapshot.first() {
                 let path = alloc::format!("{}/combined.jsonl", log_dir);
                 let mut batch = String::with_capacity(4096);
 
                 for ev in &result.events {
-                    let line = event_to_json_line(ev);
-                    #[allow(clippy::arithmetic_side_effects)]
-                    {
-                        cursor.current_size += line.len() as u64;
-                    }
-                    batch.push_str(&line);
-                    #[allow(clippy::arithmetic_side_effects)]
-                    {
-                        total_flushed += 1;
-                    }
+                    batch.push_str(&event_to_json_line(ev));
+                    total_flushed = total_flushed.saturating_add(1);
                 }
 
-                // Append batch to file.
+                let mut outcome = CursorOutcome {
+                    name: name.clone(),
+                    bytes_written: 0,
+                    events: 0,
+                    rotated: false,
+                    compress_saved: 0,
+                    compress_ops: 0,
+                    newest_seq: result.newest_seq,
+                };
+                let mut size = *start_size;
+
+                // Append batch to file. The error is dropped because a flush
+                // that cannot write has nowhere to report to -- reporting it
+                // would log an event, which is what just failed.
                 if !batch.is_empty() {
                     let batch_len = batch.len() as u64;
                     let _ = crate::fs::Vfs::append(&path, batch.as_bytes());
-                    #[allow(clippy::arithmetic_side_effects)]
-                    {
-                        cursor.total_bytes_written += batch_len;
-                        cursor.events_flushed += total_flushed as u64;
-                        total_bytes_batch += batch_len;
-                    }
+                    outcome.bytes_written = batch_len;
+                    outcome.events = total_flushed as u64;
+                    size = size.saturating_add(batch_len);
                 }
 
                 // Check if rotation is needed.
-                if cursor.current_size >= max_file_size {
+                if size >= max_file_size {
                     let (orig, comp) = rotate_file(&log_dir, "combined", max_rotated, compression);
-                    #[allow(clippy::arithmetic_side_effects)]
-                    {
-                        cursor.rotation_count += 1;
-                    }
-                    cursor.current_size = 0;
+                    outcome.rotated = true;
                     if orig > 0 {
-                        #[allow(clippy::arithmetic_side_effects)]
-                        {
-                            total_compress_saved += orig.saturating_sub(comp);
-                            total_compress_ops += 1;
-                        }
+                        outcome.compress_saved = orig.saturating_sub(comp);
+                        outcome.compress_ops = 1;
                     }
                 }
 
-                cursor.last_flushed_seq = Some(result.newest_seq);
+                outcomes.push(outcome);
             }
         }
         RotationMode::PerNamespace => {
             // Group events by namespace root and write to separate files.
-            for cursor in &mut state.cursors {
-                let ns_base = EventFilter::all()
-                    .min_severity(min_sev)
-                    .namespace(&cursor.name);
+            for (name, start_size) in &snapshot {
+                let ns_base = EventFilter::all().min_severity(min_sev).namespace(name);
                 let ns_filter = match after_seq {
                     None => ns_base,
                     Some(seq) => ns_base.after(seq),
@@ -457,68 +545,88 @@ pub fn flush() -> KernelResult<usize> {
                     continue;
                 }
 
-                let path = alloc::format!("{}/{}.jsonl", log_dir, cursor.name);
+                let path = alloc::format!("{}/{}.jsonl", log_dir, name);
                 let mut batch = String::with_capacity(2048);
 
                 for ev in &ns_result.events {
-                    let line = event_to_json_line(ev);
-                    #[allow(clippy::arithmetic_side_effects)]
-                    {
-                        cursor.current_size += line.len() as u64;
-                    }
-                    batch.push_str(&line);
-                    #[allow(clippy::arithmetic_side_effects)]
-                    {
-                        total_flushed += 1;
-                    }
+                    batch.push_str(&event_to_json_line(ev));
+                    total_flushed = total_flushed.saturating_add(1);
                 }
+
+                let mut outcome = CursorOutcome {
+                    name: name.clone(),
+                    bytes_written: 0,
+                    events: 0,
+                    rotated: false,
+                    compress_saved: 0,
+                    compress_ops: 0,
+                    newest_seq: ns_result.newest_seq,
+                };
+                let mut size = *start_size;
 
                 if !batch.is_empty() {
                     let batch_len = batch.len() as u64;
                     let _ = crate::fs::Vfs::append(&path, batch.as_bytes());
-                    #[allow(clippy::arithmetic_side_effects)]
-                    {
-                        cursor.total_bytes_written += batch_len;
-                        cursor.events_flushed += ns_result.events.len() as u64;
-                        total_bytes_batch += batch_len;
-                    }
+                    outcome.bytes_written = batch_len;
+                    outcome.events = ns_result.events.len() as u64;
+                    size = size.saturating_add(batch_len);
                 }
 
                 // Check if rotation is needed.
-                if cursor.current_size >= max_file_size {
-                    let (orig, comp) =
-                        rotate_file(&log_dir, &cursor.name, max_rotated, compression);
-                    #[allow(clippy::arithmetic_side_effects)]
-                    {
-                        cursor.rotation_count += 1;
-                    }
-                    cursor.current_size = 0;
+                if size >= max_file_size {
+                    let (orig, comp) = rotate_file(&log_dir, name, max_rotated, compression);
+                    outcome.rotated = true;
                     if orig > 0 {
-                        #[allow(clippy::arithmetic_side_effects)]
-                        {
-                            total_compress_saved += orig.saturating_sub(comp);
-                            total_compress_ops += 1;
-                        }
+                        outcome.compress_saved = orig.saturating_sub(comp);
+                        outcome.compress_ops = 1;
                     }
                 }
 
-                cursor.last_flushed_seq = Some(ns_result.newest_seq);
+                outcomes.push(outcome);
             }
         }
     }
 
-    // Deferred update — cursor borrows are released now.
-    #[allow(clippy::arithmetic_side_effects)]
-    {
-        state.total_bytes += total_bytes_batch;
-        state.total_bytes_saved_by_compression += total_compress_saved;
-        state.total_files_compressed += total_compress_ops;
-    }
+    let total_bytes_batch: u64 = outcomes.iter().map(|o| o.bytes_written).sum();
+    let total_compress_saved: u64 = outcomes.iter().map(|o| o.compress_saved).sum();
+    let total_compress_ops: u64 = outcomes.iter().map(|o| o.compress_ops).sum();
 
-    state.global_last_flushed = Some(result.newest_seq);
-    #[allow(clippy::arithmetic_side_effects)]
+    // Retake the lock and write the bookkeeping back, re-looking-up each
+    // cursor by name rather than by the index it had before the I/O. A cursor
+    // that no longer exists (the configuration was reset underneath us) simply
+    // loses its counters; its bytes are already on disk either way.
+    //
+    // Scoped so the guard is gone before `_flushing` drops -- that drop takes
+    // the same lock.
     {
-        state.total_flushes += 1;
+        let mut state = STATE.lock();
+        for outcome in &outcomes {
+            let Some(cursor) = state.cursors.iter_mut().find(|c| c.name == outcome.name) else {
+                continue;
+            };
+            cursor.total_bytes_written = cursor
+                .total_bytes_written
+                .saturating_add(outcome.bytes_written);
+            cursor.events_flushed = cursor.events_flushed.saturating_add(outcome.events);
+            if outcome.rotated {
+                cursor.rotation_count = cursor.rotation_count.saturating_add(1);
+                cursor.current_size = 0;
+            } else {
+                cursor.current_size = cursor.current_size.saturating_add(outcome.bytes_written);
+            }
+            cursor.last_flushed_seq = Some(outcome.newest_seq);
+        }
+
+        state.total_bytes = state.total_bytes.saturating_add(total_bytes_batch);
+        state.total_bytes_saved_by_compression = state
+            .total_bytes_saved_by_compression
+            .saturating_add(total_compress_saved);
+        state.total_files_compressed = state
+            .total_files_compressed
+            .saturating_add(total_compress_ops);
+
+        state.global_last_flushed = Some(result.newest_seq);
+        state.total_flushes = state.total_flushes.saturating_add(1);
     }
 
     Ok(total_flushed)
@@ -637,19 +745,26 @@ fn compress_rotated_file(path: &str, compression: LogCompression) -> (u64, u64) 
 ///
 /// Returns the number of files pruned.
 pub fn prune() -> usize {
-    let mut state = STATE.lock();
-    if !state.initialized || !state.config.enabled {
-        return 0;
-    }
-
-    let max_total = state.config.max_total_storage;
-    let max_rotated = state.config.max_rotated_files;
-    let log_dir = state.config.log_dir.clone();
-    let mode = state.config.mode;
+    // Snapshot the configuration and release the lock: both the size survey
+    // and the removals go through the VFS, which `STATE` may not be held
+    // across (see the static's doc comment). Nothing below reads `STATE`
+    // again until the counter is updated at the end.
+    let (max_total, max_rotated, log_dir, mode) = {
+        let state = STATE.lock();
+        if !state.initialized || !state.config.enabled {
+            return 0;
+        }
+        (
+            state.config.max_total_storage,
+            state.config.max_rotated_files,
+            state.config.log_dir.clone(),
+            state.config.mode,
+        )
+    };
 
     // Calculate total storage used.
     let mut total_used: u64 = 0;
-    let mut files: Vec<(String, u64)> = Vec::new(); // (path, size)
+    let mut files: Vec<LogFile> = Vec::new();
 
     match mode {
         RotationMode::Combined => {
@@ -668,27 +783,30 @@ pub fn prune() -> usize {
         }
     }
 
-    // Sort by name descending (oldest rotations have highest numbers).
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    // Youngest first, so `pop` takes the oldest. Sorting on `age` rather than
+    // on the path is what makes that true: the paths were compared as strings,
+    // and `combined.1.jsonl` < `combined.2.jsonl` < ... < `combined.jsonl`, so
+    // popping from the end deleted the *newest* rotation first and kept the
+    // stalest history — the reverse of what a log cap is for. (String order
+    // also puts `.10` between `.1` and `.2`, so any cap above nine rotations
+    // pruned in a scrambled order as well.)
+    files.sort_by(|a, b| a.age.cmp(&b.age).then_with(|| a.path.cmp(&b.path)));
 
     let mut pruned = 0usize;
     while total_used > max_total {
-        if let Some((path, size)) = files.pop() {
-            let _ = crate::fs::Vfs::remove(&path);
-            total_used = total_used.saturating_sub(size);
-            #[allow(clippy::arithmetic_side_effects)]
-            {
-                pruned += 1;
-            }
-        } else {
+        let Some(file) = files.pop() else {
             break;
-        }
+        };
+        // A file that cannot be removed is one we also cannot account for,
+        // so its size stays subtracted either way: the loop must terminate.
+        let _ = crate::fs::Vfs::remove(&file.path);
+        total_used = total_used.saturating_sub(file.size);
+        pruned = pruned.saturating_add(1);
     }
 
-    #[allow(clippy::arithmetic_side_effects)]
-    {
-        state.total_pruned += pruned as u64;
-    }
+    let mut state = STATE.lock();
+    state.total_pruned = state.total_pruned.saturating_add(pruned as u64);
+    drop(state);
 
     pruned
 }
@@ -698,7 +816,7 @@ fn collect_log_files(
     log_dir: &str,
     name: &str,
     max_rotated: u32,
-    files: &mut Vec<(String, u64)>,
+    files: &mut Vec<LogFile>,
     total: &mut u64,
 ) {
     use alloc::format;
@@ -707,13 +825,16 @@ fn collect_log_files(
     let compress_exts = [".zst", ".lz4", ".gz"];
 
     // Current file (never compressed — only rotated files get compressed).
+    // Age 0: it is the one being written to, so it is pruned last, and only
+    // if deleting every rotation still left us over the cap.
     let current = format!("{}/{}.jsonl", log_dir, name);
     if let Ok(meta) = crate::fs::Vfs::stat(&current) {
-        #[allow(clippy::arithmetic_side_effects)]
-        {
-            *total += meta.size;
-        }
-        files.push((current, meta.size));
+        *total = total.saturating_add(meta.size);
+        files.push(LogFile {
+            path: current,
+            size: meta.size,
+            age: 0,
+        });
     }
 
     // Rotated files — check compressed extensions first, then plain.
@@ -722,11 +843,12 @@ fn collect_log_files(
         for ext in &compress_exts {
             let path = format!("{}/{}.{}.jsonl{}", log_dir, name, i, ext);
             if let Ok(meta) = crate::fs::Vfs::stat(&path) {
-                #[allow(clippy::arithmetic_side_effects)]
-                {
-                    *total += meta.size;
-                }
-                files.push((path, meta.size));
+                *total = total.saturating_add(meta.size);
+                files.push(LogFile {
+                    path,
+                    size: meta.size,
+                    age: i,
+                });
                 found = true;
                 break;
             }
@@ -734,11 +856,12 @@ fn collect_log_files(
         if !found {
             let path = format!("{}/{}.{}.jsonl", log_dir, name, i);
             if let Ok(meta) = crate::fs::Vfs::stat(&path) {
-                #[allow(clippy::arithmetic_side_effects)]
-                {
-                    *total += meta.size;
-                }
-                files.push((path, meta.size));
+                *total = total.saturating_add(meta.size);
+                files.push(LogFile {
+                    path,
+                    size: meta.size,
+                    age: i,
+                });
             }
         }
     }
@@ -1179,8 +1302,75 @@ fn self_test_inner() -> KernelResult<()> {
     }
     crate::serial_println!("[logpersist]   6. Prune (empty): OK");
 
+    // Test 7: Prune deletes the *oldest* rotation first, and the live file
+    // last. Test 6 only proved that pruning nothing prunes nothing, which the
+    // reversed sort order passed just as happily.
+    {
+        let mut state = STATE.lock();
+        state.initialized = false;
+        state.cursors.clear();
+        state.total_pruned = 0;
+    }
+    // Four 100-byte files and a 250-byte cap: two must go, and which two is
+    // the whole point.
+    init_with_config(RotationConfig {
+        mode: RotationMode::Combined,
+        max_total_storage: 250,
+        max_rotated_files: 3,
+        ..self_test_config()
+    });
+    let live = alloc::format!("{SELF_TEST_LOG_DIR}/combined.jsonl");
+    let rot1 = alloc::format!("{SELF_TEST_LOG_DIR}/combined.1.jsonl");
+    let rot2 = alloc::format!("{SELF_TEST_LOG_DIR}/combined.2.jsonl");
+    let rot3 = alloc::format!("{SELF_TEST_LOG_DIR}/combined.3.jsonl");
+    let filler = [b'x'; 100];
+    for path in [&live, &rot1, &rot2, &rot3] {
+        crate::fs::Vfs::write_file(path, &filler)?;
+    }
+
+    let pruned = prune();
+    if pruned != 2 {
+        crate::serial_println!(
+            "[logpersist]   FAIL: expected 2 files pruned to get 400 bytes under a \
+             250-byte cap, got {pruned}"
+        );
+        return Err(KernelError::InternalError);
+    }
+    for (path, want, what) in [
+        (
+            &rot3,
+            false,
+            "oldest rotation (.3) should have been pruned first",
+        ),
+        (
+            &rot2,
+            false,
+            "second-oldest rotation (.2) should have been pruned",
+        ),
+        (&rot1, true, "newest rotation (.1) should have survived"),
+        (
+            &live,
+            true,
+            "the live file should never be pruned before a rotation",
+        ),
+    ] {
+        if crate::fs::Vfs::exists(path) != want {
+            crate::serial_println!("[logpersist]   FAIL: {what} ({path})");
+            return Err(KernelError::InternalError);
+        }
+    }
+    if stats().total_pruned != 2 {
+        crate::serial_println!(
+            "[logpersist]   FAIL: total_pruned is {}, expected 2",
+            stats().total_pruned
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[logpersist]   7. Prune order (oldest first): OK");
+
     // No clean-up of the ring here: `self_test` runs this against a substitute
     // one, which is dropped on the way out along with every event emitted above.
-    crate::serial_println!("[logpersist] All 6 self-tests passed.");
+    // The scratch log directory is removed by `self_test` itself.
+    crate::serial_println!("[logpersist] All 7 self-tests passed.");
     Ok(())
 }

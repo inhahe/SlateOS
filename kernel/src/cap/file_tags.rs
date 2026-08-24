@@ -35,6 +35,7 @@
 
 use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::groups::{self, CapGroupId};
 use crate::error::{KernelError, KernelResult};
@@ -108,6 +109,34 @@ static FILE_TAGS: Mutex<[FileTag; MAX_TAGGED_PATHS]> = Mutex::new({
     [EMPTY; MAX_TAGGED_PATHS]
 });
 
+/// Number of active entries in [`FILE_TAGS`], readable without the lock.
+///
+/// The VFS permission gate calls [`count`] on **every** path operation, purely
+/// to decide whether there is anything to check at all — and on this machine
+/// that is almost always "no". Answering it the obvious way meant taking
+/// `FILE_TAGS` and scanning all `MAX_TAGGED_PATHS` slots on a path that is
+/// supposed to cost 200–500 ns per component, and worse, made every unrelated
+/// file operation contend for one global lock.
+///
+/// A relaxed load costs nothing and cannot mislead: the count is only ever a
+/// filter. A stale "non-zero" costs one redundant scan under the lock, and a
+/// stale "zero" can only be read by a thread whose operation was already
+/// racing the `tag_path` that would have denied it — the same race the lock
+/// would have had.
+static TAG_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Recompute [`TAG_COUNT`] from the table.
+///
+/// Call this with the `FILE_TAGS` guard **still held**, from every path that
+/// flips an entry's `active` flag, so the store cannot interleave with another
+/// mutator's. Recomputing rather than incrementing is deliberate: the scan is
+/// O(`MAX_TAGGED_PATHS`) but happens only when tags change (rare), never on
+/// the read path (every file operation), and an absolute recompute cannot
+/// drift the way a missed decrement would.
+fn publish_count(tags: &[FileTag; MAX_TAGGED_PATHS]) {
+    TAG_COUNT.store(tags.iter().filter(|e| e.active).count(), Ordering::Relaxed);
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -164,6 +193,7 @@ pub fn tag_path(path: impl AsRef<Path>, group_id: CapGroupId) -> KernelResult<()
         .copy_from_slice(normalized.as_bytes());
     entry.group_ids[0] = group_id;
     entry.tag_count = 1;
+    publish_count(&tags);
 
     Ok(())
 }
@@ -175,6 +205,9 @@ pub fn untag_path(path: impl AsRef<Path>, group_id: CapGroupId) -> KernelResult<
     let normalized = normalize_path(path.as_ref());
 
     let mut tags = FILE_TAGS.lock();
+    // Set when an entry is deactivated, so `publish_count` runs once after the
+    // `iter_mut` borrow ends rather than inside it.
+    let mut deactivated = false;
     for entry in tags.iter_mut() {
         if entry.active && entry.path() == normalized.as_path() {
             for i in 0..entry.tag_count {
@@ -187,13 +220,18 @@ pub fn untag_path(path: impl AsRef<Path>, group_id: CapGroupId) -> KernelResult<
                     // If no tags remain, deactivate entry.
                     if entry.tag_count == 0 {
                         entry.active = false;
+                        deactivated = true;
                     }
-                    return Ok(());
+                    break;
                 }
             }
-            // Group not found on this path — not an error.
-            return Ok(());
+            // Group not found on this path — not an error; either way this is
+            // the only entry that could match, so stop looking.
+            break;
         }
+    }
+    if deactivated {
+        publish_count(&tags);
     }
     // Path not found — not an error (idempotent).
     Ok(())
@@ -204,11 +242,16 @@ pub fn clear_tags(path: impl AsRef<Path>) -> KernelResult<()> {
     let normalized = normalize_path(path.as_ref());
 
     let mut tags = FILE_TAGS.lock();
+    let mut deactivated = false;
     for entry in tags.iter_mut() {
         if entry.active && entry.path() == normalized.as_path() {
             entry.active = false;
-            return Ok(());
+            deactivated = true;
+            break;
         }
+    }
+    if deactivated {
+        publish_count(&tags);
     }
     Ok(())
 }
@@ -327,7 +370,21 @@ pub fn list_all() -> Vec<(PathBuf, Vec<CapGroupId>)> {
 }
 
 /// Count of active tagged paths.
+///
+/// Lock-free: reads the [`TAG_COUNT`] cache rather than scanning the table,
+/// because the VFS permission gate calls this on every path operation.
+#[must_use]
 pub fn count() -> usize {
+    TAG_COUNT.load(Ordering::Relaxed)
+}
+
+/// Count of active tagged paths, computed by scanning the table under the
+/// lock.
+///
+/// Only the self-test uses this — to prove [`count`]'s cache agrees with the
+/// table it claims to describe, which is the assertion that would catch a
+/// future mutator that forgets to call [`publish_count`].
+fn count_uncached() -> usize {
     let tags = FILE_TAGS.lock();
     tags.iter().filter(|e| e.active).count()
 }
@@ -358,6 +415,9 @@ pub fn remove_group_references(group_id: CapGroupId) {
             entry.active = false;
         }
     }
+    // Unconditional: this walks every entry, so tracking whether any were
+    // deactivated would cost more than the recompute it would save.
+    publish_count(&tags);
 }
 
 // ---------------------------------------------------------------------------
@@ -403,8 +463,93 @@ pub fn self_test() -> KernelResult<()> {
     test_and_composition()?;
     test_remove_group_refs()?;
     test_non_utf8_and_boundaries()?;
+    test_count_cache_tracks_table()?;
 
     serial_println!("[cap/file_tags] File capability tags self-test PASSED");
+    Ok(())
+}
+
+/// Test 7: the lock-free [`count`] cache agrees with the table it describes.
+///
+/// [`count`] stopped scanning `FILE_TAGS` when the VFS permission gate began
+/// calling it on every path operation — a mutex plus an O(n) scan is not
+/// affordable on a lookup path budgeted at 200–500 ns per component. The price
+/// of that is a cache that a future mutator can forget to refresh, and a stale
+/// *zero* is not a slow answer but a wrong one: the gate reads it as "no tags
+/// exist" and skips the check entirely, silently disabling mandatory access
+/// control. So the invariant is asserted here after every kind of mutation the
+/// module offers, against a fresh scan of the table.
+fn test_count_cache_tracks_table() -> KernelResult<()> {
+    fn agree(stage: &str) -> KernelResult<()> {
+        let cached = count();
+        let scanned = count_uncached();
+        if cached == scanned {
+            return Ok(());
+        }
+        serial_println!(
+            "[cap/file_tags]   FAIL: count cache is {} but the table holds {} ({})",
+            cached,
+            scanned,
+            stage
+        );
+        Err(KernelError::InternalError)
+    }
+
+    let baseline = count_uncached();
+    agree("before any mutation")?;
+
+    let gid_a = groups::create("ftag_count_a")?;
+    let gid_b = groups::create("ftag_count_b")?;
+
+    // tag_path: a brand-new entry.
+    tag_path("/count/one", gid_a)?;
+    agree("after tag_path created an entry")?;
+    if count() != baseline.saturating_add(1) {
+        serial_println!("[cap/file_tags]   FAIL: tag_path did not raise the count");
+        clear_tags("/count/one").ok();
+        groups::remove(gid_a).ok();
+        groups::remove(gid_b).ok();
+        return Err(KernelError::InternalError);
+    }
+
+    // tag_path again on the same path: adds a tag, not an entry.
+    tag_path("/count/one", gid_b)?;
+    agree("after a second tag on the same path")?;
+
+    // untag_path with a tag remaining: the entry stays active.
+    untag_path("/count/one", gid_b)?;
+    agree("after untag_path left one tag")?;
+
+    // untag_path of the last tag: the entry is deactivated.
+    untag_path("/count/one", gid_a)?;
+    agree("after untag_path removed the last tag")?;
+
+    // clear_tags.
+    tag_path("/count/two", gid_a)?;
+    agree("after tag_path for clear_tags")?;
+    clear_tags("/count/two")?;
+    agree("after clear_tags")?;
+
+    // remove_group_references, which deactivates entries in bulk.
+    tag_path("/count/three", gid_a)?;
+    tag_path("/count/four", gid_a)?;
+    agree("after tagging two paths")?;
+    remove_group_references(gid_a);
+    agree("after remove_group_references")?;
+
+    groups::remove(gid_a).ok();
+    groups::remove(gid_b).ok();
+
+    if count() != baseline {
+        serial_println!(
+            "[cap/file_tags]   FAIL: count is {} but started at {}",
+            count(),
+            baseline
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[cap/file_tags]   Count cache tracks the table: OK");
     Ok(())
 }
 

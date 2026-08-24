@@ -92,10 +92,22 @@ struct StartNode {
     level: u32,
     /// Whether the service has signaled readiness.
     ready: bool,
-    /// Timestamp when the service was started (ns since boot).
-    started_at_ns: u64,
-    /// Timestamp when the service signaled ready (ns since boot).
-    ready_at_ns: u64,
+    /// Timestamp when the service was started (ns since boot), or `None` if it
+    /// has not been started.
+    ///
+    /// Not a `u64` with `0` meaning "not started": this clock counts
+    /// nanoseconds since boot and starts *at* zero, so `0` is a legal instant
+    /// — and it is the instant the earliest service in the graph carries,
+    /// which is exactly the one a boot-time report most wants to name.
+    started_at_ns: Option<u64>,
+    /// Timestamp when the service signaled ready (ns since boot), or `None` if
+    /// it has not signalled.
+    ///
+    /// `Option` for the same reason as `started_at_ns`, and here the
+    /// distinction is load-bearing in a second way: a service that never
+    /// signals ready and one that signalled instantly are the two things
+    /// [`startup_timings`] exists to tell apart.
+    ready_at_ns: Option<u64>,
 }
 
 /// Crash history for a single service.
@@ -156,6 +168,48 @@ pub struct CrashInfo {
     pub last_crash_ns: Option<u64>,
     /// Whether a backoff restart is currently armed and waiting to fire.
     pub restart_pending: bool,
+    /// Timestamps (ns since boot) of the last few crashes, oldest first.
+    ///
+    /// `last_crash_ns` gives the most recent instant only, which cannot
+    /// distinguish a service that crashed ten times in two seconds from one
+    /// that crashed ten times over a week — and that distinction is the whole
+    /// point of looking at a crash record. The record has always collected
+    /// these timestamps; until now nothing read them.
+    pub crash_history: Vec<u64>,
+}
+
+impl CrashInfo {
+    /// Render the crash history as ages relative to `now_ns`, oldest first.
+    ///
+    /// Ages rather than raw uptimes: an operator reading a crash record wants
+    /// the *shape* of the failure — "3s 2s 1s" is a service in a tight loop,
+    /// "9000s 4000s 1s" is one that fails occasionally — and neither is
+    /// legible as three ten-digit nanosecond counts.
+    ///
+    /// Returns an empty string when there is no history, so a caller can skip
+    /// the line entirely rather than print an empty list.
+    #[must_use]
+    pub fn history_ages(&self, now_ns: u64) -> String {
+        if self.crash_history.is_empty() {
+            return String::new();
+        }
+        let mut out = String::with_capacity(self.crash_history.len().saturating_mul(6));
+        for (i, ts) in self.crash_history.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            // saturating: a timestamp from the future would mean the clock ran
+            // backwards, which is worth showing as 0 rather than wrapping to
+            // 584 years.
+            let age_ms = now_ns.saturating_sub(*ts) / 1_000_000;
+            if age_ms < 1000 {
+                out.push_str(&format!("{age_ms}ms"));
+            } else {
+                out.push_str(&format!("{}.{}s", age_ms / 1000, (age_ms % 1000) / 100));
+            }
+        }
+        out
+    }
 }
 
 /// An entry in the startup app list.
@@ -261,10 +315,21 @@ struct State {
     apps_launched: u32,
     /// Total crash restarts performed.
     total_restarts: u64,
-    /// Boot start timestamp (ns).
-    boot_start_ns: u64,
-    /// Boot end timestamp (ns).
-    boot_end_ns: u64,
+    /// When `boot_services` began, or `None` if it never ran.
+    ///
+    /// `Option` for the same reason as [`StartNode::started_at_ns`]: "boot
+    /// never ran" and "boot ran at uptime 0" are different answers, and a
+    /// sentinel of `0` cannot tell them apart. The old encoding was a bare
+    /// `u64` pair compared as `end > start`, which reported *nothing* for
+    /// both — so a boot that died before stamping its end looked exactly
+    /// like a healthy one whose report simply had no line for it.
+    boot_start_ns: Option<u64>,
+    /// When `boot_services` finished, or `None` if it has not finished.
+    ///
+    /// Cleared back to `None` at the top of every `boot_services` run, so a
+    /// second boot that fails partway cannot pair its fresh start against
+    /// the previous run's end and report a negative-looking duration.
+    boot_end_ns: Option<u64>,
     /// Whether initialized.
     initialized: bool,
 }
@@ -289,8 +354,8 @@ impl State {
             services_started: 0,
             apps_launched: 0,
             total_restarts: 0,
-            boot_start_ns: 0,
-            boot_end_ns: 0,
+            boot_start_ns: None,
+            boot_end_ns: None,
             initialized: false,
         }
     }
@@ -439,8 +504,8 @@ pub fn resolve_dependencies() -> KernelResult<()> {
             name: name.clone(),
             level: *level,
             ready: false,
-            started_at_ns: 0,
-            ready_at_ns: 0,
+            started_at_ns: None,
+            ready_at_ns: None,
         });
     }
 
@@ -494,7 +559,11 @@ pub fn boot_services() -> KernelResult<u32> {
 
     {
         let mut state = STATE.lock();
-        state.boot_start_ns = crate::hpet::elapsed_ns();
+        state.boot_start_ns = Some(crate::hpet::elapsed_ns());
+        // A re-run's end belongs to the previous run until this one reaches
+        // its own end.  Leaving the stale value would let a boot that dies in
+        // `resolve_dependencies` below report the *last* boot's duration.
+        state.boot_end_ns = None;
         state.phase = BootPhase::Resolving;
     }
 
@@ -534,8 +603,8 @@ pub fn boot_services() -> KernelResult<u32> {
                         .find(|n| n.service_id == *svc_id)
                     {
                         node.ready = true;
-                        node.started_at_ns = info.last_start_ns;
-                        node.ready_at_ns = info.last_start_ns;
+                        node.started_at_ns = Some(info.last_start_ns);
+                        node.ready_at_ns = Some(info.last_start_ns);
                     }
                     total_started = total_started.saturating_add(1);
                     continue;
@@ -552,7 +621,7 @@ pub fn boot_services() -> KernelResult<u32> {
                         .iter_mut()
                         .find(|n| n.service_id == *svc_id)
                     {
-                        node.started_at_ns = now;
+                        node.started_at_ns = Some(now);
                     }
                     total_started = total_started.saturating_add(1);
 
@@ -589,7 +658,7 @@ pub fn boot_services() -> KernelResult<u32> {
     {
         let mut state = STATE.lock();
         state.apps_launched = apps_launched;
-        state.boot_end_ns = crate::hpet::elapsed_ns();
+        state.boot_end_ns = Some(crate::hpet::elapsed_ns());
         state.phase = BootPhase::Complete;
     }
 
@@ -613,7 +682,7 @@ pub fn signal_ready(service_id: u32) {
         .find(|n| n.service_id == service_id)
     {
         node.ready = true;
-        node.ready_at_ns = crate::hpet::elapsed_ns();
+        node.ready_at_ns = Some(crate::hpet::elapsed_ns());
     }
 
     crate::syslog!(
@@ -983,14 +1052,78 @@ pub struct StartupStats {
     pub services_started: u32,
     pub apps_launched: u32,
     pub total_restarts: u64,
-    pub boot_start_ns: u64,
-    pub boot_end_ns: u64,
+    /// When `boot_services` began, or `None` if it never ran.
+    pub boot_start_ns: Option<u64>,
+    /// When `boot_services` finished, or `None` if it is still running or
+    /// never ran.
+    pub boot_end_ns: Option<u64>,
     pub graph_size: usize,
     pub crash_records: usize,
     pub startup_apps: usize,
     pub max_retries: u32,
     pub initial_backoff_ms: u64,
     pub max_backoff_ms: u64,
+}
+
+/// How long the last completed boot took, and — when it did not complete —
+/// why there is no answer.
+///
+/// The three cases used to be two: a report either printed a duration or
+/// printed nothing, so "boot never ran", "boot is still running" and "boot
+/// finished" collapsed into one silent state whenever the duration was
+/// unavailable. Naming them makes a missing end-stamp something a reader (and
+/// a self-test) can see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootDuration {
+    /// `boot_services` has never been called.
+    NotStarted,
+    /// `boot_services` started and has not reached its end stamp — either it
+    /// is still running, or it returned early on an error.
+    InProgress {
+        /// Uptime at which the run began.
+        started_ns: u64,
+    },
+    /// `boot_services` ran to completion.
+    Complete {
+        /// Wall time from the first stamp to the last, in nanoseconds.
+        elapsed_ns: u64,
+    },
+}
+
+impl BootDuration {
+    /// A one-line rendering suitable for a status report.
+    ///
+    /// Every variant produces text; none of them produce nothing. That is the
+    /// point of the type.
+    #[must_use]
+    pub fn label(self) -> String {
+        match self {
+            Self::NotStarted => String::from("not started"),
+            Self::InProgress { started_ns } => format!(
+                "in progress (started at {} ms uptime)",
+                started_ns / 1_000_000
+            ),
+            Self::Complete { elapsed_ns } => format!("{} ms", elapsed_ns / 1_000_000),
+        }
+    }
+}
+
+impl StartupStats {
+    /// Classify the boot timestamps into one of the three real states.
+    #[must_use]
+    pub fn boot_duration(&self) -> BootDuration {
+        match (self.boot_start_ns, self.boot_end_ns) {
+            (None, _) => BootDuration::NotStarted,
+            (Some(started_ns), None) => BootDuration::InProgress { started_ns },
+            // Saturating rather than checked: both stamps come from the same
+            // monotonic HPET, so `end < start` should be impossible — but if
+            // the clock ever misbehaves, reporting 0 ms is a better failure
+            // than reporting several hundred years.
+            (Some(start), Some(end)) => BootDuration::Complete {
+                elapsed_ns: end.saturating_sub(start),
+            },
+        }
+    }
 }
 
 /// Get startup statistics.
@@ -1014,6 +1147,70 @@ pub fn stats() -> StartupStats {
     }
 }
 
+/// One service's contribution to boot time.
+///
+/// The fields are `Option` because "never started" and "started at uptime 0"
+/// are different answers, and a boot-time report that conflates them blames
+/// the wrong service — see [`StartNode::started_at_ns`].
+#[derive(Debug, Clone)]
+pub struct StartupTiming {
+    /// Service ID in servicemgr.
+    pub service_id: u32,
+    /// Service name.
+    pub name: String,
+    /// Dependency level; services on the same level start together.
+    pub level: u32,
+    /// When the service was started, or `None` if it never was.
+    pub started_at_ns: Option<u64>,
+    /// When it signalled ready, or `None` if it never did.
+    pub ready_at_ns: Option<u64>,
+    /// How long it took to become ready, or `None` if either endpoint is
+    /// missing.
+    ///
+    /// Saturating: `ready_at` should never precede `started_at` — both come
+    /// from the same monotonic HPET — but reporting a duration of zero is a
+    /// better failure than reporting one of several hundred years.
+    pub ready_after_ns: Option<u64>,
+}
+
+/// Per-service boot timings, slowest first.
+///
+/// This is the `systemd-analyze blame` of the startup orchestrator: when boot
+/// is slow, the question is always *which service* is slow, and the graph has
+/// been recording the answer since it was written without anything ever asking
+/// for it. Services that never became ready sort last — they have no duration
+/// to compare, and their absence from the ranking is itself the finding.
+#[must_use]
+pub fn startup_timings() -> Vec<StartupTiming> {
+    let mut out: Vec<StartupTiming> = {
+        let state = STATE.lock();
+        state
+            .start_graph
+            .iter()
+            .map(|n| StartupTiming {
+                service_id: n.service_id,
+                name: n.name.clone(),
+                level: n.level,
+                started_at_ns: n.started_at_ns,
+                ready_at_ns: n.ready_at_ns,
+                ready_after_ns: match (n.started_at_ns, n.ready_at_ns) {
+                    (Some(start), Some(ready)) => Some(ready.saturating_sub(start)),
+                    _ => None,
+                },
+            })
+            .collect()
+    };
+    // `None` sorts before `Some` under the derived ordering, so reversing puts
+    // the slowest first and the never-ready ones at the end, which is the order
+    // an operator reads: the blame list, then the stragglers.
+    out.sort_by(|a, b| {
+        b.ready_after_ns
+            .cmp(&a.ready_after_ns)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    out
+}
+
 /// Get crash records for display.
 pub fn crash_records() -> Vec<CrashInfo> {
     let state = STATE.lock();
@@ -1028,6 +1225,7 @@ pub fn crash_records() -> Vec<CrashInfo> {
             permanently_failed: r.permanently_failed,
             last_crash_ns: r.last_crash_ns,
             restart_pending: r.pending_restart.is_some(),
+            crash_history: r.crash_history.clone(),
         })
         .collect()
 }
@@ -1049,10 +1247,10 @@ pub fn procfs_content() -> String {
     out.push_str(&format!("Init backoff:    {} ms\n", st.initial_backoff_ms));
     out.push_str(&format!("Max backoff:     {} ms\n", st.max_backoff_ms));
 
-    if st.boot_end_ns > st.boot_start_ns {
-        let boot_ms = (st.boot_end_ns.saturating_sub(st.boot_start_ns)) / 1_000_000;
-        out.push_str(&format!("Boot time:       {} ms\n", boot_ms));
-    }
+    out.push_str(&format!(
+        "Boot time:       {}\n",
+        st.boot_duration().label()
+    ));
 
     // Start levels.
     let levels = start_levels();
@@ -1064,9 +1262,34 @@ pub fn procfs_content() -> String {
         }
     }
 
+    // Per-service boot timings, slowest first.
+    let timings = startup_timings();
+    if !timings.is_empty() {
+        out.push_str("\nStartup Timings (slowest first):\n");
+        out.push_str(&format!(
+            "  {:16} {:>6} {:>12} {:>12}\n",
+            "Service", "Level", "Started", "Ready after"
+        ));
+        for t in &timings {
+            let started = match t.started_at_ns {
+                Some(ns) => format!("{} ms", ns / 1_000_000),
+                None => String::from("not started"),
+            };
+            let ready = match t.ready_after_ns {
+                Some(ns) => format!("{} ms", ns / 1_000_000),
+                None => String::from("never ready"),
+            };
+            out.push_str(&format!(
+                "  {:16} {:>6} {:>12} {:>12}\n",
+                t.name, t.level, started, ready
+            ));
+        }
+    }
+
     // Crash records.
     let crashes = crash_records();
     if !crashes.is_empty() {
+        let now = crate::hpet::elapsed_ns();
         out.push_str(&format!("\nCrash Records ({}):\n", crashes.len()));
         out.push_str(&format!(
             "  {:16} {:>6} {:>8} {:>8} {:>10}\n",
@@ -1087,6 +1310,10 @@ pub fn procfs_content() -> String {
                 "  {:16} {:>6} {:>8} {:>5} ms {:>10}\n",
                 c.name, c.consecutive_failures, c.total_crashes, c.backoff_ms, status
             ));
+            let ages = c.history_ages(now);
+            if !ages.is_empty() {
+                out.push_str(&format!("  {:16} crashed: {} ago\n", "", ages));
+            }
         }
     }
 
@@ -1275,6 +1502,40 @@ fn self_test_inner() -> KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Two crashes have been reported, so both must be in the history, in
+        // order, with the newest agreeing with `last_crash_ns`. The history was
+        // collected but never read by anything for as long as it existed;
+        // checking it here is what stops it silently going stale again.
+        if net_record.crash_history.len() != 2 {
+            crate::serial_println!(
+                "[svcstart]   FAIL: crash_history has {} entries after 2 crashes",
+                net_record.crash_history.len()
+            );
+            return Err(KernelError::InternalError);
+        }
+        if net_record
+            .crash_history
+            .windows(2)
+            .any(|w| matches!((w.first(), w.get(1)), (Some(a), Some(b)) if a > b))
+        {
+            crate::serial_println!("[svcstart]   FAIL: crash_history is not in time order");
+            return Err(KernelError::InternalError);
+        }
+        if net_record.crash_history.last().copied() != net_record.last_crash_ns {
+            crate::serial_println!(
+                "[svcstart]   FAIL: newest crash_history entry disagrees with last_crash_ns"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // And it must render: an empty string here would mean the display line
+        // is silently skipped for a service that has in fact crashed.
+        if net_record
+            .history_ages(crate::hpet::elapsed_ns())
+            .is_empty()
+        {
+            crate::serial_println!("[svcstart]   FAIL: history_ages empty for a crashed service");
+            return Err(KernelError::InternalError);
+        }
     }
     crate::serial_println!("[svcstart]   4. Exponential backoff: OK");
 
@@ -1313,6 +1574,16 @@ fn self_test_inner() -> KernelResult<()> {
         if net_record.restart_pending {
             crate::serial_println!(
                 "[svcstart]   FAIL: permanently-failed service still has a restart armed"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // The history is a ring of the last 10, not an unbounded log: a
+        // service that crash-loops for a week must not grow the record without
+        // limit.
+        if net_record.crash_history.len() > 10 {
+            crate::serial_println!(
+                "[svcstart]   FAIL: crash_history grew past its 10-entry cap ({})",
+                net_record.crash_history.len()
             );
             return Err(KernelError::InternalError);
         }
@@ -1377,37 +1648,234 @@ fn self_test_inner() -> KernelResult<()> {
     crate::serial_println!("[svcstart]   8. Toggle/remove apps: OK");
 
     // Test 9: Signal ready.
+    //
+    // The `if let Some(node)` this used to be had no `else`: a graph missing
+    // the node entirely — the failure mode that `resolve_dependencies` going
+    // wrong would actually produce — skipped the assertion and reported OK.
     {
         resolve_dependencies()?;
         let net = servicemgr::find_by_name("network")?;
+
+        // Before signalling: never-started, never-ready. This is the state the
+        // old `0` encoding could not express, so assert it explicitly.
+        let before = startup_timings();
+        let net_before = before
+            .iter()
+            .find(|t| t.service_id == net.id)
+            .ok_or(KernelError::InternalError)?;
+        if net_before.ready_at_ns.is_some() || net_before.ready_after_ns.is_some() {
+            crate::serial_println!(
+                "[svcstart]   FAIL: a freshly resolved node already claims a ready time"
+            );
+            return Err(KernelError::InternalError);
+        }
+
         signal_ready(net.id);
+
         let state = STATE.lock();
-        let node = state.start_graph.iter().find(|n| n.service_id == net.id);
-        if let Some(n) = node {
-            if !n.ready {
-                crate::serial_println!("[svcstart]   FAIL: service not marked ready");
-                return Err(KernelError::InternalError);
-            }
+        let node = state
+            .start_graph
+            .iter()
+            .find(|n| n.service_id == net.id)
+            .ok_or(KernelError::InternalError)?;
+        if !node.ready {
+            crate::serial_println!("[svcstart]   FAIL: service not marked ready");
+            return Err(KernelError::InternalError);
+        }
+        if node.ready_at_ns.is_none() {
+            crate::serial_println!("[svcstart]   FAIL: ready service recorded no ready time");
+            return Err(KernelError::InternalError);
         }
     }
     crate::serial_println!("[svcstart]   9. Signal ready: OK");
 
+    // Test 9b: startup timings ordering.
+    //
+    // `signal_ready` above set a ready time but not a start time, so the node
+    // has no duration and must sort into the never-ready tail rather than to
+    // the top of the blame list. Getting this backwards would put the service
+    // that told us the least at the head of the report.
+    {
+        let timings = startup_timings();
+        if timings.is_empty() {
+            crate::serial_println!("[svcstart]   FAIL: resolved graph produced no timings");
+            return Err(KernelError::InternalError);
+        }
+        let mut prev: Option<Option<u64>> = None;
+        for t in &timings {
+            if let Some(p) = prev {
+                // Descending, with `None` last: a `Some` after a `None` is the
+                // ordering inversion this checks for.
+                if p.is_none() && t.ready_after_ns.is_some() {
+                    crate::serial_println!(
+                        "[svcstart]   FAIL: '{}' has a duration but sorts after one that does not",
+                        t.name
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                if let (Some(pv), Some(tv)) = (p, t.ready_after_ns) {
+                    if tv > pv {
+                        crate::serial_println!(
+                            "[svcstart]   FAIL: timings not sorted slowest-first at '{}'",
+                            t.name
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                }
+            }
+            prev = Some(t.ready_after_ns);
+        }
+    }
+    crate::serial_println!("[svcstart]   9b. Startup timings ordering: OK");
+
     // Test 10: Stats and procfs content.
+    //
+    // This used to be `if !st.phase.label().is_empty() { }` — an empty body,
+    // so the one property it named was never actually required to hold.
     let st = stats();
-    if !st.phase.label().is_empty() {
-        // Just verify we can get stats without panicking.
+    if st.phase.label().is_empty() {
+        crate::serial_println!("[svcstart]   FAIL: boot phase has no label");
+        return Err(KernelError::InternalError);
+    }
+    if st.graph_size == 0 {
+        crate::serial_println!("[svcstart]   FAIL: stats report an empty graph after resolve");
+        return Err(KernelError::InternalError);
     }
     let content = procfs_content();
     if content.is_empty() {
         crate::serial_println!("[svcstart]   FAIL: procfs_content is empty");
         return Err(KernelError::InternalError);
     }
+    // The timings section must actually reach the operator, not merely exist as
+    // an accessor no view calls — which is the defect this whole change fixes.
+    if !content.contains("Startup Timings") {
+        crate::serial_println!("[svcstart]   FAIL: procfs output omits the startup timings");
+        return Err(KernelError::InternalError);
+    }
     crate::serial_println!("[svcstart]   10. Stats and procfs: OK");
+
+    // Test 11: boot timestamps are stamped, classified, and rendered.
+    //
+    // `boot_start_ns`/`boot_end_ns` were bare `u64`s read only behind
+    // `if end > start` at both display sites and asserted by nothing. A boot
+    // that never stamped its end printed no line rather than failing anything,
+    // so the fields could stop being written and neither a view nor a test
+    // would notice — the weak-proxy shape in known-issues.md ->
+    // TD-A-ASSERTIONS-THAT-A-CONSTANT-WOULD-PASS.
+    {
+        fn boot_time_line(content: &str) -> Option<&str> {
+            content.lines().find(|l| l.starts_with("Boot time:"))
+        }
+
+        // Every state renders a line. That is the property the old `if`
+        // destroyed, so it is asserted first and in every branch below.
+        let rendered = |what: &str| -> KernelResult<String> {
+            match boot_time_line(&procfs_content()) {
+                Some(l) => Ok(String::from(l)),
+                None => {
+                    crate::serial_println!(
+                        "[svcstart]   FAIL: procfs omits the boot-time line when {}",
+                        what
+                    );
+                    Err(KernelError::InternalError)
+                }
+            }
+        };
+
+        // (a) Never booted. `with_pristine` gave this test a fresh `State`,
+        // and nothing above calls `boot_services`.
+        if stats().boot_duration() != BootDuration::NotStarted {
+            crate::serial_println!("[svcstart]   FAIL: pristine state does not report NotStarted");
+            return Err(KernelError::InternalError);
+        }
+        let line = rendered("boot never ran")?;
+        if !line.contains("not started") {
+            crate::serial_println!("[svcstart]   FAIL: unbooted state renders '{}'", line);
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) A start stamp with no end is a run in flight, not a run that
+        // never happened — the distinction a `0` sentinel could not make.
+        {
+            let mut state = STATE.lock();
+            state.boot_start_ns = Some(crate::hpet::elapsed_ns());
+            state.boot_end_ns = None;
+        }
+        match stats().boot_duration() {
+            BootDuration::InProgress { .. } => {}
+            other => {
+                crate::serial_println!(
+                    "[svcstart]   FAIL: start-without-end classified as {:?}",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        let line = rendered("a boot is in flight")?;
+        if !line.contains("in progress") {
+            crate::serial_println!("[svcstart]   FAIL: in-flight boot renders '{}'", line);
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) A real boot stamps both ends, and the stamps must bracket the
+        // call. The bracket is the point: `stamp > 0` would pass for a
+        // constant, for a value written once at init and never again, and for
+        // a reading taken from a different clock. Only a window proves these
+        // two came from *this* call.
+        let before = crate::hpet::elapsed_ns();
+        boot_services()?;
+        let after = crate::hpet::elapsed_ns();
+        let st = stats();
+        let (start, end) = match (st.boot_start_ns, st.boot_end_ns) {
+            (Some(s), Some(e)) => (s, e),
+            (s, e) => {
+                crate::serial_println!(
+                    "[svcstart]   FAIL: boot_services left a stamp unset ({:?}, {:?})",
+                    s,
+                    e
+                );
+                return Err(KernelError::InternalError);
+            }
+        };
+        if start < before || end > after || end < start {
+            crate::serial_println!(
+                "[svcstart]   FAIL: stamps {}..{} fall outside the call window {}..{}",
+                start,
+                end,
+                before,
+                after
+            );
+            return Err(KernelError::InternalError);
+        }
+        match st.boot_duration() {
+            BootDuration::Complete { elapsed_ns } if elapsed_ns == end.saturating_sub(start) => {}
+            other => {
+                crate::serial_println!(
+                    "[svcstart]   FAIL: completed boot classified as {:?}",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        if st.phase != BootPhase::Complete {
+            crate::serial_println!(
+                "[svcstart]   FAIL: phase is {} after a completed boot",
+                st.phase.label()
+            );
+            return Err(KernelError::InternalError);
+        }
+        let line = rendered("a boot completed")?;
+        if !line.contains(" ms") {
+            crate::serial_println!("[svcstart]   FAIL: completed boot renders '{}'", line);
+            return Err(KernelError::InternalError);
+        }
+    }
+    crate::serial_println!("[svcstart]   11. Boot timestamps bracket the boot: OK");
 
     // No clean-up: `self_test` runs this against substitutes for both this
     // module's state and the service manager's, and both are dropped on the way
     // out along with everything registered above.
 
-    crate::serial_println!("[svcstart] All 10 self-tests passed.");
+    crate::serial_println!("[svcstart] All 11 self-tests passed.");
     Ok(())
 }

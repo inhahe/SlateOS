@@ -1904,7 +1904,7 @@ impl Vfs {
     pub fn readdir(path: impl AsRef<Path>) -> KernelResult<Vec<DirEntry>> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
-        check_file_tags(&path)?;
+        check_path_access(&path, PathAccess::Read)?;
 
         // Collect mount-point names that are direct children of `path`.
         // E.g., if path="/", mounts at "/tmp" and "/mnt" produce ["tmp", "mnt"].
@@ -1958,6 +1958,7 @@ impl Vfs {
         count: usize,
     ) -> KernelResult<(Vec<DirEntry>, usize)> {
         let path = path.as_ref();
+        check_path_access(path, PathAccess::Read)?;
         let submount_names: Vec<PathBuf> = {
             let vfs = VFS.lock();
             Self::submount_children(&vfs, path)
@@ -2000,7 +2001,7 @@ impl Vfs {
     /// backed I/O must skip re-translation).
     pub fn read_file_resolved(path: impl AsRef<Path>) -> KernelResult<Vec<u8>> {
         let path = path.as_ref();
-        check_file_tags(path)?;
+        check_path_access(path, PathAccess::Read)?;
         let result = Self::read_file_routed(path);
         // inotify IN_ACCESS: emit an Accessed event after a successful read,
         // but only when some watch actually requested ACCESS (a lock-free
@@ -2060,7 +2061,7 @@ impl Vfs {
     /// [`read_at_resolved`](Self::read_at_resolved)).
     pub fn stat_resolved(path: impl AsRef<Path>) -> KernelResult<DirEntry> {
         let path = path.as_ref();
-        check_file_tags(path)?;
+        check_path_access(path, PathAccess::Metadata)?;
         let (fs, _id, _opts, relative) = resolve_mount(path)?;
         fs.lock().stat(&relative)
     }
@@ -2077,7 +2078,7 @@ impl Vfs {
     /// host path (see [`read_at_resolved`](Self::read_at_resolved)).
     pub fn write_file_resolved(path: impl AsRef<Path>, data: &[u8]) -> KernelResult<()> {
         let path = path.as_ref();
-        check_file_tags(path)?;
+        check_path_access(path, PathAccess::Write)?;
         check_writable(path)?;
         // Intercept: let pre-operation handlers approve/deny before proceeding.
         // Called before VFS lock to avoid deadlock (interceptors must not call VFS).
@@ -2283,7 +2284,7 @@ impl Vfs {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
-        check_file_tags(&path)?;
+        check_path_access(&path, PathAccess::Write)?;
         check_writable(&path)?;
         // Intercept: let pre-operation handlers approve/deny.
         super::intercept::pre_delete(&path)?;
@@ -2345,7 +2346,7 @@ impl Vfs {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
-        check_file_tags(&path)?;
+        check_path_access(&path, PathAccess::Write)?;
         check_writable(&path)?;
         // Intercept: let pre-operation handlers approve/deny.
         super::intercept::pre_mkdir(&path)?;
@@ -2431,7 +2432,7 @@ impl Vfs {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
-        check_file_tags(&path)?;
+        check_path_access(&path, PathAccess::Write)?;
         check_writable(&path)?;
         // Intercept: let pre-operation handlers approve/deny.
         super::intercept::pre_delete(&path)?;
@@ -2474,7 +2475,7 @@ impl Vfs {
         len: usize,
     ) -> KernelResult<Vec<u8>> {
         let path = path.as_ref();
-        check_file_tags(path)?;
+        check_path_access(path, PathAccess::Read)?;
         let result = Self::read_at_routed(path, offset, len);
         // inotify IN_ACCESS, gated on a live ACCESS watch (see `read_file`).
         // The gate keeps this off the read hot path when no watch wants it —
@@ -2609,7 +2610,7 @@ impl Vfs {
         len: usize,
     ) -> KernelResult<Vec<u8>> {
         let path = path.as_ref();
-        check_file_tags(path)?;
+        check_path_access(path, PathAccess::Read)?;
         let (fs, _id, _opts, relative) = resolve_mount(path)?;
         fs.lock().read_at(&relative, offset, len)
     }
@@ -2626,7 +2627,7 @@ impl Vfs {
     /// path (see [`read_at_resolved`](Self::read_at_resolved)).
     pub fn write_at_resolved(path: impl AsRef<Path>, offset: u64, data: &[u8]) -> KernelResult<()> {
         let path = path.as_ref();
-        check_file_tags(path)?;
+        check_path_access(path, PathAccess::Write)?;
         check_writable(path)?;
         // Intercept and quota checks on partial writes.
         super::intercept::pre_write(path)?;
@@ -2678,6 +2679,7 @@ impl Vfs {
     pub fn truncate_resolved(path: impl AsRef<Path>, size: u64) -> KernelResult<()> {
         let path = path.as_ref();
         check_writable(path)?;
+        check_path_access(path, PathAccess::Write)?;
         let cache_inval = {
             let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
             let mut guard = fs.lock();
@@ -2704,6 +2706,7 @@ impl Vfs {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
+        check_path_access(&path, PathAccess::Write)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().fallocate(&relative, size)
     }
@@ -2745,8 +2748,8 @@ impl Vfs {
         crate::ipc::namespace::check_writable(to)?;
         let from = Self::resolve_no_follow(from)?;
         let to = Self::resolve_no_follow(to)?;
-        check_file_tags(&from)?;
-        check_file_tags(&to)?;
+        check_path_access(&from, PathAccess::Write)?;
+        check_path_access(&to, PathAccess::Write)?;
         check_writable(&from)?;
         check_writable(&to)?;
         // Intercept: let pre-operation handlers approve/deny.
@@ -2858,8 +2861,8 @@ impl Vfs {
         crate::ipc::namespace::check_writable(b)?;
         let a = Self::resolve_no_follow(a)?;
         let b = Self::resolve_no_follow(b)?;
-        check_file_tags(&a)?;
-        check_file_tags(&b)?;
+        check_path_access(&a, PathAccess::Write)?;
+        check_path_access(&b, PathAccess::Write)?;
         check_writable(&a)?;
         check_writable(&b)?;
         // Intercept: let pre-operation handlers approve/deny (treat as a
@@ -3022,6 +3025,7 @@ impl Vfs {
     /// host path (see [`read_at_resolved`](Self::read_at_resolved)).
     pub fn file_identity_resolved(path: impl AsRef<Path>) -> KernelResult<Option<FileId>> {
         let path = path.as_ref();
+        check_path_access(path, PathAccess::Metadata)?;
         let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
         let ino = fs.lock().metadata(&relative)?.ino;
         // ino == 0 ⇒ filesystem has no stable per-object identity ⇒ not
@@ -3048,6 +3052,7 @@ impl Vfs {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
+        check_path_access(&path, PathAccess::Metadata)?;
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
             fs.lock().set_attributes(&relative, attrs)?;
@@ -3068,6 +3073,7 @@ impl Vfs {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
+        check_path_access(&path, PathAccess::Metadata)?;
         // Resolve "leave unchanged" sentinels before taking the VFS lock
         // (metadata() takes the lock itself).
         let (uid, gid) = if uid == u32::MAX || gid == u32::MAX {
@@ -3100,6 +3106,7 @@ impl Vfs {
         let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
+        check_path_access(&path, PathAccess::Metadata)?;
         let (uid, gid) = if uid == u32::MAX || gid == u32::MAX {
             let meta = Self::lmetadata(&path)?;
             (
@@ -3124,6 +3131,7 @@ impl Vfs {
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
+        check_path_access(&path, PathAccess::Metadata)?;
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
             fs.lock().set_permissions(&relative, permissions)?;
@@ -3144,6 +3152,7 @@ impl Vfs {
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
+        check_path_access(&path, PathAccess::Metadata)?;
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
             fs.lock()
@@ -3164,6 +3173,7 @@ impl Vfs {
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
+        check_path_access(&path, PathAccess::Metadata)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().set_times(&relative, accessed_ns, modified_ns)
         // No notify/journal — timestamp changes are metadata-only.
@@ -3183,6 +3193,7 @@ impl Vfs {
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
+        check_path_access(&path, PathAccess::Metadata)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock()
             .set_times_no_follow(&relative, accessed_ns, modified_ns)
@@ -3193,6 +3204,7 @@ impl Vfs {
     pub fn get_xattr(path: impl AsRef<Path>, key: &str) -> KernelResult<Vec<u8>> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
+        check_path_access(&path, PathAccess::Read)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().get_xattr(&relative, key)
     }
@@ -3203,6 +3215,7 @@ impl Vfs {
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
+        check_path_access(&path, PathAccess::Write)?;
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
             fs.lock().set_xattr(&relative, key, value)?;
@@ -3218,6 +3231,7 @@ impl Vfs {
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
+        check_path_access(&path, PathAccess::Write)?;
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
             fs.lock().remove_xattr(&relative, key)?;
@@ -3231,6 +3245,7 @@ impl Vfs {
     pub fn list_xattrs(path: impl AsRef<Path>) -> KernelResult<Vec<String>> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
+        check_path_access(&path, PathAccess::Read)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().list_xattrs(&relative)
     }
@@ -3243,6 +3258,7 @@ impl Vfs {
     pub fn get_xattr_no_follow(path: impl AsRef<Path>, key: &str) -> KernelResult<Vec<u8>> {
         let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
+        check_path_access(&path, PathAccess::Read)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().get_xattr_no_follow(&relative, key)
     }
@@ -3257,6 +3273,7 @@ impl Vfs {
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
+        check_path_access(&path, PathAccess::Write)?;
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
             fs.lock().set_xattr_no_follow(&relative, key, value)?;
@@ -3272,6 +3289,7 @@ impl Vfs {
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
+        check_path_access(&path, PathAccess::Write)?;
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
             fs.lock().remove_xattr_no_follow(&relative, key)?;
@@ -3285,6 +3303,7 @@ impl Vfs {
     pub fn list_xattrs_no_follow(path: impl AsRef<Path>) -> KernelResult<Vec<String>> {
         let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
+        check_path_access(&path, PathAccess::Read)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().list_xattrs_no_follow(&relative)
     }
@@ -3301,6 +3320,7 @@ impl Vfs {
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
+        check_path_access(&path, PathAccess::Write)?;
         // Intercept: let pre-operation handlers approve/deny symlink creation.
         super::intercept::pre_check(super::intercept::FsOp::Symlink, &path, Some(target))?;
         // Quota: creating a symlink consumes an inode.
@@ -3416,6 +3436,7 @@ impl Vfs {
     pub fn readlink(path: impl AsRef<Path>) -> KernelResult<PathBuf> {
         let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
+        check_path_access(&path, PathAccess::Metadata)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().readlink(&relative)
     }
@@ -3424,6 +3445,7 @@ impl Vfs {
     pub fn lstat(path: impl AsRef<Path>) -> KernelResult<DirEntry> {
         let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
+        check_path_access(&path, PathAccess::Metadata)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().lstat(&relative)
     }
@@ -3436,6 +3458,7 @@ impl Vfs {
     pub fn lmetadata(path: impl AsRef<Path>) -> KernelResult<FileMeta> {
         let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
+        check_path_access(&path, PathAccess::Metadata)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().lmetadata(&relative)
     }
@@ -3705,10 +3728,8 @@ impl Vfs {
 
         // File capability tag check — regardless of mode, a process
         // must pass group membership requirements on tagged paths.
-        {
-            let resolved = Self::resolve_follow(path).unwrap_or_else(|_| path.to_path_buf());
-            check_file_tags(&resolved)?;
-        }
+        let resolved = Self::resolve_follow(path).unwrap_or_else(|_| path.to_path_buf());
+        check_path_access(&resolved, PathAccess::Metadata)?;
 
         // F_OK (0) — existence only; metadata() already succeeded.
         if mode == F_OK {
@@ -3740,6 +3761,21 @@ impl Vfs {
         }
         if mode & X_OK != 0 && meta.permissions & 0o111 == 0 {
             return Err(KernelError::PermissionDenied);
+        }
+
+        // POSIX ACLs, last: an ACL refines the traditional bits, it does not
+        // override a mount flag or an immutable attribute that already refused
+        // above. Each requested class is asked for separately because an ACL
+        // can grant read and deny write to the same requester, which a single
+        // combined request could not express.
+        for (bit, want) in [
+            (R_OK, PathAccess::Read),
+            (W_OK, PathAccess::Write),
+            (X_OK, PathAccess::Execute),
+        ] {
+            if mode & bit != 0 {
+                check_path_access(&resolved, want)?;
+            }
         }
 
         Ok(())
@@ -3867,7 +3903,7 @@ impl Vfs {
         // one that enforces per-process read-only volume mounts.
         crate::ipc::namespace::check_writable(path)?;
         let resolved = Self::resolve_follow(path)?;
-        check_file_tags(&resolved)?;
+        check_path_access(&resolved, PathAccess::Write)?;
         check_writable(&resolved)?;
 
         // Generate a unique temp filename in the same directory.
@@ -4609,22 +4645,65 @@ fn enforce_quota_create(path: &Path) -> KernelResult<()> {
     }
 }
 
-/// Check file/directory capability tag access for the current process.
+/// What a VFS operation intends to do with the path it was given.
 ///
-/// Files and directories can be tagged with capability group requirements.
-/// If the current path (or any ancestor) has tags, the calling process
-/// must be a member of every required group (AND-composition).
+/// The gate below needs this because the two checks it runs disagree about
+/// granularity: capability tags are all-or-nothing on a path, while a POSIX
+/// ACL grants read, write and execute independently. Passing the intent in
+/// keeps the decision at the call site, where it is known, rather than
+/// inferring it from the function name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathAccess {
+    /// The operation touches the inode's own attributes, not its contents —
+    /// `stat`, `readlink`, `chmod`, `chown`, `utimes`, attribute flags.
+    ///
+    /// No ACL permission is required, in *either* direction, and both halves
+    /// of that are deliberate:
+    ///
+    /// - Reading: POSIX makes `stat` depend on search permission along the
+    ///   path, not on read permission of the target, so requiring `r` here
+    ///   would deny `stat` on files an ACL deliberately made
+    ///   unreadable-but-visible.
+    /// - Writing: POSIX ACLs govern access to a file's *data*; who may change
+    ///   the inode's ownership and mode is decided by ownership and
+    ///   privilege, not by the ACL. Requiring `w` would make a mode-`444`
+    ///   file un-`chmod`-able by its own owner, which is not how any Unix
+    ///   behaves.
+    ///
+    /// Capability tags still apply — they are mandatory access control and
+    /// deny reaching the object at all, however innocuous the intent.
+    Metadata,
+    /// The operation reads the object's contents (or lists a directory).
+    Read,
+    /// The operation creates, modifies, renames or removes the object.
+    Write,
+    /// The operation executes the object.
+    Execute,
+}
+
+/// The single permission gate every path operation passes through.
 ///
-/// - Kernel tasks (no owning process) always pass.
-/// - Root (uid=0) always passes.
-/// - Untagged paths always pass (no restriction).
+/// Two independent checks live here, and they live *together* on purpose:
+/// before this existed, `check_file_tags` was called individually from
+/// sixteen places in this file plus a seventeenth copy in `fs/handle.rs`, and
+/// `acl::check_access` — the whole POSIX 1003.1e evaluation algorithm — was
+/// called from none of them, so `setfacl` reported success while governing
+/// nothing. A hook that has to be remembered at every entry point is a hook
+/// the next entry point will not have.
 ///
-/// This function is called from VFS operations (read, write, stat, open,
-/// etc.) to enforce file-level capability requirements.
-fn check_file_tags(path: &Path) -> KernelResult<()> {
-    // Skip check if there are no tagged paths at all (fast path for
-    // the common case of no file tags configured).
-    if crate::cap::file_tags::count() == 0 {
+/// Order matters: capability tags are checked first because they are a
+/// system-policy restriction that an ACL must not be able to grant past.
+///
+/// Both checks bypass for kernel tasks (no owning process) and for uid 0, and
+/// both fail *open* when no tag/ACL covers the path — deferring to the
+/// traditional permission bits checked elsewhere.
+pub(crate) fn check_path_access(path: &Path, want: PathAccess) -> KernelResult<()> {
+    // Fast path: nothing is configured, so nothing can deny. Both counts are
+    // relaxed atomic loads, so an unconfigured system pays two loads per VFS
+    // operation and never touches either subsystem's lock.
+    let tags = crate::cap::file_tags::count();
+    let acls = super::acl::count();
+    if tags == 0 && acls == 0 {
         return Ok(());
     }
 
@@ -4641,7 +4720,74 @@ fn check_file_tags(path: &Path) -> KernelResult<()> {
         None => return Ok(()), // No credentials — process being torn down.
     };
 
-    crate::cap::file_tags::check_access(creds.uid, creds.gid, &creds.groups, path)
+    path_access_verdict(path, creds.uid, creds.gid, &creds.groups, want)
+}
+
+/// The gate's decision, with the caller's identity passed in rather than
+/// looked up.
+///
+/// Split from [`check_path_access`] so the decision can be tested: the
+/// kernel's self-tests run as a kernel task, which the lookup above bypasses
+/// before any check runs, so a test that went through it could only ever
+/// observe "allowed" — and would keep passing if the ACL half were deleted
+/// again. Everything that decides anything lives here.
+pub(crate) fn path_access_verdict(
+    path: &Path,
+    uid: u32,
+    gid: u32,
+    supplementary_gids: &[u32],
+    want: PathAccess,
+) -> KernelResult<()> {
+    // Tags first: they are system policy, and an ACL must not be able to grant
+    // past one. (`check_access` on either side is a no-op when its own table
+    // has no entry for the path, so the order only matters when both do.)
+    if crate::cap::file_tags::count() != 0 {
+        crate::cap::file_tags::check_access(uid, gid, supplementary_gids, path)?;
+    }
+    if super::acl::count() != 0 {
+        check_acl(path, uid, gid, want)?;
+    }
+    Ok(())
+}
+
+/// Evaluate the path's POSIX ACL, if it has one, for `want`.
+///
+/// Split out from [`check_path_access`] so it can be exercised directly with
+/// synthetic credentials: the kernel's own self-tests run as a kernel task,
+/// which the gate above bypasses before reaching any ACL, so a test that went
+/// through the gate could only ever observe "allowed" and would pass against
+/// an ACL layer that had been removed entirely.
+fn check_acl(path: &Path, uid: u32, gid: u32, want: PathAccess) -> KernelResult<()> {
+    let request = match want {
+        // See `PathAccess::Metadata`.
+        PathAccess::Metadata => return Ok(()),
+        PathAccess::Read => super::acl::AccessRequest::READ,
+        PathAccess::Write => super::acl::AccessRequest::WRITE,
+        PathAccess::Execute => super::acl::AccessRequest::EXECUTE,
+    };
+
+    // Root is not subject to ACLs, matching the traditional model and Linux.
+    if uid == 0 {
+        return Ok(());
+    }
+
+    // The ACL's owner and owning-group entries are relative to the file's own
+    // uid/gid, so they have to be read before the algorithm can run.
+    //
+    // `metadata_resolved` and not `Vfs::metadata`: the latter re-enters this
+    // gate, which would recurse without bound. `metadata_resolved` is the
+    // ungated primitive and takes only the filesystem lock, which no caller of
+    // this gate holds yet — every call site runs it before touching the VFS.
+    let meta = match Vfs::metadata_resolved(path) {
+        Ok(m) => m,
+        // The object is gone or the filesystem cannot report ownership. Defer:
+        // the operation itself is about to fail with a better error than
+        // PermissionDenied, and denying here would turn a missing file into a
+        // permissions puzzle.
+        Err(_) => return Ok(()),
+    };
+
+    super::acl::check_access(path, uid, gid, meta.uid, meta.gid, request)
 }
 
 // ---------------------------------------------------------------------------
@@ -4668,6 +4814,19 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     let has_tmp = mounts.iter().any(|(p, _)| p.as_path() == Path::new("/tmp"));
+
+    // Twelve of the sections below are gated on `has_tmp`. The gate itself is
+    // honest — it is a mount-table fact, not a swallowed error — but without
+    // this record the last line would read `Self-test PASSED` after a run that
+    // skipped most of the suite, and a reader who scrolls to the bottom would
+    // have no way to tell that from a full one.
+    let mut skips = crate::fs::selftest::Skips::new();
+    if !has_tmp {
+        skips.record(
+            "symlink resolution, xattrs, ACLs, quotas, mount normalisation and 7 more",
+            "/tmp not mounted",
+        );
+    }
 
     // --- Basic path validation ---
     match Vfs::stat("relative/path") {
@@ -5896,7 +6055,192 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[vfs]   mount path normalisation: OK");
     }
 
-    serial_println!("[vfs] Self-test PASSED");
+    // --- Permission gate: POSIX ACL enforcement ---
+    if has_tmp {
+        acl_gate_self_test()?;
+    }
+
+    skips.report("[vfs]");
+    serial_println!("[vfs] Self-test PASSED{}", skips.suffix());
+    Ok(())
+}
+
+/// Verify that the permission gate actually consults POSIX ACLs.
+///
+/// This exists because `acl::check_access` — the whole POSIX 1003.1e
+/// evaluation algorithm — spent its entire life with **no production
+/// callers**. `setfacl` validated and stored an ACL, `getfacl` read it back
+/// verbatim, procfs counted it, and no file operation ever asked it anything:
+/// a security feature that reported success while doing nothing, which is
+/// strictly worse than not having the feature, because the absence of a
+/// feature is visible and a silently-inert one is not.
+///
+/// The test goes through [`path_access_verdict`] rather than through
+/// `Vfs::read_file`, because the kernel's self-tests run as a kernel task and
+/// [`check_path_access`] bypasses those before any check runs — so a test
+/// driven through a real VFS call could only ever observe "allowed", and
+/// would go on passing if the ACL half were deleted again. The call sites are
+/// covered separately by `scripts/check-vfs-permission-gate.py`.
+///
+/// The **deny** direction is what is asserted first. `check_access` fails open
+/// when it finds no ACL for the path, so a test that only checks that ordinary
+/// access still works passes just as well against a gate that was never wired
+/// in at all.
+fn acl_gate_self_test() -> KernelResult<()> {
+    use super::acl::{AclPerm, build_acl};
+    use crate::serial_println;
+
+    serial_println!("[vfs]   --- permission gate: POSIX ACLs ---");
+
+    const PATH: &str = "/tmp/_vfs_acl_gate";
+    const OWNER_UID: u32 = 500;
+    const OWNER_GID: u32 = 500;
+    const DENIED_UID: u32 = 1001;
+
+    // A helper so every failure path removes the ACL: leaving one behind would
+    // make every later VFS operation in the boot take the slow path, and worse,
+    // could deny an unrelated test.
+    fn cleanup() {
+        super::acl::remove_acl(PATH);
+        let _ = Vfs::remove(PATH);
+    }
+
+    let _ = Vfs::remove(PATH);
+    Vfs::write_file(PATH, b"acl gate")?;
+    Vfs::set_owner(PATH, OWNER_UID, OWNER_GID)?;
+
+    // Owner rw-, group r--, other r--, and a named-user entry denying 1001
+    // everything. `build_acl` derives the mask as GROUP_OBJ ∪ every named
+    // entry, so here it is r-- — permissive enough that the *named entry*, not
+    // the mask, is what denies. That distinction matters: if the mask were what
+    // refused, the test would pass without the named entry ever being consulted.
+    let acl = build_acl(
+        AclPerm::READ.union(AclPerm::WRITE),
+        AclPerm::READ,
+        AclPerm::READ,
+        &[(DENIED_UID, AclPerm::NONE)],
+        &[],
+    );
+    super::acl::set_acl(PATH, acl)?;
+
+    if super::acl::count() != 1 {
+        serial_println!(
+            "[vfs]     FAIL: acl::count() is {} after one set_acl",
+            super::acl::count()
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    let path = Path::new(PATH);
+
+    // 1. The denied user is refused a read. This is the assertion the whole
+    //    test exists for.
+    match path_access_verdict(path, DENIED_UID, DENIED_UID, &[], PathAccess::Read) {
+        Err(KernelError::PermissionDenied) => {}
+        other => {
+            serial_println!(
+                "[vfs]     FAIL: denied uid {} got {:?} on read (expected PermissionDenied)",
+                DENIED_UID,
+                other
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+    // ...and a write, which goes through a different `PathAccess` arm.
+    if path_access_verdict(path, DENIED_UID, DENIED_UID, &[], PathAccess::Write).is_ok() {
+        serial_println!("[vfs]     FAIL: denied uid was allowed to write");
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // 2. Metadata is still permitted: POSIX makes `stat` depend on search
+    //    permission along the path, not on read permission of the target, so a
+    //    deny ACL must not make the file un-`stat`-able.
+    if let Err(e) = path_access_verdict(path, DENIED_UID, DENIED_UID, &[], PathAccess::Metadata) {
+        serial_println!(
+            "[vfs]     FAIL: denied uid refused metadata access: {:?}",
+            e
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // 3. The owner still gets what the ACL grants — and only that. Write is
+    //    granted, execute is not, which proves the request is compared against
+    //    the entry rather than treated as all-or-nothing.
+    if let Err(e) = path_access_verdict(path, OWNER_UID, OWNER_GID, &[], PathAccess::Write) {
+        serial_println!(
+            "[vfs]     FAIL: owner refused write by its own ACL: {:?}",
+            e
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    if path_access_verdict(path, OWNER_UID, OWNER_GID, &[], PathAccess::Execute).is_ok() {
+        serial_println!("[vfs]     FAIL: owner granted execute the ACL does not carry");
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // 4. An unrelated user falls through to ACL_OTHER, which grants read.
+    if let Err(e) = path_access_verdict(path, 4242, 4242, &[], PathAccess::Read) {
+        serial_println!(
+            "[vfs]     FAIL: ACL_OTHER read refused for a third party: {:?}",
+            e
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // 5. Root is not subject to ACLs, matching the traditional model.
+    if let Err(e) = path_access_verdict(path, 0, 0, &[], PathAccess::Read) {
+        serial_println!("[vfs]     FAIL: root denied by an ACL: {:?}", e);
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // 6. Removing the ACL restores unrestricted access, and drops the count
+    //    back to zero so the fast path in the gate is taken again.
+    if !super::acl::remove_acl(PATH) {
+        serial_println!("[vfs]     FAIL: remove_acl reported nothing to remove");
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    if super::acl::count() != 0 {
+        serial_println!(
+            "[vfs]     FAIL: acl::count() is {} after remove_acl",
+            super::acl::count()
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    if let Err(e) = path_access_verdict(path, DENIED_UID, DENIED_UID, &[], PathAccess::Read) {
+        serial_println!(
+            "[vfs]     FAIL: read still refused after the ACL was removed: {:?}",
+            e
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    // 7. A path with no ACL is unaffected — the gate fails open, deferring to
+    //    the traditional permission bits.
+    if let Err(e) = path_access_verdict(
+        Path::new("/tmp/_vfs_acl_absent"),
+        DENIED_UID,
+        DENIED_UID,
+        &[],
+        PathAccess::Write,
+    ) {
+        serial_println!("[vfs]     FAIL: gate denied a path with no ACL: {:?}", e);
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+
+    cleanup();
+    serial_println!("[vfs]     POSIX ACL enforcement: OK (deny, metadata-exempt, root bypass)");
     Ok(())
 }
 

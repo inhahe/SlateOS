@@ -669,10 +669,22 @@ pub fn self_test() -> KernelResult<()> {
         let test_path = "/tmp/_integrity_test_1";
         let test_data = b"Integrity test file content";
 
-        if let Err(e) = Vfs::write_file(test_path, test_data) {
-            serial_println!("[integrity]   SKIP: cannot write test file: {:?}", e);
-            serial_println!("[integrity] Self-test skipped (no writable filesystem).");
+        // Whether /tmp is mounted is a fact; whether writing to it works is
+        // the thing the rest of this test depends on.  Inferring the first
+        // from the second would let a broken memfs -- or a permission gate
+        // wrongly denying the write -- switch off the integrity suite and
+        // still print a pass.
+        if !crate::fs::selftest::is_mounted("/tmp") {
+            serial_println!("[integrity] Self-test skipped (/tmp is not mounted).");
             return Ok(());
+        }
+        if let Err(e) = Vfs::write_file(test_path, test_data) {
+            serial_println!(
+                "[integrity]   FAIL: /tmp is mounted but writing {} failed: {:?}",
+                test_path,
+                e
+            );
+            return Err(KernelError::InternalError);
         }
 
         // Baseline.

@@ -501,6 +501,7 @@ unsafe fn write_cr4(val: u64) {
 /// Self-test for SMEP/SMAP detection and status.
 pub fn self_test() {
     serial_println!("[smep_smap] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // Test 1: Status query works without panic.
     let s = status();
@@ -614,10 +615,17 @@ pub fn self_test() {
         assert_eq!(count_after, count_before.wrapping_add(1));
         serial_println!("[smep_smap]   Access counter: OK");
     } else {
+        // A CPUID fact, and a hard one: without SMAP the instructions are
+        // #UD. The skip is right; it just has to survive to the last line.
+        skips.record(
+            "STAC/CLAC, with_user_access and the access counter",
+            "SMAP not available on this CPU",
+        );
         serial_println!(
             "[smep_smap]   STAC/CLAC: skipped (SMAP not available — instructions would #UD)"
         );
     }
 
-    serial_println!("[smep_smap] Self-test PASSED");
+    skips.report("[smep_smap]");
+    serial_println!("[smep_smap] Self-test PASSED{}", skips.suffix());
 }

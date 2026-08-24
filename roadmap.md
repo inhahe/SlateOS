@@ -617,6 +617,27 @@ Roadmap:
   `CRITICAL` lines all from deliberate self-tests, `map_lock_giveups=0`), which
   was the trigger `known-issues.md` had set for it.
 
+- ~~`[A]` **Enforce POSIX ACLs, and stop the capability-tag check from being
+  re-typed at every entry point**~~ — **done 2026-08-23** (`f838b82cb`,
+  `f69f16638`, `befd76f9e`; `design-decisions.md` §290; closes
+  `known-issues.md` → `TD-A-ACL-NEVER-ENFORCED`). `fs::acl::check_access`
+  implements the whole POSIX 1003.1e algorithm and had **zero** production
+  callers, so `setfacl` reported success while governing nothing.
+  `cap::file_tags::check_access` had the opposite failure from the same cause:
+  seventeen hand-written call sites and ~20 entry points that had never been
+  given one. Both now run inside a single
+  `vfs::check_path_access(path, PathAccess)`. The completeness of the call
+  sites is held by `scripts/check-vfs-permission-gate.py`, a pre-build gate in
+  `boot-test.sh` — necessary rather than tidy, because **both checks fail
+  open**, so a forgotten gate has no runtime symptom and no behavioural test
+  can see it. `PathAccess::Metadata` is exempt from ACLs in both directions,
+  matching POSIX (`stat` depends on search permission along the path, and ACLs
+  govern data rather than inode attributes — otherwise a mode-`444` file would
+  be un-`chmod`-able by its owner). `file_tags::count()` became a relaxed
+  atomic load in the same change: the gate calls it on every path operation,
+  and a global mutex plus an O(n) scan is not affordable on a lookup path
+  budgeted at 200–500 ns per component.
+
 Known-issues (open, kernel-owned):
 
 - ~~`B-PTHREAD-CHILD-JUMPS-TO-GARBAGE` defect 1~~ — **FIXED 2026-08-13**

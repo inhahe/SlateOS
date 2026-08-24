@@ -365,10 +365,21 @@ fn self_test_inner() {
     crate::serial_println!("  [2/8] get: OK");
 
     // 3: Trigger.
+    // Bracket the trigger so the timestamp is checked against the clock it is
+    // supposed to come from. `> 0` passed for any non-zero constant, for a
+    // value written at construction, and for a reading of the wrong clock.
+    let before = crate::hpet::elapsed_ns();
     trigger('s').expect("trigger");
+    let after = crate::hpet::elapsed_ns();
     let h = get_handler('s').expect("get2");
     assert_eq!(h.trigger_count, 1);
-    assert!(h.last_triggered_ns > 0);
+    assert!(
+        h.last_triggered_ns >= before && h.last_triggered_ns <= after,
+        "last_triggered_ns {} outside the trigger window [{}, {}]",
+        h.last_triggered_ns,
+        before,
+        after
+    );
     crate::serial_println!("  [3/8] trigger: OK");
 
     // 4: Register custom.

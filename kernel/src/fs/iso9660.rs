@@ -1344,6 +1344,7 @@ pub fn probe(device: &str) -> bool {
 /// Self-test: verify ISO 9660 parsing.
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[iso9660] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // ---- Unit tests (no device needed) ----
 
@@ -1400,13 +1401,15 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[iso9660] Integration test passed.");
         }
         None => {
+            skips.record("integration test", "no ISO 9660 filesystem mounted");
             serial_println!(
                 "[iso9660]   No ISO 9660 filesystem mounted — skipping integration test."
             );
         }
     }
 
-    serial_println!("[iso9660] Self-test passed (6 tests).");
+    skips.report("[iso9660]");
+    serial_println!("[iso9660] Self-test passed (6 tests){}.", skips.suffix());
     Ok(())
 }
 

@@ -326,27 +326,47 @@ pub fn whiteouts(id: OverlayId) -> KernelResult<Vec<PathBuf>> {
 /// `rel_path` is relative to the overlay root (no leading slash needed).
 pub fn which_layer(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<Layer> {
     let rel_path = rel_path.as_ref();
-    let inner = OVERLAYS.lock();
-    let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
-    let rel = normalize_rel(rel_path);
 
-    // Check whiteout first — if whited out, it doesn't exist.
-    if m.whiteouts.contains(&rel) {
-        return Ok(Layer::None);
-    }
+    // Everything that consults the overlay's own tables -- whiteouts, opaque
+    // ancestors, the layer roots -- happens under the lock; the two existence
+    // probes happen after it is released. `Vfs::exists` resolves through the
+    // filesystem's lock, and the VFS holds that lock across content
+    // generation, which for procfs reaches back into arbitrary module-global
+    // state: `OVERLAYS -> filesystem lock` inverts the live order and
+    // deadlocks. `scripts/check-vfs-under-lock.py` enforces this.
+    //
+    // The tables are therefore read at one instant and the disk at a slightly
+    // later one, so a whiteout added in between is missed by this call. That
+    // race already existed against the filesystem itself -- a file can be
+    // deleted immediately after `exists` returns true -- and the answer is a
+    // snapshot either way.
+    let (upper_full, lower_full) = {
+        let inner = OVERLAYS.lock();
+        let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
+        let rel = normalize_rel(rel_path);
 
-    // Check if an ancestor directory is opaque — hides lower-layer content.
-    let lower_hidden = is_opaque_ancestor(&m.opaque_dirs, &rel);
+        // Check whiteout first — if whited out, it doesn't exist.
+        if m.whiteouts.contains(&rel) {
+            return Ok(Layer::None);
+        }
 
-    let upper_full = layer_join(&m.upper_path, &rel);
-    let in_upper = Vfs::exists(&upper_full);
+        // Check if an ancestor directory is opaque — hides lower-layer content.
+        let lower_hidden = is_opaque_ancestor(&m.opaque_dirs, &rel);
 
-    let in_lower = if lower_hidden {
-        false
-    } else {
-        let lower_full = layer_join(&m.lower_path, &rel);
-        Vfs::exists(&lower_full)
+        (
+            layer_join(&m.upper_path, &rel),
+            // `None` means the lower layer is hidden and must not be probed at
+            // all, which is not the same as probing it and finding nothing.
+            if lower_hidden {
+                None
+            } else {
+                Some(layer_join(&m.lower_path, &rel))
+            },
+        )
     };
+
+    let in_upper = Vfs::exists(&upper_full);
+    let in_lower = lower_full.is_some_and(|lower| Vfs::exists(&lower));
 
     Ok(match (in_upper, in_lower) {
         (true, true) => Layer::Both,
@@ -760,22 +780,33 @@ pub fn exists(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<bool> {
 /// upper layer, this is a no-op.
 pub fn copy_up(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<()> {
     let rel_path = rel_path.as_ref();
+    // Take the two layer paths and get out of the lock -- the rest of this
+    // function is nothing but VFS calls, which `OVERLAYS` may not be held
+    // across (see `which_layer`).
     let (upper_full, lower_full) = {
+        let inner = OVERLAYS.lock();
+        let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
+        let rel = normalize_rel(rel_path);
+        (
+            layer_join(&m.upper_path, &rel),
+            layer_join(&m.lower_path, &rel),
+        )
+    };
+
+    // Already in upper? No-op.
+    if Vfs::exists(&upper_full) {
+        return Ok(());
+    }
+
+    // Count the copy-up now, as the original did, rather than on success: the
+    // statistic is "how many copy-ups were attempted against this overlay",
+    // and a failed read below leaves the upper layer untouched anyway. The
+    // mount is looked up again by id because the lock was released in between.
+    {
         let mut inner = OVERLAYS.lock();
         let m = inner.mounts.get_mut(&id).ok_or(KernelError::NotFound)?;
-        let rel = normalize_rel(rel_path);
-
-        let up = layer_join(&m.upper_path, &rel);
-
-        // Already in upper? No-op.
-        if Vfs::exists(&up) {
-            return Ok(());
-        }
-
         m.copyups = m.copyups.saturating_add(1);
-
-        (up, layer_join(&m.lower_path, &rel))
-    };
+    }
 
     // Read from lower.
     let data = Vfs::read_file(&lower_full)?;

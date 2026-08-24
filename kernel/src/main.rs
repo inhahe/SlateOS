@@ -679,6 +679,20 @@ extern "C" fn kernel_main() -> ! {
                 cpu::halt_loop();
             }
             boot_timing::mark(boot_timing::Milestone::Heap);
+
+            // Verify the self-test skip ledger allocates nothing.
+            //
+            // Placed here, immediately after the heap comes up, for two
+            // reasons.  It is the earliest point where `heap::stats()` can
+            // observe an allocation at all — which is the whole assertion —
+            // and the code it guards runs *earlier still*: `mm::frame::self_test()`
+            // above records two skips with no heap in existence, so a ledger
+            // that allocates kills the boot ~120 lines in, with a panic that
+            // names `alloc.rs` and nothing else.  See fs::selftest::self_test.
+            if let Err(e) = fs::selftest::self_test() {
+                serial_println!("FATAL: Skip-ledger self-test failed: {}", e);
+                cpu::halt_loop();
+            }
             console::boot_step_update(console::BootStatus::Ok, "Memory manager");
 
             // Install the REAL physical memory map into the memlayout diagnostic table

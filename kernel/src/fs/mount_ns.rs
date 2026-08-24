@@ -130,14 +130,18 @@ static NAMESPACES: Mutex<NsInner> = Mutex::new(NsInner {
 ///
 /// Creates the root namespace (ID 0) with the current global mount table.
 pub fn init() {
-    let mut inner = NAMESPACES.lock();
-
-    // Only init once.
-    if inner.namespaces.contains_key(&ROOT_NAMESPACE) {
+    // Only init once. Checked twice: cheaply here, and again below under the
+    // lock we install under, because the lock is released in between.
+    if NAMESPACES.lock().namespaces.contains_key(&ROOT_NAMESPACE) {
         return;
     }
 
-    // Query the current VFS mounts for the root namespace.
+    // Query the current VFS mounts for the root namespace -- with `NAMESPACES`
+    // released. `Vfs::mounts` resolves through the filesystem's own lock, and
+    // the VFS holds that lock across content generation, which for procfs
+    // reaches back into arbitrary module-global state. The live order is
+    // `filesystem lock -> module state`, so holding this lock across the call
+    // is an AB/BA inversion. `scripts/check-vfs-under-lock.py` enforces it.
     let mounts: Vec<NsMount> = crate::fs::vfs::Vfs::mounts()
         .into_iter()
         .map(|(path, fs_type)| NsMount {
@@ -146,6 +150,14 @@ pub fn init() {
             readonly: false,
         })
         .collect();
+
+    let mut inner = NAMESPACES.lock();
+    // Re-check: another CPU may have installed the root namespace while the
+    // mount table was being read. Its list is no staler than ours, and
+    // overwriting would discard any namespace already derived from it.
+    if inner.namespaces.contains_key(&ROOT_NAMESPACE) {
+        return;
+    }
 
     inner.namespaces.insert(
         ROOT_NAMESPACE,

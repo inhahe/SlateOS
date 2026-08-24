@@ -640,10 +640,37 @@ pub fn self_test() -> KernelResult<()> {
     // A probe write rather than a mount-flag check because that is the real
     // precondition: it accounts for a read-only mount, a quota, a file tag and
     // anything else that could stand between here and a successful write.
-    let probe = "/_trash_writable_probe";
-    if Vfs::write_file(probe, b"").is_err() {
-        crate::serial_println!("[trash]   Root is not writable — skipping self-test.");
+    //
+    // But `.is_err()` is not the right way to read the probe. It reads as
+    // "the root is not writable" and means "the write failed for *any* reason"
+    // — which includes the permission gate wrongly refusing us, and the trash
+    // machinery's own bugs. Under that form the whole suite deleted itself and
+    // returned `Ok`. So: ask the mount table whether there is a root at all,
+    // and classify the probe's error — only "this system cannot"
+    // (`ReadOnlyFilesystem` and friends) is a reason to skip.
+    let root_mounted = Vfs::mounts()
+        .iter()
+        .any(|(p, _)| p.as_path() == crate::fs::path::Path::new("/"));
+    if !root_mounted {
+        crate::serial_println!("[trash]   / is not mounted — skipping self-test.");
         return Ok(());
+    }
+    let probe = "/_trash_writable_probe";
+    match crate::fs::selftest::classify(Vfs::write_file(probe, b"")) {
+        crate::fs::selftest::Setup::Ready => {}
+        crate::fs::selftest::Setup::Unsupported(_) => {
+            crate::serial_println!("[trash]   Root is not writable — skipping self-test.");
+            return Ok(());
+        }
+        crate::fs::selftest::Setup::Failed(e) => {
+            crate::serial_println!(
+                "[trash]   FAIL: / is mounted but writing {} failed: {:?} — that is not a \
+                 missing feature, so it is a defect rather than a reason to skip",
+                probe,
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
     }
     // Absence is the expected end state, so a failure here is nothing to report.
     let _ = Vfs::remove(probe);

@@ -250,12 +250,29 @@ static JOURNAL: Mutex<JournalInner> = Mutex::new(JournalInner {
 /// Call once after the root filesystem is mounted.  If no journal file
 /// exists, starts fresh at sequence 1.
 pub fn init() {
+    // Checked twice: cheaply here, and again below under the lock the entries
+    // are installed under, since the lock is released for the read.
+    if JOURNAL.lock().initialized {
+        return;
+    }
+
+    // Read the file with `JOURNAL` released. `Vfs::read_file` resolves through
+    // the filesystem's own lock, and the VFS holds that lock across content
+    // generation, which for procfs reaches back into arbitrary module-global
+    // state. The live order is `filesystem lock -> module state`, so holding
+    // this lock across the read is an AB/BA inversion.
+    // `scripts/check-vfs-under-lock.py` enforces it.
+    let loaded = crate::fs::Vfs::read_file(JOURNAL_FILE);
+
     let mut journal = JOURNAL.lock();
+    // Re-check: another CPU may have finished initialising while the read ran
+    // unlocked. Appending our copy on top would duplicate every entry, and the
+    // duplicates would carry sequence numbers already in use.
     if journal.initialized {
         return;
     }
 
-    match crate::fs::Vfs::read_file(JOURNAL_FILE) {
+    match loaded {
         Ok(data) => {
             let text = core::str::from_utf8(&data).unwrap_or("");
             let mut max_seq = 0u64;

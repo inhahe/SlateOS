@@ -21277,7 +21277,7 @@ fn cmd_fcomment(args: &str) {
                 shell_println!("Usage: fcomment search <text> [root]");
                 return;
             }
-            let results = fcomment::search(needle, root.as_ref().map(|r| Path::new(r)));
+            let results = fcomment::search(needle, root.as_deref().map(Path::new));
             if results.is_empty() {
                 shell_println!("No matches");
             } else {
@@ -21291,7 +21291,7 @@ fn cmd_fcomment(args: &str) {
         }
         "list" | "" => {
             let root = parts.get(1).map(|p| resolve_path(p));
-            let all = fcomment::list(root.as_ref().map(|r| Path::new(r)));
+            let all = fcomment::list(root.as_deref().map(Path::new));
             if all.is_empty() {
                 shell_println!("No commented files");
             } else {
@@ -45846,10 +45846,7 @@ fn cmd_svcstart(args: &str) {
                 st.initial_backoff_ms,
                 st.max_backoff_ms
             );
-            if st.boot_end_ns > st.boot_start_ns {
-                let boot_ms = st.boot_end_ns.saturating_sub(st.boot_start_ns) / 1_000_000;
-                shell_println!("  Boot time:      {} ms", boot_ms);
-            }
+            shell_println!("  Boot time:      {}", st.boot_duration().label());
         }
         "levels" => {
             let levels = svcstart::start_levels();
@@ -45859,6 +45856,35 @@ fn cmd_svcstart(args: &str) {
                 for (i, level) in levels.iter().enumerate() {
                     let names: Vec<&str> = level.iter().map(|(_, n)| n.as_str()).collect();
                     shell_println!("Level {}: {}", i, names.join(", "));
+                }
+            }
+        }
+        "blame" | "timings" => {
+            let timings = svcstart::startup_timings();
+            if timings.is_empty() {
+                shell_println!("No startup timings. Run 'svcstart resolve' first.");
+            } else {
+                shell_println!(
+                    "{:16} {:>6} {:>12} {:>13}",
+                    "Service",
+                    "Level",
+                    "Started",
+                    "Ready after"
+                );
+                for t in &timings {
+                    // "not started" and "at 0 ms" are different answers, and the
+                    // graph could not tell them apart until these fields became
+                    // Option — the earliest service in the boot is exactly the
+                    // one that used to report itself as never having started.
+                    let started = match t.started_at_ns {
+                        Some(ns) => alloc::format!("{} ms", ns / 1_000_000),
+                        None => alloc::string::String::from("not started"),
+                    };
+                    let ready = match t.ready_after_ns {
+                        Some(ns) => alloc::format!("{} ms", ns / 1_000_000),
+                        None => alloc::string::String::from("never ready"),
+                    };
+                    shell_println!("{:16} {:>6} {:>12} {:>13}", t.name, t.level, started, ready);
                 }
             }
         }
@@ -45936,6 +45962,13 @@ fn cmd_svcstart(args: &str) {
                         status,
                         last
                     );
+                    // The crash *intervals*, which the single "last crash"
+                    // column cannot show: ten crashes in two seconds and ten
+                    // crashes over a week are the same row without this line.
+                    let ages = c.history_ages(now);
+                    if !ages.is_empty() {
+                        shell_println!("{:16} crashed: {} ago", "", ages);
+                    }
                 }
             }
         }
@@ -46109,6 +46142,7 @@ fn cmd_svcstart(args: &str) {
             shell_println!("svcstart — service startup orchestration");
             shell_println!("  show               Status and statistics");
             shell_println!("  levels             Show resolved start levels");
+            shell_println!("  blame              Per-service boot timings, slowest first");
             shell_println!("  resolve            Resolve dependency graph");
             shell_println!("  boot               Run full boot sequence");
             shell_println!("  crash <id>         Report a service crash");
@@ -60676,7 +60710,7 @@ fn cmd_pinnedapps(args: &str) {
                 return;
             }
             let dname = if display.is_empty() { app } else { &display };
-            match pinnedapps::pin(loc, app, dname, &format!("/usr/bin/{}", app)) {
+            match pinnedapps::pin(loc, app, dname, format!("/usr/bin/{app}")) {
                 Ok(()) => shell_println!("'{}' pinned to {}.", app, loc.label()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }

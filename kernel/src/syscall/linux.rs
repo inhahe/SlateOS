@@ -48114,10 +48114,33 @@ pub fn self_test_rename_noreplace() -> crate::error::KernelResult<()> {
     let _ = crate::fs::Vfs::remove(SRC);
     let _ = crate::fs::Vfs::remove(DST);
 
-    // Stage the source; if /tmp is not writable, skip cleanly.
-    if crate::fs::Vfs::write_file(SRC, b"payload").is_err() {
-        serial_println!("[syscall/linux]   rename_noreplace self-test skipped (/tmp not writable)");
+    // `/tmp` in the mount table is the precondition; a discarded `Result`
+    // from the staging write is not.  The old form skipped on *any* error,
+    // which includes a permission gate wrongly refusing us -- and this suite
+    // exercises the VFS, so it would have been switched off by exactly the
+    // failure it exists to report.
+    if !crate::fs::selftest::is_mounted("/tmp") {
+        serial_println!("[syscall/linux]   rename_noreplace self-test skipped (/tmp not mounted)");
         return Ok(());
+    }
+    match crate::fs::selftest::classify(crate::fs::Vfs::write_file(SRC, b"payload")) {
+        crate::fs::selftest::Setup::Ready => {}
+        crate::fs::selftest::Setup::Unsupported(e) => {
+            serial_println!(
+                "[syscall/linux]   rename_noreplace self-test skipped (/tmp cannot store it: {:?})",
+                e
+            );
+            return Ok(());
+        }
+        crate::fs::selftest::Setup::Failed(e) => {
+            serial_println!(
+                "[syscall/linux]   FAIL: /tmp is mounted but staging {} failed: {:?} — that is \
+                 not a missing feature, so it is a defect rather than a reason to skip",
+                SRC,
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
     }
 
     // (1) NOREPLACE onto a free destination succeeds and moves src -> dst.
@@ -48332,12 +48355,33 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     let path = Path::new("/tmp/__falloc_range__");
     // 100 bytes of 0xAA.
     const N: usize = 100;
-    let stage = || -> bool { crate::fs::Vfs::write_file(path, &[0xAAu8; N]).is_ok() };
+    let stage = || crate::fs::Vfs::write_file(path, &[0xAAu8; N]);
 
-    let _ = crate::fs::Vfs::remove(path);
-    if !stage() {
-        serial_println!("[syscall/linux]   fallocate range self-test skipped (/tmp not writable)");
+    // Whether /tmp exists is a fact about the mount table; whether writing to
+    // it works is the thing under test.  Deciding to skip from the write's
+    // own failure would let a broken /tmp switch this test off silently.
+    if !crate::fs::selftest::is_mounted("/tmp") {
+        serial_println!("[syscall/linux]   fallocate range self-test skipped (/tmp not mounted)");
         return Ok(());
+    }
+    let _ = crate::fs::Vfs::remove(path);
+    match crate::fs::selftest::classify(stage()) {
+        crate::fs::selftest::Setup::Ready => {}
+        crate::fs::selftest::Setup::Unsupported(e) => {
+            serial_println!(
+                "[syscall/linux]   fallocate range self-test skipped (/tmp cannot store files: {:?})",
+                e
+            );
+            return Ok(());
+        }
+        crate::fs::selftest::Setup::Failed(e) => {
+            serial_println!(
+                "[syscall/linux]   FAIL: /tmp is mounted but staging {:?} failed: {:?}",
+                path,
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
     }
 
     // Helper: read the whole file and check size + a predicate over bytes.
@@ -48392,8 +48436,13 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     // (4) ZERO_RANGE without KEEP_SIZE crossing EOF: re-stage, zero [90,150)
     // → size grows to 150, [0,90) intact, [90,150) zeroed.
     let _ = crate::fs::Vfs::remove(path);
-    if !stage() {
-        return Ok(());
+    if let Err(e) = stage() {
+        serial_println!(
+            "[syscall/linux]   FAIL: re-staging {:?} for ZERO_RANGE-grow failed: {:?}",
+            path,
+            e
+        );
+        return Err(KernelError::InternalError);
     }
     fallocate_zero_vfs(path, 90, 150, false)?;
     if !check(150, "ZERO_RANGE-grow", &|c| {
@@ -48537,10 +48586,33 @@ pub fn self_test_sendfile() -> crate::error::KernelResult<()> {
     let _ = crate::fs::Vfs::remove(SRC);
     let _ = crate::fs::Vfs::remove(DST);
 
-    // Stage the source; skip cleanly if /tmp is not writable.
-    if crate::fs::Vfs::write_file(SRC, PAYLOAD).is_err() {
-        serial_println!("[syscall/linux]   sendfile self-test skipped (/tmp not writable)");
+    // `/tmp` in the mount table is the precondition; a discarded `Result`
+    // from the staging write is not.  The old form skipped on *any* error,
+    // which includes a permission gate wrongly refusing us -- and this suite
+    // exercises the VFS, so it would have been switched off by exactly the
+    // failure it exists to report.
+    if !crate::fs::selftest::is_mounted("/tmp") {
+        serial_println!("[syscall/linux]   sendfile self-test skipped (/tmp not mounted)");
         return Ok(());
+    }
+    match crate::fs::selftest::classify(crate::fs::Vfs::write_file(SRC, PAYLOAD)) {
+        crate::fs::selftest::Setup::Ready => {}
+        crate::fs::selftest::Setup::Unsupported(e) => {
+            serial_println!(
+                "[syscall/linux]   sendfile self-test skipped (/tmp cannot store it: {:?})",
+                e
+            );
+            return Ok(());
+        }
+        crate::fs::selftest::Setup::Failed(e) => {
+            serial_println!(
+                "[syscall/linux]   FAIL: /tmp is mounted but staging {} failed: {:?} — that is \
+                 not a missing feature, so it is a defect rather than a reason to skip",
+                SRC,
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
     }
 
     let out_flags = OpenFlags::WRITE
@@ -48794,9 +48866,33 @@ pub fn self_test_copy_file_range() -> crate::error::KernelResult<()> {
     let _ = crate::fs::Vfs::remove(SRC);
     let _ = crate::fs::Vfs::remove(DST);
 
-    if crate::fs::Vfs::write_file(SRC, PAYLOAD).is_err() {
-        serial_println!("[syscall/linux]   copy_file_range self-test skipped (/tmp not writable)");
+    // `/tmp` in the mount table is the precondition; a discarded `Result`
+    // from the staging write is not.  The old form skipped on *any* error,
+    // which includes a permission gate wrongly refusing us -- and this suite
+    // exercises the VFS, so it would have been switched off by exactly the
+    // failure it exists to report.
+    if !crate::fs::selftest::is_mounted("/tmp") {
+        serial_println!("[syscall/linux]   copy_file_range self-test skipped (/tmp not mounted)");
         return Ok(());
+    }
+    match crate::fs::selftest::classify(crate::fs::Vfs::write_file(SRC, PAYLOAD)) {
+        crate::fs::selftest::Setup::Ready => {}
+        crate::fs::selftest::Setup::Unsupported(e) => {
+            serial_println!(
+                "[syscall/linux]   copy_file_range self-test skipped (/tmp cannot store it: {:?})",
+                e
+            );
+            return Ok(());
+        }
+        crate::fs::selftest::Setup::Failed(e) => {
+            serial_println!(
+                "[syscall/linux]   FAIL: /tmp is mounted but staging {} failed: {:?} — that is \
+                 not a missing feature, so it is a defect rather than a reason to skip",
+                SRC,
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
     }
 
     let out_flags = OpenFlags::WRITE
@@ -49074,9 +49170,33 @@ pub fn self_test_splice() -> crate::error::KernelResult<()> {
 
     let _ = crate::fs::Vfs::remove(SRC);
     let _ = crate::fs::Vfs::remove(DST);
-    if crate::fs::Vfs::write_file(SRC, PAYLOAD).is_err() {
-        serial_println!("[syscall/linux]   splice self-test skipped (/tmp not writable)");
+    // `/tmp` in the mount table is the precondition; a discarded `Result`
+    // from the staging write is not.  The old form skipped on *any* error,
+    // which includes a permission gate wrongly refusing us -- and this suite
+    // exercises the VFS, so it would have been switched off by exactly the
+    // failure it exists to report.
+    if !crate::fs::selftest::is_mounted("/tmp") {
+        serial_println!("[syscall/linux]   splice self-test skipped (/tmp not mounted)");
         return Ok(());
+    }
+    match crate::fs::selftest::classify(crate::fs::Vfs::write_file(SRC, PAYLOAD)) {
+        crate::fs::selftest::Setup::Ready => {}
+        crate::fs::selftest::Setup::Unsupported(e) => {
+            serial_println!(
+                "[syscall/linux]   splice self-test skipped (/tmp cannot store it: {:?})",
+                e
+            );
+            return Ok(());
+        }
+        crate::fs::selftest::Setup::Failed(e) => {
+            serial_println!(
+                "[syscall/linux]   FAIL: /tmp is mounted but staging {} failed: {:?} — that is \
+                 not a missing feature, so it is a defect rather than a reason to skip",
+                SRC,
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
     }
     let out_flags = OpenFlags::WRITE
         .union(OpenFlags::CREATE)
@@ -49828,12 +49948,17 @@ pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
         // distinguishable from real content.
         content.push((((i * 31 + 7) & 0xff) as u8) | 1);
     }
+    if !crate::fs::selftest::is_mounted_rw("/") {
+        serial_println!("[syscall/linux]   file mmap self-test skipped (/ not mounted read-write)");
+        return Ok(());
+    }
     if let Err(e) = crate::fs::Vfs::write_file(PATH, &content) {
         serial_println!(
-            "[syscall/linux]   file mmap: SKIP (VFS write failed: {:?})",
+            "[syscall/linux]   FAIL: / is mounted read-write but writing {} failed: {:?}",
+            PATH,
             e
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
 
     // Throwaway process with its own address space.
@@ -57022,6 +57147,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[syscall/linux] Running translation self-test...");
+
+    // Sections that skip record why here, so the closing PASSED line names
+    // them.  A skip that never reaches the summary makes a half-run
+    // byte-indistinguishable from a full one.
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // (1) errno mapping round-trips for every variant in the table.
     self_test_errno_mapping()?;
@@ -72052,10 +72182,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_mkdir_rename_family()?;
+    self_test_mkdir_rename_family(&mut skips)?;
 
     #[inline(never)]
-    fn self_test_mkdir_rename_family() -> crate::error::KernelResult<()> {
+    fn self_test_mkdir_rename_family(
+        skips: &mut crate::fs::selftest::Skips,
+    ) -> crate::error::KernelResult<()> {
         use crate::serial_println;
         // mkdir / mkdirat / rmdir / unlink / unlinkat / rename family —
         // pointer validation plus principled errno.
@@ -72241,8 +72373,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   unlink(file) -> 0, unlink(gone) -> ENOENT.
             let probe_dir = "/__mutate_selftest_dir__";
             let _ = crate::fs::Vfs::rmdir(probe_dir); // clean any stale slate
-            let writable = crate::fs::Vfs::mkdir(probe_dir).is_ok();
+            // The precondition is a fact looked up in the mount table, not an
+            // inference from a failed mkdir: inferring it would let the very
+            // regression this section exists to catch switch the section off.
+            // Once the mount says read-write, a failing mkdir is a defect.
+            let writable = crate::fs::selftest::is_mounted_rw("/");
             if writable {
+                if let Err(e) = crate::fs::Vfs::mkdir(probe_dir) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: / is mounted read-write but mkdir({}) failed: {:?}",
+                        probe_dir,
+                        e
+                    );
+                    return Err(KernelError::InternalError);
+                }
                 // Undo the probe; the dispatch path recreates it below.
                 let _ = crate::fs::Vfs::rmdir(probe_dir);
                 let dir_buf = b"/__mutate_selftest_dir__\0";
@@ -72355,8 +72499,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     "[syscall/linux]   mkdir/rmdir/unlink native-VFS round-trip (0/EEXIST/EISDIR/0/ENOENT/ENOTDIR): OK"
                 );
             } else {
+                skips.record(
+                    "mkdir/rmdir/unlink native-VFS round-trip",
+                    "/ is not mounted read-write",
+                );
                 serial_println!(
-                    "[syscall/linux]   mkdir/rmdir/unlink native-VFS round-trip skipped (read-only root)"
+                    "[syscall/linux]   SKIP: mkdir/rmdir/unlink native-VFS round-trip (/ is not mounted read-write)"
                 );
             }
 
@@ -72555,7 +72703,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             let rdst = "/__rename_selftest_dst__";
             let _ = crate::fs::Vfs::remove(rsrc);
             let _ = crate::fs::Vfs::remove(rdst);
-            if crate::fs::Vfs::write_file(rsrc, b"x").is_ok() {
+            // Mount-table fact, not an inferred error -- see the mkdir probe
+            // above for why the distinction matters.
+            if crate::fs::selftest::is_mounted_rw("/") {
+                if let Err(e) = crate::fs::Vfs::write_file(rsrc, b"x") {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: / is mounted read-write but writing {} failed: {:?}",
+                        rsrc,
+                        e
+                    );
+                    return Err(KernelError::InternalError);
+                }
                 let src_buf = b"/__rename_selftest_src__\0";
                 let src_ptr = src_buf.as_ptr() as u64;
                 let dst_buf = b"/__rename_selftest_dst__\0";
@@ -72618,8 +72776,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     "[syscall/linux]   rename native-VFS round-trip (move + NOREPLACE EEXIST): OK"
                 );
             } else {
+                skips.record(
+                    "rename native-VFS round-trip",
+                    "/ is not mounted read-write",
+                );
                 serial_println!(
-                    "[syscall/linux]   rename native-VFS round-trip skipped (read-only root)"
+                    "[syscall/linux]   SKIP: rename native-VFS round-trip (/ is not mounted read-write)"
                 );
             }
 
@@ -105720,6 +105882,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    serial_println!("[syscall/linux] Translation self-test PASSED");
+    skips.report("[syscall/linux]");
+    serial_println!(
+        "[syscall/linux] Translation self-test PASSED{}",
+        skips.suffix()
+    );
     Ok(())
 }

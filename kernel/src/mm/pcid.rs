@@ -382,6 +382,7 @@ pub fn stats() -> PcidStats {
 /// Self-test for the PCID subsystem.
 pub fn self_test() {
     serial_println!("[pcid] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // Test 1: Detection results.
     let pcid_ok = PCID_SUPPORTED.load(Ordering::Acquire);
@@ -419,6 +420,10 @@ pub fn self_test() {
             generation
         );
     } else {
+        // A CPUID fact, not a swallowed error — but it still has to reach the
+        // last line, because "PASSED" on a CPU without PCID otherwise looks
+        // exactly like "PASSED" on one where the allocator really ran.
+        skips.record("live alloc_pcid tests", "PCID not enabled on this CPU");
         serial_println!("[pcid]   (PCID not enabled on this CPU — skipping live tests)");
     }
 
@@ -432,5 +437,6 @@ pub fn self_test() {
         st.generation_flushes
     );
 
-    serial_println!("[pcid] Self-test PASSED");
+    skips.report("[pcid]");
+    serial_println!("[pcid] Self-test PASSED{}", skips.suffix());
 }

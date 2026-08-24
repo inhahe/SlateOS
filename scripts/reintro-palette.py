@@ -119,6 +119,8 @@ IM = "gui/desktop/src/input_method.rs"
 BL = "gui/desktop/src/blur.rs"
 WP = "gui/desktop/src/wallpaper.rs"
 AX = "gui/desktop/src/a11y.rs"
+SWITCH = "gui/desktop/src/switch.rs"
+SLIDER = "gui/desktop/src/slider.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -2010,15 +2012,10 @@ DEFECTS = [
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
-    (
-        "VVVVVVV: the switch knob keeps Mocha's text",
-        STARTUP,
-        [("                color: p.text,\n                corner_radii: CornerRadii::all(8.0),",
-          "                color: Color::from_hex(0xCDD6F4),\n"
-          "                corner_radii: CornerRadii::all(8.0),")],
-        ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
-    ),
+    # RETIRED by the control-module refactor: the switch knob keeps Mocha.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         "WWWWWWW: the boot tab's heading keeps Mocha's lavender",
         STARTUP,
@@ -2068,8 +2065,10 @@ DEFECTS = [
     (
         "BBBBBBBB: the boot tab's switches are a fixed blue, not the accent",
         STARTUP,
-        [("            color: if enabled { p.accent } else { p.surface2 },",
-          "            color: if enabled { p.blue } else { p.surface2 },")],
+        [
+            ('            if enabled { p.accent } else { p.surface2 },',
+             '            if enabled { p.blue } else { p.surface2 },'),
+        ],
         ["desktop"],
         ["every_control_that_offers_something_follows_the_accent"],
     ),
@@ -2601,28 +2600,27 @@ DEFECTS = [
         "RRRRRRRRRR: the enable switch is pinned to green again, so it stops "
         "following the accent",
         DTS,
-        [("            color: if enabled { p.accent } else { p.surface2 },",
-          "            color: if enabled { p.green } else { p.surface2 },")],
+        [
+            ('            if enabled { p.accent } else { p.surface2 },',
+             '            if enabled { p.green } else { p.surface2 },'),
+        ],
         ["desktop"],
         ["every_control_that_offers_something_follows_the_accent"],
     ),
     (
         "SSSSSSSSSS: the enable switch's off arm keeps Mocha's surface2",
         DTS,
-        [("            color: if enabled { p.accent } else { p.surface2 },",
-          "            color: if enabled { p.accent } else { Color::from_hex(0x585B70) },")],
+        [
+            ('            if enabled { p.accent } else { p.surface2 },',
+             '            if enabled { p.accent } else { Color::from_hex(0x585B70) },'),
+        ],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
-    (
-        "TTTTTTTTTT: the switch knob keeps Mocha's text",
-        DTS,
-        [("            color: p.text,\n            corner_radii: CornerRadii::all(9.0),",
-          "            color: Color::from_hex(0xCDD6F4),\n"
-          "            corner_radii: CornerRadii::all(9.0),")],
-        ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
-    ),
+    # RETIRED by the control-module refactor: the switch knob keeps Mocha.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         "UUUUUUUUUU: a label/value row's label keeps Mocha's subtext0",
         DTS,
@@ -2840,32 +2838,34 @@ DEFECTS = [
         "NNNNNNNNNNN: a toggle's label keeps Mocha's text",
         TPAD,
         [
-            ('            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        // Toggle track.',
-             '            color: Color::from_hex(0xCDD6F4),\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        // Toggle track.'),
+            (('            color: p.text,\n'
+              '            font_weight: FontWeightHint::Regular,\n'
+              '            max_width: None,\n'
+              '            overflow: TextOverflow::Clip,\n'
+              '        });\n'
+              '        let track_x = x + 250.0;'),
+             ('            color: Color::from_hex(0xCDD6F4),\n'
+              '            font_weight: FontWeightHint::Regular,\n'
+              '            max_width: None,\n'
+              '            overflow: TextOverflow::Clip,\n'
+              '        });\n'
+              '        let track_x = x + 250.0;')),
         ],
         ["desktop"],
         [
             'every_colour_the_panel_draws_comes_from_its_palette',
         ],
     ),
-    (
-        "OOOOOOOOOOO: a toggle's knob keeps Mocha's text",
-        TPAD,
-        [
-            ('            width: 14.0,\n            height: 14.0,\n            color: p.text,',
-             '            width: 14.0,\n            height: 14.0,\n            color: Color::from_hex(0xCDD6F4),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_panel_draws_comes_from_its_palette',
-        ],
-    ),
+    # RETIRED by the control-module refactor: a toggle.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         "PPPPPPPPPPP: a toggle's off arm keeps Mocha's surface2",
         TPAD,
         [
-            ('color: if value { p.accent } else { p.surface2 },',
-             'color: if value { p.accent } else { Color::from_hex(0x585B70) },'),
+            ('if value { p.accent } else { p.surface2 },',
+             'if value { p.accent } else { Color::from_hex(0x585B70) },'),
         ],
         ["desktop"],
         [
@@ -2889,8 +2889,8 @@ DEFECTS = [
         "RRRRRRRRRRR: a slider's track keeps Mocha's surface1",
         TPAD,
         [
-            ('            width: track_w,\n            height: 4.0,\n            color: p.surface1,',
-             '            width: track_w,\n            height: 4.0,\n            color: Color::from_hex(0x45475A),'),
+            ('            track: p.surface1,',
+             '            track: Color::from_hex(0x45475A),'),
         ],
         ["desktop"],
         [
@@ -2964,8 +2964,8 @@ DEFECTS = [
         "XXXXXXXXXXX: a slider's filled portion keeps its hardcoded blue",
         TPAD,
         [
-            ('                height: 4.0,\n                color: p.accent,',
-             '                height: 4.0,\n                color: Color::from_hex(0x89B4FA),'),
+            ('            fill: p.accent,',
+             '            fill: Color::from_hex(0x89B4FA),'),
         ],
         ["desktop"],
         [
@@ -2977,45 +2977,29 @@ DEFECTS = [
         "YYYYYYYYYYY: a slider's filled portion is the same surface as its track",
         TPAD,
         [
-            ('                height: 4.0,\n                color: p.accent,',
-             '                height: 4.0,\n                color: p.surface1,'),
+            ('            fill: p.accent,',
+             '            fill: p.surface1,'),
         ],
         ["desktop"],
         [
             'every_control_that_offers_something_follows_the_accent',
         ],
     ),
-    (
-        "ZZZZZZZZZZZ: a slider's knob keeps its hardcoded blue",
-        TPAD,
-        [
-            ('            width: 12.0,\n            height: 12.0,\n            color: p.accent,',
-             '            width: 12.0,\n            height: 12.0,\n            color: Color::from_hex(0x89B4FA),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_panel_draws_comes_from_its_palette',
-            'every_control_that_offers_something_follows_the_accent',
-        ],
-    ),
-    (
-        "AAAAAAAAAAAA: a slider's knob follows the body text instead of the accent",
-        TPAD,
-        [
-            ('            width: 12.0,\n            height: 12.0,\n            color: p.accent,',
-             '            width: 12.0,\n            height: 12.0,\n            color: p.text,'),
-        ],
-        ["desktop"],
-        [
-            'every_control_that_offers_something_follows_the_accent',
-        ],
-    ),
+    # RETIRED by the control-module refactor: a slider knob frozen to a
+    # literal. The call site no longer names the thumb colour at all --
+    # slider.rs does -- so this is unreachable here by construction. The
+    # thumb-ink family is now Gx80 and Hx80.
+    # RETIRED as superseded by the fix, not merely relocated: this defect
+    # asserted that a thumb following the body text was WRONG and the accent
+    # was right. It is the other way round -- an accent thumb on an accent
+    # fill is 1.00:1 -- so the expectation it encoded is the bug. See
+    # design-decisions 534 and Gx80.
     (
         "BBBBBBBBBBBB: a toggle's on arm keeps its hardcoded green",
         TPAD,
         [
-            ('color: if value { p.accent } else { p.surface2 },',
-             'color: if value { Color::from_hex(0xA6E3A1) } else { p.surface2 },'),
+            ('if value { p.accent } else { p.surface2 },',
+             'if value { Color::from_hex(0xA6E3A1) } else { p.surface2 },'),
         ],
         ["desktop"],
         [
@@ -3027,8 +3011,8 @@ DEFECTS = [
         "CCCCCCCCCCCC: a toggle's on arm becomes the palette's green rather than the accent",
         TPAD,
         [
-            ('color: if value { p.accent } else { p.surface2 },',
-             'color: if value { p.green } else { p.surface2 },'),
+            ('if value { p.accent } else { p.surface2 },',
+             'if value { p.green } else { p.surface2 },'),
         ],
         ["desktop"],
         [
@@ -3215,18 +3199,10 @@ DEFECTS = [
             'a_reported_value_is_the_panels_body_text',
         ],
     ),
-    (
-        'RRRRRRRRRRRR: a slider at its floor draws a rectangle that covers no pixels',
-        TPAD,
-        [
-            ('        if fill_w > 0.0 {',
-             '        if fill_w >= 0.0 {'),
-        ],
-        ["desktop"],
-        [
-            'the_panel_draws_nothing_that_is_immediately_erased',
-        ],
-    ),
+    # RETIRED by the control-module refactor: a slider at its floor draws a rectangle that covers no pixels.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Jx80.
     # ---- overview.rs (module 20 of 49) -------------------------------------
     (
         "AAAAAAAAAAAAA: the search bar keeps Mocha's surface0",
@@ -5224,18 +5200,10 @@ DEFECTS = [
             'nothing_that_reports_a_state_follows_the_accent',
         ],
     ),
-    (
-        "WWWWWWWWWWWWWWWWWWWW: a toggle's knob drops to secondary text",
-        SND,
-        [
-            ('width: 16.0,\n            height: 16.0,\n            color: p.text,',
-             'width: 16.0,\n            height: 16.0,\n            color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
-        ],
-    ),
+    # RETIRED by the control-module refactor: a toggle.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         "XXXXXXXXXXXXXXXXXXXX: the master volume label never admits to being muted",
         SND,
@@ -5440,8 +5408,8 @@ DEFECTS = [
         "LLLLLLLLLLLLLLLLLLLLLL: the slider's track is frozen back to Mocha surface0",
         OSD,
         [
-            ('color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, text_alpha),',
-             'color: Color::rgba(0x31, 0x32, 0x44, text_alpha),'),
+            ('            track: p.surface0,',
+             '            track: Color::from_hex(0x0031_3244),'),
         ],
         ["desktop"],
         [
@@ -5453,8 +5421,8 @@ DEFECTS = [
         "MMMMMMMMMMMMMMMMMMMMMM: the slider's track lightens one step",
         OSD,
         [
-            ('color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, text_alpha),',
-             'color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, text_alpha),'),
+            ('            track: p.surface0,',
+             '            track: p.surface1,'),
         ],
         ["desktop"],
         [
@@ -5465,8 +5433,8 @@ DEFECTS = [
         "NNNNNNNNNNNNNNNNNNNNNN: the slider's fill is frozen back to Mocha blue",
         OSD,
         [
-            ('width: fill_w,\n                height: track_h,\n                color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
-             'width: fill_w,\n                height: track_h,\n                color: Color::rgba(0x89, 0xB4, 0xFA, text_alpha),'),
+            ('            fill: accent,',
+             '            fill: Color::from_hex(0x0089_B4FA),'),
         ],
         ["desktop"],
         [
@@ -5479,8 +5447,8 @@ DEFECTS = [
         "OOOOOOOOOOOOOOOOOOOOOO: the slider's fill follows the accent, as if you could drag an OSD",
         OSD,
         [
-            ('width: fill_w,\n                height: track_h,\n                color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
-             'width: fill_w,\n                height: track_h,\n                color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, text_alpha),'),
+            ('            fill: accent,',
+             '            fill: p.accent,'),
         ],
         ["desktop"],
         [
@@ -5489,57 +5457,22 @@ DEFECTS = [
             'volume_and_brightness_stay_a_pair_you_can_tell_apart',
         ],
     ),
-    (
-        "PPPPPPPPPPPPPPPPPPPPPP: the slider's knob is frozen back to Mocha text",
-        OSD,
-        [
-            ('height: 10.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),',
-             'height: 10.0,\n            color: Color::rgba(0xCD, 0xD6, 0xF4, text_alpha),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_osd_draws_comes_from_its_palette',
-            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
-        ],
-    ),
-    (
-        "QQQQQQQQQQQQQQQQQQQQQQ: the slider's knob sinks into its own track",
-        OSD,
-        [
-            ('height: 10.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),',
-             'height: 10.0,\n            color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, text_alpha),'),
-        ],
-        ["desktop"],
-        [
-            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
-        ],
-    ),
-    (
-        'RRRRRRRRRRRRRRRRRRRRRR: a slider at zero draws a fill anyway',
-        OSD,
-        [
-            ('if fill_w > 0.0 {',
-             'if fill_w >= 0.0 {'),
-        ],
-        ["desktop"],
-        [
-            'the_fixtures_take_every_branch_the_osd_has',
-        ],
-    ),
-    (
-        'SSSSSSSSSSSSSSSSSSSSSS: a slider never draws its fill at all',
-        OSD,
-        [
-            ('if fill_w > 0.0 {',
-             'if fill_w < 0.0 {'),
-        ],
-        ["desktop"],
-        [
-            'the_fixtures_take_every_branch_the_osd_has',
-            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
-            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the slider.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Gx80.
+    # RETIRED by the control-module refactor: the slider.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Gx80.
+    # RETIRED by the control-module refactor: a slider at zero draws a fill anyway.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Jx80.
+    # RETIRED by the control-module refactor: a slider never draws its fill at all.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Jx80.
     (
         'TTTTTTTTTTTTTTTTTTTTTT: the music note is frozen back to Mocha lavender',
         OSD,
@@ -6176,31 +6109,14 @@ DEFECTS = [
             'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
-    (
-        "RRRRRRRRRRRRRRRRRRRRRRRR: the pill's knob is frozen back to Mocha text",
-        OSD,
-        [
-            ('height: 16.0,\n            color: p.text,',
-             'height: 16.0,\n            color: Color::from_hex(0xCDD6F4),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_osd_draws_comes_from_its_palette',
-            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
-        ],
-    ),
-    (
-        "SSSSSSSSSSSSSSSSSSSSSSSS: the pill's knob sinks into an unselected grey",
-        OSD,
-        [
-            ('height: 16.0,\n            color: p.text,',
-             'height: 16.0,\n            color: p.surface1,'),
-        ],
-        ["desktop"],
-        [
-            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the pill.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
+    # RETIRED by the control-module refactor: the pill.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         'TTTTTTTTTTTTTTTTTTTTTTTT: the enable label is frozen back to Mocha text',
         OSD,
@@ -7086,31 +7002,14 @@ DEFECTS = [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
         ],
     ),
-    (
-        'QQQQQQQQQQQQQQQQQQQQQQQQQQQ: the toggle knob is frozen back to Mocha text',
-        PRIV,
-        [
-            ('height: 16.0,\n            color: p.text,',
-             'height: 16.0,\n            color: Color::from_hex(0xCDD6F4),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_panel_draws_comes_from_its_palette',
-            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
-        ],
-    ),
-    (
-        'RRRRRRRRRRRRRRRRRRRRRRRRRRR: the toggle knob dims to secondary text',
-        PRIV,
-        [
-            ('height: 16.0,\n            color: p.text,',
-             'height: 16.0,\n            color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the toggle knob is frozen back to Mocha text.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
+    # RETIRED by the control-module refactor: the toggle knob dims to secondary text.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         'SSSSSSSSSSSSSSSSSSSSSSSSSSS: an allowed permission stops being green',
         PRIV,
@@ -13236,27 +13135,16 @@ DEFECTS = [
             'every_site_draws_the_role_it_claims',
         ],
     ),
-    (
-        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the switch knob keeps Mocha text',
-        MOUSESET,
-        [
-            ('            height: 16.0,\n            color: p.text,',
-             '            height: 16.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_panel_draws_comes_from_its_palette',
-            'none_of_the_ten_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-            'the_knob_is_the_same_ink_on_both_pills',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the switch knob keeps Mocha text.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the slider track keeps Mocha surface1',
         MOUSESET,
         [
-            ('            height: track_h,\n            color: p.surface1,',
-             '            height: track_h,\n            color: guitk::color::Color::from_hex(0x45475A),'),
+            ('            track: p.surface1,',
+             '            track: guitk::color::Color::from_hex(0x45475A),'),
         ],
         ["desktop"],
         [
@@ -13269,8 +13157,10 @@ DEFECTS = [
         'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the slider fill keeps Mocha blue',
         MOUSESET,
         [
-            ('            // Judgement 1: how much of this control is set.\n            color: p.accent,',
-             '            // Judgement 1: how much of this control is set.\n            color: guitk::color::Color::from_hex(0x89B4FA),'),
+            (('            // Judgement 1: how much of this control is set.\n'
+              '            fill: p.accent,'),
+             ('            // Judgement 1: how much of this control is set.\n'
+              '            fill: guitk::color::Color::from_hex(0x89B4FA),')),
         ],
         ["desktop"],
         [
@@ -13280,21 +13170,10 @@ DEFECTS = [
             'only_what_is_in_force_is_accented',
         ],
     ),
-    (
-        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the slider thumb keeps Mocha lavender',
-        MOUSESET,
-        [
-            ('            color: emphasized(p.accent),',
-             '            color: guitk::color::Color::from_hex(0xB4BEFE),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_panel_draws_comes_from_its_palette',
-            'none_of_the_ten_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-            'the_thumb_is_derived_from_the_fill_it_ends',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the slider thumb keeps Mocha lavender.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Gx80.
     (
         'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the panel background is drawn a rung up, on the same surface as the header that is meant to stand proud of it',
         MOUSESET,
@@ -13396,8 +13275,10 @@ DEFECTS = [
         "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the slider fill is pinned to blue, so how much is set stops following the user's accent",
         MOUSESET,
         [
-            ('            // Judgement 1: how much of this control is set.\n            color: p.accent,',
-             '            // Judgement 1: how much of this control is set.\n            color: p.blue,'),
+            (('            // Judgement 1: how much of this control is set.\n'
+              '            fill: p.accent,'),
+             ('            // Judgement 1: how much of this control is set.\n'
+              '            fill: p.blue,')),
         ],
         ["desktop"],
         [
@@ -13420,52 +13301,24 @@ DEFECTS = [
             'only_what_is_in_force_moves_when_the_accent_moves',
         ],
     ),
-    (
-        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the slider thumb is pinned to lavender again, the named-beside-it shape this conversion existed to remove',
-        MOUSESET,
-        [
-            ('            color: emphasized(p.accent),',
-             '            color: p.lavender,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-            'the_thumb_is_derived_from_the_fill_it_ends',
-        ],
-    ),
-    (
-        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the slider thumb is the fill's own colour, so there is no handle to see",
-        MOUSESET,
-        [
-            ('            color: emphasized(p.accent),',
-             '            color: p.accent,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-            'the_thumb_is_derived_from_the_fill_it_ends',
-            'only_what_is_in_force_is_accented',
-        ],
-    ),
-    (
-        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the switch knob follows its pill, so the thing that marks the position changes meaning with the state',
-        MOUSESET,
-        [
-            ('            height: 16.0,\n            color: p.text,',
-             '            height: 16.0,\n            color: bg,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-            'the_knob_is_the_same_ink_on_both_pills',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the slider thumb is pinned to lavender again, the named-beside-it shape this conversion existed to remove.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Gx80.
+    # RETIRED by the control-module refactor: the slider thumb is the fill.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Gx80.
+    # RETIRED by the control-module refactor: the switch knob follows its pill, so the thing that marks the position changes meaning with the state.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the slider track is accented along its whole length, so every control reads as fully set',
         MOUSESET,
         [
-            ('            height: track_h,\n            color: p.surface1,',
-             '            height: track_h,\n            color: p.accent,'),
+            ('            track: p.surface1,',
+             '            track: p.accent,'),
         ],
         ["desktop"],
         [
@@ -13539,33 +13392,14 @@ DEFECTS = [
             'only_what_is_in_force_moves_when_the_accent_moves',
         ],
     ),
-    (
-        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the slider thumb is emphasized off blue rather than off the fill, so it is derived from a colour the track never uses',
-        MOUSESET,
-        [
-            ('            color: emphasized(p.accent),',
-             '            color: emphasized(p.blue),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_panel_draws_comes_from_its_palette',
-            'every_site_draws_the_role_it_claims',
-            'the_thumb_is_derived_from_the_fill_it_ends',
-        ],
-    ),
-    (
-        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the switch knob is drawn at a label's dimness",
-        MOUSESET,
-        [
-            ('            height: 16.0,\n            color: p.text,',
-             '            height: 16.0,\n            color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-            'the_knob_is_the_same_ink_on_both_pills',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the slider thumb is emphasized off blue rather than off the fill, so it is derived from a colour the track never uses.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Hx80.
+    # RETIRED by the control-module refactor: the switch knob is drawn at a label.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the drop shadow keeps its own alpha instead of the palette's",
         HOTKEYS,
@@ -16076,8 +15910,8 @@ DEFECTS = [
         "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a slider's track goes back to being Mocha surface0",
         DISP,
         [
-            ('            width: track_w,\n            height: 6.0,\n            color: p.surface0,',
-             '            width: track_w,\n            height: 6.0,\n            color: Color::from_hex(0x0031_3244),'),
+            ('            track: p.surface0,',
+             '            track: Color::from_hex(0x0031_3244),'),
         ],
         ["desktop"],
         [
@@ -16090,8 +15924,10 @@ DEFECTS = [
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a slider's filled portion goes back to being Mocha blue",
         DISP,
         [
-            ('            // How much of the setting is chosen, so: the accent.\n            color: p.accent,',
-             '            // How much of the setting is chosen, so: the accent.\n            color: Color::from_hex(0x0089_B4FA),'),
+            (('            // How much of the setting is chosen, so: the accent.\n'
+              '            fill: p.accent,'),
+             ('            // How much of the setting is chosen, so: the accent.\n'
+              '            fill: Color::from_hex(0x0089_B4FA),')),
         ],
         ["desktop"],
         [
@@ -16104,8 +15940,10 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a slider stops showing how much of it is chosen",
         DISP,
         [
-            ('            // How much of the setting is chosen, so: the accent.\n            color: p.accent,',
-             '            // How much of the setting is chosen, so: the accent.\n            color: p.surface1,'),
+            (('            // How much of the setting is chosen, so: the accent.\n'
+              '            fill: p.accent,'),
+             ('            // How much of the setting is chosen, so: the accent.\n'
+              '            fill: p.surface1,')),
         ],
         ["desktop"],
         [
@@ -16116,30 +15954,22 @@ DEFECTS = [
         "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a slider's track and its filled portion trade roles",
         DISP,
         [
-            ('            width: track_w,\n            height: 6.0,\n            color: p.surface0,',
-             '            width: track_w,\n            height: 6.0,\n            color: p.accent,'),
-            ('            // How much of the setting is chosen, so: the accent.\n            color: p.accent,',
-             '            // How much of the setting is chosen, so: the accent.\n            color: p.surface0,'),
+            ('            track: p.surface0,',
+             '            track: p.accent,'),
+            (('            // How much of the setting is chosen, so: the accent.\n'
+              '            fill: p.accent,'),
+             ('            // How much of the setting is chosen, so: the accent.\n'
+              '            fill: p.surface0,')),
         ],
         ["desktop"],
         [
             'every_site_draws_the_role_it_claims',
         ],
     ),
-    (
-        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a slider's thumb goes back to being Mocha text",
-        DISP,
-        [
-            ('            width: 12.0,\n            height: 12.0,\n            color: p.text,',
-             '            width: 12.0,\n            height: 12.0,\n            color: Color::from_hex(0x00CD_D6F4),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_panel_draws_comes_from_its_palette',
-            'none_of_the_nine_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
+    # RETIRED by the control-module refactor: a slider.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Gx80.
     (
         "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the grey ramp is tinted, so a display's colour cast is measured against a tint",
         DISP,
@@ -16675,8 +16505,8 @@ DEFECTS = [
         "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the on switch keeps its own Mocha green",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: if enabled { guitk::color::Color::from_hex(0xA6E3A1) } else { p.surface2 },'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            if enabled { guitk::color::Color::from_hex(0xA6E3A1) } else { p.surface2 },'),
         ],
         ["desktop"],
         [
@@ -16691,8 +16521,8 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the off switch keeps its own Mocha surface2",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: if enabled { p.green } else { guitk::color::Color::from_hex(0x585B70) },'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            if enabled { p.green } else { guitk::color::Color::from_hex(0x585B70) },'),
         ],
         ["desktop"],
         [
@@ -16707,8 +16537,8 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the on switch follows the accent, so on means chosen",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: if enabled { p.accent } else { p.surface2 },'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            if enabled { p.accent } else { p.surface2 },'),
         ],
         ["desktop"],
         [
@@ -16720,8 +16550,8 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the switch's on and off branches are swapped",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: if enabled { p.surface2 } else { p.green },'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            if enabled { p.surface2 } else { p.green },'),
         ],
         ["desktop"],
         [
@@ -16734,8 +16564,8 @@ DEFECTS = [
         "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: every switch reads as on",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: p.green,'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            p.green,'),
         ],
         ["desktop"],
         [
@@ -16748,8 +16578,8 @@ DEFECTS = [
         "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: every switch reads as off",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: p.surface2,'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            p.surface2,'),
         ],
         ["desktop"],
         [
@@ -16761,8 +16591,8 @@ DEFECTS = [
         "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the off switch sits a rung too low",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: if enabled { p.green } else { p.surface0 },'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            if enabled { p.green } else { p.surface0 },'),
         ],
         ["desktop"],
         [
@@ -16770,57 +16600,24 @@ DEFECTS = [
             'green_means_on_and_the_accent_means_chosen',
         ],
     ),
-    (
-        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the switch knob keeps its own Mocha text",
-        A11Y,
-        [
-            ('            height: 18.0,\n            color: p.text,',
-             '            height: 18.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_panel_draws_comes_from_its_palette',
-            'none_of_the_nine_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-            'green_means_on_and_the_accent_means_chosen',
-            'every_site_changes_when_the_mode_does',
-        ],
-    ),
-    (
-        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the switch knob drops to the secondary rung",
-        A11Y,
-        [
-            ('            height: 18.0,\n            color: p.text,',
-             '            height: 18.0,\n            color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-            'green_means_on_and_the_accent_means_chosen',
-        ],
-    ),
-    (
-        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the switch knob turns green, so every row reads as on",
-        A11Y,
-        [
-            ('            height: 18.0,\n            color: p.text,',
-             '            height: 18.0,\n            color: p.green,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-            'green_means_on_and_the_accent_means_chosen',
-            'the_active_feature_line_is_green_and_only_drawn_when_there_is_one',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the switch knob keeps its own Mocha text.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
+    # RETIRED by the control-module refactor: the switch knob drops to the secondary rung.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
+    # RETIRED by the control-module refactor: the switch knob turns green, so every row reads as on.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a switch's pill and its knob are traded",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: p.text,'),
-            ('            height: 18.0,\n            color: p.text,',
-             '            height: 18.0,\n            color: if enabled { p.green } else { p.surface2 },'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            p.text,'),
         ],
         ["desktop"],
         [
@@ -22441,6 +22238,231 @@ DEFECTS = [
             'inverting_twice_returns_the_original_color',
             'test_color_filter_inverted',
             'the_filters_still_produce_the_weights_they_were_written_with',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a switch knob reaches the very edge of its pill when on",
+        SWITCH,
+        [
+            ('        x + width - knob - INSET\n',
+             '        x + width - knob\n'),
+        ],
+        ["desktop"],
+        [
+            'the_geometry_is_the_one_every_hand_written_switch_already_used',
+            'the_knob_is_at_the_right_end_when_on_and_the_left_end_when_off',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a switch shows its off position when on and vice versa",
+        SWITCH,
+        [
+            ('    let knob_x = if on {\n',
+             '    let knob_x = if !on {\n'),
+        ],
+        ["desktop"],
+        [
+            'the_geometry_is_the_one_every_hand_written_switch_already_used',
+            'the_knob_is_at_the_right_end_when_on_and_the_left_end_when_off',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a switch knob stops being derived from the pill under it",
+        SWITCH,
+        [
+            ('            color: readable_on(track),\n',
+             '            color: appearance::LIGHT_EXTREME,\n'),
+        ],
+        ["desktop"],
+        [
+            # The ink is still one of the two extremes, so every 'comes from its
+            # palette' sweep still passes -- only *which* extreme changes, and
+            # only for a light background.
+            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'the_knob_is_legible_on_every_track_a_panel_can_choose',
+            'the_knob_follows_the_track_rather_than_the_theme',
+            # The one call-site test that pins the ink by equality with
+            # readable_on(pill) rather than by a contrast floor, so it fails
+            # for any change to that line at all. It is the inheritor of the
+            # fourteen per-panel knob defects this module retired.
+            'the_knob_is_legible_on_both_pills',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the ink chooser's threshold drifts five points up",
+        APP,
+        [
+            ('    if luma > 140.0 {\n',
+             '    if luma > 145.0 {\n'),
+        ],
+        ["appearance", "desktop"],
+        [
+            # Deliberately narrow: only light overlay1 (luma 144.15) and light
+            # lavender (142.17) sit in the five-point window, so this fails only
+            # for a test that sweeps every role or every accent in light mode. A
+            # test that checks one hand-picked colour would not notice.
+            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'the_knob_is_legible_on_every_track_a_panel_can_choose',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a slider thumb hangs off the bottom of its own track",
+        SLIDER,
+        [
+            ('            y: self.y + self.height / 2.0 - self.thumb / 2.0,\n',
+             '            y: self.y + self.height / 2.0,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_geometry_is_the_one_every_hand_written_slider_already_used',
+            'the_thumb_overhangs_the_track_on_every_shape_the_shell_draws',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: a slider thumb shrinks to the height of its track",
+        SLIDER,
+        [
+            (('            width: self.thumb,\n'
+              '            height: self.thumb,\n'),
+             ('            width: self.height,\n'
+              '            height: self.height,\n')),
+        ],
+        ["desktop"],
+        [
+            # The overhang test is the premise of the ink rule: a contained
+            # thumb would be read against the track, not the card, and 'text'
+            # would stop being the right answer.
+            'the_geometry_is_the_one_every_hand_written_slider_already_used',
+            'the_thumb_overhangs_the_track_on_every_shape_the_shell_draws',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a slider thumb takes the colour of the fill it ends",
+        SLIDER,
+        [
+            ('            color: fade(self.p.text, self.alpha),\n',
+             '            color: fade(self.fill, self.alpha),\n'),
+        ],
+        ["desktop"],
+        [
+            # This is the touchpad bug (1.00:1) generalised to all five sliders.
+            'the_thumb_is_legible_against_every_card_it_can_sit_on',
+            'text_beats_readable_on_the_fill_against_the_card',
+            'every_control_that_offers_something_follows_the_accent',
+            'the_thumb_does_not_follow_the_fill_it_ends',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a slider thumb takes the switch knob's rule instead of its own",
+        SLIDER,
+        [
+            ('            color: fade(self.p.text, self.alpha),\n',
+             '            color: fade(appearance::readable_on(self.fill), self.alpha),\n'),
+        ],
+        ["desktop"],
+        [
+            # The plausible 'fix' a future reader would reach for, having seen
+            # switch.rs. On Mocha it inks the thumb #11111B -- 1.1:1 against a
+            # base card. Containment, not consistency, decides the rule.
+            'the_thumb_is_legible_against_every_card_it_can_sit_on',
+            'text_beats_readable_on_the_fill_against_the_card',
+            'every_control_that_offers_something_follows_the_accent',
+            'the_thumb_does_not_follow_the_fill_it_ends',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the light theme's ink drifts toward the page it is read on",
+        APP,
+        [
+            ('pub const LIGHT_TEXT: Color = Color::from_hex(0x4C4F69);\n',
+             'pub const LIGHT_TEXT: Color = Color::from_hex(0x8A8DA0);\n'),
+        ],
+        ["appearance", "desktop"],
+        [
+            # 2.90:1 on a Latte base. 0x8C8FA1 would have been the rounder
+            # number but it is light overlay1's own value, and a duplicate would
+            # trip the palette's distinctness tests for the wrong reason.
+            'the_thumb_is_legible_against_every_card_it_can_sit_on',
+            'text_beats_readable_on_the_fill_against_the_card',
+            'every_role_a_user_reads_is_legible_on_the_base_of_its_own_palette',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a slider at its floor still emits a zero-width fill",
+        SLIDER,
+        [
+            ('        if fill_w > 0.0 {\n',
+             '        if fill_w >= 0.0 {\n'),
+        ],
+        ["desktop"],
+        [
+            'a_slider_on_its_floor_emits_no_fill_rectangle',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a slider's fraction stops being bounded",
+        SLIDER,
+        [
+            ('            self.frac.clamp(0.0, 1.0)\n',
+             '            self.frac\n'),
+        ],
+        ["desktop"],
+        [
+            'an_out_of_range_fraction_cannot_push_the_thumb_off_the_track',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a fading slider's thumb stays opaque",
+        SLIDER,
+        [
+            ('            color: fade(self.p.text, self.alpha),\n',
+             '            color: self.p.text,\n'),
+        ],
+        ["desktop"],
+        [
+            # The osd is the only caller that fades, so this is invisible
+            # everywhere else -- which is exactly why the helper owns the fade
+            # rather than the caller pre-multiplying.
+            'the_alpha_reaches_every_part_of_the_control',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the structural knob locator stops matching what it locates",
+        A11Y,
+        [
+            (('                && *kw == 18.0\n'
+              '            {\n'
+              '                knobs.push(i + 1);\n'),
+             ('                && *kw == 19.0\n'
+              '            {\n'
+              '                knobs.push(i + 1);\n')),
+        ],
+        ["desktop"],
+        [
+            # Proves the guard is load-bearing: with nothing located, the
+            # exclusion silently excludes nothing and the sweep would judge knob
+            # colours it has no claim over. The trailing push line is part of
+            # the pattern because the pill test above it is textually identical.
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: every slider reads as fully set, so its track is drawn and immediately covered",
+        TPAD,
+        [
+            ('            frac: (value - min) / (max - min),\n',
+             '            frac: 1.0,\n'),
+        ],
+        ["desktop"],
+        [
+            # The inheritor of RRRRRRRRRRRR, which patched the fill guard this
+            # panel used to own. The guard now lives in slider.rs and is proved
+            # once, by JJJ...x80 -- but that leaves this panel's erasure sweep
+            # with nothing to catch, and a sweep nothing can trip is a sweep
+            # that proves nothing. A full fill covers the track exactly, which
+            # is the erasure the test is named for.
+            'the_panel_draws_nothing_that_is_immediately_erased',
         ],
     ),
 ]

@@ -168,6 +168,48 @@ pub struct CrashInfo {
     pub last_crash_ns: Option<u64>,
     /// Whether a backoff restart is currently armed and waiting to fire.
     pub restart_pending: bool,
+    /// Timestamps (ns since boot) of the last few crashes, oldest first.
+    ///
+    /// `last_crash_ns` gives the most recent instant only, which cannot
+    /// distinguish a service that crashed ten times in two seconds from one
+    /// that crashed ten times over a week — and that distinction is the whole
+    /// point of looking at a crash record. The record has always collected
+    /// these timestamps; until now nothing read them.
+    pub crash_history: Vec<u64>,
+}
+
+impl CrashInfo {
+    /// Render the crash history as ages relative to `now_ns`, oldest first.
+    ///
+    /// Ages rather than raw uptimes: an operator reading a crash record wants
+    /// the *shape* of the failure — "3s 2s 1s" is a service in a tight loop,
+    /// "9000s 4000s 1s" is one that fails occasionally — and neither is
+    /// legible as three ten-digit nanosecond counts.
+    ///
+    /// Returns an empty string when there is no history, so a caller can skip
+    /// the line entirely rather than print an empty list.
+    #[must_use]
+    pub fn history_ages(&self, now_ns: u64) -> String {
+        if self.crash_history.is_empty() {
+            return String::new();
+        }
+        let mut out = String::with_capacity(self.crash_history.len().saturating_mul(6));
+        for (i, ts) in self.crash_history.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            // saturating: a timestamp from the future would mean the clock ran
+            // backwards, which is worth showing as 0 rather than wrapping to
+            // 584 years.
+            let age_ms = now_ns.saturating_sub(*ts) / 1_000_000;
+            if age_ms < 1000 {
+                out.push_str(&format!("{age_ms}ms"));
+            } else {
+                out.push_str(&format!("{}.{}s", age_ms / 1000, (age_ms % 1000) / 100));
+            }
+        }
+        out
+    }
 }
 
 /// An entry in the startup app list.
@@ -1104,6 +1146,7 @@ pub fn crash_records() -> Vec<CrashInfo> {
             permanently_failed: r.permanently_failed,
             last_crash_ns: r.last_crash_ns,
             restart_pending: r.pending_restart.is_some(),
+            crash_history: r.crash_history.clone(),
         })
         .collect()
 }
@@ -1167,6 +1210,7 @@ pub fn procfs_content() -> String {
     // Crash records.
     let crashes = crash_records();
     if !crashes.is_empty() {
+        let now = crate::hpet::elapsed_ns();
         out.push_str(&format!("\nCrash Records ({}):\n", crashes.len()));
         out.push_str(&format!(
             "  {:16} {:>6} {:>8} {:>8} {:>10}\n",
@@ -1187,6 +1231,10 @@ pub fn procfs_content() -> String {
                 "  {:16} {:>6} {:>8} {:>5} ms {:>10}\n",
                 c.name, c.consecutive_failures, c.total_crashes, c.backoff_ms, status
             ));
+            let ages = c.history_ages(now);
+            if !ages.is_empty() {
+                out.push_str(&format!("  {:16} crashed: {} ago\n", "", ages));
+            }
         }
     }
 
@@ -1375,6 +1423,40 @@ fn self_test_inner() -> KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Two crashes have been reported, so both must be in the history, in
+        // order, with the newest agreeing with `last_crash_ns`. The history was
+        // collected but never read by anything for as long as it existed;
+        // checking it here is what stops it silently going stale again.
+        if net_record.crash_history.len() != 2 {
+            crate::serial_println!(
+                "[svcstart]   FAIL: crash_history has {} entries after 2 crashes",
+                net_record.crash_history.len()
+            );
+            return Err(KernelError::InternalError);
+        }
+        if net_record
+            .crash_history
+            .windows(2)
+            .any(|w| matches!((w.first(), w.get(1)), (Some(a), Some(b)) if a > b))
+        {
+            crate::serial_println!("[svcstart]   FAIL: crash_history is not in time order");
+            return Err(KernelError::InternalError);
+        }
+        if net_record.crash_history.last().copied() != net_record.last_crash_ns {
+            crate::serial_println!(
+                "[svcstart]   FAIL: newest crash_history entry disagrees with last_crash_ns"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // And it must render: an empty string here would mean the display line
+        // is silently skipped for a service that has in fact crashed.
+        if net_record
+            .history_ages(crate::hpet::elapsed_ns())
+            .is_empty()
+        {
+            crate::serial_println!("[svcstart]   FAIL: history_ages empty for a crashed service");
+            return Err(KernelError::InternalError);
+        }
     }
     crate::serial_println!("[svcstart]   4. Exponential backoff: OK");
 
@@ -1413,6 +1495,16 @@ fn self_test_inner() -> KernelResult<()> {
         if net_record.restart_pending {
             crate::serial_println!(
                 "[svcstart]   FAIL: permanently-failed service still has a restart armed"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // The history is a ring of the last 10, not an unbounded log: a
+        // service that crash-loops for a week must not grow the record without
+        // limit.
+        if net_record.crash_history.len() > 10 {
+            crate::serial_println!(
+                "[svcstart]   FAIL: crash_history grew past its 10-entry cap ({})",
+                net_record.crash_history.len()
             );
             return Err(KernelError::InternalError);
         }

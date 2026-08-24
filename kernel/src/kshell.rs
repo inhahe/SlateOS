@@ -45965,6 +45965,13 @@ fn cmd_svcstart(args: &str) {
                         status,
                         last
                     );
+                    // The crash *intervals*, which the single "last crash"
+                    // column cannot show: ten crashes in two seconds and ten
+                    // crashes over a week are the same row without this line.
+                    let ages = c.history_ages(now);
+                    if !ages.is_empty() {
+                        shell_println!("{:16} crashed: {} ago", "", ages);
+                    }
                 }
             }
         }

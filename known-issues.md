@@ -72372,3 +72372,113 @@ codebase, two output macros cannot be encoding a stdout/stderr split, so one
 of them had to be wrong. When two ways of doing the same thing coexist with
 no rule separating them, that is not style; it is a bug that has not been
 observed yet.
+
+## A-KSHELL-3676-FAILING-COMMANDS-REPORTED-SUCCESS — ✅ FIXED 2026-08-24 (lane A)
+
+**In short:** 3,676 built-in shell commands printed an error message and then
+told the script that they had succeeded. Nothing looked wrong on screen — the
+error was right there in the terminal — but a script could not see it. `rm -rf
+"$dir"` after a failed step still ran; `cmd || echo "failed"` never printed
+"failed"; `id=$(cgroup create)` set `id` to the empty string and carried on.
+Fixed by giving every one of them a failing exit status, in three sweeps, plus
+a fourth commit undoing the four places where the sweep went too far.
+
+**Where:** `kernel/src/kshell.rs`. Commits `306eba384`, `ad372afab`,
+`2e7008827`, `2ab39d291`.
+
+**The damage is never the wrong value.** It is the control-flow decision
+downstream, and every shell construct that branches — `||`, `&&`, `if`,
+`set -e` — reads the exit status and nothing else. A shell in which failure
+reports 0 makes all of them decide the opposite of what they were written to
+decide. That is strictly worse than the command not existing: a missing command
+at least fails.
+
+### Three shapes, found by three different rules
+
+| shape | sites | what it looks like |
+|---|---|---|
+| bail | 766 | diagnostic, then a bare `return;` |
+| fall-through | 945 | diagnostic is the last statement of its block; control falls out |
+| error arm | 1,965 | `Err(e) => shell_println!("Error: {:?}", e),` |
+
+The error arms are the worst of the three, because the message is *right
+there*. A human reading the terminal sees the error and assumes everything
+downstream saw it too.
+
+### What made the sweeps safe, and the three times they weren't
+
+A line-level rule — "the text contains Usage:/Invalid/not found" — is wrong,
+and it was wrong on real sites. Each guard below exists because it caught one:
+
+1. **Judge the statement *run*, not the line.** Walk up from the last print and
+   collect the contiguous run at the same indent (folding rustfmt's split `);`
+   tail back into one statement), then judge the run by its **first** message. A
+   multi-line usage block leads with `"Usage: …"` and continues with indented
+   examples; a listing leads with a banner or a row.
+2. **A complaint starts its own message.** If the run's first literal begins
+   with whitespace it is an indented row inside a report. That single test is
+   what separates `"Group '{}' not found"` from `"  Unknown drops:    {}"` — a
+   row of `vlan stats`, which the first draft swept. Marking that command failed
+   would have been a *new* bug.
+3. **`Usage:`/`Error:` must lead the message** (after at most a `cmdname: `
+   prefix), **and every other word must be a whole word.** Two successes were
+   swept before these anchors existed:
+   - `"Network Usage: {} apps, {} interfaces"` — the *header* of `netusage
+     stats`, which then ends on an indented row: textually the exact shape of a
+     usage error.
+   - `"datausage: self-tests completed (see serial)."` — the command name
+     `datausage` merely ends in the letters `usage`.
+4. **A `=== … ===` banner means output, not a diagnostic.** Encoded as a rule
+   rather than an exception for `cmd_ksyms`, the only site that trips it today.
+5. **`Err` arms need no anchoring.** The arm *is* the failure path — stronger
+   corroboration than the `return;` the first sweep leaned on. All 197 distinct
+   messages were enumerated: every one names a real failure, so the vocabulary
+   filter (which exists to spare arms that absorb an error deliberately) had
+   nothing to spare.
+
+### The mirror-image bug the sweep introduced: `--help` is not a mistake
+
+`ad372afab`. A granted help request and a rejected argument **print the same
+text**, so no textual rule can separate them — only the gate above the block
+can. Four sites printed the usage because the user asked for it, and the sweep
+marked all four as failures. That is this task's own bug class in reverse: a
+command that succeeded reporting failure, breaking `cmd --help >/dev/null ||
+echo "not installed"`, a real idiom for probing whether a tool exists. `grep
+--help` exits 0; `grep --bogus` exits 2.
+
+Three were a plain deletion (`dedup`, `journal`, `fsck.ext4`). `zip` was not:
+its gate is `args.is_empty() || args == "--help" || args == "-h"`, one condition
+covering both a granted request and a command with nothing to run, so it had to
+be split.
+
+Found by scanning **every** help-gated block in the file for a failure status,
+not by re-reading the sweep's diff — so the check outlives the commit and covers
+sites no sweep touched. It is worth re-running after any future sweep.
+
+### Coverage
+
+Self-test rungs 18–20 in `kshell::self_test`, one per lesson rather than one per
+shape:
+
+| rung | asserts |
+|---|---|
+| 18 | `zip --help` and `zip` print **byte-identical** output and opposite statuses |
+| 19 | `tag zzz` fails (fall-through); `netusage stats` and `datausage test` do **not** (report header, whole-word) |
+| 20 | `cgroup delete <bogus>` fails (error arm); **and `echo ok` still reports 0** |
+
+That last control is the one that makes the set meaningful. Without it, a
+kshell that set status 1 unconditionally would pass rungs 17–20.
+
+### Known under-sweep, left deliberately
+
+Rule 3 rejects `"base64: decode error: {}"` and `"tee: write error: {:?}"`,
+which have two words before the `error:`. Loosening the anchor to admit them
+re-admits `"Network Usage:"`. Three unfixed sites beat one invented failure.
+
+**Lesson:** a mechanical rewrite over thousands of sites is only as good as the
+predicate, and a predicate that reads one line cannot tell a complaint from a
+row of a report. Every guard above came from *sampling the sites the rule chose*
+and *enumerating every distinct message it matched* — not from reading the
+rule and judging it plausible. Two of the three false positives were single
+sites out of thousands, and both would have turned a working command into a
+failing one.

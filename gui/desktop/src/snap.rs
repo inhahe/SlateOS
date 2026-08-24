@@ -1171,12 +1171,11 @@ mod tests {
                         cmds.extend(mgr.render_zone_highlight(&p, zone.id));
                     }
                     drawn += colors(&cmds).len();
-                    // Nothing is declared derived: every value this module
-                    // draws is a role, a role at an alpha, black, or a
-                    // `readable_on` endpoint. A module that needed an
-                    // exception here would be one that still computes a
-                    // colour of its own.
-                    assert_drawn_from(&p, &cmds, &[], "snap");
+                    // One declared derivation: the lettering on a zone label,
+                    // which is `readable_on` ink for the scrim it sits on
+                    // (see the module docs). Everything else this module
+                    // draws is a role, a role at an alpha, or black.
+                    assert_drawn_from(&p, &cmds, &[readable_on(p.scrim())], "snap");
                 }
             }
         }

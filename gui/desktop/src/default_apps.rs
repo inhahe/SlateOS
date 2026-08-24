@@ -1783,10 +1783,14 @@ mod tests {
         for light in [false, true] {
             let p = accented(light);
             for (tab, cmds) in every_tab(&p) {
-                // No `derived` list: the only computed colour here is
-                // `readable_on(p.accent)`, and the sweep allows both of that
-                // function's endpoints outright.
-                crate::palette_check::assert_drawn_from(&p, &cmds, &[], &format!("{tab:?}"));
+                // The only computed colour here is the lettering on the
+                // accent-filled button, so that is the whole `derived` list.
+                crate::palette_check::assert_drawn_from(
+                    &p,
+                    &cmds,
+                    &[appearance::readable_on(p.accent)],
+                    &format!("{tab:?}"),
+                );
             }
         }
     }
@@ -1799,10 +1803,12 @@ mod tests {
     /// leftover names itself. Run in dark it would be worthless — nine of the
     /// eleven would still equal the role that replaced them.
     ///
-    /// It also closes the sweep's documented blind spot. `assert_drawn_from`
-    /// cannot reject `0x11111B`, because that is one of `readable_on`'s two
-    /// answers; but with an accent below the luma threshold, `readable_on`
-    /// returns the *other* endpoint, so `0x11111B` should not appear at all.
+    /// It also reaches past what a declaration can say. The sweep declares
+    /// `readable_on(p.accent)` as derived, and a declaration is a claim about
+    /// a *value* rather than about where that value may appear — so a stray
+    /// literal equal to it would ride along. With an accent below the luma
+    /// threshold `readable_on` returns the pale endpoint, so `0x11111B`
+    /// should not appear at all, and here that is asserted outright.
     #[test]
     fn none_of_the_eleven_deleted_constants_is_still_drawn() {
         const DELETED: [(&str, u32); 11] = [

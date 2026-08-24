@@ -1667,6 +1667,19 @@ mod tests {
         ];
         for light in [false, true] {
             let p = Palette::for_mode(light);
+            // The lettering on a filled badge is `readable_on` ink, which is a
+            // computed colour rather than a role and so must be declared. The
+            // fills are written out by hand rather than read back from
+            // `DriverStatus::color` — an expectation taken from the code under
+            // test is an echo of it, not a check on it.
+            let ink = [
+                readable_on(p.green),
+                readable_on(p.yellow),
+                readable_on(p.red),
+                readable_on(p.blue),
+                readable_on(p.overlay0),
+                readable_on(p.peach),
+            ];
             for set in &sets {
                 for tab in DeviceSettingsTab::all() {
                     for selected in [false, true] {
@@ -1686,7 +1699,7 @@ mod tests {
                                     palette_check::assert_drawn_from(
                                         &p,
                                         &cmds,
-                                        &[],
+                                        &ink,
                                         "device_settings",
                                     );
                                 }

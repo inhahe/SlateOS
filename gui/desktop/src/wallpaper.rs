@@ -2203,11 +2203,25 @@ mod tests {
     // Render commands
     // ------------------------------------------------------------------
 
+    /// A chosen colour is drawn edge to edge, once.
+    ///
+    /// The chosen colour is off-palette on purpose. This test used to pick
+    /// `0x1E1E2E`, which is the dark palette's `base` — so it could not tell
+    /// "draws the colour the user chose" from "ignores the user and draws the
+    /// theme", and a defect that did the latter passed it. A fixture value
+    /// that equals a role cannot distinguish the choice from the role.
     #[test]
     fn render_solid_produces_one_fill() {
+        const CHOSEN: Color = Color::from_hex(0x0012_3456);
+        let p = dark();
+        assert!(
+            !p.roles().iter().any(|(_, r)| *r == CHOSEN),
+            "the fixture colour is a role, so this test cannot see the theme \
+             winning over the user's choice"
+        );
         let mut mgr = WallpaperManager::new();
-        mgr.set_solid_color(Color::from_hex(0x1E1E2E));
-        let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
+        mgr.set_solid_color(CHOSEN);
+        let cmds = mgr.get_render_commands(&p, 1920.0, 1080.0, 0);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             RenderCommand::FillRect {
@@ -2218,7 +2232,7 @@ mod tests {
             } => {
                 assert!((width - 1920.0).abs() < f32::EPSILON);
                 assert!((height - 1080.0).abs() < f32::EPSILON);
-                assert_eq!(*color, Color::from_hex(0x1E1E2E));
+                assert_eq!(*color, CHOSEN);
             }
             other => panic!("expected FillRect, got {other:?}"),
         }
@@ -2260,6 +2274,30 @@ mod tests {
         let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
         assert!(!cmds.is_empty());
         assert!(matches!(&cmds[0], RenderCommand::FillRect { .. }));
+    }
+
+    #[test]
+    fn a_slideshow_with_images_draws_one() {
+        // The empty case above passes whether the slideshow renders an image
+        // or merely a background, because with no images there is no image to
+        // draw either way — so on its own it says nothing about whether the
+        // slideshow renders pictures at all. This is the other half: with a
+        // path populated, the underlay must be followed by the image.
+        let mut mgr = WallpaperManager::new();
+        mgr.set_slideshow("/walls", 300, false);
+        mgr.populate_slideshow_paths(vec!["/walls/one.png".to_string()]);
+        let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
+        assert_eq!(
+            cmds.len(),
+            2,
+            "a slideshow with a picture in it drew {} command(s): {cmds:?}",
+            cmds.len()
+        );
+        assert!(matches!(&cmds[0], RenderCommand::FillRect { .. }));
+        assert!(
+            matches!(&cmds[1], RenderCommand::Image { .. }),
+            "the slideshow drew a background and no picture: {cmds:?}"
+        );
     }
 
     // ------------------------------------------------------------------

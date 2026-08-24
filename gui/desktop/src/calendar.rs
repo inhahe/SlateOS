@@ -4785,11 +4785,15 @@ description: Just a test";
     /// The light render is the one that matters: every constant deleted from
     /// this module was a Catppuccin Mocha value, so a missed substitution is a
     /// colour the light palette does not contain, and it names itself.
+    ///
+    /// Three declared derivations: the user's accent and a user-chosen event
+    /// colour, neither of which is themed, and the digit on today's disc,
+    /// which is `readable_on` ink for that disc's accent fill.
     #[test]
     fn every_colour_the_calendar_draws_comes_from_its_palette() {
         for light in [false, true] {
             let p = accented(light);
-            let derived = [p.accent, USER_ORANGE];
+            let derived = [p.accent, readable_on(p.accent), USER_ORANGE];
             for off_month in [false, true] {
                 for mode in [CalendarViewMode::Month, CalendarViewMode::Year] {
                     let (mut cal, store) = scene();
@@ -4813,11 +4817,11 @@ description: Just a test";
 
     /// Every colour that is a role moves when the mode does.
     ///
-    /// This is what the membership sweep cannot see. `assert_drawn_from` runs
-    /// against the light palette and is obliged to accept `#EFF1F5` — it is
-    /// both Latte `base` and a `readable_on` endpoint — so a leftover constant
-    /// that happened to hold a Latte value would pass it. It cannot pass this:
-    /// a constant does not move.
+    /// This is what the membership sweep cannot see. `assert_drawn_from` is a
+    /// set-membership test, so in a light render it accepts `#EFF1F5` because
+    /// that is Latte `base` — and a leftover *constant* holding that value is
+    /// indistinguishable from the role to any single render. It cannot pass
+    /// this: a constant does not move.
     #[test]
     fn every_role_the_calendar_draws_moves_with_the_mode() {
         let dark = accented(false);

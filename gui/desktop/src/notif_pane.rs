@@ -3249,6 +3249,18 @@ mod tests {
         ];
         for light in [false, true] {
             let p = Palette::for_mode(light);
+            // The two computed inks: the lettering on the accent-filled
+            // action button, and the lettering inside a priority badge. The
+            // four badge fills are written out rather than read back from
+            // `NotifPriority::accent_color`, so this is a claim about the
+            // design instead of an echo of the code under test.
+            let ink = [
+                readable_on(p.accent),
+                readable_on(p.overlay0),
+                readable_on(p.blue),
+                readable_on(p.peach),
+                readable_on(p.red),
+            ];
             for priority in priorities {
                 for show_settings in [false, true] {
                     for read in [false, true] {
@@ -3265,7 +3277,7 @@ mod tests {
                                     );
                                     let cmds = pane.render(&p, SCREEN_W, TEST_SCREEN_H);
                                     assert!(!cmds.is_empty(), "a visible pane draws something");
-                                    palette_check::assert_drawn_from(&p, &cmds, &[], "notif_pane");
+                                    palette_check::assert_drawn_from(&p, &cmds, &ink, "notif_pane");
                                 }
                             }
                         }
@@ -3286,7 +3298,12 @@ mod tests {
                         wound_pane(NotifPriority::Urgent, false, false, false, true, false);
                     pane.state = state;
                     let cmds = pane.render(&p, SCREEN_W, TEST_SCREEN_H);
-                    palette_check::assert_drawn_from(&p, &cmds, &[], "notif_pane mid-slide");
+                    palette_check::assert_drawn_from(
+                        &p,
+                        &cmds,
+                        &[readable_on(p.accent), readable_on(p.red)],
+                        "notif_pane mid-slide",
+                    );
                 }
             }
         }

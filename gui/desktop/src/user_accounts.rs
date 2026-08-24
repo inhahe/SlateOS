@@ -2052,6 +2052,43 @@ mod tests {
         }
     }
 
+    /// Every colour this panel *computes* rather than reads.
+    ///
+    /// All of it is `readable_on` ink: initials on an avatar circle, the
+    /// account-type word on its badge, and the lettering on the accent-filled
+    /// button. Such ink is declared rather than exempt because each value
+    /// `readable_on` can return is also a role of one of the two palettes —
+    /// see `palette_check`'s module docs.
+    ///
+    /// The fills are written out by hand rather than read back through
+    /// `avatar_colors` and `badge_color`: an expectation taken from the code
+    /// under test is an echo of it. The cost is that adding an avatar colour
+    /// without adding it here fails the sweep, which is the correct direction
+    /// for that failure to point. Each fill is wrapped individually rather
+    /// than mapped over a bare list of roles, because a bare list of the seven
+    /// avatar roles is textually the production table — a second copy of the
+    /// thing being checked, sitting one screen away from it.
+    fn every_ink(p: &Palette) -> [Color; 11] {
+        [
+            // Initials, on each of the seven avatar slots.
+            readable_on(p.blue),
+            readable_on(p.green),
+            readable_on(p.peach),
+            readable_on(p.mauve),
+            readable_on(p.red),
+            readable_on(p.yellow),
+            readable_on(p.lavender),
+            // Initials again, on the two non-initials avatar backgrounds.
+            readable_on(p.surface1),
+            readable_on(p.surface0),
+            // The account-type word: red and blue are covered above, so only
+            // the guest badge adds a fill here.
+            readable_on(p.overlay0),
+            // The lettering on the accent-filled button.
+            readable_on(p.accent),
+        ]
+    }
+
     /// The membership sweep: nothing this panel draws may be a colour outside
     /// the palette it was handed. See `palette_check` for why the light render
     /// is what makes a leftover Mocha constant name itself.
@@ -2059,6 +2096,7 @@ mod tests {
     fn every_colour_the_panel_draws_comes_from_its_palette() {
         for light in [false, true] {
             let p = Palette::for_mode(light);
+            let ink = every_ink(&p);
             for populated in [false, true] {
                 for tab in AccountsTab::ALL {
                     for selected in [None, Some(1001)] {
@@ -2076,7 +2114,7 @@ mod tests {
                                     palette_check::assert_drawn_from(
                                         &p,
                                         &cmds,
-                                        &[],
+                                        &ink,
                                         "user_accounts",
                                     );
                                 }
@@ -2111,7 +2149,7 @@ mod tests {
                 palette_check::assert_drawn_from(
                     &p,
                     &cmds,
-                    &[],
+                    &every_ink(&p),
                     "user_accounts (nobody signed in)",
                 );
             }

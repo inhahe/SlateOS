@@ -1530,12 +1530,14 @@ mod tests {
     // 7. Pinning a surface to one mode disarms the membership sweep for that
     //    surface; the per-site tables are then the whole proof.
     //
-    // 8. NEW HERE: *the sweep is blind to the two `readable_on` endpoints, and
-    //    this module draws one of them all over the screen.* `on_wallpaper()`
-    //    is `#EFF1F5` — which is the light endpoint, so the sweep accounts for
-    //    it unconditionally in both modes, and which is also Latte's `base`. A
+    // 8. NEW HERE: *a declared derivation is a claim about a value, not about
+    //    where that value may appear — and this module draws one such value
+    //    all over the screen.* `on_wallpaper()` is `#EFF1F5`, which the sweep
+    //    has to be told about in a dark render, and which is also Latte's
+    //    `base`, so in a light render it is an ordinary role and needs no
+    //    telling. Either way it is an accounted-for colour everywhere, so a
     //    site that took `p.on_wallpaper()` where it owed `p.text`, or the
-    //    reverse, is therefore something only the tables below can see. That
+    //    reverse, is something only the tables below can see. That
     //    matters more here than the arithmetic suggests, because the mistake is
     //    a legibility bug rather than a colour bug: `p.text` on a photograph is
     //    unreadable, and looks perfectly fine in every screenshot taken against
@@ -1826,7 +1828,11 @@ mod tests {
         for (mode, p) in table_palettes() {
             for (what, s) in screens(&p) {
                 let cmds = s.render(&p);
-                assert_drawn_from(&p, &cmds, &[], &format!("login {what} ({mode})"));
+                // The three computed inks: the pale extreme the wallpaper
+                // labels take in both modes (see note 8), and the lettering
+                // on the accent-filled sign-in button.
+                let derived = [p.on_wallpaper(), p.on_wallpaper_dim(), p.on_accent()];
+                assert_drawn_from(&p, &cmds, &derived, &format!("login {what} ({mode})"));
             }
         }
     }

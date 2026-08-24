@@ -12,24 +12,58 @@
 //! - Smooth fade-in/fade-out animation
 //! - Configurable hover delay before popup appears
 //! - Auto-dismiss when mouse leaves the popup and taskbar button
+//!
+//! # Colour
+//!
+//! Every colour here is read from the [`Palette`] the renderers are handed;
+//! the nine `MOCHA_*` constants this module used to own are gone. Three of the
+//! decisions that conversion forced are worth stating, because a later reader
+//! will otherwise assume the obvious answer was taken.
+//!
+//! ## The close button's X was illegible — in the theme the shell ships
+//!
+//! The X was drawn in `TEXT` on a close button that turns `RED` under the
+//! cursor. Light-grey lettering on a pastel red measures **1.60:1 in Mocha**
+//! and 1.47:1 in Latte: not "below the 4.5:1 floor" but very nearly invisible,
+//! and — uniquely among the forty modules converted before this one — broken
+//! in the *dark* theme, which is the one the shell actually starts in. Every
+//! previous instance of this bug was a light-mode failure that Mocha happened
+//! to hide. The idle state was failing too, more quietly: `TEXT` on `SURFACE2`
+//! is 4.62:1 in Mocha but 3.69:1 in Latte.
+//!
+//! The X is now [`readable_on`] of whatever the button is actually filled
+//! with, which fixes all four cases at once: 8.10:1 and 4.80:1 hovered, 5.90:1
+//! and 8.67:1 idle. This is the same fix as in the previous four modules, and
+//! it keeps being the same fix because the underlying mistake keeps being the
+//! same one — a constant named for a *value* (`TEXT`) cannot express the thing
+//! the site needs, which is "the ink that can be read on this fill".
+//!
+//! ## A window's own colour is not the shell's to theme
+//!
+//! [`WindowSnapshot::dominant_color`] is a sample of what a real window is
+//! displaying. It is data, like the pixels of a [`RenderCommand::Image`], and
+//! it does not belong to any palette — so it is `Option<Color>`, and the
+//! renderer supplies `p.surface1` when it is `None`. Before this change the
+//! field was *initialised* to Mocha `SURFACE1`, which conflated two different
+//! things: "this window has not been sampled yet" and "this window happens to
+//! be that exact grey". The first must follow the theme and the second must
+//! not, so they cannot be the same value. Tests that install a sample declare
+//! it to the membership sweep as `derived`, which is the sweep's way of
+//! recording that a colour was claimed by someone rather than leaked.
+//!
+//! ## A focused window is a *selection*, so its border follows the accent
+//!
+//! The focused thumbnail's border was `BLUE`, which in this module means "this
+//! is the one you are on" rather than any kind of status — the same
+//! state-versus-selection split the accessibility and focus-assist pages
+//! settled. It is now `p.accent`, so a user who chooses a green accent sees
+//! the focused window ringed in green. The *hover* ring stays `p.overlay0` and
+//! the resting ring `p.surface2`: those are depth, not choice.
 
+use appearance::{Palette, readable_on};
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
-
-// ============================================================================
-// Catppuccin Mocha theme constants
-// ============================================================================
-
-const MOCHA_BASE: Color = Color::from_hex(0x1E1E2E);
-const MOCHA_SURFACE0: Color = Color::from_hex(0x313244);
-const MOCHA_SURFACE1: Color = Color::from_hex(0x45475A);
-const MOCHA_SURFACE2: Color = Color::from_hex(0x585B70);
-const MOCHA_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const MOCHA_TEXT: Color = Color::from_hex(0xCDD6F4);
-const MOCHA_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const MOCHA_BLUE: Color = Color::from_hex(0x89B4FA);
-const MOCHA_RED: Color = Color::from_hex(0xF38BA8);
 
 // ============================================================================
 // Configuration
@@ -165,8 +199,21 @@ pub struct WindowSnapshot {
     pub window_width: f32,
     /// Actual window height.
     pub window_height: f32,
-    /// Dominant color of the window content (for placeholder rendering).
-    pub dominant_color: Color,
+    /// The window content's own dominant colour, once something has sampled
+    /// it — `None` until then.
+    ///
+    /// A real window's colour is not a palette role and must not become one:
+    /// it is a property of what the application is displaying, in the same way
+    /// the pixels of a [`RenderCommand::Image`] are. So the renderer draws
+    /// this verbatim when it is `Some`, and falls back to `p.surface1` when it
+    /// is `None`.
+    ///
+    /// The `Option` is the point rather than ceremony. This field used to be
+    /// initialised to Mocha `SURFACE1`, which made "nobody has looked at this
+    /// window yet" indistinguishable from "this window really is that grey" —
+    /// and the first of those has to follow the theme while the second must
+    /// not.
+    pub dominant_color: Option<Color>,
     /// Whether this window is currently focused.
     pub is_focused: bool,
     /// Whether this window is minimized.
@@ -174,7 +221,7 @@ pub struct WindowSnapshot {
 }
 
 impl WindowSnapshot {
-    /// Create a new window snapshot.
+    /// Create a new window snapshot, with no content colour sampled yet.
     pub fn new(window_id: u64, app_id: &str, title: &str, width: f32, height: f32) -> Self {
         Self {
             window_id,
@@ -182,7 +229,7 @@ impl WindowSnapshot {
             title: title.to_string(),
             window_width: width,
             window_height: height,
-            dominant_color: MOCHA_SURFACE1,
+            dominant_color: None,
             is_focused: false,
             is_minimized: false,
         }
@@ -569,7 +616,7 @@ impl PeekPopup {
     }
 
     /// Render the peek popup to a list of render commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {
         if !self.is_rendering() {
             return Vec::new();
         }
@@ -593,27 +640,24 @@ impl PeekPopup {
 
         // Background
         let bg_alpha = (230.0 * alpha) as u8;
+        let bg = p.base;
         cmds.push(RenderCommand::FillRect {
             x: self.popup_x,
             y: self.popup_y,
             width: self.popup_width,
             height: self.popup_height,
-            color: Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, bg_alpha),
+            color: Color::rgba(bg.r, bg.g, bg.b, bg_alpha),
             corner_radii: CornerRadii::all(POPUP_RADIUS),
         });
 
         // Border
+        let border = p.surface2;
         cmds.push(RenderCommand::StrokeRect {
             x: self.popup_x,
             y: self.popup_y,
             width: self.popup_width,
             height: self.popup_height,
-            color: Color::rgba(
-                MOCHA_SURFACE2.r,
-                MOCHA_SURFACE2.g,
-                MOCHA_SURFACE2.b,
-                (180.0 * alpha) as u8,
-            ),
+            color: Color::rgba(border.r, border.g, border.b, (180.0 * alpha) as u8),
             line_width: 1.0,
             corner_radii: CornerRadii::all(POPUP_RADIUS),
         });
@@ -621,7 +665,7 @@ impl PeekPopup {
         // Render each thumbnail
         for (i, slot) in self.slots.iter().enumerate() {
             let is_hovered = self.hovered_slot == Some(i);
-            self.render_thumbnail(&mut cmds, slot, i, is_hovered, alpha);
+            self.render_thumbnail(&mut cmds, p, slot, i, is_hovered, alpha);
         }
 
         cmds
@@ -631,6 +675,7 @@ impl PeekPopup {
     fn render_thumbnail(
         &self,
         cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
         slot: &ThumbnailSlot,
         index: usize,
         is_hovered: bool,
@@ -642,17 +687,13 @@ impl PeekPopup {
 
         // Hover highlight background
         if is_hovered {
+            let wash = p.surface0;
             cmds.push(RenderCommand::FillRect {
                 x: abs_x - 4.0,
                 y: abs_y - 4.0,
                 width: slot.width + 8.0,
                 height: slot.height + TITLE_HEIGHT + 8.0,
-                color: Color::rgba(
-                    MOCHA_SURFACE0.r,
-                    MOCHA_SURFACE0.g,
-                    MOCHA_SURFACE0.b,
-                    (200.0 * alpha) as u8,
-                ),
+                color: Color::rgba(wash.r, wash.g, wash.b, (200.0 * alpha) as u8),
                 corner_radii: CornerRadii::all(6.0),
             });
         }
@@ -663,11 +704,13 @@ impl PeekPopup {
             None => return,
         };
 
+        // A minimized window is showing nothing, so whatever was sampled from
+        // it is stale — the placeholder is the honest answer, and a dimmer one
+        // than the un-sampled case so the two states still read apart.
         let content_color = if snap.is_minimized {
-            // Dimmer for minimized windows
-            MOCHA_SURFACE0
+            p.surface0
         } else {
-            snap.dominant_color
+            snap.dominant_color.unwrap_or(p.surface1)
         };
 
         cmds.push(RenderCommand::FillRect {
@@ -679,13 +722,15 @@ impl PeekPopup {
             corner_radii: CornerRadii::all(4.0),
         });
 
-        // Border around thumbnail
+        // Border around thumbnail. Focus is a *selection* — "this is the one
+        // you are on" — so it wears the accent, while hover and rest are
+        // depth and stay on the neutral ramp.
         let border_color = if snap.is_focused {
-            MOCHA_BLUE
+            p.accent
         } else if is_hovered {
-            MOCHA_OVERLAY0
+            p.overlay0
         } else {
-            MOCHA_SURFACE2
+            p.surface2
         };
 
         cmds.push(RenderCommand::StrokeRect {
@@ -705,7 +750,7 @@ impl PeekPopup {
                 y: abs_y + slot.height / 2.0 - 6.0,
                 text: "Minimized".to_string(),
                 font_size: 11.0,
-                color: Color::rgba(MOCHA_SUBTEXT0.r, MOCHA_SUBTEXT0.g, MOCHA_SUBTEXT0.b, a),
+                color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, a),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(slot.width - 8.0),
                 overflow: TextOverflow::Ellipsis,
@@ -723,7 +768,7 @@ impl PeekPopup {
             y: title_y,
             text: snap.title.clone(),
             font_size: 11.0,
-            color: Color::rgba(MOCHA_TEXT.r, MOCHA_TEXT.g, MOCHA_TEXT.b, a),
+            color: Color::rgba(p.text.r, p.text.g, p.text.b, a),
             font_weight: FontWeightHint::Regular,
             max_width: Some(slot.width - 4.0),
             overflow: TextOverflow::Ellipsis,
@@ -736,9 +781,9 @@ impl PeekPopup {
 
             // Close button background
             let close_bg = if self.close_hovered {
-                MOCHA_RED
+                p.red
             } else {
-                MOCHA_SURFACE2
+                p.surface2
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -750,9 +795,13 @@ impl PeekPopup {
                 corner_radii: CornerRadii::all(3.0),
             });
 
-            // X symbol via two crossed lines
+            // X symbol via two crossed lines, inked for the fill underneath
+            // it. `TEXT` here measured 1.60:1 hovered in Mocha — the one
+            // contrast failure in this series that the dark theme did not
+            // hide. See the module docs.
             let margin = 4.0;
-            let line_color = Color::rgba(MOCHA_TEXT.r, MOCHA_TEXT.g, MOCHA_TEXT.b, a);
+            let ink = readable_on(close_bg);
+            let line_color = Color::rgba(ink.r, ink.g, ink.b, a);
             cmds.push(RenderCommand::Line {
                 x1: bx + margin,
                 y1: by + margin,
@@ -876,8 +925,8 @@ impl PeekManager {
     }
 
     /// Render the popup. Returns an empty vec if hidden.
-    pub fn render(&self) -> Vec<RenderCommand> {
-        self.popup.render()
+    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {
+        self.popup.render(p)
     }
 
     /// Check if a point is inside the popup.
@@ -908,6 +957,8 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
+    use appearance::AccentColor;
 
     fn make_snapshot(id: u64, title: &str, w: f32, h: f32) -> WindowSnapshot {
         WindowSnapshot::new(id, "test-app", title, w, h)
@@ -929,6 +980,90 @@ mod tests {
             fade_duration_ms: 50,
             ..PeekConfig::default()
         }
+    }
+
+    /// A window content colour that belongs to no palette — what a real
+    /// sample of a real window would look like.
+    const SAMPLED: Color = Color::from_hex(0x00C0_FFEE);
+
+    /// A palette wearing an accent that is in no palette, so "this site
+    /// followed the accent" and "this site read a role" cannot be confused.
+    ///
+    /// The guards below are the fixture doing instrument duty: if the accent
+    /// were equal to a role, every accent assertion would pass for the wrong
+    /// reason, and if `SAMPLED` were equal to a role the membership sweep
+    /// would accept a leaked constant as a window's own colour.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0x00FF_00FF);
+        assert!(
+            !p.roles()
+                .iter()
+                .any(|(n, r)| *n != "accent" && *r == p.accent),
+            "the fixture accent is a role of the {} palette, so it cannot \
+             distinguish following the accent from reading that role",
+            if light { "light" } else { "dark" }
+        );
+        assert!(
+            !p.roles().iter().any(|(_, r)| *r == SAMPLED),
+            "the fixture's sampled window colour is a role of the {} palette, \
+             so the membership sweep could not tell a leaked constant from a \
+             window's own pixels",
+            if light { "light" } else { "dark" }
+        );
+        p
+    }
+
+    /// A palette wearing a *real* accent, which resolves to a different value
+    /// per mode.
+    ///
+    /// [`accented`] installs one fixed magenta in both modes on purpose — that
+    /// is what makes it a good instrument for "did this site follow the
+    /// accent". It is therefore useless for "did this site move when the mode
+    /// did", because the accent legitimately would not move. A real
+    /// [`AccentColor`] has a dark and a light form, so it moves the way every
+    /// other role does.
+    fn wearing(light: bool, accent: AccentColor) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = if light {
+            accent.color_light()
+        } else {
+            accent.color()
+        };
+        p
+    }
+
+    /// Every colour `cmds` puts on the screen, at full alpha.
+    ///
+    /// Alpha is stripped because it is animation and depth here — the fade
+    /// scales every colour, and the popup's own chrome is drawn at 230/180/200
+    /// — none of which is a claim about the palette. Comparing it would make
+    /// every pin an assertion about the fade curve as well.
+    fn colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. }
+                | RenderCommand::Line { color, .. }
+                | RenderCommand::BoxShadow { color, .. } => {
+                    Some(Color::rgba(color.r, color.g, color.b, 255))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A visible popup over `snaps`, with slot 0 hovered when `hover`.
+    fn peek_over(snaps: Vec<WindowSnapshot>, hover: bool) -> PeekPopup {
+        let mut popup = PeekPopup::new(make_config());
+        popup.begin_hover("test-app", 200.0, 200.0, snaps, 1000);
+        popup.tick(1101);
+        popup.tick(1200);
+        if hover {
+            popup.hovered_slot = Some(0);
+        }
+        popup
     }
 
     // ---- Config tests ----
@@ -1033,7 +1168,7 @@ mod tests {
         let long = "This is a very long window title — Café über 日本語 — that cannot fit";
         let peek = peek_showing(long);
         let titles: Vec<_> = peek
-            .render()
+            .render(&accented(false))
             .into_iter()
             .filter_map(|cmd| match cmd {
                 RenderCommand::Text {
@@ -1062,7 +1197,7 @@ mod tests {
     #[test]
     fn a_narrow_thumbnail_with_a_non_latin_title_renders() {
         let peek = peek_showing("日本語のウィンドウ");
-        assert!(!peek.render().is_empty());
+        assert!(!peek.render(&accented(false)).is_empty());
     }
 
     // ---- Layout tests ----
@@ -1368,7 +1503,7 @@ mod tests {
     #[test]
     fn test_popup_render_hidden_empty() {
         let popup = PeekPopup::new(make_config());
-        let cmds = popup.render();
+        let cmds = popup.render(&accented(false));
         assert!(cmds.is_empty());
     }
 
@@ -1380,7 +1515,7 @@ mod tests {
         popup.tick(1101);
         popup.tick(1200);
 
-        let cmds = popup.render();
+        let cmds = popup.render(&accented(false));
         // Should have: shadow, background, border + per-thumbnail commands
         assert!(cmds.len() >= 5);
     }
@@ -1397,7 +1532,7 @@ mod tests {
         let y = popup.popup_y + popup.slots[0].y + 10.0;
         popup.on_mouse_move(x, y);
 
-        let cmds = popup.render();
+        let cmds = popup.render(&accented(false));
         // Should have extra commands for hover highlight and close button
         assert!(cmds.len() >= 8);
     }
@@ -1411,7 +1546,7 @@ mod tests {
         popup.tick(1101);
         popup.tick(1200);
 
-        let cmds = popup.render();
+        let cmds = popup.render(&accented(false));
         // Should contain a "Minimized" text command
         let has_minimized = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
@@ -1552,7 +1687,7 @@ mod tests {
     #[test]
     fn test_manager_render_empty_when_hidden() {
         let mgr = PeekManager::new(make_config());
-        let cmds = mgr.render();
+        let cmds = mgr.render(&accented(false));
         assert!(cmds.is_empty());
     }
 
@@ -1636,6 +1771,375 @@ mod tests {
         for slot in &slots {
             assert!(slot.width > 0.0);
             assert!(slot.height > 0.0);
+        }
+    }
+
+    // ---- Colour: the conversion off this module's own palette ----
+
+    /// The four window states this module can draw, as one popup.
+    ///
+    /// Focused, hovered, minimized and sampled are separate branches in
+    /// `render_thumbnail`, and a fixture that omits one leaves that branch
+    /// unchecked by every test below — the empty-state lesson from the focus
+    /// assist page, applied up front rather than after a sweep found it.
+    fn four_states() -> Vec<WindowSnapshot> {
+        let mut plain = make_snapshot(1, "Plain", 800.0, 600.0);
+        let mut focused = make_snapshot(2, "Focused", 800.0, 600.0);
+        focused.is_focused = true;
+        let mut minimized = make_snapshot(3, "Minimized", 800.0, 600.0);
+        minimized.is_minimized = true;
+        let mut sampled = make_snapshot(4, "Sampled", 800.0, 600.0);
+        sampled.dominant_color = Some(SAMPLED);
+        plain.dominant_color = None;
+        vec![plain, focused, minimized, sampled]
+    }
+
+    /// Nothing either renderer draws is outside the palette it was handed.
+    ///
+    /// Rendered in *both* modes, because a leftover Mocha constant is a legal
+    /// colour in the dark render and only names itself in the light one. The
+    /// window's own sampled colour is declared `derived`: it is the one value
+    /// here that is deliberately not a role, and naming it at the call site is
+    /// how the sweep records that somebody claimed it.
+    #[test]
+    fn every_colour_the_module_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+            for hover in [false, true] {
+                for close in [false, true] {
+                    let mut popup = peek_over(four_states(), hover);
+                    popup.close_hovered = close;
+                    assert_drawn_from(&p, &popup.render(&p), &[SAMPLED], "window peek");
+                }
+            }
+        }
+    }
+
+    /// None of the nine deleted constants is still drawn.
+    ///
+    /// The membership sweep above cannot catch these on its own: in the *dark*
+    /// render every one of them is a legitimate role, so only the light render
+    /// can say a Mocha value survived.
+    #[test]
+    fn none_of_the_nine_deleted_constants_is_still_drawn() {
+        let deleted = [
+            ("BASE", 0x001E_1E2E),
+            ("SURFACE0", 0x0031_3244),
+            ("SURFACE1", 0x0045_475A),
+            ("SURFACE2", 0x0058_5B70),
+            ("OVERLAY0", 0x006C_7086),
+            ("TEXT", 0x00CD_D6F4),
+            ("SUBTEXT0", 0x00A6_ADC8),
+            ("BLUE", 0x0089_B4FA),
+            ("RED", 0x00F3_8BA8),
+        ];
+        let p = accented(true);
+        for hover in [false, true] {
+            for close in [false, true] {
+                let mut popup = peek_over(four_states(), hover);
+                popup.close_hovered = close;
+                let drawn = colors(&popup.render(&p));
+                for (name, hex) in deleted {
+                    assert!(
+                        !drawn.contains(&Color::from_hex(hex)),
+                        "the light render still draws Mocha {name} \
+                         (#{hex:06X}), so that constant survived the \
+                         conversion (hover = {hover}, close = {close})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every colour of the popup, in order, is the role that site claims.
+    ///
+    /// The expectation is written out by hand rather than derived from
+    /// anything the renderer walks, which is what lets it see a site moving as
+    /// well as a site changing colour.
+    #[test]
+    fn every_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+            for close in [false, true] {
+                let mut popup = peek_over(four_states(), true);
+                popup.close_hovered = close;
+                let black = Color::rgba(0, 0, 0, 255);
+                // Chrome: shadow, background, border.
+                let mut want = vec![black, p.base, p.surface2];
+                // Slot 0: hovered, unsampled, unfocused — highlight, then the
+                // placeholder fill, the hover ring and the title. Hovering is
+                // also what makes the close button appear, so its fill and the
+                // two strokes of its X land here too — the pin catching that
+                // omission is the reason it is written out by hand.
+                //
+                // Both states of that button are rendered because only the
+                // *ink* is asserted elsewhere, and the ink is a step function:
+                // `peach` and `red` take the same side of the step in both
+                // modes, so a hovered button quietly repainted `peach` was a
+                // site with no test at all until this loop existed.
+                let close_bg = if close { p.red } else { p.surface2 };
+                let x_ink = readable_on(close_bg);
+                want.extend([
+                    p.surface0, p.surface1, p.overlay0, p.text, close_bg, x_ink, x_ink,
+                ]);
+                // Slot 1: focused, unsampled.
+                want.extend([p.surface1, p.accent, p.text]);
+                // Slot 2: minimized — placeholder fill, resting ring, the
+                // "Minimized" legend, then the title.
+                want.extend([p.surface0, p.surface2, p.subtext0, p.text]);
+                // Slot 3: a real sample, which is not a role at all.
+                want.extend([SAMPLED, p.surface2, p.text]);
+                assert_eq!(
+                    colors(&popup.render(&p)),
+                    want,
+                    "the peek popup's colours are not the roles it claims, in \
+                     order (light = {light}, close hovered = {close})"
+                );
+            }
+        }
+    }
+
+    /// The close button's X is legible on the button it is drawn on.
+    ///
+    /// This is the module's real bug fix, and the one contrast failure in this
+    /// series that the dark theme did not hide: `TEXT` on the hovered red
+    /// measured **1.60:1 in Mocha** and 1.47:1 in Latte. `readable_on` is a
+    /// *step* function of the fill's brightness, so a test that sampled one
+    /// state in one theme would still pass against a hard-coded ink — the
+    /// assertion at the end is what makes this a claim about the function
+    /// rather than about a sample.
+    #[test]
+    fn the_close_button_x_is_legible_on_the_button_it_marks() {
+        let mut saw_dark_ink = false;
+        let mut saw_light_ink = false;
+        for light in [false, true] {
+            let p = accented(light);
+            for close in [false, true] {
+                let mut popup = peek_over(four_states(), true);
+                popup.close_hovered = close;
+                let cmds = popup.render(&p);
+                let fill = if close { p.red } else { p.surface2 };
+                let ink: Vec<Color> = cmds
+                    .iter()
+                    .filter_map(|c| match c {
+                        RenderCommand::Line { color, .. } => {
+                            Some(Color::rgba(color.r, color.g, color.b, 255))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(ink.len(), 2, "the X is two crossed lines");
+                for got in ink {
+                    assert_eq!(
+                        got,
+                        readable_on(fill),
+                        "the close X is not inked for its own button \
+                         (light = {light}, hovered = {close})"
+                    );
+                    if got == Color::from_hex(0x0011_111B) {
+                        saw_dark_ink = true;
+                    } else {
+                        saw_light_ink = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_dark_ink && saw_light_ink,
+            "every case landed on the same side of readable_on's step, so \
+             this test would pass against a hard-coded ink and proves nothing"
+        );
+    }
+
+    /// The focused window's ring is the accent, and it is the only one.
+    ///
+    /// Focus here marks *which window you are on*, not a status, so it follows
+    /// the user's accent the way a selected row does. Hover and rest are depth
+    /// and must stay on the neutral ramp — if they drifted onto the accent the
+    /// popup would claim three windows were focused.
+    #[test]
+    fn only_the_focused_thumbnail_wears_the_accent() {
+        for light in [false, true] {
+            let p = accented(light);
+            let popup = peek_over(four_states(), true);
+            let rings: Vec<Color> = popup
+                .render(&p)
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect { color, .. } => {
+                        Some(Color::rgba(color.r, color.g, color.b, 255))
+                    }
+                    _ => None,
+                })
+                .collect();
+            // The popup's own border, then one ring per thumbnail.
+            assert_eq!(
+                rings,
+                vec![p.surface2, p.overlay0, p.accent, p.surface2, p.surface2],
+                "the thumbnail rings are wrong (light = {light})"
+            );
+        }
+    }
+
+    /// Hovering the focused window does not take its focus ring away.
+    ///
+    /// [`four_states`] gives the hovered slot and the focused slot to two
+    /// different windows, so nothing above it exercises the precedence between
+    /// the two branches — swap them and every test on this page still passes.
+    /// The pointer sits on the focused window constantly in real use, and it
+    /// is exactly then that "which window am I on" matters most.
+    #[test]
+    fn a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it() {
+        for light in [false, true] {
+            let p = accented(light);
+            let mut snap = make_snapshot(1, "Both", 800.0, 600.0);
+            snap.is_focused = true;
+            let rings: Vec<Color> = peek_over(vec![snap], true)
+                .render(&p)
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect { color, .. } => {
+                        Some(Color::rgba(color.r, color.g, color.b, 255))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                rings,
+                vec![p.surface2, p.accent],
+                "hovering the focused window replaced its focus ring with the \
+                 hover ring, so the popup no longer says which window you are \
+                 on (light = {light})"
+            );
+        }
+    }
+
+    /// The manager draws with the palette it was handed, not one of its own.
+    ///
+    /// Every other colour test here calls [`PeekPopup::render`] directly — but
+    /// the desktop calls [`PeekManager::render`], and that one-line delegate is
+    /// the only place a palette could be swapped for a hard-coded one without a
+    /// single test on this page noticing.
+    #[test]
+    fn the_manager_renders_with_the_palette_it_was_given() {
+        let mut mgr = PeekManager::new(make_config());
+        mgr.popup
+            .begin_hover("test-app", 200.0, 200.0, four_states(), 1000);
+        mgr.popup.tick(1101);
+        mgr.popup.tick(1200);
+        mgr.popup.hovered_slot = Some(0);
+        let light = accented(true);
+        assert_drawn_from(&light, &mgr.render(&light), &[SAMPLED], "peek manager");
+        assert_ne!(
+            colors(&mgr.render(&accented(false))),
+            colors(&mgr.render(&light)),
+            "the manager drew the same popup in both modes, so it is not \
+             rendering with the palette it was given"
+        );
+    }
+
+    /// An unsampled window gets the palette's placeholder; a sampled one gets
+    /// its own colour, untouched by the theme.
+    ///
+    /// These are the two halves of why `dominant_color` is an `Option`. Before
+    /// it was one, "not sampled" *was* Mocha `SURFACE1` — so in Latte the
+    /// placeholder stayed dark, and a window that genuinely was that grey
+    /// could not be told from one nobody had looked at.
+    #[test]
+    fn an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not() {
+        let mut placeholders = Vec::new();
+        for light in [false, true] {
+            let p = accented(light);
+            let popup = peek_over(four_states(), false);
+            let fills = colors(&popup.render(&p));
+            // Slot 0 is unsampled, slot 3 carries a real sample. Chrome is
+            // three commands; each unhovered slot draws fill, ring, title,
+            // and the minimized one an extra legend — and with nothing
+            // hovered there is no close button anywhere.
+            assert_eq!(
+                fills[3], p.surface1,
+                "the unsampled window (light = {light})"
+            );
+            assert_eq!(
+                fills[13], SAMPLED,
+                "the sampled window's own colour was themed away \
+                 (light = {light})"
+            );
+            placeholders.push(fills[3]);
+        }
+        assert_ne!(
+            placeholders[0], placeholders[1],
+            "the placeholder is the same in both modes, so it is not being \
+             read from the palette"
+        );
+    }
+
+    /// A minimized window shows the placeholder, not a stale sample.
+    ///
+    /// What was sampled from a window before it was minimized is no longer
+    /// what that window is showing, so drawing it would be a confident lie.
+    #[test]
+    fn a_minimized_window_ignores_whatever_was_sampled_from_it() {
+        let p = accented(false);
+        let mut snap = make_snapshot(1, "Gone", 800.0, 600.0);
+        snap.dominant_color = Some(SAMPLED);
+        snap.is_minimized = true;
+        let drawn = colors(&peek_over(vec![snap], false).render(&p));
+        assert!(
+            !drawn.contains(&SAMPLED),
+            "a minimized window drew the colour it had before it was minimized"
+        );
+        assert_eq!(drawn[3], p.surface0, "the minimized placeholder");
+    }
+
+    /// Changing the mode changes what is drawn — at every site, not most.
+    ///
+    /// The one site that legitimately does not move is the shadow, which is an
+    /// absence of light rather than a colour, and the sampled window, which is
+    /// not the shell's to theme. Both are excluded by name rather than by a
+    /// tolerance, so a site that stopped following the palette cannot hide
+    /// among them.
+    ///
+    /// This is the one test that must not use [`accented`]: that fixture pins
+    /// the same magenta in both modes, so the focused ring would fail here for
+    /// a reason that is not a defect. A real [`AccentColor`] moves.
+    ///
+    /// The close button is rendered in both of its states for the same reason
+    /// the ordered pin loops over them: the hovered fill and the ink chosen for
+    /// it are two distinct sites, and a fixture that leaves `close_hovered`
+    /// alone renders neither. A site nothing renders is a site nothing checks,
+    /// so the loop is what makes this test's claim — *every* site — true.
+    #[test]
+    fn every_site_changes_when_the_mode_does() {
+        for close in [false, true] {
+            let mut popup = peek_over(four_states(), true);
+            popup.close_hovered = close;
+            assert_modes_differ(&popup, close);
+        }
+    }
+
+    /// The body of [`every_site_changes_when_the_mode_does`], for one state of
+    /// the close button.
+    fn assert_modes_differ(popup: &PeekPopup, close: bool) {
+        let dark = wearing(false, AccentColor::Mauve);
+        let light = wearing(true, AccentColor::Mauve);
+        let a = colors(&popup.render(&dark));
+        let b = colors(&popup.render(&light));
+        assert_eq!(a.len(), b.len(), "the two modes drew different popups");
+        let black = Color::rgba(0, 0, 0, 255);
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            if *x == black || *x == SAMPLED {
+                assert_eq!(
+                    x, y,
+                    "colour {i} is the shadow or the sample and must not move \
+                     (close hovered = {close})"
+                );
+                continue;
+            }
+            assert_ne!(
+                x, y,
+                "colour {i} is the same in both modes (close hovered = {close})"
+            );
         }
     }
 }

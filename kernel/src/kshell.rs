@@ -322,6 +322,43 @@ fn assert_output_starts_with(what: &str, out: &[u8], expected: &[u8]) {
     panic!("`{}` output did not start with the expected prefix", what);
 }
 
+/// Assert a captured command's output does **not** contain `forbidden`.
+///
+/// The negative counterpart to [`assert_output_starts_with`], and it exists for
+/// a shape the positive form structurally cannot catch: a bug that consists of
+/// the command saying one sentence too many. `grep` printing
+/// "grep: no matches for 'p'" after failing to *open* the file is a claim about
+/// that file's contents which was never established — and because the sentence
+/// is exactly the one a genuinely empty search prints, every prefix assertion
+/// about the real diagnostic still passes with it there.
+///
+/// Panics on a hit, after printing both sides, so the failing boot carries its
+/// own explanation.
+fn assert_output_lacks(what: &str, out: &[u8], forbidden: &[u8]) {
+    use crate::serial_println;
+
+    // An empty needle is in every haystack, so a caller that passes one is
+    // asking a question with only one possible answer. Refuse it rather than
+    // fail confusingly.
+    assert!(
+        !forbidden.is_empty(),
+        "`{}`: assert_output_lacks needs a non-empty needle",
+        what
+    );
+
+    let present =
+        forbidden.len() <= out.len() && out.windows(forbidden.len()).any(|w| w == forbidden);
+    if !present {
+        return;
+    }
+    serial_println!("  !! `{}`: output contained text it must not", what);
+    serial_println!("     forbidden:");
+    dump_lines(forbidden);
+    serial_println!("     actual output ({} bytes):", out.len());
+    dump_lines(out);
+    panic!("`{}` output contained text it must not", what);
+}
+
 // ---------------------------------------------------------------------------
 // Working directory
 // ---------------------------------------------------------------------------
@@ -10795,6 +10832,101 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         let _ = Vfs::remove(path);
         let _ = Vfs::remove(text);
+    }
+
+    serial_println!("  kshell::self_test 25: 'found nothing' and 'could not look' differ");
+    // Every rung above this one asks whether a command distinguishes success
+    // from failure. `grep` needs a rung of its own because it has *three*
+    // answers, and the two failing ones are not interchangeable: 1 means the
+    // search completed and the pattern is absent, 2 means the search never
+    // happened. Collapsing 2 into 1 makes
+    //
+    //     grep pat missing-file || echo "not present"
+    //
+    // report a missing *file* as missing *text* -- an answer about the wrong
+    // subject, delivered in a form the caller cannot tell from a real one.
+    {
+        use crate::fs::vfs::Vfs;
+
+        let path = Path::new("/tmp/kshell_grep_status_selftest.txt");
+        Vfs::write_file(path, b"alpha\nbeta\n")?;
+
+        // 0: matched.
+        let out = capture_command("grep alpha /tmp/kshell_grep_status_selftest.txt");
+        assert_output_starts_with("the match is printed", &out, b"alpha");
+        assert_eq!(last_exit(), 0, "a match is success");
+
+        // 1: searched the whole file, the pattern is not in it. This is the
+        // answer that must stay reserved -- `&&`/`||` chains depend on it.
+        let out = capture_command("grep zzz_absent /tmp/kshell_grep_status_selftest.txt");
+        assert_output_starts_with("and says so", &out, b"grep: no matches for");
+        assert_eq!(last_exit(), 1, "searched and found nothing");
+
+        // 2: never got to look. The file does not exist, so nothing whatsoever
+        // has been established about where the pattern is or is not.
+        let out = capture_command("grep alpha /zzz_no_such_dir/zzz_no_such_file");
+        assert_output_starts_with("the failure names the path", &out, b"grep: ");
+        assert_eq!(last_exit(), 2, "could not search is not 'found nothing'");
+        // And it must not have claimed a clean search on the way past: that
+        // sentence asserts something about the file's *contents*, which is
+        // exactly what was never read.
+        assert_output_lacks(
+            "a search that never happened reports no empty result",
+            &out,
+            b"no matches for",
+        );
+
+        // A mistyped directory under -r, which used to be the quietest of the
+        // lot: `stat` failed, the walk returned without a word, and the run
+        // ended indistinguishable from a clean search of an empty tree.
+        let out = capture_command("grep -r alpha /zzz_no_such_dir");
+        assert_output_starts_with("the walk names what it could not stat", &out, b"grep: ");
+        assert_eq!(last_exit(), 2, "an unwalkable tree is not an empty one");
+
+        // A usage error is 2 as well, for the same reason: returning 1 would
+        // answer a question about the file that grep never opened.
+        let out = capture_command("grep -Z alpha /tmp/kshell_grep_status_selftest.txt");
+        assert_output_starts_with("the bad flag is named", &out, b"grep: unknown flag");
+        assert_eq!(last_exit(), 2, "a usage error is not an absent pattern");
+
+        // The piped half must agree with the file half on all three, or
+        // `grep p f` and `cat f | grep p` answer `&&` differently.
+        let out = capture_command("cat /tmp/kshell_grep_status_selftest.txt | grep beta");
+        assert_output_starts_with("the piped match is printed", &out, b"beta");
+        assert_eq!(last_exit(), 0, "piped: a match is success");
+
+        let out = capture_command("cat /tmp/kshell_grep_status_selftest.txt | grep zzz_absent");
+        assert_output_starts_with("piped: says so", &out, b"grep: no matches for");
+        assert_eq!(last_exit(), 1, "piped: searched and found nothing");
+
+        // The divergence this half was fixed for: the piped form dropped an
+        // unknown flag on the floor and searched anyway, so a typo silently
+        // changed what was searched for and still reported success.
+        let out = capture_command("cat /tmp/kshell_grep_status_selftest.txt | grep -Z beta");
+        assert_output_starts_with("piped: the bad flag is named", &out, b"grep: unknown flag");
+        assert_eq!(last_exit(), 2, "piped: a usage error is not a search");
+
+        // `-l` was in the same class as `-Z` until now: dropped on the floor, so
+        // `grep -l p f` named the file while `cat f | grep -l p` printed the
+        // matching *lines*. Two different answers to one question.
+        let out = capture_command("cat /tmp/kshell_grep_status_selftest.txt | grep -l beta");
+        assert_output_starts_with("piped -l names the input", &out, b"(standard input)");
+        assert_eq!(last_exit(), 0, "piped -l: a match is success");
+
+        // `-r` has no tree to walk on the right of a pipe, and says so rather
+        // than being mistaken for a typo.
+        let out = capture_command("cat /tmp/kshell_grep_status_selftest.txt | grep -r beta");
+        assert_output_starts_with("piped -r explains itself", &out, b"grep: -r: no directory");
+        assert_eq!(last_exit(), 2, "piped -r: nothing was searched");
+
+        // ...but a directory operand still reaches the file form, flags and all.
+        // This is why the delegation is decided before flags are rejected: the
+        // other order refuses this line as "-r on a pipe" and never looks.
+        let out = capture_command("echo ignored | grep -r alpha /zzz_no_such_dir");
+        assert_output_starts_with("the operand won over the pipe", &out, b"grep: ");
+        assert_eq!(last_exit(), 2, "and the file form's verdict came back");
+
+        let _ = Vfs::remove(path);
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -104719,15 +104851,34 @@ fn cmd_uniq_input(args: &str, input: &[u8]) {
     }
 }
 
-/// Grep piped input for a pattern.  `args` is the search pattern (no file
-/// argument).  If `args` contains a space it is interpreted as
-/// `<pattern> <file>` and delegates to `cmd_grep`.
+/// Grep piped input for a pattern.  `args` carries the flags and the pattern;
+/// the text to search is `input`.
+///
+/// If `args` names a second positional word it looks like `<pattern> <file>`,
+/// and the whole thing is handed to [`cmd_grep`] — matching GNU, where an
+/// explicit file operand wins and the pipe is left unread.
 ///
 /// Exits with the same three-valued status as the file form: 0 matched, 1
 /// searched and found nothing, 2 could not search at all (a usage error). There
 /// is no unreadable-target case here — the input arrived already read — so 2
 /// only ever comes from a bad argument.
 fn cmd_grep_input(args: &str, input: &str) {
+    // Decide *before* parsing flags whether this is really the file form.
+    //
+    // Flag rejection below is strict, and the two halves do not accept the same
+    // set: `-r` means nothing without a directory to walk. Rejecting first would
+    // therefore break `cat x | grep -r pat /dir`, which is a perfectly good file
+    // search that merely has a pipe attached — so the delegation has to be the
+    // first question asked, not the last.
+    let positional_count = args
+        .split_whitespace()
+        .filter(|w| !(w.starts_with('-') && w.len() > 1 && !w.starts_with("--")))
+        .count();
+    if positional_count >= 2 {
+        cmd_grep(args);
+        return;
+    }
+
     // Parse flags and find the pattern.
     let mut flags = GrepFlags::new();
     let mut positional: alloc::vec::Vec<&str> = Vec::new();
@@ -104742,6 +104893,22 @@ fn cmd_grep_input(args: &str, input: &str) {
                     'c' => flags.count_only = true,
                     'n' => flags.show_line_numbers = true,
                     'w' => flags.whole_word = true,
+                    // `-l` used to be silently dropped here while the file half
+                    // honoured it, so `grep -l p f` named the file and
+                    // `cat f | grep -l p` printed the matching lines instead.
+                    // On a pipe the "file" is stdin, which GNU spells
+                    // `(standard input)`.
+                    'l' => flags.files_only = true,
+                    'r' | 'R' => {
+                        // Named, rather than lumped in with a typo, because it
+                        // is a real flag being refused for a real reason: there
+                        // is no tree to walk on the right of a pipe. (With a
+                        // directory operand this never runs — the delegation
+                        // above already sent it to the file form.)
+                        shell_println!("grep: -{}: no directory to search on piped input", ch);
+                        set_exit(2);
+                        return;
+                    }
                     _ => {
                         // The file form rejects an unknown flag; this one used
                         // to drop it on the floor. So `grep -Z pat f` failed
@@ -104758,12 +104925,6 @@ fn cmd_grep_input(args: &str, input: &str) {
         } else {
             positional.push(word);
         }
-    }
-
-    // If there are 2+ positional args, it looks like "pattern file" — delegate.
-    if positional.len() >= 2 {
-        cmd_grep(args);
-        return;
     }
 
     let pattern = match positional.first() {
@@ -104797,6 +104958,14 @@ fn cmd_grep_input(args: &str, input: &str) {
         if show {
             match_count = match_count.saturating_add(1);
 
+            if flags.files_only {
+                // `-l` asks *which* inputs contain the pattern, not where. One
+                // line, once, then stop reading: the rest of the pipe cannot
+                // change the answer.
+                shell_println!("(standard input)");
+                break;
+            }
+
             if !flags.count_only {
                 if flags.show_line_numbers {
                     // `{}:{}`, not `{}: {}`. The file-reading half (`grep_file`)
@@ -104821,7 +104990,11 @@ fn cmd_grep_input(args: &str, input: &str) {
 
     if flags.count_only {
         shell_println!("{}", match_count);
-    } else if match_count == 0 {
+    } else if match_count == 0 && !flags.files_only {
+        // `-l` prints names, so its empty result is an empty list. Adding a
+        // sentence to it would put a non-name on a stream the caller is reading
+        // as names -- the same shape as the file half, which has always
+        // suppressed this line under `-l`.
         shell_println!("grep: no matches for '{}'", pattern);
     }
     // "Found nothing" is grep's documented exit 1, and it is the status the

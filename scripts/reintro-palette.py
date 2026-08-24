@@ -110,6 +110,7 @@ SNAP = "gui/desktop/src/snap.rs"
 DISP = "gui/desktop/src/display_settings.rs"
 A11Y = "gui/desktop/src/accessibility_settings.rs"
 FOCUS = "gui/desktop/src/focus_assist.rs"
+PEEK = "gui/desktop/src/window_peek.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -17673,9 +17674,736 @@ DEFECTS = [
             'the_suppressed_line_is_overlay_and_only_drawn_when_there_is_one',
         ],
     ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the popup background is still Mocha BASE',
+        PEEK,
+        [
+            ('        let bg = p.base;',
+             '        let bg = Color::from_hex(0x1E1E2E);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the popup border is still Mocha SURFACE2',
+        PEEK,
+        [
+            ('        let border = p.surface2;',
+             '        let border = Color::from_hex(0x585B70);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+            'only_the_focused_thumbnail_wears_the_accent',
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the hover wash is still Mocha SURFACE0',
+        PEEK,
+        [
+            ('            let wash = p.surface0;',
+             '            let wash = Color::from_hex(0x313244);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the minimized placeholder is still Mocha SURFACE0',
+        PEEK,
+        [
+            ('        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };',
+             '        let content_color = if snap.is_minimized {\n            Color::from_hex(0x313244)\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the unsampled placeholder is still Mocha SURFACE1',
+        PEEK,
+        [
+            ('        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };',
+             '        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(Color::from_hex(0x45475A))\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+            'an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the focus ring is still the Mocha BLUE it was hard-coded to',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            Color::from_hex(0x89B4FA)\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+            'only_the_focused_thumbnail_wears_the_accent',
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the hover ring is still Mocha OVERLAY0',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            Color::from_hex(0x6C7086)\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+            'only_the_focused_thumbnail_wears_the_accent',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the resting ring is still Mocha SURFACE2',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            Color::from_hex(0x585B70)\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+            'only_the_focused_thumbnail_wears_the_accent',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the Minimized legend is still Mocha SUBTEXT0',
+        PEEK,
+        [
+            ('                color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, a),',
+             '                color: Color::rgba(0xA6, 0xAD, 0xC8, a),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the window title is still Mocha TEXT',
+        PEEK,
+        [
+            ('            color: Color::rgba(p.text.r, p.text.g, p.text.b, a),',
+             '            color: Color::rgba(0xCD, 0xD6, 0xF4, a),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the hovered close button is still Mocha RED',
+        PEEK,
+        [
+            ('            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                p.surface2\n            };',
+             '            let close_bg = if self.close_hovered {\n                Color::from_hex(0xF38BA8)\n            } else {\n                p.surface2\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the resting close button is still Mocha SURFACE2',
+        PEEK,
+        [
+            ('            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                p.surface2\n            };',
+             '            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                Color::from_hex(0x585B70)\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the close X is still inked with Mocha TEXT, which is the original bug',
+        PEEK,
+        [
+            ('            let ink = readable_on(close_bg);',
+             '            let ink = Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the popup background reads mantle instead of base',
+        PEEK,
+        [
+            ('        let bg = p.base;',
+             '        let bg = p.mantle;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the popup border reads overlay0 instead of surface2',
+        PEEK,
+        [
+            ('        let border = p.surface2;',
+             '        let border = p.overlay0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the hover wash reads surface1, the same value the thumbnail fill uses',
+        PEEK,
+        [
+            ('            let wash = p.surface0;',
+             '            let wash = p.surface1;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a minimized window gets the unsampled placeholder, so the two read alike',
+        PEEK,
+        [
+            ('        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };',
+             '        let content_color = if snap.is_minimized {\n            p.surface1\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_minimized_window_ignores_whatever_was_sampled_from_it',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: an unsampled window gets the minimized placeholder, so the two read alike',
+        PEEK,
+        [
+            ('        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };',
+             '        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface0)\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the focus ring reads blue, so the accent was never actually wired up',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.blue\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the hover ring reads surface2, so hovering a thumbnail shows nothing',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.surface2\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the resting ring reads overlay0, so every thumbnail looks hovered',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.overlay0\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the Minimized legend reads text, so the aside is as loud as the title',
+        PEEK,
+        [
+            ('                color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, a),',
+             '                color: Color::rgba(p.text.r, p.text.g, p.text.b, a),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the window title reads subtext0, so the title is quieter than the aside',
+        PEEK,
+        [
+            ('            color: Color::rgba(p.text.r, p.text.g, p.text.b, a),',
+             '            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, a),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the hovered close button reads peach, which is a warning and not a danger',
+        PEEK,
+        [
+            ('            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                p.surface2\n            };',
+             '            let close_bg = if self.close_hovered {\n                p.peach\n            } else {\n                p.surface2\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the resting close button reads surface1 instead of surface2',
+        PEEK,
+        [
+            ('            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                p.surface2\n            };',
+             '            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                p.surface1\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the close X reads text instead of being inked for its own button',
+        PEEK,
+        [
+            ('            let ink = readable_on(close_bg);',
+             '            let ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a minimized window still draws the colour that was sampled before it went',
+        PEEK,
+        [
+            ('        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };',
+             '        let content_color = snap.dominant_color.unwrap_or(p.surface1);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_minimized_window_ignores_whatever_was_sampled_from_it',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the sampled colour is thrown away, so every window shows the placeholder',
+        PEEK,
+        [
+            ('        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };',
+             '        let content_color = p.surface1;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not',
+            # Collapsing the whole conditional takes the minimized arm with it,
+            # so the placeholder this test pins becomes SURFACE1 as well.
+            'a_minimized_window_ignores_whatever_was_sampled_from_it',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the minimized and unsampled placeholders are swapped',
+        PEEK,
+        [
+            ('        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };',
+             '        let content_color = if snap.is_minimized {\n            snap.dominant_color.unwrap_or(p.surface1)\n        } else {\n            p.surface0\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_minimized_window_ignores_whatever_was_sampled_from_it',
+            'an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: hover outranks focus, so pointing at the focused window unfocuses it',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if is_hovered {\n            p.overlay0\n        } else if snap.is_focused {\n            p.accent\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the focus test is inverted, so every window but the focused one is ringed',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if !snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the hover wash is painted under every thumbnail, hovered or not',
+        PEEK,
+        [
+            ('        // Hover highlight background\n        if is_hovered {',
+             '        // Hover highlight background\n        if true {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the hover wash is never painted, so hovering a thumbnail is invisible',
+        PEEK,
+        [
+            ('        // Hover highlight background\n        if is_hovered {',
+             '        // Hover highlight background\n        if false {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: every thumbnail gets a close button, not just the one under the pointer',
+        PEEK,
+        [
+            ('        if is_hovered && self.config.show_close_buttons {',
+             '        if self.config.show_close_buttons {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+            'an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: no thumbnail gets a close button',
+        PEEK,
+        [
+            ('        if is_hovered && self.config.show_close_buttons {',
+             '        if is_hovered && false {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+            'test_popup_render_with_hovered_thumbnail',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the Minimized legend is drawn on every window except the minimized one',
+        PEEK,
+        [
+            ('        // Minimized indicator\n        if snap.is_minimized {',
+             '        // Minimized indicator\n        if !snap.is_minimized {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not',
+            'test_popup_render_minimized_window',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: hovering one thumbnail marks them all as hovered',
+        PEEK,
+        [
+            ('            let is_hovered = self.hovered_slot == Some(i);',
+             '            let is_hovered = self.hovered_slot.is_some();'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+            'only_the_focused_thumbnail_wears_the_accent',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the manager renders with a palette of its own instead of the caller\'s',
+        PEEK,
+        [
+            ('        self.popup.render(p)',
+             '        self.popup.render(&Palette::for_mode(false))'),
+        ],
+        ["desktop"],
+        [
+            'the_manager_renders_with_the_palette_it_was_given',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the close X is inked for the popup background rather than for the button',
+        PEEK,
+        [
+            ('            let ink = readable_on(close_bg);',
+             '            let ink = readable_on(p.base);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the close X is hard-coded to the pale readable_on endpoint',
+        PEEK,
+        [
+            ('            let ink = readable_on(close_bg);',
+             '            let ink = Color::from_hex(0xEFF1F5);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the close X is hard-coded to the near-black readable_on endpoint',
+        PEEK,
+        [
+            ('            let ink = readable_on(close_bg);',
+             '            let ink = Color::from_hex(0x11111B);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the title is drawn in the window\'s own colour instead of the text role',
+        PEEK,
+        [
+            ('            color: Color::rgba(p.text.r, p.text.g, p.text.b, a),',
+             '            color: Color::rgba(content_color.r, content_color.g, content_color.b, a),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the popup\'s background and its border are swapped',
+        PEEK,
+        [
+            ('        let bg = p.base;',
+             '        let bg = p.surface2;'),
+            ('        let border = p.surface2;',
+             '        let border = p.base;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the focus ring wears the accent\'s ink rather than the accent',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.on_accent()\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the hover ring and the resting ring are swapped',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.surface2\n        } else {\n            p.overlay0\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the Minimized legend wears the accent, so an aside claims to be a choice',
+        PEEK,
+        [
+            ('                color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, a),',
+             '                color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, a),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the hover wash wears the accent, so hovering looks like selecting',
+        PEEK,
+        [
+            ('            let wash = p.surface0;',
+             '            let wash = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: readable_on is applied twice, which inverts the ink it just chose',
+        PEEK,
+        [
+            ('            let ink = readable_on(close_bg);',
+             '            let ink = readable_on(readable_on(close_bg));'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the close X is drawn in the button\'s own colour, so it is invisible',
+        PEEK,
+        [
+            ('            let line_color = Color::rgba(ink.r, ink.g, ink.b, a);',
+             '            let line_color = Color::rgba(close_bg.r, close_bg.g, close_bg.b, a);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the close button never notices the pointer is on it',
+        PEEK,
+        [
+            ('            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                p.surface2\n            };',
+             '            let close_bg = if false {\n                p.red\n            } else {\n                p.surface2\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the close button always looks as though the pointer is on it',
+        PEEK,
+        [
+            ('            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                p.surface2\n            };',
+             '            let close_bg = if true {\n                p.red\n            } else {\n                p.surface2\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the resting ring wears the accent, so every window claims to be focused',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.accent\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+        ],
+    ),
 ]
-
-
 def run_tests(pkg):
     r = subprocess.run(
         ["cargo", "test", "-p", pkg, "--target", TARGET],

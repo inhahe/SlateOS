@@ -73388,3 +73388,55 @@ Either of these removes the hazard; the first is smaller and probably right:
 Never run `git checkout --`, `git restore`, or `git stash` against
 `bench/boot-history.jsonl`. If it is dirty before a merge, **commit it**, do not
 clear it.
+
+---
+
+### 2026-08-24 — the `cmp`/`diff` verdict: reversing this file's own recommendation, from flat-1 to 0/1/2
+
+The entry above (§"Still outstanding") queued the `cmp`/`diff` verdict fix with
+an explicit recommendation: *"Follow the tree's flat-`1` convention rather than
+POSIX `cmp`'s 0/1/2: a half-migrated table is worse than a consistent one … so
+'differ' and 'could not compare' both report 1."*
+
+**That recommendation was wrong, and the fix as landed uses 0/1/2** for `grep`,
+`cmp` and `diff` alike. Recorded here rather than silently overriding, because
+this file is where the next reader will look for the rationale and will
+otherwise find the superseded one.
+
+**Why the earlier argument does not apply.** It borrowed its force from the
+*syntax-error* sites, where the choice really is about a shell-wide status
+table: bash reserves 2 for syntax errors, 126 for not-executable, 127 for
+not-found, 128+N for signals, and adopting one row of that table without the
+rest leaves a caller unable to tell which convention it is reading. That
+reasoning is sound and those sites still use flat 1.
+
+But `grep`/`cmp`/`diff`'s 0/1/2 is not a row of the shell's table at all. It is
+a **per-command** convention, and 1 in it is not a failure code — it is a
+*finding*: "I compared them and they differ", "I searched and it is not there".
+The third value exists precisely because that finding must be distinguishable
+from "I never got to look". Collapsing 2 into 1 does not lose resolution
+uniformly; it loses it in one direction only, replacing *I don't know* with a
+confident, wrong *no*, delivered in the exact form the caller is waiting for.
+
+**And the loss the earlier note accepted was larger than it looked.** It called
+flat-1 "a real loss of resolution … still strictly better than today". Strictly
+better, yes — but the case it waves through is the one that matters most:
+
+```
+diff a b || echo "they differ"
+```
+
+`diff` prints nothing when files match, so under flat-1 a run that *refused* to
+compare (unreadable file, or one past the 2000-line cap) is byte-identical to a
+successful comparison and now also status-identical to a real difference. There
+is no observation left that separates the three. Under 0/1/2 the status is the
+one thing that does.
+
+The full rationale, the alternatives and the rule for deciding whether another
+command needs a third value are in `design-decisions.md` §275.
+
+**Scope of the reversal:** `grep`, `cmp`, `diff` only. Usage errors inside those
+three moved from 1 to 2 as part of it, for the same reason — inside them, 1 is
+spent. Everywhere else in the shell a usage error is still 1, and the 17
+`"Syntax error: …"` sites remain queued for flat `set_exit(1)` exactly as
+originally planned.

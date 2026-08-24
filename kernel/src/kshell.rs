@@ -10929,6 +10929,80 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = Vfs::remove(path);
     }
 
+    serial_println!("  kshell::self_test 26: a comparison not made is not a comparison");
+    // `cmp` and `diff` answer the same three-valued question as `grep`, and got
+    // it wrong in the most dangerous direction: *every* outcome left the status
+    // at the 0 `dispatch` sets before each command. So `cmp a b && cp a b` was
+    // told "identical" when the files differed, and when one of them did not
+    // exist at all.
+    //
+    // `diff` is worse still, because silence is its success: it prints nothing
+    // when the files match, so a run that refused to compare (unreadable file,
+    // past the line cap) was byte-identical *and* status-identical to a run
+    // that compared and found nothing. Nothing distinguished them at all.
+    {
+        use crate::fs::vfs::Vfs;
+
+        let a = Path::new("/tmp/kshell_cmp_selftest_a.txt");
+        let b = Path::new("/tmp/kshell_cmp_selftest_b.txt");
+        let same = Path::new("/tmp/kshell_cmp_selftest_same.txt");
+        Vfs::write_file(a, b"one\ntwo\n")?;
+        Vfs::write_file(b, b"one\nTWO\n")?;
+        Vfs::write_file(same, b"one\ntwo\n")?;
+
+        // 0: compared, identical.
+        let out =
+            capture_command("cmp /tmp/kshell_cmp_selftest_a.txt /tmp/kshell_cmp_selftest_same.txt");
+        assert_output_lacks("identical files are not 'differ'", &out, b"differ");
+        assert_eq!(last_exit(), 0, "cmp: identical is success");
+
+        // 1: compared, they differ. This is the answer `cmp a b && cp a b`
+        // depends on, and the one that used to come back as 0.
+        let out =
+            capture_command("cmp /tmp/kshell_cmp_selftest_a.txt /tmp/kshell_cmp_selftest_b.txt");
+        assert_output_lacks(
+            "differing files are not 'identical'",
+            &out,
+            b"are identical",
+        );
+        assert_eq!(last_exit(), 1, "cmp: differ is 1");
+
+        // 2: could not compare. Distinct from 1, because "they differ" is a
+        // claim about two files' contents and only one of these was read.
+        let out =
+            capture_command("cmp /tmp/kshell_cmp_selftest_a.txt /zzz_no_such_dir/zzz_no_file");
+        assert_output_starts_with("cmp names the file it could not read", &out, b"cmp: ");
+        assert_eq!(last_exit(), 2, "cmp: unread is not 'differ'");
+
+        // A usage error is 2 as well: 1 would report a mistyped command line as
+        // a real difference between files nothing ever opened.
+        let out = capture_command("cmp /tmp/kshell_cmp_selftest_a.txt");
+        assert_output_starts_with("cmp explains the usage", &out, b"Usage: cmp");
+        assert_eq!(last_exit(), 2, "cmp: a usage error is not a comparison");
+
+        // `diff`: silence means identical, so the status is the *only* thing
+        // separating these three.
+        let out = capture_command(
+            "diff /tmp/kshell_cmp_selftest_a.txt /tmp/kshell_cmp_selftest_same.txt",
+        );
+        assert_eq!(out.as_slice(), b"", "diff: identical prints nothing");
+        assert_eq!(last_exit(), 0, "diff: identical is success");
+
+        let out =
+            capture_command("diff /tmp/kshell_cmp_selftest_a.txt /tmp/kshell_cmp_selftest_b.txt");
+        assert_output_starts_with("diff prints a unified header", &out, b"--- ");
+        assert_eq!(last_exit(), 1, "diff: differ is 1");
+
+        let out =
+            capture_command("diff /tmp/kshell_cmp_selftest_a.txt /zzz_no_such_dir/zzz_no_file");
+        assert_output_starts_with("diff names the file it could not read", &out, b"diff: ");
+        assert_eq!(last_exit(), 2, "diff: unread is not 'identical'");
+
+        let _ = Vfs::remove(a);
+        let _ = Vfs::remove(b);
+        let _ = Vfs::remove(same);
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -95219,11 +95293,21 @@ fn grep_recursive(
 /// Compare two files byte-by-byte.
 ///
 /// Usage: `cmp <file1> <file2>`
+///
+/// Exits with the same three-valued status as `grep`, and for the same reason:
+/// **0** the files are the same, **1** they differ, **2** the comparison could
+/// not be made — a file that would not open, or a usage error. Every one of
+/// those used to leave the status untouched, so a missing file was reported to
+/// `cmp a b && echo same` as *same*: `cmp` printed a diagnostic, returned 0, and
+/// the caller acted on a comparison that never happened.
 fn cmd_cmp(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
+        // 2, not 1: inside `cmp`, 1 is the reserved answer "compared them, they
+        // differ". A usage error returning 1 would report a mistyped command
+        // line as a real difference between two files nothing ever read.
         shell_println!("Usage: cmp <file1> <file2>");
-        set_exit(1);
+        set_exit(2);
         return;
     }
 
@@ -95234,6 +95318,7 @@ fn cmd_cmp(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("cmp: {}: {:?}", path1.display(), e);
+            set_exit(2);
             return;
         }
     };
@@ -95241,6 +95326,7 @@ fn cmd_cmp(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("cmp: {}: {:?}", path2.display(), e);
+            set_exit(2);
             return;
         }
     };
@@ -95252,6 +95338,9 @@ fn cmd_cmp(args: &str) {
             path2.display(),
             data1.len()
         );
+        // No `set_exit(0)`: `dispatch` zeroes the status before every command,
+        // so success is the state we are already in. Saying it again here would
+        // imply the other arms cannot rely on that, and they do.
         return;
     }
 
@@ -95277,6 +95366,10 @@ fn cmd_cmp(args: &str) {
         path2.display(),
         data2.len(),
     );
+    // The one outcome that has to be *said* in the status rather than only in
+    // the output: `cmp a b && cp a b` is the whole reason this command exists,
+    // and it was told "identical" every time the files differed.
+    set_exit(1);
 }
 
 /// Line-level diff between two text files (unified format).
@@ -95285,11 +95378,21 @@ fn cmd_cmp(args: &str) {
 ///
 /// Uses a simple LCS-based diff algorithm suitable for kernel context.
 /// Files are capped at 2000 lines to bound memory usage.
+///
+/// Exits with the same three-valued status as `cmp`: **0** identical, **1**
+/// they differ, **2** the comparison could not be made — an unreadable file, a
+/// usage error, or a file past the line cap. The last of those is why the
+/// distinction matters most here: `diff` prints *nothing at all* when the files
+/// are the same, so a run that declined to compare and a run that compared and
+/// found no difference were, before this, byte-identical **and**
+/// status-identical. There was no way for a caller to tell them apart.
 fn cmd_diff(args: &str) {
     let parts: Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
+        // 2, not 1: inside `diff`, 1 is the reserved answer "compared them,
+        // they differ".
         shell_println!("Usage: diff <file1> <file2>");
-        set_exit(1);
+        set_exit(2);
         return;
     }
 
@@ -95300,6 +95403,7 @@ fn cmd_diff(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("diff: {}: {:?}", path1.display(), e);
+            set_exit(2);
             return;
         }
     };
@@ -95307,12 +95411,14 @@ fn cmd_diff(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("diff: {}: {:?}", path2.display(), e);
+            set_exit(2);
             return;
         }
     };
 
     if data1 == data2 {
-        // Identical files — no output (like Unix diff).
+        // Identical files — no output (like Unix diff), and status 0, which
+        // `dispatch` has already set.
         return;
     }
 
@@ -95332,6 +95438,11 @@ fn cmd_diff(args: &str) {
             lines2.len(),
             MAX_LINES,
         );
+        // 2: this is a refusal to compare, not a comparison. Returning 0 here
+        // was the worst of the three -- the files are already known to differ
+        // (the byte compare above says so), and a silent 0 told the caller the
+        // opposite of a fact the command had in hand.
+        set_exit(2);
         return;
     }
 
@@ -95509,6 +95620,10 @@ fn cmd_diff(args: &str) {
         // newline differs. Show a minimal note.
         shell_println!("(files differ only in trailing newline)");
     }
+
+    // Reached only when `data1 != data2`, checked above, so every path here is
+    // a real difference regardless of how the hunks came out.
+    set_exit(1);
 }
 
 /// Pre-allocate disk space for a file.

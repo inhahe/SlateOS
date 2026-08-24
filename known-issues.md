@@ -72407,3 +72407,195 @@ recurring shape is not "the wrong value was computed" but "no value was
 computed and the default was reported as if it were one." A default of
 success is a claim, and every early `return` past it is an unexamined
 assertion that the claim still holds.
+
+## A-KSHELL-2334-COMMANDS-PRINTED-PAST-THE-CAPTURE — ✅ FIXED 2026-08-24 (lane A)
+
+**In short:** 2,334 places in the shell printed straight to the machine's own
+screen instead of to whoever asked for the output. If you were logged in over
+SSH and typed `container ls`, the listing appeared on the *physical monitor of
+the machine you dialled into* and you saw a blank line. If a script did
+`x=$(container ls)`, `x` came back empty — not an error, just empty — and the
+script carried on with it.
+
+**Where:** `kernel/src/kshell.rs`, 2,334 `crate::console_println!` and 13
+`crate::console_print!` calls, converted to `shell_println!` / `shell_print!`.
+
+**Why it happened.** kshell has no stderr. There is `shell_println!` and there
+is `crate::console_println!`, and no `shell_eprintln!` — so the split between
+the two was never a stdout/stderr distinction, it was drift. 17,819 sites used
+the shell writer and 2,335 used the console writer, and nothing distinguished
+them: `cmd_container` alone had 266 console sites, `cmd_help` 254, `cmd_oci`
+85, `cmd_netns` 63, `cmd_cgroup` 60, `cmd_docker` 57, `cmd_firewall` 48,
+`cmd_tar` 45. 2,194 of the 2,334 were inside 176 `cmd_*` functions, i.e. they
+were ordinary command output, not diagnostics.
+
+**Why it is a correctness bug and not a tidiness one.** `capture_command` is
+not only `$(…)`. It is also what `net/ssh.rs:1759` and `net/telnet.rs:558`
+call to run a remote user's command line. So every one of these sites was a
+remote-shell bug with a second, worse half: the remote user's output was
+printed on the *host's* console, in front of whoever is sitting at it.
+
+**Why the conversion is provably safe.** `shell_write_bytes` already falls
+back to `crate::console::write_bytes` when `SHELL_OUTPUT` is `None`. With
+nothing capturing — the local interactive case — the two writers are the same
+writer. The change is a no-op locally and a fix everywhere else, which is why
+it could be applied to all 2,334 sites at once rather than audited one by one.
+
+**17 sites stay on the console, and the rule separating them is not "these
+happened to be console calls" but *terminal interaction is not output*.** A
+prompt, a menu and the echo of the user's own keystrokes are the terminal's
+furniture; they are not something a caller asked for and must never appear in
+a captured value. Bash agrees: it puts all of them on stderr or leaves them to
+the tty.
+
+| kept on the console | why |
+|---|---|
+| `execute` — the `+ {}` xtrace line | Bash sends xtrace to stderr. Capturing it would make `x=$(echo hi)` evaluate to `"+ echo hi\nhi"`, so *turning on tracing would silently corrupt every captured value in the script being traced.* |
+| `execute_select` × 6 — the numbered menu, the `#? ` prompt, backspace and character echo | `x=$(select …)` would otherwise contain the menu, the prompt and the user's typing. |
+| `cmd_read` × 5 — the `-p` prompt, backspace and character echo | `read`'s result is the variable it sets, not anything it printed. |
+| `run` × 5 — the startup banner and the `> ` / `cwd> ` prompt | No capture can be active in the REPL loop, so behaviour is identical either way — but routing a prompt through the shell writer would encode the claim that a prompt is something a caller might want, and it is not. |
+
+The `cmd_read` five were *already* `shell_print!` before this change and were
+wrong in the pre-existing code, not broken by the sweep; they are corrected
+here because the rule is being written down here. Each group carries a comment
+at the site, and self-test §17 asserts the xtrace case, so nobody "finishes
+the conversion" later.
+
+**Covered by** kshell self-test §17: a command body reaching the capture
+(`cgroup`), a usage diagnostic from inside the same command
+(`cgroup delete`), the unknown-command message — the sharpest case, since a
+typo over SSH previously showed the remote user nothing whatsoever — and the
+xtrace exclusion, asserting `$(echo hi)` under `set -x` is exactly `hi\n`.
+
+**The 38 raw `crate::console::write` calls are now audited too**, since a
+macro sweep cannot reach them. 36 of them are the line editor — prompt
+redraws, `\r\x1b[2K` erases, the `(reverse-i-search)` overlay, keystroke echo
+— and are correctly console-only under the rule above; `read_line`'s doc
+comment now says so explicitly, so the next sweep skips the region on purpose
+rather than by luck. One is `shell_write_bytes`'s own fallback. **The
+thirty-eighth was a live instance of exactly this bug**: `container logs`
+wrote the log body with `console::write_str` and only its trailing newline
+with `shell_println!`, so `$(container logs 1)` evaluated to a single `"\n"`
+while the log itself printed on the host's screen. Fixed with
+`shell_println_bytes`, which is also byte-clean — a container's captured
+output is not ours to launder through a format string.
+
+**Still open in this class:** nothing known in kshell. The same audit has not
+been done for other kernel-side command surfaces.
+
+**Lesson:** the fourth silent-success bug in the shell in two days. Here the
+tell was the *absence* of a distinction — with no `shell_eprintln!` in the
+codebase, two output macros cannot be encoding a stdout/stderr split, so one
+of them had to be wrong. When two ways of doing the same thing coexist with
+no rule separating them, that is not style; it is a bug that has not been
+observed yet.
+
+## A-KSHELL-3676-FAILING-COMMANDS-REPORTED-SUCCESS — ✅ FIXED 2026-08-24 (lane A)
+
+**In short:** 3,676 built-in shell commands printed an error message and then
+told the script that they had succeeded. Nothing looked wrong on screen — the
+error was right there in the terminal — but a script could not see it. `rm -rf
+"$dir"` after a failed step still ran; `cmd || echo "failed"` never printed
+"failed"; `id=$(cgroup create)` set `id` to the empty string and carried on.
+Fixed by giving every one of them a failing exit status, in three sweeps, plus
+a fourth commit undoing the four places where the sweep went too far.
+
+**Where:** `kernel/src/kshell.rs`. Commits `306eba384`, `ad372afab`,
+`2e7008827`, `2ab39d291`.
+
+**The damage is never the wrong value.** It is the control-flow decision
+downstream, and every shell construct that branches — `||`, `&&`, `if`,
+`set -e` — reads the exit status and nothing else. A shell in which failure
+reports 0 makes all of them decide the opposite of what they were written to
+decide. That is strictly worse than the command not existing: a missing command
+at least fails.
+
+### Three shapes, found by three different rules
+
+| shape | sites | what it looks like |
+|---|---|---|
+| bail | 766 | diagnostic, then a bare `return;` |
+| fall-through | 945 | diagnostic is the last statement of its block; control falls out |
+| error arm | 1,965 | `Err(e) => shell_println!("Error: {:?}", e),` |
+
+The error arms are the worst of the three, because the message is *right
+there*. A human reading the terminal sees the error and assumes everything
+downstream saw it too.
+
+### What made the sweeps safe, and the three times they weren't
+
+A line-level rule — "the text contains Usage:/Invalid/not found" — is wrong,
+and it was wrong on real sites. Each guard below exists because it caught one:
+
+1. **Judge the statement *run*, not the line.** Walk up from the last print and
+   collect the contiguous run at the same indent (folding rustfmt's split `);`
+   tail back into one statement), then judge the run by its **first** message. A
+   multi-line usage block leads with `"Usage: …"` and continues with indented
+   examples; a listing leads with a banner or a row.
+2. **A complaint starts its own message.** If the run's first literal begins
+   with whitespace it is an indented row inside a report. That single test is
+   what separates `"Group '{}' not found"` from `"  Unknown drops:    {}"` — a
+   row of `vlan stats`, which the first draft swept. Marking that command failed
+   would have been a *new* bug.
+3. **`Usage:`/`Error:` must lead the message** (after at most a `cmdname: `
+   prefix), **and every other word must be a whole word.** Two successes were
+   swept before these anchors existed:
+   - `"Network Usage: {} apps, {} interfaces"` — the *header* of `netusage
+     stats`, which then ends on an indented row: textually the exact shape of a
+     usage error.
+   - `"datausage: self-tests completed (see serial)."` — the command name
+     `datausage` merely ends in the letters `usage`.
+4. **A `=== … ===` banner means output, not a diagnostic.** Encoded as a rule
+   rather than an exception for `cmd_ksyms`, the only site that trips it today.
+5. **`Err` arms need no anchoring.** The arm *is* the failure path — stronger
+   corroboration than the `return;` the first sweep leaned on. All 197 distinct
+   messages were enumerated: every one names a real failure, so the vocabulary
+   filter (which exists to spare arms that absorb an error deliberately) had
+   nothing to spare.
+
+### The mirror-image bug the sweep introduced: `--help` is not a mistake
+
+`ad372afab`. A granted help request and a rejected argument **print the same
+text**, so no textual rule can separate them — only the gate above the block
+can. Four sites printed the usage because the user asked for it, and the sweep
+marked all four as failures. That is this task's own bug class in reverse: a
+command that succeeded reporting failure, breaking `cmd --help >/dev/null ||
+echo "not installed"`, a real idiom for probing whether a tool exists. `grep
+--help` exits 0; `grep --bogus` exits 2.
+
+Three were a plain deletion (`dedup`, `journal`, `fsck.ext4`). `zip` was not:
+its gate is `args.is_empty() || args == "--help" || args == "-h"`, one condition
+covering both a granted request and a command with nothing to run, so it had to
+be split.
+
+Found by scanning **every** help-gated block in the file for a failure status,
+not by re-reading the sweep's diff — so the check outlives the commit and covers
+sites no sweep touched. It is worth re-running after any future sweep.
+
+### Coverage
+
+Self-test rungs 18–20 in `kshell::self_test`, one per lesson rather than one per
+shape:
+
+| rung | asserts |
+|---|---|
+| 18 | `zip --help` and `zip` print **byte-identical** output and opposite statuses |
+| 19 | `tag zzz` fails (fall-through); `netusage stats` and `datausage test` do **not** (report header, whole-word) |
+| 20 | `cgroup delete <bogus>` fails (error arm); **and `echo ok` still reports 0** |
+
+That last control is the one that makes the set meaningful. Without it, a
+kshell that set status 1 unconditionally would pass rungs 17–20.
+
+### Known under-sweep, left deliberately
+
+Rule 3 rejects `"base64: decode error: {}"` and `"tee: write error: {:?}"`,
+which have two words before the `error:`. Loosening the anchor to admit them
+re-admits `"Network Usage:"`. Three unfixed sites beat one invented failure.
+
+**Lesson:** a mechanical rewrite over thousands of sites is only as good as the
+predicate, and a predicate that reads one line cannot tell a complaint from a
+row of a report. Every guard above came from *sampling the sites the rule chose*
+and *enumerating every distinct message it matched* — not from reading the
+rule and judging it plausible. Two of the three false positives were single
+sites out of thousands, and both would have turned a working command into a
+failing one.

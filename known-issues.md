@@ -71772,33 +71772,44 @@ suite's green result now includes it and reads as if it were checked.
 the tree: every `#[test] fn` name under `gui/`, minus every name appearing in
 any defect's expected-failures list.
 
-**How to reproduce.** Collect the test-function names in a converted module and
-subtract the names declared across `DEFECTS`; the difference is the unproven
-set. As of this entry that difference has never been computed, so its size is
-unknown — which is itself the finding.
+**How to reproduce.** `python scripts/reintro-palette.py --coverage`. It reads
+the tree and writes nothing, so it is safe to run at any time, including while
+a sweep is in flight.
 
-**What the proper fix looks like.** A third preflight mode next to `--check`,
-say `--coverage`, that walks `gui/**/src/*.rs` for `fn <name>()` immediately
-under a `#[test]` attribute, walks `DEFECTS` for declared names, and prints the
-per-file difference. It should not fail the build: plenty of tests are
-legitimately not reachable by a source-level find/replace (a test of a pure
-arithmetic helper, for instance, has no "defect" short of rewriting the helper),
-so the output is a worklist, not a gate. What matters is that the number is
-*visible* and can be driven down deliberately, instead of being discovered by
-accident when something adjacent breaks.
+**MEASURED 2026-08-24.** The reporting half is now built (`--coverage`, added
+the same day this entry was written), so the size is no longer unknown:
 
-Two refinements worth having in the same pass:
+```
+2922 tests in the swept packages, 2479 unproved (15.2% proved),
+0 dangling, 77 single-prover
+```
 
-- Report the reverse as well — declared names that match no `#[test] fn`
-  anywhere. That catches a renamed test whose defect still names the old name,
-  which currently surfaces only as a `[MISSING: ...]` after a full sweep.
-- Count provers per test, so a test with exactly one can be told apart from one
-  with forty. The single-prover tests are the fragile ones: they are one
-  refactor away from becoming unproven, which is precisely what happened to
-  `touchpad::the_panel_draws_nothing_that_is_immediately_erased`.
+Read that carefully before reacting to it. **It does not mean 85% of the suite
+is worthless.** A large share of those 2479 cannot be reached by a
+source-level find/replace at all — a test of a pure arithmetic helper has no
+"defect" short of rewriting the helper, and inventing one would be ceremony
+rather than proof. What the number *is* is the first honest measurement of how
+much of the suite has been examined, against a defect list that (as of the same
+change) is 0 stale, 0 ambiguous, 0 no-op and therefore means what it says.
 
-**Why it was not fixed in the same change.** The 56 stranded defects had to be
-resolved before anything else could be measured — a coverage report computed
-against a list containing 56 entries that no longer apply would have been wrong
-in a way that is hard to see. Now that `--check` is clean, the report can be
-written against a list that means what it says.
+The two encouraging figures:
+
+- **0 dangling.** No defect names a test that does not exist, so no defect can
+  currently report a spurious `MISSING` after an hours-long run.
+- **77 single-prover.** These are the fragile ones — one refactor from becoming
+  unproved, exactly as `touchpad::the_panel_draws_nothing_that_is_immediately_erased`
+  was. They are the cheapest thing to harden and the list is short enough to
+  work through deliberately.
+
+**What remains.** The report exists; the number now has to be driven down. That
+is deliberate ongoing work, not a single task: pick a module, read its unproved
+tests, and either write a defect that makes each one fire or satisfy yourself
+that it is genuinely unreachable by patching. The report is explicitly **not** a
+gate — it exits non-zero only on dangling declarations, which are unambiguously
+a mistake — because a gate on a number with a legitimate floor just gets
+silenced.
+
+**Why the report could not be written earlier.** The 56 stranded defects had to
+be resolved first. A coverage report computed against a list containing 56
+entries that no longer apply would have overstated the proved set by exactly
+those 56, and been wrong in a way that is very hard to see.

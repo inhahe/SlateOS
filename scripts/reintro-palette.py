@@ -62,6 +62,7 @@ where the wrong one could be passed, and it is three lines long.
 
 import hashlib
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -22552,6 +22553,118 @@ def check(snap):
     return 1 if bad or amb or noop else 0
 
 
+# A `#[test]` may carry further attributes before the function, and
+# `#[should_panic(expected = "...")]` puts brackets inside brackets, so the
+# attribute run is matched line-wise rather than with a bracket-balancing regex.
+_TEST_ATTR = re.compile(r"^\s*#\[test\]\s*$")
+_ATTR = re.compile(r"^\s*#\[")
+_FN = re.compile(r"^\s*(?:async\s+)?fn\s+([A-Za-z0-9_]+)\s*\(")
+
+# The two packages this harness sweeps. A test in guitk or the compositor is
+# not unproven-by-this-harness; it is simply out of scope, and listing it would
+# bury the finding in noise.
+COVERED_DIRS = ("gui/desktop/src", "gui/appearance/src")
+
+
+def tests_in_tree():
+    """`{path: [test names]}` for every `#[test] fn` in the swept packages."""
+    found = {}
+    for d in COVERED_DIRS:
+        for p in sorted((ROOT / d).rglob("*.rs")):
+            names = []
+            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+            for i, ln in enumerate(lines):
+                if not _TEST_ATTR.match(ln):
+                    continue
+                for nxt in lines[i + 1:]:
+                    if _ATTR.match(nxt) or not nxt.strip():
+                        continue
+                    m = _FN.match(nxt)
+                    if m:
+                        names.append(m.group(1))
+                    break
+            if names:
+                found[p.relative_to(ROOT).as_posix()] = names
+    return found
+
+
+def coverage():
+    """Report the tests no defect ever asks a question of.
+
+    `check()` answers "does every defect still apply?". This answers the
+    question one level up, which nothing else does: "is every test actually
+    proved by something?" A test with no defect behind it has never been seen
+    to fail for the right reason, yet it counts toward a green suite exactly
+    like a proved one does. That is the harness's own failure mode, and it is
+    invisible to `check()` -- a list of defects can be entirely healthy and
+    still leave half the suite unexamined.
+
+    It is deliberately **not** a gate. Plenty of tests cannot be reached by a
+    source-level find/replace at all: a test of a pure arithmetic helper has no
+    "defect" short of rewriting the helper, and inventing one would be
+    ceremony, not proof. The output is a worklist whose number should be driven
+    down on purpose, not a build failure to be silenced.
+
+    Three findings, in decreasing order of severity:
+
+    1. **Unproved** -- a test whose name no defect names anywhere. Nothing has
+       ever asked it anything.
+    2. **Dangling** -- a declared name matching no test in the tree, i.e. a
+       test renamed out from under a defect. Today this surfaces only as a
+       `[MISSING: ...]` at the end of a run that takes hours.
+    3. **Single-prover** -- a test exactly one defect names. These are the
+       fragile ones: one refactor from becoming unproved, which is precisely
+       what happened to touchpad's erasure sweep when the empty-fill guard
+       moved into slider.rs (design-decisions.md 535).
+    """
+    provers = {}
+    for _name, path, _edits, _pkgs, expect in DEFECTS:
+        for t in expect:
+            provers.setdefault(t, []).append(path)
+
+    in_tree = tests_in_tree()
+    everywhere = {t for names in in_tree.values() for t in names}
+
+    unproved = {
+        f: [t for t in names if t not in provers]
+        for f, names in in_tree.items()
+    }
+    unproved = {f: ts for f, ts in unproved.items() if ts}
+    total_tests = sum(len(v) for v in in_tree.values())
+    total_unproved = sum(len(v) for v in unproved.values())
+
+    print("=== tests no defect names (never asked anything) ===")
+    for f in sorted(unproved):
+        print(f"  {f}  ({len(unproved[f])} of {len(in_tree[f])})")
+        for t in unproved[f]:
+            print(f"      {t}")
+    if not unproved:
+        print("  none")
+
+    dangling = sorted(t for t in provers if t not in everywhere)
+    print(f"\n=== declared names matching no test ({len(dangling)}) ===")
+    for t in dangling:
+        print(f"  {t}  <- declared by {len(provers[t])} defect(s)")
+    if not dangling:
+        print("  none")
+
+    single = sorted(t for t, ps in provers.items() if len(ps) == 1 and t in everywhere)
+    print(f"\n=== proved by exactly one defect ({len(single)}) ===")
+    for t in single:
+        print(f"  {t}  ({provers[t][0]})")
+    if not single:
+        print("  none")
+
+    pct = 100.0 * (total_tests - total_unproved) / total_tests if total_tests else 0.0
+    print(
+        f"\n{total_tests} tests in the swept packages, {total_unproved} unproved "
+        f"({pct:.1f}% proved), {len(dangling)} dangling, {len(single)} single-prover"
+    )
+    # Dangling is the one finding that is unambiguously a mistake: a defect
+    # declaring a test that does not exist can only ever report MISSING.
+    return 1 if dangling else 0
+
+
 def apply_to(snap, path, edits):
     """`(patched_text, None)`, or `(None, why)` if the defect cannot be put in.
 
@@ -22664,6 +22777,12 @@ def restore(files, snap, digest):
 
 
 def main():
+    # Before the snapshot: `--coverage` reads the tree and writes nothing, so
+    # it must not print a snapshot banner implying otherwise, and it is the one
+    # mode that is safe to run while a sweep is in flight elsewhere.
+    if sys.argv[1:2] == ["--coverage"]:
+        sys.exit(coverage())
+
     files = sorted({d[1] for d in DEFECTS})
     snap = {f: (ROOT / f).read_bytes() for f in files}
     digest = {f: hashlib.sha256(b).hexdigest() for f, b in snap.items()}

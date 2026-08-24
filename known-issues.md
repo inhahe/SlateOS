@@ -50401,7 +50401,7 @@ guarantee, and on Windows the failure mode would be a sharing violation in
 whichever of the two processes lost the race. Wait for `[run-timeout] child
 exited` before running any cargo command against the same target directory.
 
-**Part 2 progress. 44 of 49 modules converted.**
+**Part 2 progress. 45 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -53470,6 +53470,140 @@ exited` before running any cargo command against the same target directory.
       the same site. **A literal and the role it equals in one mode are the
       same defect to any test that runs in that mode**; declarations for the
       two variants of a site should be written as a pair, not independently.
+- [x] `file_drop.rs` — 6 constants over 13 colour sites, done 2026-08-24. 41
+  tests in the module (eleven new), harness defects Ax72–Hx73 (thirty-four).
+  - **The badge ink has to be `base`; `crust`, the reflexive choice, fails all
+    four effect colours in Latte and passes all four in Mocha.** The effect
+    badge is a filled chip whose fill is one of four saturated hues — red
+    forbids, green copies, blue moves, peach links — with a label drawn on top,
+    so the ink is being asked to read on four different backgrounds at once.
+    `crust` measures 8.10 / 12.61 / 8.91 / 10.59 on those four in Mocha and
+    **4.10 / 3.98 / 3.96 / 3.95** in Latte — four failures, none of them
+    visible to a dark-mode review. `base` measures 7.08 / 11.03 / 7.79 / 9.27
+    and **4.80 / 4.66 / 4.63 / 4.62**, clearing the floor on all eight. The
+    margin is thin enough on the Latte side (4.62 against 4.5) that the
+    reasoning is now written into the module header rather than left to be
+    re-derived: the darkest role is not automatically the most readable ink,
+    because Latte's `crust` is a *light* colour and the effect hues are
+    mid-tone.
+  - **No `surface*` or `overlay0` role can be a badge fill in either mode.**
+    The obvious-looking "quiet chip" for the item count is `surface2` with
+    `text` on it, which is **4.62 in Mocha and 3.69 in Latte**; `surface1` is
+    6.31 / **4.39**; `overlay0` fails with every ink there is. Only four
+    pairings in the whole palette work for a chip on the card: `peach`+`base`,
+    `subtext1`+`base`, `text`+`base` and `text`+`crust`. The count chip took
+    `text`+`base` — an inverted chip — which is the only one of the four that
+    is not also an effect colour.
+  - **The item-count chip was `peach`, and so is `DropEffect::Link`.** Both
+    were the same hardcoded `MOCHA_PEACH`, so a twelve-file *copy* drag drew a
+    green badge next to a peach chip that means "link" everywhere else in the
+    same overlay. This is a meaning collision rather than a contrast failure,
+    and no contrast or membership test can see it: peach is a legal member and
+    reads fine on the card. `the_item_count_chip_is_never_an_effect_colour`
+    asserts the disjointness directly, against all four effects in both modes.
+  - **The contrast test changed shape — it now reads the pairing out of the
+    rendered commands — and stopped being a structural zero.** The previous
+    four modules each had a contrast test that compared palette values against
+    a *hand-written* pairing table and never called the renderer; each caught
+    exactly nothing in its own file, because a table of pairings is a claim
+    about the palette, and no defect in the module under test can falsify it.
+    Here the walk takes `cmds.windows(2)`, pairs every `FillRect` with the
+    `Text` that follows it, and asserts 4.5:1 on whatever it finds. It caught
+    **14 of 34**, second only to the ordered site table. It is not an echo
+    (lesson 22) because nothing it asserts comes from the code under test: the
+    4.5:1 floor comes from WCAG, and the required pair count (24 on the card,
+    8 on the tooltip) is written out by hand, so a site that stops being drawn
+    fails the count rather than silently passing an empty walk. **A contrast
+    test should read its pairings from the rendered output; a hand-written
+    pairing table can only catch a role moving underneath it.**
+  - **…and it is still blind to a *transposition*, because contrast is
+    symmetric.** `X×72` swaps the tooltip's fill and its ink, and the walk
+    computes `contrast(fill, ink)` — a symmetric function — so it returns
+    exactly the ratio it returned before. The declaration was wrong, not the
+    test: legibility genuinely survives a transposition and the design
+    genuinely does not, which is the ordered site table's job. Fixed by
+    dropping the declaration and writing the reason into the test's doc
+    comment. **Lesson: a contrast check cannot see its two operands exchanged.**
+  - **A `zip` between an expectation table and a drawn list truncates, and that
+    was a real hole in two tests, not a bad declaration.** `F×73` stops drawing
+    the tooltip entirely. Both
+    `every_site_the_drop_highlight_draws_moves_with_the_mode` and its drag-card
+    twin asserted only that the two modes drew *the same number* of colours —
+    which a vanished site satisfies, since it vanishes from both — and then
+    zipped the three-entry site table onto a one-entry drawn list, so the two
+    missing sites fell off the end of the zip and were never asked whether they
+    move. The role tests already pinned their length against the table; the
+    mode tests now do too. This is lesson 24's shape once more (*a site nothing
+    renders is a site nothing checks*) arriving through a new door: not a
+    branch nobody exercised, but a `zip` quietly shortening the question.
+  - **The colour extractor flattens alpha, so every colour test in the module
+    was blind to the deliberate translucency.** `colors()` forces alpha to 255
+    so that a role comparison is not defeated by a card drawn at 220. That is
+    right for the role tests and wrong as a total picture: the drag card is
+    220/255 and the drop tooltip 200/255 on purpose — a drag decoration must
+    not hide what is being dragged *onto* — and nothing asserted it.
+    `only_the_card_and_the_tooltip_are_translucent` pins both alpha vectors
+    exactly, and is the sole catcher of the two defects that make them opaque.
+    The alphas are also deliberately *not* `p.panel_alpha`: a drag decoration
+    is not a panel, and tying it to the panel setting would let a user who
+    likes opaque panels lose the drag preview.
+  - **A geometry test must locate by geometry.**
+    `a_multi_item_description_stops_before_the_count_badge` is a *layout* test,
+    and it found the count badge as "the only peach fill on the card". That
+    made it silently assert the badge's colour as well, and it would have
+    stopped working the instant the role changed — reporting a colour defect in
+    the vocabulary of overlap. It now locates the badge by the only thing that
+    is actually about geometry: `width == COUNT_BADGE_W`, a named constant
+    introduced for the purpose.
+  - **Sweep: 34 caught, 0 escaped, 0 never asked, 2 under-caught, 5
+    under-declared**, on a preflight of `34 build, 0 do not, 0 not applied`.
+    Both under-catches were genuine findings rather than noise — one a wrong
+    declaration (the symmetric contrast test), one a real hole in two tests
+    (the truncating zip) — and both were re-run to green after the fix. Every
+    run ended `restored: all files match their recorded SHA-256`.
+  - Catcher census (34 defects):
+
+    | Test | Caught | Sole catcher |
+    |---|---|---|
+    | `every_drag_overlay_site_draws_the_role_it_claims` | 17 | 3 |
+    | `every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on` | 14 | 0 |
+    | `every_drop_highlight_site_draws_the_role_it_claims` | 8 | 1 |
+    | `every_site_the_drag_overlay_draws_moves_with_the_mode` | 7 | 0 |
+    | `every_colour_the_drag_overlay_draws_comes_from_its_palette` | 6 | 0 |
+    | `an_unlabelled_target_draws_no_tooltip` | 6 | 1 |
+    | `each_drop_effect_wears_its_own_role` | 5 | 1 |
+    | `the_drop_tooltips_label_is_readable_on_its_fill` | 5 | 0 |
+    | `only_the_card_and_the_tooltip_are_translucent` | 4 | 2 |
+    | `the_item_count_chip_is_never_an_effect_colour` | 3 | 0 |
+    | `every_colour_the_drop_highlight_draws_comes_from_its_palette` | 3 | 0 |
+    | `every_site_the_drop_highlight_draws_moves_with_the_mode` | 3 | 0 |
+    | `a_single_item_drag_draws_no_count_chip` | 1 | 1 |
+    | `a_multi_item_description_stops_before_the_count_badge` | 1 | 0 |
+
+    Counts are after the two fixes below; the two `moves_with_the_mode` rows
+    each gained one catch when the truncating `zip` was closed.
+
+    - **The ordered pin's share fell to 17 of 34 — the lowest in the series —
+      and that is the point.** Its share was 33/37 in `session_mgr` because
+      that module is one renderer with one scene. `file_drop` has two
+      renderers, a four-way semantic mapping, two conditional branches and two
+      deliberate alpha values, and the census shows each of those needing its
+      own test: the mapping is caught only by the pinned effect vector, the
+      branches only by the two absence tests, the alphas only by the
+      translucency test. A falling sole-catcher count on a rising defect count
+      is what a well-decomposed suite looks like.
+    - **All five under-declarations are one test: `an_unlabelled_target_draws_no_tooltip`.**
+      It asserts that an empty label draws exactly one command, and then — to
+      confirm the survivor is the border rather than a stray fill — that its
+      colour is `p.green`. That second clause is an accidental value-keyed
+      locator: every defect that changes what `DropEffect::Copy` resolves to
+      (copy/move transposed, all-blue, all-accent) or that draws the border in
+      some other role trips it, in the vocabulary of tooltip suppression. It is
+      the calendar's variety of accidental locator, and errs only in the
+      stricter direction: it can fail where it was not asked, never pass where
+      it should have failed. **Five modules in, every under-declaration this
+      harness has produced has been an alignment or collision artefact of a
+      test locating its site indirectly.**
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

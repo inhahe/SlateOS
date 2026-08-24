@@ -1186,6 +1186,19 @@ mod tests {
         let in_dark = colors(&overlay_of(&Palette::for_mode(false), 12, DropEffect::Link));
         let in_light = colors(&overlay_of(&Palette::for_mode(true), 12, DropEffect::Link));
         assert_eq!(in_dark.len(), in_light.len());
+        // Pinned against the *table*, not merely against the other mode. The
+        // loop below zips the table onto the drawn list, and a zip stops at the
+        // shorter side: a site that stopped being drawn at all shrinks both
+        // modes equally, satisfies the assertion above, and then falls off the
+        // end of the zip without ever being asked whether it moves. The site
+        // tables' own tests pin this length; so must these.
+        assert_eq!(
+            in_dark.len(),
+            expected_overlay(&dark(), DropEffect::Link).len(),
+            "the overlay drew {} colours, not the {} the table lists",
+            in_dark.len(),
+            expected_overlay(&dark(), DropEffect::Link).len()
+        );
         for ((what, _), (d, l)) in expected_overlay(&dark(), DropEffect::Link)
             .into_iter()
             .zip(in_dark.iter().zip(&in_light))
@@ -1212,6 +1225,15 @@ mod tests {
             DropEffect::Copy,
         ));
         assert_eq!(in_dark.len(), in_light.len());
+        // See the sibling test: the zip below truncates, so a site that is not
+        // drawn at all is never asked whether it moves with the mode.
+        assert_eq!(
+            in_dark.len(),
+            expected_highlight(&dark(), DropEffect::Copy).len(),
+            "the highlight drew {} colours, not the {} the table lists",
+            in_dark.len(),
+            expected_highlight(&dark(), DropEffect::Copy).len()
+        );
         for ((what, _), (d, l)) in expected_highlight(&dark(), DropEffect::Copy)
             .into_iter()
             .zip(in_dark.iter().zip(&in_light))
@@ -1313,6 +1335,13 @@ mod tests {
 
     /// The same walk over the drop-target tooltip, which the card test cannot
     /// reach — a second renderer is a second surface.
+    ///
+    /// Neither walk can see the fill and the ink *transposed*: the contrast
+    /// ratio is a symmetric function of its two arguments, so drawing the fill
+    /// in the ink's role and the ink in the fill's yields exactly the ratio it
+    /// yielded before. Legibility survives a transposition; the design does
+    /// not. That defect belongs to the site tables above, which are ordered,
+    /// and the sweep confirms they catch it.
     #[test]
     fn the_drop_tooltips_label_is_readable_on_its_fill() {
         let mut checked = 0usize;
@@ -1384,6 +1413,43 @@ mod tests {
             4,
             "a single-item drag drew {drawn:?}, which is more than the card, \
              the description and the effect badge"
+        );
+    }
+
+    /// The card and the tooltip are translucent, and nothing else is.
+    ///
+    /// `colors()` flattens alpha so that one list can be compared against
+    /// palette roles, which means every other test in this module is blind to
+    /// it — the card could go fully opaque and hide the thing being dragged
+    /// *onto*, and nothing above would notice. The two alphas are a deliberate
+    /// property of these two surfaces: a drag decoration follows the cursor
+    /// across arbitrary content and has to let it through.
+    #[test]
+    fn only_the_card_and_the_tooltip_are_translucent() {
+        let p = dark();
+        let alphas = |cmds: &[RenderCommand]| -> Vec<u8> {
+            cmds.iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. }
+                    | RenderCommand::StrokeRect { color, .. }
+                    | RenderCommand::Text { color, .. } => Some(color.a),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Card, description, badge, label, chip, count.
+        assert_eq!(
+            alphas(&overlay_of(&p, 12, DropEffect::Copy)),
+            vec![220, 255, 255, 255, 255, 255]
+        );
+        // Border, tooltip fill, tooltip label.
+        assert_eq!(
+            alphas(&render_drop_target_highlight(
+                &p,
+                &target_with("Drop here"),
+                DropEffect::Copy
+            )),
+            vec![255, 200, 255]
         );
     }
 

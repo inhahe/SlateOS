@@ -114,6 +114,7 @@ PEEK = "gui/desktop/src/window_peek.rs"
 ABOUT = "gui/desktop/src/about.rs"
 CAL = "gui/desktop/src/calendar.rs"
 SESS = "gui/desktop/src/session_mgr.rs"
+FD = "gui/desktop/src/file_drop.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -20291,6 +20292,513 @@ DEFECTS = [
         [
             'every_picker_site_draws_the_role_it_claims',
             'the_title_wears_the_accent_only_while_searching',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the drag card's fill is mantle, not base",
+        FD,
+        [
+            ('    let card_fill = p.base;',
+             '    let card_fill = p.mantle;'),
+        ],
+        ["desktop"],
+        [
+        # mantle is a role, moves with the mode, and `text` on it reads 12.14/6.57 -
+        # so membership, the mode test and the contrast walk all pass. Only the
+        # ordered pin knows which role belongs here.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the drag card's fill is still the Mocha BASE constant",
+        FD,
+        [
+            ('    let card_fill = p.base;',
+             '    let card_fill = Color::from_hex(0x1E1E2E);'),
+        ],
+        ["desktop"],
+        [
+        # the contrast walk catches this one too: Latte `text` on Mocha `base` is
+        # 2.05, because the card stops following the mode but its ink does not.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the dragged item's description drops a tier to subtext0",
+        FD,
+        [
+            ('    let desc_ink = p.text;',
+             '    let desc_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+        # 7.37/4.64 on base, so it clears the floor - a readable defect is still a
+        # defect, and only the pin can see it.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the dragged item's description is still the Mocha TEXT constant",
+        FD,
+        [
+            ('    let desc_ink = p.text;',
+             '    let desc_ink = Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the badge ink is crust, the reflexive darkest role',
+        FD,
+        [
+            ('    let badge_ink = p.base;',
+             '    let badge_ink = p.crust;'),
+        ],
+        ["desktop"],
+        [
+        # the headline defect this module exists to catch: 12.61/10.59 in Mocha but
+        # 3.98/3.95 in Latte. Membership and the mode test both pass - crust is a
+        # perfectly good role that moves with the theme. Only a contrast check that
+        # reads the real ink/fill pairing out of the rendered commands sees it.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the badge ink is still the Mocha BASE constant',
+        FD,
+        [
+            ('    let badge_ink = p.base;',
+             '    let badge_ink = Color::from_hex(0x1E1E2E);'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the item-count chip goes back to peach, colliding with Link',
+        FD,
+        [
+            ('    let count_chip = p.text;',
+             '    let count_chip = p.peach;'),
+        ],
+        ["desktop"],
+        [
+        # base ink on peach is 9.27/4.62, so the contrast walk passes: this is a
+        # meaning collision, not a legibility one, and it needs its own test.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'the_item_count_chip_is_never_an_effect_colour',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the item-count chip is still the Mocha PEACH constant',
+        FD,
+        [
+            ('    let count_chip = p.text;',
+             '    let count_chip = Color::from_hex(0xFAB387);'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'the_item_count_chip_is_never_an_effect_colour',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the item-count chip is surface2, the obvious-looking chip that cannot work',
+        FD,
+        [
+            ('    let count_chip = p.text;',
+             '    let count_chip = p.surface2;'),
+        ],
+        ["desktop"],
+        [
+        # 2.46 Mocha / 1.91 Latte - a surface role is defined as being near the
+        # background, so it fails as a badge fill in *both* modes.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the description's ink and the badge's ink are transposed",
+        FD,
+        [
+            ('    let desc_ink = p.text;',
+             '    let desc_ink = p.base;'),
+            ('    let badge_ink = p.base;',
+             '    let badge_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+        # two edits are safe: each anchor carries its own binding name, so the first
+        # edit cannot create a duplicate of the second's anchor (lesson 18).
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the card's fill and the count chip are transposed",
+        FD,
+        [
+            ('    let card_fill = p.base;',
+             '    let card_fill = p.text;'),
+            ('    let count_chip = p.text;',
+             '    let count_chip = p.base;'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: copy and move wear each other's colours, so green now means move",
+        FD,
+        [
+            ('            Self::Copy => p.green,\n            Self::Move => p.blue,',
+             '            Self::Copy => p.blue,\n            Self::Move => p.green,'),
+        ],
+        ["desktop"],
+        [
+        # the site pin cannot catch this and must not be declared: its expectation
+        # calls `effect.color(p)`, so it is an echo of the code under test (lesson
+        # 22). Both colours are palette roles that move with the mode, so
+        # membership and the mode test pass, and base ink clears 4.5 on both, so
+        # the contrast walk passes. Only the hand-pinned role vector sees it.
+            'each_drop_effect_wears_its_own_role',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a forbidden drop wears the link colour',
+        FD,
+        [
+            ('            Self::None => p.red,',
+             '            Self::None => p.peach,'),
+        ],
+        ["desktop"],
+        [
+            'each_drop_effect_wears_its_own_role',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: every effect wears the same blue, so the badge says nothing',
+        FD,
+        [
+            ('            Self::None => p.red,\n            Self::Copy => p.green,\n            Self::Move => p.blue,\n            Self::Link => p.peach,',
+             '            Self::None => p.blue,\n            Self::Copy => p.blue,\n            Self::Move => p.blue,\n            Self::Link => p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'each_drop_effect_wears_its_own_role',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: every effect wears the accent, so the badge tracks the theme not the verb',
+        FD,
+        [
+            ('            Self::None => p.red,\n            Self::Copy => p.green,\n            Self::Move => p.blue,\n            Self::Link => p.peach,',
+             '            Self::None => p.accent,\n            Self::Copy => p.accent,\n            Self::Move => p.accent,\n            Self::Link => p.accent,'),
+        ],
+        ["desktop"],
+        [
+        # the accent is one of the 21 roles, so membership passes, and it moves with
+        # the mode, so the mode test passes.
+            'each_drop_effect_wears_its_own_role',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the link effect is still the Mocha PEACH constant',
+        FD,
+        [
+            ('            Self::Link => p.peach,',
+             '            Self::Link => Color::from_hex(0xFAB387),'),
+        ],
+        ["desktop"],
+        [
+            'each_drop_effect_wears_its_own_role',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_colour_the_drop_highlight_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the effect badge's label is drawn in the description's ink",
+        FD,
+        [
+            ('        font_size: 9.0,\n        color: badge_ink,',
+             '        font_size: 9.0,\n        color: desc_ink,'),
+        ],
+        ["desktop"],
+        [
+        # `color: badge_ink,` appears at two sites, so the anchor has to span the
+        # font size above it to be unique.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the item count is drawn in the chip's own colour, so it is invisible",
+        FD,
+        [
+            ('            font_size: 10.0,\n            color: badge_ink,',
+             '            font_size: 10.0,\n            color: count_chip,'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the item-count chip is filled with the card's own colour",
+        FD,
+        [
+            ('            height: 16.0,\n            color: count_chip,',
+             '            height: 16.0,\n            color: card_fill,'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the effect badge is filled with the count chip's colour",
+        FD,
+        [
+            ('        height: 12.0,\n        color: badge_color,',
+             '        height: 12.0,\n        color: count_chip,'),
+        ],
+        ["desktop"],
+        [
+        # base ink on a `text` chip is 11.34/7.06, so this is perfectly legible and
+        # perfectly wrong - the badge stops saying what will happen. Contrast
+        # cannot see it; only the pin can.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the target tooltip's label drops to overlay0",
+        FD,
+        [
+            ('    let tooltip_ink = p.text;',
+             '    let tooltip_ink = p.overlay0;'),
+        ],
+        ["desktop"],
+        [
+        # 3.36 Mocha / 2.30 Latte - the same overlay-as-ink shape module 44 found.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'the_drop_tooltips_label_is_readable_on_its_fill',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the target tooltip's label is still the Mocha TEXT constant",
+        FD,
+        [
+            ('    let tooltip_ink = p.text;',
+             '    let tooltip_ink = Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'every_colour_the_drop_highlight_draws_comes_from_its_palette',
+            'every_site_the_drop_highlight_draws_moves_with_the_mode',
+            'the_drop_tooltips_label_is_readable_on_its_fill',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the target tooltip is filled with surface1',
+        FD,
+        [
+            ('    let tooltip_fill = p.base;',
+             '    let tooltip_fill = p.surface1;'),
+        ],
+        ["desktop"],
+        [
+        # 6.31 in Mocha and 4.39 in Latte - under the floor by a tenth, and
+        # invisible to any check that only looks at dark mode.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'the_drop_tooltips_label_is_readable_on_its_fill',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the target tooltip's fill and label are transposed",
+        FD,
+        [
+            ('    let tooltip_fill = p.base;',
+             '    let tooltip_fill = p.text;'),
+            ('    let tooltip_ink = p.text;',
+             '    let tooltip_ink = p.base;'),
+        ],
+        ["desktop"],
+        [
+        # NOT the contrast test, though it walks exactly this pair: the contrast
+        # ratio is symmetric in its two arguments, so a transposition of the
+        # fill and the ink reproduces the ratio exactly. Only the ordered site
+        # table can see this one.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the target's glowing border is drawn in the tooltip's ink",
+        FD,
+        [
+            ('        color,\n        line_width: 2.0,',
+             '        color: tooltip_ink,\n        line_width: 2.0,'),
+        ],
+        ["desktop"],
+        [
+        # the border carries no text, so no contrast pair changes; `text` is a role
+        # that moves with the mode, so membership and the mode test pass. The
+        # border stops meaning anything and only the pin notices.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the target's border and its tooltip fill are transposed",
+        FD,
+        [
+            ('        color,\n        line_width: 2.0,',
+             '        color: tooltip_fill,\n        line_width: 2.0,'),
+            ('            color: Color::rgba(tooltip_fill.r, tooltip_fill.g, tooltip_fill.b, 200),',
+             '            color: Color::rgba(color.r, color.g, color.b, 200),'),
+        ],
+        ["desktop"],
+        [
+        # safe as two edits: the first writes `color: tooltip_fill,` which does not
+        # match the second anchor's `Color::rgba(` shape.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'the_drop_tooltips_label_is_readable_on_its_fill',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the drop highlight resolves its effect colour from a hardcoded dark palette',
+        FD,
+        [
+            ('    let color = effect.color(p);',
+             '    let color = effect.color(&Palette::for_mode(false));'),
+        ],
+        ["desktop"],
+        [
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'every_colour_the_drop_highlight_draws_comes_from_its_palette',
+            'every_site_the_drop_highlight_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the drag badge resolves its effect colour from a hardcoded dark palette',
+        FD,
+        [
+            ('    let badge_color = session.current_effect.color(p);',
+             '    let badge_color = session.current_effect.color(&Palette::for_mode(false));'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a single-item drag draws a count badge reading 1',
+        FD,
+        [
+            ('    // Item count badge (if multiple).\n    if count > 1 {',
+             '    // Item count badge (if multiple).\n    if true {'),
+        ],
+        ["desktop"],
+        [
+        # `if count > 1` appears twice - the other governs the description's room -
+        # so the anchor spans the comment above it.
+            'a_single_item_drag_draws_no_count_chip',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the count badge is never drawn, so a twelve-file drag looks like one file',
+        FD,
+        [
+            ('    // Item count badge (if multiple).\n    if count > 1 {',
+             '    // Item count badge (if multiple).\n    if false {'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+            'the_item_count_chip_is_never_an_effect_colour',
+            'a_multi_item_description_stops_before_the_count_badge',
+            'only_the_card_and_the_tooltip_are_translucent',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: an unlabelled target draws an empty tooltip',
+        FD,
+        [
+            ('    if !target.label.is_empty() {',
+             '    if true {'),
+        ],
+        ["desktop"],
+        [
+            'an_unlabelled_target_draws_no_tooltip',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the target tooltip is never drawn, so the target never says what it is',
+        FD,
+        [
+            ('    if !target.label.is_empty() {',
+             '    if false {'),
+        ],
+        ["desktop"],
+        [
+        # not declared against the highlight membership test: drawing *fewer*
+        # colours leaves every colour still drawn a legal member.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'every_site_the_drop_highlight_draws_moves_with_the_mode',
+            'the_drop_tooltips_label_is_readable_on_its_fill',
+            'only_the_card_and_the_tooltip_are_translucent',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the drag card is fully opaque and hides what is being dragged onto',
+        FD,
+        [
+            ('        color: Color::rgba(card_fill.r, card_fill.g, card_fill.b, 220),',
+             '        color: Color::rgba(card_fill.r, card_fill.g, card_fill.b, 255),'),
+        ],
+        ["desktop"],
+        [
+        # every other test in the module flattens alpha so one list can be compared
+        # against palette roles, which makes all of them blind to this.
+            'only_the_card_and_the_tooltip_are_translucent',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the target tooltip is fully opaque',
+        FD,
+        [
+            ('            color: Color::rgba(tooltip_fill.r, tooltip_fill.g, tooltip_fill.b, 200),',
+             '            color: Color::rgba(tooltip_fill.r, tooltip_fill.g, tooltip_fill.b, 255),'),
+        ],
+        ["desktop"],
+        [
+            'only_the_card_and_the_tooltip_are_translucent',
         ],
     ),
 ]

@@ -438,12 +438,23 @@ impl PathBar {
             self.selection_anchor = Some(self.cursor.byte);
         }
 
-        // Backwards through the string, which on a path holding a right-to-left
-        // directory name is not leftwards on the screen. Deliberate and
-        // unresolved: `open-questions.md` → C-Q2. `text::caret_left` is the
-        // visual alternative, built and tested, and switching is calling it
-        // here instead — but not without an answer.
-        if let Some(prev) = self.cursor.prev_in(&self.edit_text) {
+        // Leftwards on the screen, which on a path holding a right-to-left
+        // directory name is not backwards through the string: the caret walks
+        // through that name rather than jumping across it. The operator chose
+        // visual motion; the reasoning is `design-decisions.md` §541.
+        //
+        // Measured at `FONT_SIZE`/`Regular` because that is what `edit_text` is
+        // drawn at — the gaps between glyphs belong to the shaped run, so any
+        // other size would put the caret where this bar never drew it. And the
+        // returned cursor is assigned whole: its affinity is what tells apart
+        // the two screen positions that share one byte offset where the two
+        // directions meet.
+        if let Some(prev) = crate::text::caret_left(
+            &self.edit_text,
+            self.cursor,
+            FONT_SIZE,
+            FontWeightHint::Regular,
+        ) {
             self.cursor = prev;
         }
     }
@@ -459,8 +470,13 @@ impl PathBar {
             self.selection_anchor = Some(self.cursor.byte);
         }
 
-        // Logical, for the reason given in `move_cursor_left` above.
-        if let Some(next) = self.cursor.next_in(&self.edit_text) {
+        // Visual, for the reason given in `move_cursor_left` above.
+        if let Some(next) = crate::text::caret_right(
+            &self.edit_text,
+            self.cursor,
+            FONT_SIZE,
+            FontWeightHint::Regular,
+        ) {
             self.cursor = next;
         }
     }

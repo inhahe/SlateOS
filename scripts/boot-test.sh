@@ -2418,6 +2418,61 @@ check_recursive_locks() {
 
 check_recursive_locks
 
+# Keep module-global locks out from under calls into the VFS.
+#
+# Same family as the check above, and the same placement rationale: it costs
+# milliseconds against a ten-minute build, and it must run before the build so
+# a check that cannot run never looks like a check that passed.
+#
+# The failure is an AB/BA deadlock, not a recursive one.  `Vfs::readdir` takes
+# the *filesystem's* lock and, for a generated filesystem like procfs, calls
+# the subsystem that produces the content -- which takes that subsystem's
+# module-global lock.  So the live order is filesystem lock -> module state.
+# A function that holds module state and then calls into the VFS runs that
+# order backwards, and two CPUs, one in each path, wedge each other with no
+# output at all.  This is not hypothetical: the case that prompted the checker
+# sat on the path of every file read and write.
+#
+# The sweep that brought the count from 31 to 0 is in the git history; every
+# fix has the same shape, which is the shape to follow for a new report.
+# Snapshot what the VFS call needs while the lock is held, drop the guard, make
+# the call, then retake the lock and re-look-up by key or name to write the
+# result back.  Never carry a reference -- or a bare index -- into a container
+# across the call, because the container can move underneath it.  Where the
+# work genuinely needs `&mut` for its whole duration (`net/ssh.rs`), check the
+# object out of its slot with `mem::replace` and leave a placeholder behind.
+check_vfs_lock_order() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== VFS lock-order check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking for module locks held across a call into the VFS ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-vfs-under-lock.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each report above holds a module-global" >&2
+    echo "lock across a VFS call, which inverts the kernel's filesystem-lock" >&2
+    echo "-> module-state order and can wedge two CPUs against each other with" >&2
+    echo "no serial output.  Snapshot what the call needs, drop the guard, then" >&2
+    echo "retake it and re-look-up by key to write back.  The analysis is" >&2
+    echo "within-file and hand-checkable: read the function it names first." >&2
+    echo "" >&2
+    echo "Note it reports only the FIRST VFS call under a given guard, so a" >&2
+    echo "function with several must have all of them moved, not just the one" >&2
+    echo "named -- otherwise the next one simply takes its place." >&2
+    exit 1
+}
+
+check_vfs_lock_order
+
 # Keep kernel writes to user memory inside the validated primitives.
 #
 # Same placement rationale as the two checks above: it costs milliseconds, the

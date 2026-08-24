@@ -896,6 +896,13 @@ pub struct InputDialog {
     /// screen, and a caret rebuilt from the offset alone steps over a
     /// right-to-left word rather than through it.
     cursor: TextCursor,
+    /// Where a selection started, as a byte offset into `input_text`, or `None`
+    /// if nothing is selected. The other end of the selection is the caret —
+    /// deliberately, rather than a stored `(start, end)` pair, which is a third
+    /// number that can disagree with the other two. A plain offset and not a
+    /// `TextCursor`: a selection is a range of *text*, so it has no side of a
+    /// direction boundary to be on. See `design-decisions.md` §546.
+    selection_anchor: Option<usize>,
     password_mode: bool,
     validation_error: Option<String>,
     /// Validation function stored as a flag; actual validation is done via `validate()`.
@@ -927,6 +934,7 @@ impl InputDialog {
             placeholder: placeholder.to_string(),
             input_text: String::new(),
             cursor: TextCursor::default(),
+            selection_anchor: None,
             password_mode: false,
             validation_error: None,
             has_validator: false,
@@ -957,6 +965,7 @@ impl InputDialog {
     pub fn with_initial_text(mut self, text: &str) -> Self {
         self.input_text = text.to_string();
         self.cursor = TextCursor::from(text.len());
+        self.selection_anchor = None;
         self
     }
 
@@ -965,6 +974,7 @@ impl InputDialog {
         self.result = None;
         self.validation_error = None;
         self.focused_element = InputFocus::TextField;
+        self.selection_anchor = None;
         self.overlay.show();
     }
 
@@ -987,6 +997,9 @@ impl InputDialog {
     pub fn set_input_text(&mut self, text: &str) {
         self.input_text = text.to_string();
         self.cursor = TextCursor::from(text.len());
+        // The anchor names offsets in the string that has just been replaced,
+        // so it can be past the end of the new one.
+        self.selection_anchor = None;
     }
 
     /// Set a validation error message (shown below the input field).
@@ -1083,15 +1096,34 @@ impl InputDialog {
             // reader of that script means, even where that character is drawn
             // on the right. The arrows below are the opposite — they are about
             // the screen — and that asymmetry is deliberate.
+            //
+            // Every deleting arm below asks the selection first. A key that
+            // would remove one character removes the whole selection instead
+            // when there is one, which is what "selected" means everywhere
+            // else; a field that deleted one character out of a highlighted run
+            // would leave the user staring at a highlight that no longer
+            // matches the text under it.
             Key::Backspace => {
-                if let Some(prev) = self.cursor.prev_in(&self.input_text) {
+                if crate::textedit::delete_selection(
+                    &mut self.input_text,
+                    &mut self.cursor,
+                    &mut self.selection_anchor,
+                ) {
+                    self.validation_error = None;
+                } else if let Some(prev) = self.cursor.prev_in(&self.input_text) {
                     self.input_text.remove(prev.byte());
                     self.cursor = prev;
                     self.validation_error = None;
                 }
             }
             Key::Delete => {
-                if self.cursor.byte() < self.input_text.len() {
+                if crate::textedit::delete_selection(
+                    &mut self.input_text,
+                    &mut self.cursor,
+                    &mut self.selection_anchor,
+                ) {
+                    self.validation_error = None;
+                } else if self.cursor.byte() < self.input_text.len() {
                     // `remove` takes the whole character at the offset, so no
                     // width arithmetic is needed here — only the guard that the
                     // offset is inside the string.
@@ -1099,18 +1131,36 @@ impl InputDialog {
                     self.validation_error = None;
                 }
             }
-            Key::Left => self.move_caret(false),
-            Key::Right => self.move_caret(true),
+            // Each arrow plants the anchor before it moves, if Shift is down,
+            // and drops it if not: a bare arrow on a selection means "put the
+            // caret here and forget the selection", not "extend it silently".
+            Key::Left => {
+                self.begin_or_end_selection(event.modifiers.shift);
+                self.move_caret(false);
+            }
+            Key::Right => {
+                self.begin_or_end_selection(event.modifiers.shift);
+                self.move_caret(true);
+            }
             Key::Home => {
+                self.begin_or_end_selection(event.modifiers.shift);
                 self.cursor = TextCursor::default();
             }
             Key::End => {
+                self.begin_or_end_selection(event.modifiers.shift);
                 self.cursor = TextCursor::from(self.input_text.len());
             }
             _ => {
                 if let Some(ch) = event.text
                     && !ch.is_control()
                 {
+                    // Typing over a selection replaces it, so the character
+                    // lands where the selection was rather than beside it.
+                    crate::textedit::delete_selection(
+                        &mut self.input_text,
+                        &mut self.cursor,
+                        &mut self.selection_anchor,
+                    );
                     self.input_text.insert(self.cursor.byte(), ch);
                     // The boundary after the caret, once the text has the new
                     // character in it, is where the typing left the caret.
@@ -1183,6 +1233,30 @@ impl InputDialog {
         if let Some(next) = stepped {
             self.cursor = next;
         }
+    }
+
+    /// Plant or drop the selection anchor for an arrow key that is about to
+    /// move the caret.
+    fn begin_or_end_selection(&mut self, shift: bool) {
+        crate::textedit::begin_or_end_selection(shift, self.cursor, &mut self.selection_anchor);
+    }
+
+    /// The selected range as offsets into the *drawn* string.
+    ///
+    /// For an ordinary field that is the range as stored. For a password field
+    /// the drawn string is a row of one-byte marks, one per character, so both
+    /// ends have to be converted from byte offsets in the secret to mark counts
+    /// — otherwise a selection over an accented letter would highlight two
+    /// marks for one character, and a selection over an emoji four, which is
+    /// exactly the byte-count leak the masking exists to prevent.
+    fn drawn_offset(&self, byte: usize) -> usize {
+        if !self.password_mode {
+            return byte;
+        }
+        self.input_text.get(..byte).map_or_else(
+            || self.input_text.chars().count(),
+            |head| head.chars().count(),
+        )
     }
 
     /// Cycle focus between text field, OK, and Cancel.
@@ -1353,6 +1427,14 @@ impl InputDialog {
         });
 
         // Input text or placeholder.
+        //
+        // Geometry shared by both paths, so the caret in an empty field sits
+        // exactly where the first character will be drawn.
+        let text_x = x + CONTENT_PADDING + 10.0;
+        let text_y = content_y + (INPUT_HEIGHT - FONT_SIZE) / 2.0;
+        let text_avail = input_width - 20.0;
+        let field_focused = self.focused_element == InputFocus::TextField;
+
         let display_text = if self.input_text.is_empty() {
             self.placeholder.clone()
         } else if self.password_mode {
@@ -1368,21 +1450,47 @@ impl InputDialog {
         } else {
             self.input_text.clone()
         };
-        let text_color = if self.input_text.is_empty() {
-            COLOR_OVERLAY0
+        if self.input_text.is_empty() {
+            // The placeholder is not editable text: it has no caret positions
+            // in it and nothing can be selected in it, so it is drawn plainly
+            // and the caret — if the field has the focus — goes at the left,
+            // where the first character the user types will appear. A focused
+            // empty field with no caret is one the user cannot tell is ready.
+            tree.push(RenderCommand::Text {
+                x: text_x,
+                y: text_y,
+                text: display_text,
+                color: COLOR_OVERLAY0,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(text_avail),
+                overflow: TextOverflow::Ellipsis,
+            });
+            if field_focused {
+                crate::textedit::push_caret(tree, text_x, text_y, FONT_SIZE, COLOR_TEXT);
+            }
         } else {
-            COLOR_TEXT
-        };
-        tree.push(RenderCommand::Text {
-            x: x + CONTENT_PADDING + 10.0,
-            y: content_y + (INPUT_HEIGHT - FONT_SIZE) / 2.0,
-            text: display_text,
-            color: text_color,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(input_width - 20.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+            // Offsets into the *drawn* string: for a password field that is the
+            // row of marks, not the secret. See `drawn_offset`.
+            let drawn_cursor = TextCursor::from(self.drawn_offset(self.cursor.byte()));
+            let drawn_anchor = self.selection_anchor.map(|a| self.drawn_offset(a));
+            crate::textedit::draw(
+                tree,
+                &crate::textedit::SingleLine {
+                    text: &display_text,
+                    cursor: drawn_cursor,
+                    selection_anchor: drawn_anchor,
+                    focused: field_focused,
+                    x: text_x,
+                    y: text_y,
+                    width: text_avail,
+                    line_height: FONT_SIZE,
+                    font_size: FONT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: COLOR_TEXT,
+                },
+            );
+        }
 
         content_y += INPUT_HEIGHT;
 
@@ -3244,11 +3352,13 @@ mod tests {
 
         let mut tree = RenderTree::new();
         dialog.render(800.0, 600.0, &mut tree);
+        // `RichText`, not `Text`: the field's contents are drawn by
+        // `textedit::draw`, which colours the selection per glyph.
         let masks: Vec<&String> = tree
             .commands
             .iter()
             .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } if text.starts_with('*') => Some(text),
+                RenderCommand::RichText { text, .. } if text.starts_with('*') => Some(text),
                 _ => None,
             })
             .collect();
@@ -3257,6 +3367,250 @@ mod tests {
         assert!(
             !masks[0].contains(|c| c != '*'),
             "nothing of the secret itself is drawn"
+        );
+    }
+
+    // --- InputDialog caret, selection and scrolling ---
+    //
+    // The dialog tracked a caret from the day it was written and never drew
+    // one, so every test above could assert where the caret *went* and none
+    // could assert where it is *shown* -- see `known-issues.md`,
+    // TD-C-TWO-TOOLKIT-TEXT-FIELDS-DRAW-NO-CARET-AT-ALL. These are the tests
+    // that can.
+
+    /// Every vertical `Line` in a rendered dialog, by x. The caret is the only
+    /// thing in this dialog drawn as a zero-width line.
+    fn caret_xs(dialog: &InputDialog) -> Vec<f32> {
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, .. } if (x1 - x2).abs() < f32::EPSILON => Some(*x1),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The dialog, shown and fully faded in, ready to render.
+    fn opened(mut dialog: InputDialog) -> InputDialog {
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+        dialog
+    }
+
+    fn shifted(k: Key, shift: bool) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers {
+                shift,
+                ..Modifiers::NONE
+            },
+            text: None,
+        })
+    }
+
+    #[test]
+    fn the_field_draws_a_caret_when_it_has_the_focus_and_not_when_it_does_not() {
+        let dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abc"));
+        assert_eq!(
+            caret_xs(&dialog).len(),
+            1,
+            "the focused field must show where the next character will go"
+        );
+
+        // Tab to the OK button. A caret still drawn here would say the typing
+        // goes to the text field when Space would in fact press the button.
+        let mut moved = dialog;
+        moved.handle_event(&shifted(Key::Tab, false));
+        assert_eq!(moved.focused_element, InputFocus::OkButton);
+        assert!(
+            caret_xs(&moved).is_empty(),
+            "an unfocused field must not draw a caret"
+        );
+    }
+
+    #[test]
+    fn an_empty_input_dialog_still_shows_where_typing_will_land() {
+        // The empty field draws its placeholder, which is not editable text --
+        // but the caret still belongs at the left, or a user cannot tell a
+        // ready field from a dead one.
+        let dialog = opened(InputDialog::prompt("T", "P:", "type here"));
+        assert_eq!(caret_xs(&dialog).len(), 1);
+    }
+
+    #[test]
+    fn the_input_dialogs_drawn_caret_follows_the_arrow_keys() {
+        // The point of the whole exercise: the caret the dialog tracks and the
+        // caret it draws have to be the same caret.
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abcdef"));
+        let at_end = caret_xs(&dialog)[0];
+
+        dialog.handle_event(&shifted(Key::Home, false));
+        let at_start = caret_xs(&dialog)[0];
+        assert!(
+            at_start < at_end,
+            "Home must move the drawn caret left of where End leaves it, got {at_start} then {at_end}"
+        );
+
+        dialog.handle_event(&shifted(Key::Right, false));
+        let after_one = caret_xs(&dialog)[0];
+        assert!(
+            after_one > at_start,
+            "one Right must move the drawn caret rightwards in left-to-right text"
+        );
+    }
+
+    #[test]
+    fn shift_and_an_arrow_select_in_the_input_dialog_and_a_bare_arrow_gives_it_up() {
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abcdef"));
+        assert_eq!(dialog.selection_anchor, None);
+
+        dialog.handle_event(&shifted(Key::Left, true));
+        dialog.handle_event(&shifted(Key::Left, true));
+        assert_eq!(
+            dialog.selection_anchor,
+            Some(6),
+            "the anchor stays where the selection began, not where the caret is now"
+        );
+        assert_eq!(dialog.cursor.byte(), 4);
+
+        dialog.handle_event(&shifted(Key::Left, false));
+        assert_eq!(
+            dialog.selection_anchor, None,
+            "a bare arrow means 'put the caret here and forget the selection'"
+        );
+    }
+
+    #[test]
+    fn an_input_dialogs_selection_is_painted_behind_the_text() {
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abcdef"));
+        dialog.handle_event(&shifted(Key::Home, false));
+        dialog.handle_event(&shifted(Key::Right, true));
+        dialog.handle_event(&shifted(Key::Right, true));
+
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+        let painted = tree.commands.iter().any(|c| {
+            matches!(c, RenderCommand::FillRect { color, .. }
+                if *color == crate::textedit::SELECTION_BACKGROUND)
+        });
+        assert!(painted, "a selection nobody can see is not a selection");
+    }
+
+    #[test]
+    fn typing_over_an_input_dialogs_selection_replaces_it() {
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abcdef"));
+        dialog.handle_event(&shifted(Key::Home, false));
+        for _ in 0..3 {
+            dialog.handle_event(&shifted(Key::Right, true));
+        }
+        dialog.handle_event(&Event::Key(KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: Some('Z'),
+        }));
+        assert_eq!(dialog.input_text, "Zdef");
+        assert_eq!(dialog.cursor.byte(), 1);
+        assert_eq!(dialog.selection_anchor, None);
+    }
+
+    #[test]
+    fn backspace_over_an_input_dialogs_selection_takes_it_and_nothing_more() {
+        // The bug this guards is an off-by-one that is easy to write and hard
+        // to see: deleting the selection *and then* the character before it.
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abcdef"));
+        for _ in 0..2 {
+            dialog.handle_event(&shifted(Key::Left, true));
+        }
+        dialog.handle_event(&shifted(Key::Backspace, false));
+        assert_eq!(dialog.input_text, "abcd");
+        assert_eq!(dialog.cursor.byte(), 4);
+
+        // And with no selection it still deletes exactly one character.
+        dialog.handle_event(&shifted(Key::Backspace, false));
+        assert_eq!(dialog.input_text, "abc");
+    }
+
+    #[test]
+    fn delete_over_a_selection_takes_the_selection_rather_than_the_next_character() {
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abcdef"));
+        dialog.handle_event(&shifted(Key::Home, false));
+        for _ in 0..2 {
+            dialog.handle_event(&shifted(Key::Right, true));
+        }
+        dialog.handle_event(&shifted(Key::Delete, false));
+        assert_eq!(dialog.input_text, "cdef");
+        assert_eq!(dialog.cursor.byte(), 0);
+    }
+
+    #[test]
+    fn an_input_dialog_selection_spanning_a_multi_byte_character_is_cut_on_a_boundary() {
+        // `String::drain` panics on an offset inside a character, and a panic
+        // in a dialog takes the application down over a keystroke.
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("aébc"));
+        dialog.handle_event(&shifted(Key::Home, false));
+        for _ in 0..2 {
+            dialog.handle_event(&shifted(Key::Right, true));
+        }
+        dialog.handle_event(&shifted(Key::Backspace, false));
+        assert_eq!(dialog.input_text, "bc");
+    }
+
+    #[test]
+    fn replacing_the_text_from_code_drops_a_selection_that_named_the_old_text() {
+        // The anchor is an offset into a string that no longer exists; left
+        // behind it can point past the end of the new one, and the next
+        // backspace would try to cut a range that is not there.
+        let mut dialog =
+            opened(InputDialog::prompt("T", "P:", "").with_initial_text("a long value"));
+        for _ in 0..4 {
+            dialog.handle_event(&shifted(Key::Left, true));
+        }
+        assert!(dialog.selection_anchor.is_some());
+        dialog.set_input_text("hi");
+        assert_eq!(dialog.selection_anchor, None);
+        assert_eq!(dialog.cursor.byte(), 2);
+    }
+
+    #[test]
+    fn a_password_selection_is_measured_in_marks_and_not_in_bytes() {
+        // The mask is one byte per character, the secret is not, so a selection
+        // carried over unconverted would highlight two marks for an accented
+        // letter -- redrawing exactly the byte-length leak the masking exists
+        // to prevent, this time in the shape of the highlight.
+        let secret = "aébc"; // 4 characters, 5 bytes
+        let dialog = InputDialog::prompt("T", "P:", "")
+            .with_password_mode(true)
+            .with_initial_text(secret);
+        assert_eq!(dialog.drawn_offset(secret.len()), 4);
+        assert_eq!(dialog.drawn_offset(3), 2, "'a' and 'é' are two marks");
+        assert_eq!(dialog.drawn_offset(0), 0);
+    }
+
+    #[test]
+    fn an_input_dialog_longer_than_its_box_scrolls_to_keep_the_caret_in_view() {
+        // Without a scroll offset the caret is painted past the right edge of
+        // the field, over whatever is beside it.
+        let long = "x".repeat(400);
+        let dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text(&long));
+        let caret = caret_xs(&dialog)[0];
+
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+        let clip = tree.commands.iter().find_map(|c| match c {
+            RenderCommand::PushClip {
+                x, width, height, ..
+            } if *height <= FONT_SIZE => Some((*x, *width)),
+            _ => None,
+        });
+        let (clip_x, clip_w) = clip.expect("the field's text must be clipped to the field");
+        assert!(
+            caret >= clip_x && caret <= clip_x + clip_w,
+            "the caret at {caret} must be inside the field's box {clip_x}..{}",
+            clip_x + clip_w
         );
     }
 

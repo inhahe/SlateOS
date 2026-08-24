@@ -17,7 +17,7 @@ use crate::layout::{
     FlexAlign, FlexDirection, FlexItem, FlexJustify, FlexLayout, LayoutBox, Size, SizeConstraint,
     flex_layout,
 };
-use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, TextSpan};
+use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::{Borders, CornerRadii, Edges, FontWeight, Style};
 use crate::text::TextCursor;
 
@@ -759,7 +759,7 @@ impl Widget {
                         overflow: TextOverflow::Ellipsis,
                     });
                     if self.focused {
-                        push_caret(tree, cx, cy, line_h, self.style.foreground);
+                        crate::textedit::push_caret(tree, cx, cy, line_h, self.style.foreground);
                     }
                 } else {
                     self.render_text_input_value(
@@ -866,11 +866,11 @@ impl Widget {
 
     /// Draw a non-empty text field's contents: selection, text, caret.
     ///
-    /// Split out of the render arm because it is the only part of this widget
-    /// that has three interacting pieces of geometry, and because the arm has
-    /// to keep rendering children after it — an early `return` there would
-    /// silently drop them.
-    #[allow(clippy::too_many_arguments)]
+    /// Split out of the render arm because the arm has to keep rendering
+    /// children after it — an early `return` there would silently drop them.
+    /// The drawing itself belongs to `crate::textedit`, which is shared with the
+    /// toolkit's other single-line fields so that a selection looks the same in
+    /// all of them.
     fn render_text_input_value(
         &self,
         tree: &mut RenderTree,
@@ -882,83 +882,22 @@ impl Widget {
         avail: f32,
         line_h: f32,
     ) {
-        let size = self.style.font_size;
-        let caret_px = crate::text::caret_x(value, cursor, size, FontWeightHint::Regular);
-        let scroll = horizontal_scroll(self.measure(value), avail, caret_px);
-
-        // Everything below is drawn shifted left by `scroll`, so the head of a
-        // long string lands outside the field. The clip is what keeps it from
-        // being painted over whatever is to the left — without it, scrolling
-        // one field would smear its text across the rest of the form.
-        tree.clip(cx, cy, avail, line_h);
-        let origin = cx - scroll;
-
-        let range = selection_anchor
-            .map(|anchor| {
-                let here = cursor.byte();
-                (anchor.min(here), anchor.max(here))
-            })
-            .filter(|&(from, to)| from < to);
-
-        if let Some((from, to)) = range {
-            // `selection_boxes`, and not one rectangle from `x_of(from)` to
-            // `x_of(to)`: where the range crosses a change of direction it is
-            // two runs on screen with unselected text between them, and the
-            // single rectangle would highlight characters nobody selected.
-            for (left, width) in
-                crate::text::selection_boxes(value, from, to, size, FontWeightHint::Regular)
-            {
-                tree.push(RenderCommand::FillRect {
-                    x: origin + left,
-                    y: cy,
-                    width,
-                    height: line_h,
-                    color: SELECTION_BACKGROUND,
-                    corner_radii: CornerRadii::ZERO,
-                });
-            }
-        }
-
-        // `RichText` rather than three `Text` commands, because cutting the
-        // string at the selection's edges and drawing the pieces end to end
-        // assumes screen order is byte order — true right up until the text
-        // mixes directions, at which point the pieces belong interleaved and
-        // there is no `x` at which one of them draws correctly. Colour has to
-        // be a property of a glyph. See `RenderCommand::RichText`.
-        let spans = range.map_or_else(Vec::new, |(from, to)| {
-            let mut spans = Vec::with_capacity(2);
-            if from > 0 {
-                spans.push(TextSpan {
-                    end: u32::try_from(from).unwrap_or(u32::MAX),
-                    color: self.style.foreground,
-                });
-            }
-            spans.push(TextSpan {
-                end: u32::try_from(to).unwrap_or(u32::MAX),
-                color: SELECTION_FOREGROUND,
-            });
-            spans
-        });
-        tree.push(RenderCommand::RichText {
-            x: origin,
-            y: cy,
-            text: value.to_string(),
-            spans,
-            color: self.style.foreground,
-            font_size: size,
-            font_weight: FontWeightHint::Regular,
-            // No `max_width`: the clip above is what bounds this, and an
-            // ellipsis would mark a cut that the scroll offset means is not a
-            // cut — the rest is reachable by moving the caret, which is exactly
-            // what a truncation mark tells the reader it is not.
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        if self.focused {
-            push_caret(tree, origin + caret_px, cy, line_h, self.style.foreground);
-        }
-        tree.unclip();
+        crate::textedit::draw(
+            tree,
+            &crate::textedit::SingleLine {
+                text: value,
+                cursor,
+                selection_anchor,
+                focused: self.focused,
+                x: cx,
+                y: cy,
+                width: avail,
+                line_height: line_h,
+                font_size: self.style.font_size,
+                weight: FontWeightHint::Regular,
+                color: self.style.foreground,
+            },
+        );
     }
 
     // ======================================================================
@@ -1024,7 +963,7 @@ impl Widget {
                     let caret_px =
                         crate::text::caret_x(value, *cursor, font_size, FontWeightHint::Regular);
                     let text_w = crate::text::measure(value, font_size, FontWeightHint::Regular);
-                    let scroll = horizontal_scroll(text_w, content_w, caret_px);
+                    let scroll = crate::textedit::horizontal_scroll(text_w, content_w, caret_px);
                     *cursor = crate::text::cursor_at(
                         value,
                         mouse.x - content_x + scroll,
@@ -1093,7 +1032,7 @@ impl Widget {
                     // the insert is what makes the caret land in the right
                     // place: the deletion moves every offset after it, so an
                     // insert positioned first would end up somewhere else.
-                    delete_selection(value, cursor, selection_anchor);
+                    crate::textedit::delete_selection(value, cursor, selection_anchor);
                     value.insert(cursor.byte(), ch);
                     // Typing lands the caret after what was typed, which is the
                     // downstream side of the new boundary whichever way the
@@ -1119,7 +1058,7 @@ impl Widget {
                         // character before it removes something the user never
                         // pointed at, which is the one editing mistake that
                         // cannot be seen happening.
-                        if !delete_selection(value, cursor, selection_anchor) {
+                        if !crate::textedit::delete_selection(value, cursor, selection_anchor) {
                             if let Some(prev) = cursor.prev_in(value) {
                                 value.remove(prev.byte());
                                 *cursor = prev;
@@ -1128,7 +1067,7 @@ impl Widget {
                         EventResult::Consumed
                     }
                     crate::event::Key::Delete => {
-                        if !delete_selection(value, cursor, selection_anchor) {
+                        if !crate::textedit::delete_selection(value, cursor, selection_anchor) {
                             // Forward delete is the logical *next* character,
                             // for the same reason Backspace is the logical
                             // previous one, and `next_in` is what refuses to
@@ -1174,7 +1113,7 @@ impl Widget {
                     // highlight standing would make the next keystroke delete
                     // text the user had stopped selecting.
                     crate::event::Key::Left => {
-                        begin_or_end_selection(shift, *cursor, selection_anchor);
+                        crate::textedit::begin_or_end_selection(shift, *cursor, selection_anchor);
                         if let Some(prev) = crate::text::caret_left(
                             value,
                             *cursor,
@@ -1186,7 +1125,7 @@ impl Widget {
                         EventResult::Consumed
                     }
                     crate::event::Key::Right => {
-                        begin_or_end_selection(shift, *cursor, selection_anchor);
+                        crate::textedit::begin_or_end_selection(shift, *cursor, selection_anchor);
                         if let Some(next) = crate::text::caret_right(
                             value,
                             *cursor,
@@ -1203,12 +1142,12 @@ impl Widget {
                     // because there is nothing on the far side of them for a
                     // boundary to have two sides of.
                     crate::event::Key::Home => {
-                        begin_or_end_selection(shift, *cursor, selection_anchor);
+                        crate::textedit::begin_or_end_selection(shift, *cursor, selection_anchor);
                         *cursor = TextCursor::from(0);
                         EventResult::Consumed
                     }
                     crate::event::Key::End => {
-                        begin_or_end_selection(shift, *cursor, selection_anchor);
+                        crate::textedit::begin_or_end_selection(shift, *cursor, selection_anchor);
                         *cursor = TextCursor::from(value.len());
                         EventResult::Consumed
                     }
@@ -1241,92 +1180,6 @@ impl Widget {
             _ => EventResult::Ignored,
         }
     }
-}
-
-/// Plant or drop a selection anchor as an arrow key is about to move the caret.
-///
-/// Called *before* the move, with the caret's current position, because the
-/// anchor is where the selection started — the place the caret is leaving, not
-/// the place it is going to.
-fn begin_or_end_selection(shift: bool, cursor: TextCursor, anchor: &mut Option<usize>) {
-    if shift {
-        anchor.get_or_insert(cursor.byte());
-    } else {
-        *anchor = None;
-    }
-}
-
-/// Remove the selected range, if there is one, leaving the caret where it was.
-///
-/// Returns whether anything was deleted, which is how the callers tell "the
-/// selection was the edit" from "there was no selection, do the ordinary
-/// thing". The anchor is cleared either way: after this there is nothing left
-/// to be selected, and an anchor pointing into text that has been removed is
-/// an offset that can be past the end of the string.
-fn delete_selection(
-    value: &mut String,
-    cursor: &mut TextCursor,
-    anchor: &mut Option<usize>,
-) -> bool {
-    let Some(start) = anchor.take() else {
-        return false;
-    };
-    let here = cursor.byte();
-    let (from, to) = (start.min(here), start.max(here));
-    // Offsets that are not on a character boundary, or that run past the end,
-    // cannot arise from the code above — but `String::drain` panics on them,
-    // and a panic in a text field takes the whole application down over a
-    // keystroke. Refusing the edit is the only outcome the user can recover
-    // from.
-    if from >= to || !value.is_char_boundary(from) || !value.is_char_boundary(to) {
-        return false;
-    }
-    value.drain(from..to);
-    *cursor = TextCursor::from(from);
-    true
-}
-
-/// What a text field's selection is painted in, and what selected text is
-/// drawn in over it. The same accent the checkbox tick already uses.
-const SELECTION_BACKGROUND: Color = Color::from_hex(0x0078D7);
-const SELECTION_FOREGROUND: Color = Color::WHITE;
-
-/// How close to the right edge of the field the caret is allowed to sit before
-/// the text starts scrolling under it. One pixel is the caret's own width; two
-/// keeps it from being drawn half on the border.
-const CARET_EDGE_MARGIN: f32 = 2.0;
-
-/// Draw the caret as a vertical rule of the line's height.
-fn push_caret(tree: &mut RenderTree, x: f32, y: f32, line_h: f32, color: Color) {
-    tree.push(RenderCommand::Line {
-        x1: x,
-        y1: y,
-        x2: x,
-        y2: y + line_h,
-        color,
-        width: 1.0,
-    });
-}
-
-/// How far left to shift a field's text so the caret stays inside the box.
-///
-/// Deliberately computed fresh each frame from the caret's position, rather
-/// than remembered across frames and adjusted by the minimum needed. A stored
-/// offset is a second source of truth about where the text is, and it goes
-/// stale in every direction: the value can be replaced from code, the field can
-/// be resized, the font can change, and each of those leaves an offset that
-/// scrolls the text to somewhere the caret is not. The cost is that moving the
-/// caret leftwards through a long string scrolls the view further than strictly
-/// necessary; the benefit is that "the caret is visible" is true by
-/// construction rather than by everyone remembering to maintain it.
-///
-/// Nothing scrolls while the text fits, which is the overwhelmingly common
-/// case, so this is `0.0` almost always.
-fn horizontal_scroll(text_width: f32, avail: f32, caret_px: f32) -> f32 {
-    if text_width <= avail {
-        return 0.0;
-    }
-    (caret_px - avail + CARET_EDGE_MARGIN).clamp(0.0, text_width - avail)
 }
 
 fn weight_to_hint(w: FontWeight) -> FontWeightHint {
@@ -2090,13 +1943,13 @@ mod tests {
 
         let tree = drawn(&w);
         let highlighted = tree.commands.iter().any(|c| {
-            matches!(c, RenderCommand::FillRect { color, .. } if *color == SELECTION_BACKGROUND)
+            matches!(c, RenderCommand::FillRect { color, .. } if *color == crate::textedit::SELECTION_BACKGROUND)
         });
         assert!(highlighted, "the selected range must be painted");
 
         let recoloured = tree.commands.iter().any(|c| {
             matches!(c, RenderCommand::RichText { spans, .. }
-                if spans.iter().any(|s| s.color == SELECTION_FOREGROUND))
+                if spans.iter().any(|s| s.color == crate::textedit::SELECTION_FOREGROUND))
         });
         assert!(
             recoloured,
@@ -2152,21 +2005,5 @@ mod tests {
             kind: MouseEventKind::Press(crate::event::MouseButton::Left),
         });
         assert_eq!(selection_of(&w), None);
-    }
-
-    #[test]
-    fn nothing_scrolls_while_the_text_fits() {
-        assert_eq!(horizontal_scroll(40.0, 80.0, 40.0), 0.0);
-        assert_eq!(horizontal_scroll(80.0, 80.0, 80.0), 0.0);
-    }
-
-    #[test]
-    fn the_scroll_never_runs_past_either_end_of_the_text() {
-        // Caret at the very start of a long string: show the head, rather than
-        // scrolling to a negative offset that leaves a blank gap on the left.
-        assert_eq!(horizontal_scroll(500.0, 80.0, 0.0), 0.0);
-        // Caret at the very end: show the tail and no further — scrolling past
-        // it would leave blank space on the right with text still off-screen.
-        assert_eq!(horizontal_scroll(500.0, 80.0, 500.0), 420.0);
     }
 }

@@ -73417,9 +73417,26 @@ converted only 11 of 15 sites — the rewriter matched `&out`, and four captures
 are bound to other names (`0ddfaa5bc`). A mechanical sweep's own coverage is
 worth re-deriving from the source rather than from the count the sweep reported.
 
-## TD-C-TWO-TOOLKIT-TEXT-FIELDS-DRAW-NO-CARET-AT-ALL (lane C, 2026-08-24) — **half fixed 2026-08-24**
+## TD-C-TWO-TOOLKIT-TEXT-FIELDS-DRAW-NO-CARET-AT-ALL — RESOLVED 2026-08-24
 
-**`WidgetKind::TextInput` is done**: it now has a focus, a caret gated on it, a
+**Both fields are done.** `WidgetKind::TextInput` and `InputDialog` now share one
+implementation of a single-line field's caret, selection and scrolling —
+`gui/toolkit/src/textedit.rs`, written for this fix precisely so that the five
+text fields in the tree stop each having their own answer. `InputDialog`
+converts its offsets through `drawn_offset` first, so a password field's caret
+and selection are measured in mask characters and never leak the secret's byte
+length. Reasoning in `design-decisions.md` §546.
+
+**One piece is deliberately not done: clicking in an `InputDialog` does not move
+its caret.** It cannot, and the reason is a separate defect —
+`TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED` below. The widget
+text field does support click-to-place, because a `Widget` has a layout box.
+
+The original report follows.
+
+---
+
+**`WidgetKind::TextInput` was done first**: it now has a focus, a caret gated on it, a
 selection anchor with Shift+Arrow and painted selection boxes, click-to-place-
 caret, and a horizontal scroll offset that keeps the caret inside the box. See
 `design-decisions.md` §546, and the twenty tests from
@@ -73666,3 +73683,49 @@ into on open must say so with `WidgetTree::focus_first()`. That is a behaviour
 change, but not one that breaks any current caller: no app in the tree routes
 events through `WidgetTree::handle_event` today — they were all doing their own
 key handling, which is itself a sign that this path was not usable.
+
+## TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED (lane C, 2026-08-24) — **open**
+
+`ModalOverlay` has a `content_rect` — the dialog's own rectangle, which
+`handle_mouse` tests a click against to decide whether it landed outside the
+dialog and should dismiss it. **Nothing ever sets it.** The only callers of
+`set_content_rect` in the tree are two unit tests (`gui/toolkit/src/modal.rs`);
+no dialog calls it, so every live dialog carries `(0.0, 0.0, 0.0, 0.0)` and
+`point_in_content` answers `false` for every point on the screen.
+
+### What breaks
+
+- **`dismiss_on_click_outside` dismisses on a click *anywhere*, including on the
+  dialog's own buttons.** `ModalOverlay::new()` turns it on by default, so this
+  is the behaviour of any dialog that does not turn it off. `InputDialog` and
+  `ProgressDialog` set it to `false` in their constructors and are unaffected;
+  `AlertDialog` and `NonModalDialog` need checking, and the default itself is
+  the trap for whatever is written next.
+- **No dialog can hit-test anything inside itself.** That is why `InputDialog`
+  has a caret it can place with the arrows but not with the mouse: the geometry
+  it would need is computed inside `render(&self, parent_width, parent_height,
+  …)` from the parent's size, discarded when that call returns, and unavailable
+  to `handle_mouse`, which is not told the parent's size at all.
+
+### Why it is a design fault and not a missing call
+
+Adding `self.overlay.set_content_rect(...)` inside `render` is impossible as
+written — `render` takes `&self`. Threading the parent size into `handle_mouse`
+instead would give two independent copies of the layout arithmetic, in two
+methods, that have to agree exactly or the click lands in the wrong place; that
+is the bug it is trying to fix, moved.
+
+### The proper fix
+
+Give the dialogs a **layout step**, as `Widget`/`WidgetTree` already have: a
+`fn layout(&mut self, parent_width: f32, parent_height: f32)` that computes the
+rectangles once, stores them (dialog rect, input-field rect, button rects), and
+is called before `render` and consulted by `handle_mouse`. `render` then draws
+from the stored boxes rather than recomputing them, and `handle_mouse` hit-tests
+against the same numbers that were drawn — which is the property that makes a
+click land where the user aimed it.
+
+Once that exists, `InputDialog` gains click-to-place-caret in a few lines, using
+`text::cursor_at` against the stored field rect exactly as
+`WidgetKind::TextInput` does today, and `dismiss_on_click_outside` starts
+meaning what it says.

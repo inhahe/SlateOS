@@ -46,9 +46,16 @@
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::os_bytes;
+use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;
-use std::io::{self, ErrorKind, Write};
+use std::io::{ErrorKind, Write};
 use std::process::ExitCode;
+
+// Before `main`, so that `yes >&-` still has a closed descriptor to fail
+// against. Without it this program does not merely misreport — it never ends:
+// the runtime hands it /dev/null and it writes `y` into the void for as long as
+// the machine is on. See `coreutils::stdfd`.
+coreutils::guard_std_fds!();
 
 /// `yes -x; echo $?` is 1. Measured, not assumed: `ls`, `sort` and `grep` are 2.
 const YES: Program = Program::new("yes", 1);
@@ -82,16 +89,11 @@ enum Request {
 }
 
 fn main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
-        Ok(Request::Help) => {
-            print!("{}", help_text());
-            ExitCode::SUCCESS
-        }
-        Ok(Request::Version) => {
-            println!("yes (SlateOS coreutils) 0.1.0");
-            ExitCode::SUCCESS
-        }
+        Ok(Request::Help) => say(help_text().as_bytes()),
+        Ok(Request::Version) => say(b"yes (SlateOS coreutils) 0.1.0\n"),
         Ok(Request::Run(operands)) => run(&fill(&record(&operands))),
         Err(e) => {
             YES.report(&e);
@@ -181,15 +183,40 @@ fn fill(record: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// Say one thing and stop — `--help` and `--version`.
+///
+/// These two go through a *buffered* stream and are diagnosed by
+/// `close_stdout`'s wording, not the loop's, which is why they say
+/// `yes: write error: …` where `yes >&-` says `yes: standard output: …`.
+/// Upstream has the same split for the same reason: `usage` prints through
+/// stdio and the atexit hook reports it, while the loop below writes to the
+/// descriptor itself and reports its own failure.
+fn say(bytes: &[u8]) -> ExitCode {
+    let mut out = Stream::stdout();
+    // `Stream::write_all` records rather than returns; the verdict is `finish`.
+    let _ = out.write_all(bytes);
+    if let Err(e) = out.finish() {
+        stdfd::write_error("yes", &e);
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
+}
+
 /// Write `buf` forever.
 ///
 /// Not reachable from the tests below — what it does is make syscalls — which
 /// is why everything that decides *what* it writes is a separate function.
+///
+/// Upstream is `while (full_write (STDOUT_FILENO, buf, bufused) == bufused)
+/// continue;` — the descriptor, not the stream, and no buffer of its own,
+/// because `buf` is already `BUFSIZ` bytes and buffering it again would only
+/// copy it. [`stdfd::write_all`] is that `full_write`, and using it rather than
+/// `io::stdout()` is what makes this loop *stop*: std reopens a closed
+/// descriptor on /dev/null and then reports `EBADF` as a completed write, so
+/// `yes >&-` through std has no failure to end on.
 fn run(buf: &[u8]) -> ExitCode {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
     loop {
-        if let Err(e) = out.write_all(buf) {
+        if let Err(e) = stdfd::write_all(1, buf) {
             // The normal ending: the reader went away. GNU is killed by
             // SIGPIPE here and prints nothing, so neither do we.
             if e.kind() == ErrorKind::BrokenPipe {

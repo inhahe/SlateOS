@@ -331,15 +331,33 @@ xfail_case 'version names SlateOS' --version
 # =============================================================================
 # 7. A write that fails for a reason other than a dead reader
 # =============================================================================
-# Not run through `head`: this one has to reach the real error path, and it
-# terminates on its own.
+# Not run through `head`: these have to reach the real error path, and they
+# terminate on their own.
+#
+# Two destinations, and the difference between them is the point. `/dev/full`
+# fails every write; a *closed* standard output (`>&-`) is worse, because Rust
+# hides it — the runtime reopens the descriptor on /dev/null before `main` and
+# then maps `EBADF` to a completed write, so `yes >&-` through `io::stdout()`
+# does not merely report the wrong thing, it never ends. The `timeout` below is
+# what turns that into a failed case rather than a hung harness.
+#
+# The two diagnostics are also worded differently, and that is upstream's doing
+# rather than an accident: the endless loop is `full_write` on the descriptor
+# and reports `standard output: …` itself, while `--help` and `--version` print
+# through stdio and are reported by the `close_stdout` atexit hook as
+# `write error: …`. Both are measured here.
 
 writefail() {
+  local mode=$1; shift
   local o_err g_err o_rc g_rc side err rc
   o_err=$(mktemp); g_err=$(mktemp)
   for side in ours gnu; do
     if [ "$side" = ours ]; then err=$o_err; else err=$g_err; fi
-    timeout -k 2 60 env PATH="$bindir/$side" yes >/dev/full 2>"$err"
+    if [ "$mode" = closed ]; then
+      timeout -k 2 60 env PATH="$bindir/$side" yes "$@" >&- 2>"$err"
+    else
+      timeout -k 2 60 env PATH="$bindir/$side" yes "$@" >/dev/full 2>"$err"
+    fi
     rc=$?
     if [ "$side" = ours ]; then o_rc=$rc; else g_rc=$rc; fi
   done
@@ -356,10 +374,19 @@ writefail() {
 }
 
 if [ -w /dev/full ]; then
-  writefail; report 'yes > /dev/full'
+  writefail full; report 'yes > /dev/full'
+  writefail full y; report 'yes y > /dev/full'
 else
   echo "note: no writable /dev/full; the write-error case did not run" >&2
 fi
+
+writefail closed;             report 'yes >&-'
+writefail closed y;           report 'yes y >&-'
+writefail closed --help;      report 'yes --help >&-'
+writefail closed --version;   report 'yes --version >&-'
+# A rejected command line never reaches standard output at all, so closing it
+# changes nothing: the diagnostic is the same and so is the status.
+writefail closed --bogus;     report 'yes --bogus >&-'
 
 # =============================================================================
 # 8. The broken-pipe status, recorded once

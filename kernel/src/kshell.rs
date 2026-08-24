@@ -40,6 +40,7 @@
     clippy::panic
 )]
 
+use crate::bytestr::ByteStrExt;
 use crate::fs::path::{Path, PathBuf};
 use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -155,6 +156,17 @@ pub fn shell_write_bytes(bytes: &[u8]) {
         drop(guard);
         crate::console::write_bytes(bytes);
     }
+}
+
+/// Write raw bytes followed by a newline.
+///
+/// The byte equivalent of `shell_println!("{}", line)`, which is what nearly
+/// every line-oriented command does with a line it read. Written as a function
+/// rather than a macro because there is nothing to format: the whole point is
+/// that the bytes go out untouched.
+fn shell_println_bytes(bytes: &[u8]) {
+    shell_write_bytes(bytes);
+    shell_write_bytes(b"\n");
 }
 
 /// Print to the shell output destination (no newline).
@@ -6204,41 +6216,69 @@ fn trim_trailing_newlines(bytes: &[u8]) -> &[u8] {
 /// decoded does not run at all and exits non-zero, which is what stops `tee`
 /// from writing a U+FFFD-mangled copy of a binary file.
 fn dispatch_with_input(line: &str, input: &[u8]) {
-    let Some(input) = shell_bytes_as_str(input, line.split(' ').next().unwrap_or("")) else {
-        set_exit(1);
-        return;
-    };
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
     let args = parts.next().unwrap_or("").trim();
 
     // Commands that support reading from piped input.
     match cmd {
+        // --- Byte-clean: these see the pipe exactly as it arrived. ---
+        // Each one either only moves whole lines around or already worked in
+        // bytes internally, so there is nothing here that a decode would buy.
+        // `tee` is the one that matters most — it writes its input to a file,
+        // so a lossy decode here would corrupt on disk, not just on screen.
         "sort" => cmd_sort_input(args, input),
         "uniq" => cmd_uniq_input(args, input),
-        "grep" => cmd_grep_input(args, input),
         "head" => cmd_head_input(args, input),
         "tail" => cmd_tail_input(args, input),
         "wc" => cmd_wc_input(args, input),
         "nl" => cmd_nl_input(args, input),
         "rev" => cmd_rev_input(args, input),
+        "tac" => cmd_tac_input(args, input),
+        "tee" => cmd_tee_input(args, input),
         "cat" if args.is_empty() => {
             // `cat` with no args reads from pipe.
-            shell_print!("{}", input);
+            shell_write_bytes(input);
         }
-        "mapfile" | "readarray" => cmd_mapfile_input(args, input),
-        "tee" => cmd_tee_input(args, input),
-        "cut" => cmd_cut_input(args, input),
-        "tr" => cmd_tr_input(args, input),
-        "tac" => cmd_tac_input(args, input),
-        "fold" => cmd_fold_input(args, input),
-        "paste" => cmd_paste_input(args, input),
-        "xargs" => cmd_xargs_input(args, input),
-        "column" => cmd_column_input(args, input),
-        "sed" => cmd_sed_input(args, input),
-        "awk" => cmd_awk_input(args, input),
+
+        // --- Still text-only: narrowed individually, at the point of use. ---
+        // The narrowing is here rather than at the top of the function so that
+        // an undecodable pipe only stops the commands that genuinely cannot
+        // cope with it. Converting one more of these is a matter of moving its
+        // arm up into the block above.
+        //
+        // `grep`, `cut`, `tr` and `fold` are `char`-oriented (character
+        // classes, field indices, display width); `sed` and `awk` are real
+        // text interpreters; `mapfile` and `paste` are blocked on something
+        // else rather than on themselves — both store `String`s in the shell
+        // environment, which is still a `String` map.
+        "grep" | "mapfile" | "readarray" | "cut" | "tr" | "fold" | "paste" | "xargs" | "column"
+        | "sed" | "awk" => {
+            let Some(text) = shell_bytes_as_str(input, cmd) else {
+                set_exit(1);
+                return;
+            };
+            match cmd {
+                "grep" => cmd_grep_input(args, text),
+                "mapfile" | "readarray" => cmd_mapfile_input(args, text),
+                "cut" => cmd_cut_input(args, text),
+                "tr" => cmd_tr_input(args, text),
+                "fold" => cmd_fold_input(args, text),
+                "paste" => cmd_paste_input(args, text),
+                "xargs" => cmd_xargs_input(args, text),
+                "column" => cmd_column_input(args, text),
+                "sed" => cmd_sed_input(args, text),
+                "awk" => cmd_awk_input(args, text),
+                // Unreachable: the outer arm lists exactly these names.
+                _ => dispatch(line),
+            }
+        }
+
         _ => {
-            // Command doesn't support piped input — just run normally.
+            // Command doesn't support piped input — just run normally. Note
+            // this is deliberately *outside* the narrowing above: such a
+            // command ignores `input` entirely, so refusing to run it because
+            // the pipe was not UTF-8 would be a refusal with no cause.
             dispatch(line);
         }
     }
@@ -9077,6 +9117,171 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert_eq!(shell_bytes_as_str(b"caf\xc3\xa9", "selftest"), Some("café"));
     assert_eq!(shell_bytes_as_str(b"", "selftest"), Some(""));
     assert_eq!(shell_bytes_as_str(b"re\xffport", "selftest"), None);
+
+    serial_println!("  kshell::self_test 8: piped-input commands are byte-clean");
+    // Every command in this section is reachable as the right-hand side of a
+    // pipe, so its input is whatever the left-hand side produced — and after
+    // the output sink became byte-oriented, that can be any byte sequence the
+    // filesystem accepts. These assertions go through `dispatch_with_input`,
+    // the real dispatch path, rather than calling the `cmd_*_input` functions
+    // directly, because the routing decision (byte-clean arm vs. narrowed
+    // text-only arm) is exactly the thing that can regress.
+    {
+        /// Run one piped command and return its output bytes.
+        ///
+        /// Mirrors `capture_command`'s nesting discipline: `self_test` itself
+        /// may be invoked from a captured context.
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let prev = SHELL_OUTPUT.lock().take();
+            capture_start();
+            dispatch_with_input(cmd, input);
+            let out = capture_stop();
+            *SHELL_OUTPUT.lock() = prev;
+            out
+        }
+
+        // `cat` with no argument is the identity on a pipe. Nothing is added,
+        // nothing is removed: not a trailing newline, not a U+FFFD.
+        assert_eq!(
+            piped("cat", b"\x00\x80\xff\n\xfe").as_slice(),
+            &b"\x00\x80\xff\n\xfe"[..]
+        );
+        assert_eq!(piped("cat", b"").as_slice(), &b""[..]);
+
+        // Line-oriented commands re-emit each line followed by `\n`, so a
+        // final line without one gains one. That is `str::lines` behaviour and
+        // was true before this change too; what is new is that the bytes of
+        // each line survive.
+        // 0xFF sorts after every ASCII byte, matching `str`'s `Ord` (which is
+        // *defined* as the lexicographic order of the UTF-8 bytes) on the
+        // valid subset — so `\xffa` lands last despite starting with an `a`
+        // in its second byte.
+        assert_eq!(piped("sort", b"b\n\xffa\n").as_slice(), &b"b\n\xffa\n"[..]);
+        assert_eq!(piped("sort", b"\xffz\nz\n").as_slice(), &b"z\n\xffz\n"[..]);
+        assert_eq!(
+            piped("uniq", b"\xffx\n\xffx\ny\n").as_slice(),
+            &b"\xffx\ny\n"[..]
+        );
+        // The count is the bare number, not `-n N`: a non-numeric `args` is how
+        // these commands detect "this is a filename, ignore the pipe".
+        assert_eq!(
+            piped("head 1", b"\xffone\ntwo\n").as_slice(),
+            &b"\xffone\n"[..]
+        );
+        assert_eq!(
+            piped("tail 1", b"one\n\xfftwo\n").as_slice(),
+            &b"\xfftwo\n"[..]
+        );
+        assert_eq!(piped("tac", b"a\n\xffb\n").as_slice(), &b"\xffb\na\n"[..]);
+        assert_eq!(piped("rev", b"a\n\xffb\n").as_slice(), &b"\xffb\na\n"[..]);
+
+        // `wc` counts bytes, not decoded characters. A 2-byte UTF-8 sequence
+        // counts 2, and an undecodable byte counts 1 — never a replacement
+        // char, and never a byte dropped by a failed decode.
+        assert_eq!(
+            piped("wc", b"caf\xc3\xa9\n").as_slice(),
+            &b"  1 lines  1 words  6 bytes\n"[..]
+        );
+        assert_eq!(
+            piped("wc", b"\xff\xfe").as_slice(),
+            &b"  0 lines  1 words  2 bytes\n"[..]
+        );
+        assert_eq!(
+            piped("wc", b"a\n\xffb\n").as_slice(),
+            &b"  2 lines  2 words  5 bytes\n"[..]
+        );
+
+        // `nl` numbers with an ASCII prefix and then hands the line through
+        // untouched, so the prefix is text and the payload is bytes.
+        assert_eq!(piped("nl", b"\xffx\n").as_slice(), &b"     1\t\xffx\n"[..]);
+
+        // `tee` is the case that matters most: it is the only command
+        // reachable from a pipe whose output lands on *disk*, so a lossy
+        // decode here corrupts a file rather than a screenful of text.
+        {
+            use crate::fs::vfs::Vfs;
+            let path = "/tmp/kshell_tee_selftest.bin";
+            let _ = Vfs::remove(path);
+            let payload = b"\x89PNG\r\n\x1a\n\x00\xff\xfe";
+            assert_eq!(
+                piped("tee /tmp/kshell_tee_selftest.bin", payload).as_slice(),
+                &payload[..]
+            );
+            assert_eq!(
+                Vfs::read_file(path)?.as_slice(),
+                &payload[..],
+                "tee must write a byte-identical copy"
+            );
+            let _ = Vfs::remove(path);
+        }
+
+        // The file-argument halves of the same commands. These delegate from
+        // the pipe versions when `args` names a file, so a divergence between
+        // the two would show up as `sort f` and `cat f | sort` disagreeing.
+        // Before this change they substituted the literal string `<binary>`
+        // (`head`, `tail`, `nl`, `rev`) or refused outright (`sort`, `uniq`).
+        {
+            use crate::fs::vfs::Vfs;
+            let path = "/tmp/kshell_bytefile_selftest.bin";
+            Vfs::write_file(path, b"b\n\xffa\n")?;
+            assert_eq!(
+                piped("sort /tmp/kshell_bytefile_selftest.bin", b"").as_slice(),
+                &b"b\n\xffa\n"[..]
+            );
+            assert_eq!(
+                piped("head 1 /tmp/kshell_bytefile_selftest.bin", b"").as_slice(),
+                &b"b\n"[..]
+            );
+            assert_eq!(
+                piped("tail 1 /tmp/kshell_bytefile_selftest.bin", b"").as_slice(),
+                &b"\xffa\n"[..]
+            );
+            assert_eq!(
+                piped("rev /tmp/kshell_bytefile_selftest.bin", b"").as_slice(),
+                &b"\xffa\nb\n"[..]
+            );
+            assert_eq!(
+                piped("nl /tmp/kshell_bytefile_selftest.bin", b"").as_slice(),
+                &b"     1\tb\n     2\t\xffa\n"[..]
+            );
+            Vfs::write_file(path, b"\xffx\n\xffx\n")?;
+            assert_eq!(
+                piped("uniq /tmp/kshell_bytefile_selftest.bin", b"").as_slice(),
+                &b"\xffx\n"[..]
+            );
+            assert_eq!(
+                piped("uniq -c /tmp/kshell_bytefile_selftest.bin", b"").as_slice(),
+                &b"      2 \xffx\n"[..]
+            );
+
+            // `sort`/`uniq` were the only file commands that skipped
+            // `resolve_path`, so a relative name failed under any cwd but `/`.
+            let saved = CWD.lock().clone();
+            *CWD.lock() = PathBuf::from(&b"/tmp"[..]);
+            assert_eq!(
+                piped("uniq kshell_bytefile_selftest.bin", b"").as_slice(),
+                &b"\xffx\n"[..],
+                "sort/uniq must resolve a relative path against the cwd"
+            );
+            *CWD.lock() = saved;
+
+            let _ = Vfs::remove(path);
+        }
+
+        // The other half of the dispatch decision: a command that has *not*
+        // been converted still refuses non-UTF-8 rather than corrupting it,
+        // and the refusal is per-command, at the point of use.
+        assert_eq!(piped("grep x", b"\xffx\n").as_slice(), &b""[..]);
+        assert_eq!(
+            last_exit(),
+            1,
+            "a text-only command must fail, not silently mangle"
+        );
+        // ...but a command that ignores its input entirely is still allowed to
+        // run, because refusing it would be a refusal with no cause. `echo`
+        // never looks at the pipe.
+        assert_eq!(piped("echo ok", b"\xff").as_slice(), &b"ok\n"[..]);
+    }
 
     serial_println!("  kshell::self_test PASSED");
     Ok(())
@@ -84417,12 +84622,14 @@ fn cmd_head(args: &str) {
         }
     };
 
-    let text = core::str::from_utf8(&data).unwrap_or("<binary>");
-    for (printed, line) in text.lines().enumerate() {
+    // No decode: this used to substitute the literal string `<binary>` for a
+    // file that failed to decode, which printed one plausible-looking line
+    // that had nothing to do with the file, and exited 0.
+    for (printed, line) in data.lines().enumerate() {
         if printed >= count {
             break;
         }
-        shell_println!("{}", line);
+        shell_println_bytes(line);
     }
 }
 
@@ -84449,15 +84656,11 @@ fn cmd_tail(args: &str) {
         }
     };
 
-    let text = core::str::from_utf8(&data).unwrap_or("<binary>");
-    let lines: alloc::vec::Vec<&str> = text.lines().collect();
-    let start = if lines.len() > count {
-        lines.len() - count
-    } else {
-        0
-    };
-    for line in &lines[start..] {
-        shell_println!("{}", line);
+    // Same `<binary>` substitution as `head` had; see there.
+    let lines: alloc::vec::Vec<&[u8]> = data.lines().collect();
+    let start = lines.len().saturating_sub(count);
+    for line in lines.get(start..).unwrap_or(&[]) {
+        shell_println_bytes(line);
     }
 }
 
@@ -93933,30 +94136,32 @@ fn cmd_sort(args: &str) {
         return;
     }
 
-    let data = match crate::fs::Vfs::read_file(path) {
+    // `sort` and `uniq` were the only two file commands that passed the raw
+    // argument to the VFS instead of resolving it against the shell's cwd, so
+    // `cd /tmp && sort notes.txt` reported the file missing while `cat
+    // notes.txt` in the same directory worked.
+    let path = resolve_path(path);
+
+    let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("sort: cannot read '{}': {:?}", path, e);
+            crate::console_println!("sort: cannot read '{}': {:?}", path.display(), e);
             return;
         }
     };
 
-    let text = match core::str::from_utf8(&data) {
-        Ok(t) => t,
-        Err(_) => {
-            crate::console_println!("sort: file is not valid UTF-8");
-            return;
-        }
-    };
-
-    let mut lines: Vec<&str> = text.lines().collect();
+    // No decode: this used to refuse a non-UTF-8 file outright, which made
+    // `sort file` reject input that `cat file | sort` handles fine — and this
+    // function is also what `cmd_sort_input` delegates to when given a
+    // filename, so the two paths must agree.
+    let mut lines: Vec<&[u8]> = data.lines().collect();
     lines.sort_unstable();
     if reverse {
         lines.reverse();
     }
 
     for line in &lines {
-        shell_println!("{}", line);
+        shell_println_bytes(line);
     }
 }
 
@@ -93975,49 +94180,49 @@ fn cmd_uniq(args: &str) {
         return;
     }
 
-    let data = match crate::fs::Vfs::read_file(path) {
+    // See `cmd_sort`: this was the other command missing cwd resolution.
+    let path = resolve_path(path);
+
+    let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("uniq: cannot read '{}': {:?}", path, e);
+            crate::console_println!("uniq: cannot read '{}': {:?}", path.display(), e);
             return;
         }
     };
 
-    let text = match core::str::from_utf8(&data) {
-        Ok(t) => t,
-        Err(_) => {
-            crate::console_println!("uniq: file is not valid UTF-8");
-            return;
-        }
-    };
-
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.is_empty() {
+    // As in `cmd_sort`: no decode, so the file path and the pipe path agree.
+    let lines: Vec<&[u8]> = data.lines().collect();
+    let Some(&first) = lines.first() else {
         return;
-    }
+    };
 
-    let mut prev = lines[0];
+    let mut prev = first;
     let mut count = 1u64;
+
+    /// Emit one run, with the `-c` count prefix when asked for.
+    ///
+    /// The count is formatted and the line is not, so the two halves go out
+    /// through different writers — the line never has to become a `&str` in
+    /// order to be concatenated with its prefix.
+    fn emit(count_mode: bool, count: u64, line: &[u8]) {
+        if count_mode {
+            shell_write(&alloc::format!("{count:7} "));
+        }
+        shell_println_bytes(line);
+    }
 
     for &line in lines.iter().skip(1) {
         if line == prev {
             count = count.wrapping_add(1);
         } else {
-            if count_mode {
-                shell_println!("{:7} {}", count, prev);
-            } else {
-                shell_println!("{}", prev);
-            }
+            emit(count_mode, count, prev);
             prev = line;
             count = 1;
         }
     }
     // Print the last run.
-    if count_mode {
-        shell_println!("{:7} {}", count, prev);
-    } else {
-        shell_println!("{}", prev);
-    }
+    emit(count_mode, count, prev);
 }
 
 // ---------------------------------------------------------------------------
@@ -94030,35 +94235,39 @@ fn cmd_uniq(args: &str) {
 
 /// Sort piped input lines.  If `args` is non-empty it is treated as a
 /// filename (delegates to `cmd_sort`).
-fn cmd_sort_input(args: &str, input: &str) {
+fn cmd_sort_input(args: &str, input: &[u8]) {
     if !args.is_empty() {
         cmd_sort(args);
         return;
     }
-    let mut lines: Vec<&str> = input.lines().collect();
+    // Byte order is the same order `str` sorts in — `str`'s `Ord` is defined
+    // as the lexicographic order of its UTF-8 bytes — so this is not merely
+    // "close enough", it produces an identical result for text input while
+    // also being able to sort input that is not text at all.
+    let mut lines: Vec<&[u8]> = input.lines().collect();
     lines.sort_unstable();
     for line in &lines {
-        shell_println!("{}", line);
+        shell_println_bytes(line);
     }
 }
 
 /// Remove adjacent duplicate lines from piped input.  If `args` is
 /// non-empty it is treated as a filename (delegates to `cmd_uniq`).
-fn cmd_uniq_input(args: &str, input: &str) {
+fn cmd_uniq_input(args: &str, input: &[u8]) {
     if !args.is_empty() {
         cmd_uniq(args);
         return;
     }
-    let lines: Vec<&str> = input.lines().collect();
-    if lines.is_empty() {
+    let lines: Vec<&[u8]> = input.lines().collect();
+    let Some(&first) = lines.first() else {
         return;
-    }
+    };
 
-    let mut prev = lines[0];
-    shell_println!("{}", prev);
+    let mut prev = first;
+    shell_println_bytes(prev);
     for &line in lines.iter().skip(1) {
         if line != prev {
-            shell_println!("{}", line);
+            shell_println_bytes(line);
             prev = line;
         }
     }
@@ -94149,7 +94358,7 @@ fn cmd_grep_input(args: &str, input: &str) {
 /// Show the first N lines of piped input.  `args` is an optional line
 /// count (default 10).  If `args` looks like a filename (non-numeric),
 /// delegates to `cmd_head`.
-fn cmd_head_input(args: &str, input: &str) {
+fn cmd_head_input(args: &str, input: &[u8]) {
     let trimmed = args.trim();
 
     // If args is non-empty and not purely numeric, treat as "N file" or
@@ -94171,14 +94380,14 @@ fn cmd_head_input(args: &str, input: &str) {
         if printed >= count {
             break;
         }
-        shell_println!("{}", line);
+        shell_println_bytes(line);
     }
 }
 
 /// Show the last N lines of piped input.  `args` is an optional line
 /// count (default 10).  If `args` looks like a filename (non-numeric),
 /// delegates to `cmd_tail`.
-fn cmd_tail_input(args: &str, input: &str) {
+fn cmd_tail_input(args: &str, input: &[u8]) {
     let trimmed = args.trim();
 
     if !trimmed.is_empty() {
@@ -94194,21 +94403,17 @@ fn cmd_tail_input(args: &str, input: &str) {
         trimmed.parse::<usize>().unwrap_or(10)
     };
 
-    let lines: Vec<&str> = input.lines().collect();
-    let start = if lines.len() > count {
-        lines.len() - count
-    } else {
-        0
-    };
-    for line in &lines[start..] {
-        shell_println!("{}", line);
+    let lines: Vec<&[u8]> = input.lines().collect();
+    let start = lines.len().saturating_sub(count);
+    for line in lines.get(start..).unwrap_or(&[]) {
+        shell_println_bytes(line);
     }
 }
 
 /// Count lines, words, and bytes of piped input.  `args` is ignored
 /// (if non-empty, delegates to `cmd_wc` with a filename).
 #[allow(clippy::arithmetic_side_effects)]
-fn cmd_wc_input(args: &str, input: &str) {
+fn cmd_wc_input(args: &str, input: &[u8]) {
     if !args.is_empty() {
         cmd_wc(args);
         return;
@@ -94219,7 +94424,11 @@ fn cmd_wc_input(args: &str, input: &str) {
     let mut words: usize = 0;
     let mut in_word = false;
 
-    for b in input.bytes() {
+    // This loop was already byte-oriented — the `&str` parameter never bought
+    // it anything, and the byte count it reports is now genuinely the number
+    // of bytes on the pipe rather than the number of bytes that survived a
+    // decode.
+    for &b in input {
         if b == b'\n' {
             lines += 1;
         }
@@ -94379,20 +94588,28 @@ fn cmd_nl(args: &str) {
         }
     };
 
-    let text = core::str::from_utf8(&data).unwrap_or("<binary>");
-    for (i, line) in text.lines().enumerate() {
-        shell_println!("{:>6}\t{}", i.saturating_add(1), line);
+    // The whole file goes through as bytes. This used to substitute the literal
+    // string `<binary>` for a file that failed to decode, which numbered it as
+    // a single line reading "<binary>" — a plausible-looking output that has
+    // nothing to do with the file's actual contents, and exit status 0.
+    for (i, line) in data.lines().enumerate() {
+        shell_write(&alloc::format!("{:>6}\t", i.saturating_add(1)));
+        shell_println_bytes(line);
     }
 }
 
 /// Number lines of piped input.
-fn cmd_nl_input(args: &str, input: &str) {
+fn cmd_nl_input(args: &str, input: &[u8]) {
     if !args.is_empty() {
         cmd_nl(args);
         return;
     }
     for (i, line) in input.lines().enumerate() {
-        shell_println!("{:>6}\t{}", i.saturating_add(1), line);
+        // The number is formatted, the line is not: the two halves go out
+        // through different writers precisely so the line never has to become
+        // a `&str` in order to be concatenated with the prefix.
+        shell_write(&alloc::format!("{:>6}\t", i.saturating_add(1)));
+        shell_println_bytes(line);
     }
 }
 
@@ -94413,22 +94630,28 @@ fn cmd_rev(args: &str) {
         }
     };
 
-    let text = core::str::from_utf8(&data).unwrap_or("<binary>");
-    let lines: Vec<&str> = text.lines().collect();
+    // Same `<binary>` substitution as `nl` had: a file that did not decode was
+    // reported as one line reading "<binary>". Reversing whole lines never
+    // splits a multi-byte character, so there was never a reason to decode.
+    let lines: Vec<&[u8]> = data.lines().collect();
     for line in lines.iter().rev() {
-        shell_println!("{}", line);
+        shell_println_bytes(line);
     }
 }
 
 /// Reverse lines of piped input.
-fn cmd_rev_input(args: &str, input: &str) {
+fn cmd_rev_input(args: &str, input: &[u8]) {
     if !args.is_empty() {
         cmd_rev(args);
         return;
     }
-    let lines: Vec<&str> = input.lines().collect();
+    // Note this `rev` reverses the *order of lines*, not the characters within
+    // them (it is an alias of `tac` here, per its own doc comment). That is
+    // what makes it byte-safe: reversing bytes within a line would tear a
+    // multi-byte character in half, but moving whole lines around cannot.
+    let lines: Vec<&[u8]> = input.lines().collect();
     for line in lines.iter().rev() {
-        shell_println!("{}", line);
+        shell_println_bytes(line);
     }
 }
 
@@ -94711,8 +94934,11 @@ fn cmd_tac(args: &str) {
     let path = resolve_path(args);
     match crate::fs::Vfs::read_file(&path) {
         Ok(data) => {
-            let text = core::str::from_utf8(&data).unwrap_or("");
-            tac_process(text);
+            // Previously `from_utf8(&data).unwrap_or("")`, which printed
+            // *nothing at all* for a file that was not valid UTF-8 — and
+            // still exited 0, so the empty output was indistinguishable from
+            // an empty file. The bytes now go straight through.
+            tac_process(&data);
         }
         Err(e) => {
             crate::console_println!("tac: {}: {:?}", args, e);
@@ -94721,7 +94947,7 @@ fn cmd_tac(args: &str) {
     }
 }
 
-fn cmd_tac_input(args: &str, input: &str) {
+fn cmd_tac_input(args: &str, input: &[u8]) {
     if !args.is_empty() {
         cmd_tac(args);
         return;
@@ -94729,10 +94955,10 @@ fn cmd_tac_input(args: &str, input: &str) {
     tac_process(input);
 }
 
-fn tac_process(text: &str) {
-    let lines: Vec<&str> = text.lines().collect();
+fn tac_process(text: &[u8]) {
+    let lines: Vec<&[u8]> = text.lines().collect();
     for line in lines.iter().rev() {
-        shell_println!("{}", line);
+        shell_println_bytes(line);
     }
 }
 
@@ -95659,20 +95885,29 @@ fn mapfile_store(var_name: &str, text: &str, strip_newlines: bool) {
 }
 
 /// `tee FILE` with piped input: writes input to file AND passes through.
-fn cmd_tee_input(args: &str, input: &str) {
+/// `tee [FILE]` — copy piped input to stdout and, if given, to a file.
+///
+/// The most important member of the byte-clean set: this is the one command
+/// reachable from a pipe whose output lands on *disk*. A lossy decode on the
+/// way in would not merely garble a display, it would write the garbling to a
+/// file and report success — the same class of loss as
+/// `B-KSHELL-APPEND-TRUNCATES-BINARY-FILES`, arriving through a different
+/// door. `cat img.png | tee copy.png` now produces a byte-identical copy.
+fn cmd_tee_input(args: &str, input: &[u8]) {
     let path = args.trim();
     if path.is_empty() {
         // No file — just pass through.
-        shell_print!("{}", input);
+        shell_write_bytes(input);
         return;
     }
 
     let resolved = resolve_path(path);
     // Pass through to output.
-    shell_print!("{}", input);
+    shell_write_bytes(input);
     // Also write to file.
-    if let Err(e) = crate::fs::Vfs::write_file(&resolved, input.as_bytes()) {
+    if let Err(e) = crate::fs::Vfs::write_file(&resolved, input) {
         crate::console_println!("tee: write error: {:?}", e);
+        set_exit(1);
     }
 }
 

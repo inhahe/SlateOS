@@ -158,6 +158,41 @@ impl<'a> Iterator for SplitByte<'a> {
     }
 }
 
+/// Iterator over the lines of a byte string. See [`ByteStrExt::lines`].
+#[derive(Clone, Debug)]
+pub struct Lines<'a> {
+    /// `None` once the input is exhausted. Distinguishing "no input left" from
+    /// "an empty final line" is the whole difficulty of matching `str::lines`,
+    /// and this field is where it is kept: a trailing `\n` sets it to `None`
+    /// rather than to `Some(b"")`, so `"a\n"` yields one line and not two.
+    rest: Option<&'a [u8]>,
+}
+
+impl<'a> Iterator for Lines<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<&'a [u8]> {
+        let rest = self.rest?;
+        match rest.iter().position(|&b| b == b'\n') {
+            Some(idx) => {
+                let line = rest.get(..idx).unwrap_or(rest);
+                let after = rest.get(idx.saturating_add(1)..).unwrap_or(&[]);
+                // A trailing newline ends the input; it does not introduce a
+                // final empty line. This is what makes `"a\n"` and `"a"` yield
+                // the same thing, as `str::lines` documents.
+                self.rest = if after.is_empty() { None } else { Some(after) };
+                // Strip the CR of a CRLF, but only there: a lone `\r` is not a
+                // line ending, so `"a\r"` is the one-line input `a\r`.
+                Some(line.strip_suffix(b"\r").unwrap_or(line))
+            }
+            None => {
+                self.rest = None;
+                if rest.is_empty() { None } else { Some(rest) }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The extension trait
 // ---------------------------------------------------------------------------
@@ -205,6 +240,19 @@ pub trait ByteStrExt {
 
     /// Byte offset of the first occurrence of `byte`.
     fn find_byte(&self, byte: u8) -> Option<usize>;
+
+    /// Split into lines, like `str::lines`.
+    ///
+    /// Lines end at `\n` or `\r\n`, and the line ending is not included. The
+    /// final line ending is optional: `"a\n"` and `"a"` both yield one line.
+    /// An empty input yields no lines at all — *not* one empty line.
+    ///
+    /// This is deliberately **not** `split_byte(b'\n')`, which differs on all
+    /// three of those points. Nearly every piped-input command in the shell
+    /// (`head`, `tail`, `wc`, `nl`, `tac`, …) is written against `str::lines`
+    /// semantics, so the byte version has to be the same function, not a
+    /// near-miss that adds a spurious empty last line to every pipeline.
+    fn lines(&self) -> Lines<'_>;
 }
 
 impl ByteStrExt for [u8] {
@@ -259,6 +307,10 @@ impl ByteStrExt for [u8] {
 
     fn find_byte(&self, byte: u8) -> Option<usize> {
         self.iter().position(|&b| b == byte)
+    }
+
+    fn lines(&self) -> Lines<'_> {
+        Lines { rest: Some(self) }
     }
 }
 
@@ -354,6 +406,48 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert_eq!(b"".find_str(b""), Some(0));
     assert_eq!(b"abc".find_byte(b'c'), Some(2));
     assert_eq!(b"abc".find_byte(b'z'), None);
+
+    serial_println!("  bytestr::self_test 6: lines matches str::lines exactly");
+    // Every assertion below is paired with the `str` call it must agree with,
+    // because `lines` is the one helper here whose obvious implementation
+    // (`split_byte(b'\n')`) is wrong in three separate ways, and each of those
+    // ways adds or drops a line in a real shell pipeline.
+    let l = |s: &'static [u8]| -> Vec<&'static [u8]> { s.lines().collect() };
+    // (1) A trailing newline does NOT produce a final empty line. This is the
+    // one that matters most: shell output almost always ends in `\n`, so
+    // getting it wrong appends a blank line to every `head`/`tail`/`nl`.
+    assert_eq!(l(b"a\nb\n"), alloc::vec![&b"a"[..], &b"b"[..]]);
+    assert_eq!(l(b"a\nb"), alloc::vec![&b"a"[..], &b"b"[..]]);
+    assert_eq!("a\nb\n".lines().count(), 2);
+    // (2) An empty input yields NO lines, not one empty line — the opposite of
+    // `split_byte`, which yields exactly one empty field.
+    assert_eq!(l(b"").len(), 0);
+    assert_eq!("".lines().count(), 0);
+    assert_eq!(b"".split_byte(b'\n').count(), 1);
+    // ...but a lone newline IS one (empty) line, and interior blank lines are
+    // preserved rather than skipped.
+    assert_eq!(l(b"\n"), alloc::vec![&b""[..]]);
+    assert_eq!("\n".lines().count(), 1);
+    assert_eq!(l(b"a\n\nb"), alloc::vec![&b"a"[..], &b""[..], &b"b"[..]]);
+    assert_eq!(l(b"\n\n"), alloc::vec![&b""[..], &b""[..]]);
+    // (3) CRLF is a line ending and the CR is stripped; a *lone* CR is not a
+    // line ending and must survive as ordinary content.
+    assert_eq!(l(b"a\r\nb\r\n"), alloc::vec![&b"a"[..], &b"b"[..]]);
+    assert_eq!(l(b"a\r"), alloc::vec![&b"a\r"[..]]);
+    assert_eq!("a\r".lines().collect::<Vec<&str>>(), alloc::vec!["a\r"]);
+    assert_eq!(l(b"a\r\rb\n"), alloc::vec![&b"a\r\rb"[..]]);
+    // Only the last CR before the LF goes: `"a\r\r\n"` keeps one.
+    assert_eq!(l(b"a\r\r\n"), alloc::vec![&b"a\r"[..]]);
+    assert_eq!("a\r\r\n".lines().collect::<Vec<&str>>(), alloc::vec!["a\r"]);
+    // The case the module exists for: a non-UTF-8 byte is ordinary content,
+    // and is not mistaken for a separator at any position in the line.
+    assert_eq!(
+        l(b"re\xffport\n\xffhead\n"),
+        alloc::vec![&b"re\xffport"[..], &b"\xffhead"[..]]
+    );
+    // 0x0A appearing inside what would be a multi-byte sequence in UTF-8 is
+    // still a newline here: this is a byte string, not decoded text.
+    assert_eq!(l(b"\xc3\na"), alloc::vec![&b"\xc3"[..], &b"a"[..]]);
 
     serial_println!("  bytestr::self_test PASSED");
     Ok(())

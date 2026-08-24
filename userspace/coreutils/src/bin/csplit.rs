@@ -612,7 +612,7 @@ fn extract_regexp(bytes: &[u8], skip: bool) -> Result<Control, Fail> {
         Fail::fatal(format!(
             "{}: {}",
             quote(pattern),
-            String::from_utf8_lossy(&e.0)
+            String::from_utf8_lossy(&e.detail)
         ))
     })?;
 

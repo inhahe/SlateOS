@@ -4,6 +4,7 @@
 //!
 //! Single personality: `ollama`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -34,11 +35,24 @@ fn run_ollama(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "serve" => {
-            let host = args.windows(2).find(|w| w[0] == "--host").map(|w| w[1].as_str()).unwrap_or("127.0.0.1");
-            let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("11434");
+            let host = args
+                .windows(2)
+                .find(|w| w[0] == "--host")
+                .map(|w| w[1].as_str())
+                .unwrap_or("127.0.0.1");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("11434");
             println!("time=2024-01-15T14:00:00Z level=INFO msg=\"starting ollama\"");
-            println!("time=2024-01-15T14:00:00Z level=INFO msg=\"listening on {}:{}\"", host, port);
-            println!("time=2024-01-15T14:00:00Z level=INFO msg=\"detected GPU: NVIDIA RTX 4090 (24 GB)\"");
+            println!(
+                "time=2024-01-15T14:00:00Z level=INFO msg=\"listening on {}:{}\"",
+                host, port
+            );
+            println!(
+                "time=2024-01-15T14:00:00Z level=INFO msg=\"detected GPU: NVIDIA RTX 4090 (24 GB)\""
+            );
             0
         }
         "run" => {
@@ -51,7 +65,10 @@ fn run_ollama(args: Vec<String>) -> i32 {
                 println!();
                 println!("> {}", p);
                 println!();
-                println!("This is a simulated response from the {} model running locally via Ollama.", model);
+                println!(
+                    "This is a simulated response from the {} model running locally via Ollama.",
+                    model
+                );
                 println!("In a real deployment, the model would generate contextual responses.");
             } else {
                 println!(">>> Send a message (/? for help)");
@@ -108,9 +125,13 @@ fn run_ollama(args: Vec<String>) -> i32 {
         }
         "create" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("mymodel");
-            let modelfile = args.windows(2).find(|w| w[0] == "-f").map(|w| w[1].as_str()).unwrap_or("Modelfile");
+            let modelfile = args
+                .windows(2)
+                .find(|w| w[0] == "-f")
+                .map(|w| w[1].as_str())
+                .unwrap_or("Modelfile");
             println!("reading {} ...", modelfile);
-            println!("creating model '{}'", name);
+            println!("creating model {}", quoteaf_os(name));
             println!("  using base model llama3");
             println!("  applying parameters");
             println!("  applying system prompt");
@@ -120,24 +141,26 @@ fn run_ollama(args: Vec<String>) -> i32 {
         "cp" => {
             let src = args.get(1).map(|s| s.as_str()).unwrap_or("llama3");
             let dst = args.get(2).map(|s| s.as_str()).unwrap_or("my-llama3");
-            println!("copied '{}' to '{}'", src, dst);
+            println!("copied {} to {}", quoteaf_os(src), quoteaf_os(dst));
             0
         }
         "rm" => {
             let model = args.get(1).map(|s| s.as_str()).unwrap_or("llama3");
-            println!("deleted '{}'", model);
+            println!("deleted {}", quoteaf_os(model));
             0
         }
         "ps" => {
             println!("NAME              ID              SIZE      PROCESSOR       UNTIL");
-            println!("llama3:latest     abc123def456    5.9 GB    100% GPU        4 minutes from now");
+            println!(
+                "llama3:latest     abc123def456    5.9 GB    100% GPU        4 minutes from now"
+            );
             0
         }
         _ => {
             if cmd.is_empty() {
                 eprintln!("Usage: ollama <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -153,7 +176,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ollama};
+    use super::run_ollama;
 
     #[test]
     fn help_exits_zero() {

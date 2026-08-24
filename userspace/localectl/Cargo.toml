@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS localectl utility"
 [dependencies]
+# localectl names locales, keymaps and X11 layouts, strings read out of the
+# locale and keymap directories on disk.
+quoting = { path = "../quoting" }

@@ -6,6 +6,7 @@
 //!
 //! Detected via argv[0].
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -134,9 +135,10 @@ fn regex_find(pattern: &str, text: &str) -> Option<(usize, usize)> {
     // Try matching at each position
     for start in 0..=text.len() {
         if let Some(end) = regex_match_at(&pat_chars, 0, text, start)
-            && (end > start || pat_chars.is_empty()) {
-                return Some((start, end));
-            }
+            && (end > start || pat_chars.is_empty())
+        {
+            return Some((start, end));
+        }
     }
     None
 }
@@ -473,7 +475,7 @@ fn parse_rev_args(args: &[String]) -> RevOptions {
                 process::exit(0);
             }
             _ if arg.starts_with('-') && arg.len() > 1 => {
-                eprintln!("rev: unknown option '{}'", arg);
+                eprintln!("rev: unknown option {}", quoteaf_os(arg));
                 process::exit(1);
             }
             _ => {

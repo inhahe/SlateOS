@@ -4,11 +4,16 @@
 //!
 //! Single personality: `zellij`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_zellij(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -44,23 +49,32 @@ fn run_zellij(args: &[String], _prog: &str) -> i32 {
         println!("zellij 0.40.1 (Slate OS)");
         return 0;
     }
-    let cmd = args.iter().find(|a| !a.starts_with('-'))
+    let cmd = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
     match cmd {
         Some("list-sessions") | Some("ls") => {
             println!("  default [Created: today] (ACTIVE)");
         }
         Some("kill-session") => {
-            let name = args.iter().skip_while(|a| a.as_str() != "kill-session").nth(1)
-                .map(|s| s.as_str()).unwrap_or("default");
+            let name = args
+                .iter()
+                .skip_while(|a| a.as_str() != "kill-session")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("default");
             println!("Killed session: {}", name);
         }
         Some("kill-all-sessions") => println!("All sessions killed."),
         Some("delete-all-sessions") => println!("All dead sessions deleted."),
         Some("attach") | Some("a") => {
-            let name = args.windows(2).find(|w| w[0] == "-s" || w[0] == "--session")
-                .map(|w| w[1].as_str()).unwrap_or("default");
-            println!("zellij: Attaching to session '{}'...", name);
+            let name = args
+                .windows(2)
+                .find(|w| w[0] == "-s" || w[0] == "--session")
+                .map(|w| w[1].as_str())
+                .unwrap_or("default");
+            println!("zellij: Attaching to session {}...", quoteaf_os(name));
         }
         Some("setup") => {
             println!("zellij: Setup wizard");
@@ -68,21 +82,32 @@ fn run_zellij(args: &[String], _prog: &str) -> i32 {
             println!("  Default shell: /bin/sh");
         }
         Some("action") => {
-            let action = args.iter().skip_while(|a| a.as_str() != "action").nth(1)
-                .map(|s| s.as_str()).unwrap_or("new-pane");
+            let action = args
+                .iter()
+                .skip_while(|a| a.as_str() != "action")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("new-pane");
             println!("zellij action: {}", action);
         }
         Some("run") => {
-            let command = args.iter().skip_while(|a| a.as_str() != "run").nth(1)
-                .map(|s| s.as_str()).unwrap_or("sh");
-            println!("zellij run: Starting '{}'", command);
+            let command = args
+                .iter()
+                .skip_while(|a| a.as_str() != "run")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("sh");
+            println!("zellij run: Starting {}", quoteaf_os(command));
         }
         Some("convert-config") => println!("zellij: Config converted."),
         Some("convert-layout") => println!("zellij: Layout converted."),
         _ => {
-            let session = args.windows(2).find(|w| w[0] == "-s" || w[0] == "--session")
-                .map(|w| w[1].as_str()).unwrap_or("default");
-            println!("zellij: Starting session '{}'...", session);
+            let session = args
+                .windows(2)
+                .find(|w| w[0] == "-s" || w[0] == "--session")
+                .map(|w| w[1].as_str())
+                .unwrap_or("default");
+            println!("zellij: Starting session {}...", quoteaf_os(session));
         }
     }
     0
@@ -90,7 +115,10 @@ fn run_zellij(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "zellij".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "zellij".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_zellij(&rest, &prog);
     process::exit(code);
@@ -98,7 +126,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_zellij};
+    use super::{basename, run_zellij, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `kfp`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_kfp(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -39,7 +44,7 @@ fn run_kfp(args: &[String]) -> i32 {
                     println!("Creating pipeline from {}...", file);
                     println!("Pipeline created: pl-ghi789");
                 }
-                _ => println!("kfp pipeline: '{}' completed", sub),
+                _ => println!("kfp pipeline: {} completed", quoteaf_os(sub)),
             }
         }
         "run" => {
@@ -51,12 +56,15 @@ fn run_kfp(args: &[String]) -> i32 {
                     println!("run-def      training-pipeline   Running     2024-01-15");
                 }
                 "create" => {
-                    let pipeline = args.windows(2).find(|w| w[0] == "--pipeline-name")
-                        .map(|w| w[1].as_str()).unwrap_or("training-pipeline");
-                    println!("Creating run for pipeline '{}'...", pipeline);
+                    let pipeline = args
+                        .windows(2)
+                        .find(|w| w[0] == "--pipeline-name")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("training-pipeline");
+                    println!("Creating run for pipeline {}...", quoteaf_os(pipeline));
                     println!("Run created: run-ghi");
                 }
-                _ => println!("kfp run: '{}' completed", sub),
+                _ => println!("kfp run: {} completed", quoteaf_os(sub)),
             }
         }
         "experiment" => {
@@ -66,17 +74,20 @@ fn run_kfp(args: &[String]) -> i32 {
                 println!("exp-abc      Default           15");
                 println!("exp-def      Hyperparameter    8");
             } else {
-                println!("kfp experiment: '{}' completed", sub);
+                println!("kfp experiment: {} completed", quoteaf_os(sub));
             }
         }
-        _ => println!("kfp: '{}' completed", subcmd),
+        _ => println!("kfp: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "kfp".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "kfp".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_kfp(&rest);
     process::exit(code);
@@ -84,7 +95,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_kfp};
+    use super::{basename, run_kfp, strip_ext};
 
     #[test]
     fn basename_strips_path() {

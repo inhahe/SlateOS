@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! dnsmadeeasy-cli — Slate OS personality CLI for DNS Made Easy, the long-running enterprise DNS.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -34,7 +35,9 @@ fn print_help(prog: &str) {
 
 fn print_version() {
     println!("dnsmadeeasy-cli 0.1.0");
-    println!("Tiggee LLC (dba DNS Made Easy) — Reston, Virginia. Founded 2002. Acquired by DigiCert 2022.");
+    println!(
+        "Tiggee LLC (dba DNS Made Easy) — Reston, Virginia. Founded 2002. Acquired by DigiCert 2022."
+    );
 }
 
 fn cmd_about() {
@@ -244,17 +247,47 @@ fn run_dme(args: &[String], prog: &str) -> i32 {
         return 0;
     };
     match sub.as_str() {
-        "help" | "-h" | "--help" => { print_help(prog); 0 }
-        "version" | "-V" | "--version" => { print_version(); 0 }
-        "about" => { cmd_about(); 0 }
-        "network" => { cmd_network(); 0 }
-        "features" => { cmd_features(); 0 }
-        "api" => { cmd_api(); 0 }
-        "uptime" => { cmd_uptime(); 0 }
-        "pricing" => { cmd_pricing(); 0 }
-        "digi" => { cmd_digi(); 0 }
+        "help" | "-h" | "--help" => {
+            print_help(prog);
+            0
+        }
+        "version" | "-V" | "--version" => {
+            print_version();
+            0
+        }
+        "about" => {
+            cmd_about();
+            0
+        }
+        "network" => {
+            cmd_network();
+            0
+        }
+        "features" => {
+            cmd_features();
+            0
+        }
+        "api" => {
+            cmd_api();
+            0
+        }
+        "uptime" => {
+            cmd_uptime();
+            0
+        }
+        "pricing" => {
+            cmd_pricing();
+            0
+        }
+        "digi" => {
+            cmd_digi();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'. Try '{prog} help'.");
+            eprintln!(
+                "{prog}: unknown subcommand {}. Try '{prog} help'.",
+                quoteaf_os(other)
+            );
             2
         }
     }

@@ -17,6 +17,7 @@
 //! lsusb --json                    JSON output
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -559,12 +560,10 @@ fn scan_proc_usb() -> Vec<UsbDevice> {
                         if let Some((k, v)) = part.split_once('=') {
                             match k {
                                 "Vendor" => {
-                                    dev.vendor_id =
-                                        u16::from_str_radix(v.trim(), 16).unwrap_or(0);
+                                    dev.vendor_id = u16::from_str_radix(v.trim(), 16).unwrap_or(0);
                                 }
                                 "ProdID" => {
-                                    dev.product_id =
-                                        u16::from_str_radix(v.trim(), 16).unwrap_or(0);
+                                    dev.product_id = u16::from_str_radix(v.trim(), 16).unwrap_or(0);
                                 }
                                 _ => {}
                             }
@@ -575,15 +574,16 @@ fn scan_proc_usb() -> Vec<UsbDevice> {
             "S" => {
                 // String descriptor line.
                 if let Some(ref mut dev) = current
-                    && let Some(val) = rest.split_once('=').map(|(_, v)| v.trim().to_string()) {
-                        if rest.starts_with("Manufacturer") {
-                            dev.manufacturer = val;
-                        } else if rest.starts_with("Product") {
-                            dev.product = val;
-                        } else if rest.starts_with("SerialNumber") {
-                            dev.serial = val;
-                        }
+                    && let Some(val) = rest.split_once('=').map(|(_, v)| v.trim().to_string())
+                {
+                    if rest.starts_with("Manufacturer") {
+                        dev.manufacturer = val;
+                    } else if rest.starts_with("Product") {
+                        dev.product = val;
+                    } else if rest.starts_with("SerialNumber") {
+                        dev.serial = val;
                     }
+                }
             }
             _ => {
                 // Ignore C:, I:, E: lines for the summary scan.
@@ -720,10 +720,8 @@ fn display_verbose(dev: &UsbDevice) {
 
 fn display_tree(devices: &[UsbDevice]) {
     // Build a map from sysfs_name -> device for lookup.
-    let name_map: std::collections::HashMap<&str, &UsbDevice> = devices
-        .iter()
-        .map(|d| (d.sysfs_name.as_str(), d))
-        .collect();
+    let name_map: std::collections::HashMap<&str, &UsbDevice> =
+        devices.iter().map(|d| (d.sysfs_name.as_str(), d)).collect();
 
     // Identify root hubs (names starting with "usb").
     let mut roots: Vec<&UsbDevice> = devices
@@ -748,11 +746,11 @@ fn display_tree(devices: &[UsbDevice]) {
             format!(", {}", speed_label(&root.speed))
         };
 
+        println!("/:  Bus {:03} Dev {:03}{speed_str}", root.bus, root.devnum,);
         println!(
-            "/:  Bus {:03} Dev {:03}{speed_str}",
-            root.bus, root.devnum,
+            "    ID {:04x}:{:04x} {desc}",
+            root.vendor_id, root.product_id
         );
-        println!("    ID {:04x}:{:04x} {desc}", root.vendor_id, root.product_id);
 
         // Gather children of this root.
         let children = gather_children(&root.sysfs_name, devices);
@@ -762,10 +760,7 @@ fn display_tree(devices: &[UsbDevice]) {
 
 /// Gather direct children of a given sysfs parent name.
 fn gather_children<'a>(parent: &str, devices: &'a [UsbDevice]) -> Vec<&'a UsbDevice> {
-    let mut kids: Vec<&UsbDevice> = devices
-        .iter()
-        .filter(|d| d.parent_name == parent)
-        .collect();
+    let mut kids: Vec<&UsbDevice> = devices.iter().filter(|d| d.parent_name == parent).collect();
     kids.sort_by_key(|d| d.devnum);
     kids
 }
@@ -841,10 +836,7 @@ fn json_escape(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             c if c < '\x20' => {
                 // Control characters as \u00XX.
-                let _ = std::fmt::Write::write_fmt(
-                    &mut out,
-                    format_args!("\\u{:04x}", c as u32),
-                );
+                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("\\u{:04x}", c as u32));
             }
             c => out.push(c),
         }
@@ -946,12 +938,17 @@ fn print_usage() {
 
 /// Parse a `<bus>:<dev>` string where either part may be omitted.
 fn parse_bus_dev(s: &str) -> Result<(u16, u16), String> {
-    let (bus_str, dev_str) = s.split_once(':')
+    let (bus_str, dev_str) = s
+        .split_once(':')
         .ok_or_else(|| format!("expected <bus>:<dev>, got '{s}'"))?;
 
-    let bus = bus_str.trim().parse::<u16>()
+    let bus = bus_str
+        .trim()
+        .parse::<u16>()
         .map_err(|_| format!("invalid bus number: '{bus_str}'"))?;
-    let dev = dev_str.trim().parse::<u16>()
+    let dev = dev_str
+        .trim()
+        .parse::<u16>()
         .map_err(|_| format!("invalid device number: '{dev_str}'"))?;
 
     Ok((bus, dev))
@@ -960,7 +957,8 @@ fn parse_bus_dev(s: &str) -> Result<(u16, u16), String> {
 /// Parse a `<vendor>:<product>` hex filter string. Either side may be empty
 /// to act as a wildcard.
 fn parse_vendor_product(s: &str) -> Result<(Option<u16>, Option<u16>), String> {
-    let (v_str, p_str) = s.split_once(':')
+    let (v_str, p_str) = s
+        .split_once(':')
         .ok_or_else(|| format!("expected <vendor>:<product>, got '{s}'"))?;
 
     let vendor = if v_str.trim().is_empty() {
@@ -1056,7 +1054,7 @@ fn main() {
                 match parse_class_filter(&args[i + 1]) {
                     Some(cls) => config.filter_class = Some(cls),
                     None => {
-                        eprintln!("error: unknown USB class: '{}'", args[i + 1]);
+                        eprintln!("error: unknown USB class: {}", quoteaf_os(&args[i + 1]));
                         process::exit(1);
                     }
                 }
@@ -1087,9 +1085,7 @@ fn main() {
     };
 
     if devices.is_empty() {
-        eprintln!(
-            "No USB devices found (is /sys/bus/usb or /proc/usb/devices available?)"
-        );
+        eprintln!("No USB devices found (is /sys/bus/usb or /proc/usb/devices available?)");
         process::exit(1);
     }
 
@@ -1313,18 +1309,12 @@ mod tests {
 
     #[test]
     fn parse_vendor_product_vendor_wildcard() {
-        assert_eq!(
-            parse_vendor_product(":c52b"),
-            Ok((None, Some(0xC52B))),
-        );
+        assert_eq!(parse_vendor_product(":c52b"), Ok((None, Some(0xC52B))),);
     }
 
     #[test]
     fn parse_vendor_product_product_wildcard() {
-        assert_eq!(
-            parse_vendor_product("046d:"),
-            Ok((Some(0x046D), None)),
-        );
+        assert_eq!(parse_vendor_product("046d:"), Ok((Some(0x046D), None)),);
     }
 
     #[test]

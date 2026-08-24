@@ -9,6 +9,7 @@
 //! - `fwupd` — firmware update daemon
 //! - `fwupdtool` — firmware update debugging/testing tool
 
+use quoting::quoteaf_os;
 use std::collections::BTreeMap;
 use std::env;
 use std::process;
@@ -121,9 +122,10 @@ fn discover_devices() -> Vec<Device> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_file()
-            && let Some(dev) = parse_device_file(&path) {
-                devices.push(dev);
-            }
+            && let Some(dev) = parse_device_file(&path)
+        {
+            devices.push(dev);
+        }
     }
 
     if devices.is_empty() {
@@ -147,8 +149,14 @@ fn parse_device_file(path: &std::path::Path) -> Option<Device> {
         vendor: map.get("Vendor").cloned().unwrap_or_default(),
         version: map.get("Version").cloned().unwrap_or_default(),
         _version_lowest: map.get("VersionLowest").cloned().unwrap_or_default(),
-        guid: map.get("Guid").map(|s| s.split(',').map(|g| g.trim().to_string()).collect()).unwrap_or_default(),
-        _flags: map.get("Flags").map(|s| s.split(',').map(|f| f.trim().to_string()).collect()).unwrap_or_default(),
+        guid: map
+            .get("Guid")
+            .map(|s| s.split(',').map(|g| g.trim().to_string()).collect())
+            .unwrap_or_default(),
+        _flags: map
+            .get("Flags")
+            .map(|s| s.split(',').map(|f| f.trim().to_string()).collect())
+            .unwrap_or_default(),
         plugin: map.get("Plugin").cloned().unwrap_or_default(),
         _icon: map.get("Icon").cloned().unwrap_or_default(),
         _update_state: UpdateState::Unknown,
@@ -165,7 +173,11 @@ fn simulated_devices() -> Vec<Device> {
             version: "1.0.0".to_string(),
             _version_lowest: "0.9.0".to_string(),
             guid: vec!["230c8b18-8d9b-53ec-838b-6cfc0571051b".to_string()],
-            _flags: vec!["internal".to_string(), "updatable".to_string(), "needs-reboot".to_string()],
+            _flags: vec![
+                "internal".to_string(),
+                "updatable".to_string(),
+                "needs-reboot".to_string(),
+            ],
             plugin: "uefi_capsule".to_string(),
             _icon: "computer".to_string(),
             _update_state: UpdateState::Unknown,
@@ -210,27 +222,32 @@ fn read_remotes() -> Vec<Remote> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().map(|e| e == "conf").unwrap_or(false)
-            && let Ok(content) = std::fs::read_to_string(&path) {
-                let mut remote = Remote {
-                    id: path.file_stem().unwrap_or_default().to_string_lossy().to_string(),
-                    enabled: true,
-                    _kind: "download".to_string(),
-                    _uri: String::new(),
-                    _title: String::new(),
-                };
-                for line in content.lines() {
-                    if let Some((key, value)) = line.split_once('=') {
-                        match key.trim() {
-                            "Enabled" => remote.enabled = value.trim() == "true",
-                            "Title" => remote._title = value.trim().to_string(),
-                            "URI" | "Url" => remote._uri = value.trim().to_string(),
-                            "Type" => remote._kind = value.trim().to_string(),
-                            _ => {}
-                        }
+            && let Ok(content) = std::fs::read_to_string(&path)
+        {
+            let mut remote = Remote {
+                id: path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
+                enabled: true,
+                _kind: "download".to_string(),
+                _uri: String::new(),
+                _title: String::new(),
+            };
+            for line in content.lines() {
+                if let Some((key, value)) = line.split_once('=') {
+                    match key.trim() {
+                        "Enabled" => remote.enabled = value.trim() == "true",
+                        "Title" => remote._title = value.trim().to_string(),
+                        "URI" | "Url" => remote._uri = value.trim().to_string(),
+                        "Type" => remote._kind = value.trim().to_string(),
+                        _ => {}
                     }
                 }
-                remotes.push(remote);
             }
+            remotes.push(remote);
+        }
     }
 
     if remotes.is_empty() {
@@ -329,9 +346,9 @@ fn cmd_refresh(args: &[String]) {
     for r in &remotes {
         if r.enabled {
             if force {
-                println!("Refreshing remote '{}' (forced)...", r.id);
+                println!("Refreshing remote {} (forced)...", quoteaf_os(&r.id));
             } else {
-                println!("Refreshing remote '{}'...", r.id);
+                println!("Refreshing remote {}...", quoteaf_os(&r.id));
             }
             println!("  Downloading metadata... done.");
         }
@@ -347,9 +364,11 @@ fn cmd_update(args: &[String]) {
 
     for d in &devices {
         if let Some(ref filter) = device_filter
-            && !d.id.contains(filter.as_str()) && !d.name.to_lowercase().contains(&filter.to_lowercase()) {
-                continue;
-            }
+            && !d.id.contains(filter.as_str())
+            && !d.name.to_lowercase().contains(&filter.to_lowercase())
+        {
+            continue;
+        }
 
         if d.name.contains("System Firmware") {
             if !assume_yes {
@@ -372,7 +391,7 @@ fn cmd_install(args: &[String]) {
     let cab_file = &args[0];
     let device_id = args.get(1);
 
-    println!("Installing firmware from '{}'...", cab_file);
+    println!("Installing firmware from {}...", quoteaf_os(cab_file));
     if let Some(dev) = device_id {
         println!("  Target device: {}", dev);
     }
@@ -397,7 +416,7 @@ fn cmd_enable_remote(args: &[String]) {
             process::exit(1);
         }
     };
-    println!("Enabled remote '{}'.", remote_id);
+    println!("Enabled remote {}.", quoteaf_os(remote_id));
 }
 
 fn cmd_disable_remote(args: &[String]) {
@@ -408,7 +427,7 @@ fn cmd_disable_remote(args: &[String]) {
             process::exit(1);
         }
     };
-    println!("Disabled remote '{}'.", remote_id);
+    println!("Disabled remote {}.", quoteaf_os(remote_id));
 }
 
 fn cmd_get_history() {
@@ -451,7 +470,7 @@ fn cmd_security() {
 fn cmd_downgrade(args: &[String]) {
     let device_filter = args.iter().find(|a| !a.starts_with('-'));
     match device_filter {
-        Some(dev) => println!("Looking for downgrades for '{}'...", dev),
+        Some(dev) => println!("Looking for downgrades for {}...", quoteaf_os(dev)),
         None => println!("Looking for downgrades for all devices..."),
     }
     println!("No downgrades available.");
@@ -463,9 +482,10 @@ fn cmd_verify(args: &[String]) {
 
     for d in &devices {
         if let Some(filter) = device_filter
-            && !d.id.contains(filter.as_str()) {
-                continue;
-            }
+            && !d.id.contains(filter.as_str())
+        {
+            continue;
+        }
         println!("Verifying firmware on {}... OK", d.name);
     }
 }
@@ -485,7 +505,11 @@ fn run_daemon(args: &[String]) {
 
     let remotes = read_remotes();
     let enabled = remotes.iter().filter(|r| r.enabled).count();
-    println!("fwupd: {} remote(s) configured ({} enabled)", remotes.len(), enabled);
+    println!(
+        "fwupd: {} remote(s) configured ({} enabled)",
+        remotes.len(),
+        enabled
+    );
 
     println!("fwupd: daemon ready");
 }
@@ -494,7 +518,10 @@ fn run_daemon(args: &[String]) {
 
 fn run_fwupdtool(args: Vec<String>) -> i32 {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
-    let cmd = rest.first().cloned().unwrap_or_else(|| "get-devices".to_string());
+    let cmd = rest
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "get-devices".to_string());
     let cmd_args: Vec<String> = rest.into_iter().skip(1).collect();
 
     if cmd == "-h" || cmd == "--help" {
@@ -571,7 +598,10 @@ fn print_fwupdmgr_help() {
 
 fn run_fwupdmgr(args: Vec<String>) -> i32 {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
-    let cmd = rest.first().cloned().unwrap_or_else(|| "get-devices".to_string());
+    let cmd = rest
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "get-devices".to_string());
     let cmd_args: Vec<String> = rest.into_iter().skip(1).collect();
 
     if cmd == "-h" || cmd == "--help" {

@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! dynadot-cli — Slate OS personality CLI for Dynadot, the domainer-focused registrar.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -239,17 +240,47 @@ fn run_dynadot(args: &[String], prog: &str) -> i32 {
         return 0;
     };
     match sub.as_str() {
-        "help" | "-h" | "--help" => { print_help(prog); 0 }
-        "version" | "-V" | "--version" => { print_version(); 0 }
-        "about" => { cmd_about(); 0 }
-        "auctions" => { cmd_auctions(); 0 }
-        "bulkops" => { cmd_bulkops(); 0 }
-        "api" => { cmd_api(); 0 }
-        "builder" => { cmd_builder(); 0 }
-        "pricing" => { cmd_pricing(); 0 }
-        "forum" => { cmd_forum(); 0 }
+        "help" | "-h" | "--help" => {
+            print_help(prog);
+            0
+        }
+        "version" | "-V" | "--version" => {
+            print_version();
+            0
+        }
+        "about" => {
+            cmd_about();
+            0
+        }
+        "auctions" => {
+            cmd_auctions();
+            0
+        }
+        "bulkops" => {
+            cmd_bulkops();
+            0
+        }
+        "api" => {
+            cmd_api();
+            0
+        }
+        "builder" => {
+            cmd_builder();
+            0
+        }
+        "pricing" => {
+            cmd_pricing();
+            0
+        }
+        "forum" => {
+            cmd_forum();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'. Try '{prog} help'.");
+            eprintln!(
+                "{prog}: unknown subcommand {}. Try '{prog} help'.",
+                quoteaf_os(other)
+            );
             2
         }
     }

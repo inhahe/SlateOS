@@ -8,6 +8,7 @@
 //! - `dockerd` — Docker daemon
 //! - `docker-compose` — multi-container orchestration
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -25,15 +26,30 @@ struct _Container {
 
 fn _sample_containers() -> Vec<_Container> {
     vec![
-        _Container { id: "a1b2c3d4e5f6".to_string(), image: "nginx:latest".to_string(),
-            command: "nginx -g 'daemon off;'".to_string(), status: "Up 2 hours".to_string(),
-            name: "web-server".to_string(), _ports: "0.0.0.0:80->80/tcp".to_string() },
-        _Container { id: "f6e5d4c3b2a1".to_string(), image: "postgres:16".to_string(),
-            command: "postgres".to_string(), status: "Up 2 hours".to_string(),
-            name: "database".to_string(), _ports: "5432/tcp".to_string() },
-        _Container { id: "1234abcd5678".to_string(), image: "redis:7".to_string(),
-            command: "redis-server".to_string(), status: "Exited (0) 1 hour ago".to_string(),
-            name: "cache".to_string(), _ports: "".to_string() },
+        _Container {
+            id: "a1b2c3d4e5f6".to_string(),
+            image: "nginx:latest".to_string(),
+            command: "nginx -g 'daemon off;'".to_string(),
+            status: "Up 2 hours".to_string(),
+            name: "web-server".to_string(),
+            _ports: "0.0.0.0:80->80/tcp".to_string(),
+        },
+        _Container {
+            id: "f6e5d4c3b2a1".to_string(),
+            image: "postgres:16".to_string(),
+            command: "postgres".to_string(),
+            status: "Up 2 hours".to_string(),
+            name: "database".to_string(),
+            _ports: "5432/tcp".to_string(),
+        },
+        _Container {
+            id: "1234abcd5678".to_string(),
+            image: "redis:7".to_string(),
+            command: "redis-server".to_string(),
+            status: "Exited (0) 1 hour ago".to_string(),
+            name: "cache".to_string(),
+            _ports: "".to_string(),
+        },
     ]
 }
 
@@ -47,10 +63,30 @@ struct _Image {
 
 fn _sample_images() -> Vec<_Image> {
     vec![
-        _Image { repository: "nginx".to_string(), tag: "latest".to_string(), id: "abc123def456".to_string(), size: "187MB".to_string() },
-        _Image { repository: "postgres".to_string(), tag: "16".to_string(), id: "def456abc789".to_string(), size: "425MB".to_string() },
-        _Image { repository: "redis".to_string(), tag: "7".to_string(), id: "789abc123def".to_string(), size: "138MB".to_string() },
-        _Image { repository: "node".to_string(), tag: "22-slim".to_string(), id: "456def789abc".to_string(), size: "245MB".to_string() },
+        _Image {
+            repository: "nginx".to_string(),
+            tag: "latest".to_string(),
+            id: "abc123def456".to_string(),
+            size: "187MB".to_string(),
+        },
+        _Image {
+            repository: "postgres".to_string(),
+            tag: "16".to_string(),
+            id: "def456abc789".to_string(),
+            size: "425MB".to_string(),
+        },
+        _Image {
+            repository: "redis".to_string(),
+            tag: "7".to_string(),
+            id: "789abc123def".to_string(),
+            size: "138MB".to_string(),
+        },
+        _Image {
+            repository: "node".to_string(),
+            tag: "22-slim".to_string(),
+            id: "456def789abc".to_string(),
+            size: "245MB".to_string(),
+        },
     ]
 }
 
@@ -101,12 +137,19 @@ fn run_docker(args: Vec<String>) -> i32 {
         }
         "run" => {
             let detach = cmd_args.iter().any(|a| a == "-d" || a == "--detach");
-            let image = cmd_args.iter().rfind(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("ubuntu:latest");
+            let image = cmd_args
+                .iter()
+                .rfind(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or("ubuntu:latest");
             if detach {
                 println!("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2");
             } else {
-                println!("Unable to find image '{}' locally", image);
-                println!("latest: Pulling from library/{}", image.split(':').next().unwrap_or(image));
+                println!("Unable to find image {} locally", quoteaf_os(image));
+                println!(
+                    "latest: Pulling from library/{}",
+                    image.split(':').next().unwrap_or(image)
+                );
                 println!("Digest: sha256:abcdef1234567890...");
                 println!("Status: Downloaded newer image for {}", image);
                 println!("(container started — simulated)");
@@ -116,13 +159,26 @@ fn run_docker(args: Vec<String>) -> i32 {
         "ps" => {
             let show_all = cmd_args.iter().any(|a| a == "-a" || a == "--all");
             let containers = _sample_containers();
-            println!("CONTAINER ID   IMAGE           COMMAND                  STATUS              NAMES");
+            println!(
+                "CONTAINER ID   IMAGE           COMMAND                  STATUS              NAMES"
+            );
             for c in &containers {
-                if !show_all && c.status.starts_with("Exited") { continue; }
-                println!("{:<14} {:<15} {:?}{:<5} {:<19} {}",
-                    c.id, c.image,
-                    if c.command.len() > 20 { &c.command[..20] } else { &c.command },
-                    "", c.status, c.name);
+                if !show_all && c.status.starts_with("Exited") {
+                    continue;
+                }
+                println!(
+                    "{:<14} {:<15} {:?}{:<5} {:<19} {}",
+                    c.id,
+                    c.image,
+                    if c.command.len() > 20 {
+                        &c.command[..20]
+                    } else {
+                        &c.command
+                    },
+                    "",
+                    c.status,
+                    c.name
+                );
             }
             0
         }
@@ -130,12 +186,17 @@ fn run_docker(args: Vec<String>) -> i32 {
             let images = _sample_images();
             println!("REPOSITORY   TAG        IMAGE ID       SIZE");
             for img in &images {
-                println!("{:<12} {:<10} {:<14} {}", img.repository, img.tag, img.id, img.size);
+                println!(
+                    "{:<12} {:<10} {:<14} {}",
+                    img.repository, img.tag, img.id, img.size
+                );
             }
             0
         }
         "build" => {
-            let tag = cmd_args.iter().position(|a| a == "-t" || a == "--tag")
+            let tag = cmd_args
+                .iter()
+                .position(|a| a == "-t" || a == "--tag")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("myapp:latest");
@@ -150,9 +211,15 @@ fn run_docker(args: Vec<String>) -> i32 {
             0
         }
         "pull" => {
-            let image = cmd_args.first().map(|s| s.as_str()).unwrap_or("ubuntu:latest");
+            let image = cmd_args
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("ubuntu:latest");
             println!("Using default tag: latest");
-            println!("latest: Pulling from library/{}", image.split(':').next().unwrap_or(image));
+            println!(
+                "latest: Pulling from library/{}",
+                image.split(':').next().unwrap_or(image)
+            );
             println!("a1b2c3d4: Pull complete");
             println!("e5f6a7b8: Pull complete");
             println!("Digest: sha256:abcdef1234567890...");
@@ -161,19 +228,25 @@ fn run_docker(args: Vec<String>) -> i32 {
         }
         "stop" => {
             for name in &cmd_args {
-                if !name.starts_with('-') { println!("{}", name); }
+                if !name.starts_with('-') {
+                    println!("{}", name);
+                }
             }
             0
         }
         "start" | "restart" => {
             for name in &cmd_args {
-                if !name.starts_with('-') { println!("{}", name); }
+                if !name.starts_with('-') {
+                    println!("{}", name);
+                }
             }
             0
         }
         "rm" => {
             for name in &cmd_args {
-                if !name.starts_with('-') { println!("{}", name); }
+                if !name.starts_with('-') {
+                    println!("{}", name);
+                }
             }
             0
         }
@@ -208,9 +281,15 @@ fn run_docker(args: Vec<String>) -> i32 {
             0
         }
         "stats" => {
-            println!("CONTAINER ID   NAME         CPU %   MEM USAGE / LIMIT     MEM %   NET I/O          BLOCK I/O");
-            println!("a1b2c3d4e5f6   web-server   0.15%   25.5MiB / 2GiB        1.24%   1.2kB / 648B     0B / 0B");
-            println!("f6e5d4c3b2a1   database     1.20%   128MiB / 2GiB         6.25%   856B / 432B      4.1MB / 12.3MB");
+            println!(
+                "CONTAINER ID   NAME         CPU %   MEM USAGE / LIMIT     MEM %   NET I/O          BLOCK I/O"
+            );
+            println!(
+                "a1b2c3d4e5f6   web-server   0.15%   25.5MiB / 2GiB        1.24%   1.2kB / 648B     0B / 0B"
+            );
+            println!(
+                "f6e5d4c3b2a1   database     1.20%   128MiB / 2GiB         6.25%   856B / 432B      4.1MB / 12.3MB"
+            );
             0
         }
         "top" => {
@@ -276,17 +355,35 @@ fn run_docker(args: Vec<String>) -> i32 {
             }
             0
         }
-        "login" => { println!("Login Succeeded (simulated)"); 0 }
-        "logout" => { println!("Removing login credentials (simulated)"); 0 }
-        "tag" => { println!("Tagged (simulated)"); 0 }
+        "login" => {
+            println!("Login Succeeded (simulated)");
+            0
+        }
+        "logout" => {
+            println!("Removing login credentials (simulated)");
+            0
+        }
+        "tag" => {
+            println!("Tagged (simulated)");
+            0
+        }
         "push" => {
-            let image = cmd_args.first().map(|s| s.as_str()).unwrap_or("myapp:latest");
-            println!("The push refers to repository [docker.io/library/{}]", image);
+            let image = cmd_args
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("myapp:latest");
+            println!(
+                "The push refers to repository [docker.io/library/{}]",
+                image
+            );
             println!("a1b2c3d4: Pushed");
             println!("{}: digest: sha256:abcdef... size: 1234", image);
             0
         }
-        other => { eprintln!("docker: '{}' is not a docker command.", other); 1 }
+        other => {
+            eprintln!("docker: {} is not a docker command.", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -308,7 +405,10 @@ fn run_compose(args: Vec<String>) -> i32 {
             println!("  --version Show version");
             0
         }
-        "--version" | "version" => { println!("Docker Compose version v2.26.0 (Slate OS)"); 0 }
+        "--version" | "version" => {
+            println!("Docker Compose version v2.26.0 (Slate OS)");
+            0
+        }
         "up" => {
             println!("[+] Running 3/3");
             println!(" ✔ Container cache       Started");
@@ -331,10 +431,26 @@ fn run_compose(args: Vec<String>) -> i32 {
             println!("cache         cache       exited");
             0
         }
-        "logs" => { println!("Attaching to web-server, database, cache"); println!("web-server | Listening on :80"); 0 }
-        "config" => { println!("name: myproject"); println!("services:"); println!("  web:"); println!("    image: nginx:latest"); 0 }
-        "build" => { println!("Building web... done (simulated)"); 0 }
-        other => { eprintln!("docker-compose: '{}' is not a command.", other); 1 }
+        "logs" => {
+            println!("Attaching to web-server, database, cache");
+            println!("web-server | Listening on :80");
+            0
+        }
+        "config" => {
+            println!("name: myproject");
+            println!("services:");
+            println!("  web:");
+            println!("    image: nginx:latest");
+            0
+        }
+        "build" => {
+            println!("Building web... done (simulated)");
+            0
+        }
+        other => {
+            eprintln!("docker-compose: {} is not a command.", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -345,7 +461,9 @@ fn run_dockerd(args: Vec<String>) -> i32 {
         println!("Docker daemon.");
         println!();
         println!("Options:");
-        println!("  --data-root string   Root directory of runtime state (default /var/lib/docker)");
+        println!(
+            "  --data-root string   Root directory of runtime state (default /var/lib/docker)"
+        );
         println!("  --debug              Enable debug mode");
         println!("  --host list          Daemon socket(s) to connect to");
         println!("  --storage-driver     Storage driver to use");
@@ -376,7 +494,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);

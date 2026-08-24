@@ -2,3 +2,8 @@
 name = "nebula-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# nebula-cli names hosts, certificates and groups; a certificate name is
+# baked into a cert signed by someone else.
+quoting = { path = "../quoting" }

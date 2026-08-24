@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `gs`, `ps2pdf`, `pdf2ps`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -32,15 +33,34 @@ fn run_gs(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let device = args.iter().find_map(|a| a.strip_prefix("-sDEVICE=")).unwrap_or("pdfwrite");
-    let output = args.iter().find_map(|a| a.strip_prefix("-sOutputFile=")).unwrap_or("output");
-    let input_files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-') && !a.starts_with("/")).map(|s| s.as_str()).collect();
+    let device = args
+        .iter()
+        .find_map(|a| a.strip_prefix("-sDEVICE="))
+        .unwrap_or("pdfwrite");
+    let output = args
+        .iter()
+        .find_map(|a| a.strip_prefix("-sOutputFile="))
+        .unwrap_or("output");
+    let input_files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-') && !a.starts_with("/"))
+        .map(|s| s.as_str())
+        .collect();
 
     println!("GPL Ghostscript 10.03.0 (Slate OS) (2025-05-22)");
     println!("Copyright (C) 2025 Artifex Software, Inc.  All rights reserved.");
     if !input_files.is_empty() {
-        println!("Processing {} file(s) with device '{}'", input_files.len(), device);
-        println!("Output: {}", output);
+        // The count is this program's own arithmetic and needs no quoting;
+        // the device name is whatever followed `-sDEVICE=`, and the output
+        // file is whatever followed `-sOutputFile=`. The hand-written quotes
+        // sat around the one of the three that was already the least
+        // interesting, and quoted it in a way a `'` in the name escapes.
+        println!(
+            "Processing {} file(s) with device {}",
+            input_files.len(),
+            quoteaf_os(device)
+        );
+        println!("Output: {}", quoteaf_os(output));
         println!("Processing pages...");
         println!("Page 1");
         println!("Page 2");
@@ -54,8 +74,17 @@ fn run_ps2pdf(args: Vec<String>) -> i32 {
         println!("Usage: ps2pdf [options] input.ps [output.pdf]");
         return 0;
     }
-    let input = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("input.ps");
-    let output = args.iter().filter(|a| !a.starts_with('-')).nth(1).map(|s| s.as_str()).unwrap_or("output.pdf");
+    let input = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("input.ps");
+    let output = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .nth(1)
+        .map(|s| s.as_str())
+        .unwrap_or("output.pdf");
     println!("Converting {} -> {} (simulated)", input, output);
     0
 }
@@ -65,8 +94,17 @@ fn run_pdf2ps(args: Vec<String>) -> i32 {
         println!("Usage: pdf2ps [options] input.pdf [output.ps]");
         return 0;
     }
-    let input = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("input.pdf");
-    let output = args.iter().filter(|a| !a.starts_with('-')).nth(1).map(|s| s.as_str()).unwrap_or("output.ps");
+    let input = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("input.pdf");
+    let output = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .nth(1)
+        .map(|s| s.as_str())
+        .unwrap_or("output.ps");
     println!("Converting {} -> {} (simulated)", input, output);
     0
 }
@@ -78,7 +116,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -94,7 +134,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_gs};
+    use super::run_gs;
 
     #[test]
     fn help_exits_zero() {

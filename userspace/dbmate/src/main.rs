@@ -4,6 +4,7 @@
 //!
 //! Single personality: `dbmate`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -46,7 +47,10 @@ fn run_dbmate(args: Vec<String>) -> i32 {
     match cmd {
         "new" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("migration");
-            println!("Creating migration: db/migrations/20240115143000_{}.sql", name);
+            println!(
+                "Creating migration: db/migrations/20240115143000_{}.sql",
+                name
+            );
             0
         }
         "up" | "migrate" => {
@@ -100,7 +104,7 @@ fn run_dbmate(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Error: command required. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -116,7 +120,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_dbmate};
+    use super::run_dbmate;
 
     #[test]
     fn help_exits_zero() {

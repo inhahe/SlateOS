@@ -2,3 +2,8 @@
 name = "doxygen"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# Both messages name a file doxygen has just written, from a path given on
+# the command line.
+quoting = { path = "../quoting" }

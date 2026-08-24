@@ -30,7 +30,47 @@
 //! let loaded = HotkeyConfig::load(&text)?;
 //! let restored = loaded.into_registry();
 //! ```
+//!
+//! # Colour
+//!
+//! Every colour is read from the [`Palette`] the caller supplies; this module
+//! holds none of its own. Four judgements decide which role goes where, and
+//! each of them is a test rather than a comment.
+//!
+//! 1. **The panel is as transparent as the user asked, not as transparent as
+//!    this file guessed.** The background used to be `Color::rgba(30, 30, 46,
+//!    240)` — Mocha `base` with an alpha soldered onto it. That is a
+//!    *setting* frozen into a constant: a user who turned transparency off
+//!    still saw the wallpaper through their hotkey list, and a user who turned
+//!    it up to Full got a panel noticeably more solid than every other popup
+//!    on the same screen. [`Palette::panel_bg`] is `base` at the palette's own
+//!    `panel_alpha`, so the panel now answers the setting.
+//! 2. **Nothing here is accented, and that is a claim rather than an
+//!    oversight.** This panel is a *reference card* — the user is reading it,
+//!    not operating it, and the selected row marks where they are looking
+//!    rather than what is in force. So the selection moves a rung
+//!    ([`surface0`](Palette::surface0) over the panel, ink from
+//!    [`subtext1`](Palette::subtext1) up to [`text`](Palette::text)) instead
+//!    of changing hue. That also matches the shell's other keyboard-driven
+//!    list, the launcher, which fills its selected row with a surface and
+//!    spends its accent on a separate marker bar. The count is asserted at
+//!    zero, so an accent appearing here later has to be a decision rather than
+//!    a slip.
+//! 3. **The selection is said twice, and both sayings are tested.** A fill
+//!    appears *and* the label brightens. Either alone is a one-bit signal that
+//!    a low-contrast display or a user with poor colour discrimination can
+//!    lose; together they survive either failure. A test that checked only the
+//!    fill would let the ink branch collapse silently, which is the exact
+//!    shape of bug this conversion exists to catch.
+//! 4. **A key badge is three rungs of one stack, and the stack is what is
+//!    checked.** [`mantle`](Palette::mantle) behind the panel it sits on,
+//!    [`surface1`](Palette::surface1) as its edge, [`subtext0`](Palette::subtext0)
+//!    as its ink. The tests assert the *relations* — a badge is a different
+//!    colour from the panel in both modes, and its ink is dimmer than the
+//!    header's — because those hold in Mocha and Latte alike, whereas "the
+//!    badge is `#181825`" holds in neither once the mode can change.
 
+use appearance::Palette;
 use guitk::event::{Key, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -38,25 +78,6 @@ use guitk::text;
 
 use std::collections::BTreeMap;
 use std::fmt;
-
-// ============================================================================
-// Theme — Catppuccin Mocha palette (consistent with other desktop modules)
-// ============================================================================
-
-mod theme {
-    use guitk::color::Color;
-
-    pub const BASE: Color = Color::rgba(30, 30, 46, 240);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const SURFACE2: Color = Color::from_hex(0x585B70);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const SHADOW: Color = Color::rgba(0, 0, 0, 100);
-}
 
 // ============================================================================
 // Rendering constants
@@ -936,8 +957,12 @@ fn parse_hotkey_string(s: &str) -> Result<Hotkey, HotkeyError> {
 /// on top of the desktop. The panel is positioned at `(panel_x, panel_y)`.
 ///
 /// `selected_index` optionally highlights one row (for keyboard navigation).
+///
+/// `p` supplies every colour drawn; see this module's `# Colour` section for
+/// the four judgements that decide which role goes where.
 pub fn render_settings_panel(
     registry: &HotkeyRegistry,
+    p: &Palette,
     panel_x: f32,
     panel_y: f32,
     selected_index: Option<usize>,
@@ -960,7 +985,9 @@ pub fn render_settings_panel(
         offset_y: 4.0,
         blur: 20.0,
         spread: 6.0,
-        color: theme::SHADOW,
+        // Black in both modes, which is why it does not flip with the theme:
+        // a shadow is an absence of light rather than a colour.
+        color: p.shadow(),
         corner_radii: radii,
     });
 
@@ -970,7 +997,8 @@ pub fn render_settings_panel(
         y: panel_y,
         width: PANEL_WIDTH,
         height: panel_height,
-        color: theme::BASE,
+        // Judgement 1: the transparency setting, not a baked-in alpha.
+        color: p.panel_bg(),
         corner_radii: radii,
     });
 
@@ -980,7 +1008,7 @@ pub fn render_settings_panel(
         y: panel_y,
         width: PANEL_WIDTH,
         height: panel_height,
-        color: theme::SURFACE2,
+        color: p.surface2,
         line_width: 1.0,
         corner_radii: radii,
     });
@@ -998,7 +1026,7 @@ pub fn render_settings_panel(
         x: panel_x + PADDING,
         y: panel_y + PADDING,
         text: "Keyboard Shortcuts".to_string(),
-        color: theme::TEXT,
+        color: p.text,
         font_size: HEADER_FONT_SIZE,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1011,7 +1039,7 @@ pub fn render_settings_panel(
         y1: panel_y + HEADER_HEIGHT,
         x2: panel_x + PANEL_WIDTH - PADDING,
         y2: panel_y + HEADER_HEIGHT,
-        color: theme::SURFACE1,
+        color: p.surface1,
         width: 1.0,
     });
 
@@ -1028,18 +1056,19 @@ pub fn render_settings_panel(
                 y: row_y + 2.0,
                 width: content_width + PADDING,
                 height: ROW_HEIGHT - 4.0,
-                color: theme::SURFACE0,
+                // Judgement 2: one rung up from the panel, not the accent.
+                // The selected row is where the user is *looking*; nothing on
+                // this card is in force.
+                color: p.surface0,
                 corner_radii: CornerRadii::all(6.0),
             });
         }
 
         // Action label on the left.
         let label = action.display_label();
-        let label_color = if is_selected {
-            theme::TEXT
-        } else {
-            theme::SUBTEXT1
-        };
+        // Judgement 3: the selection is said twice. The fill above is the
+        // other saying, and neither is allowed to carry it alone.
+        let label_color = if is_selected { p.text } else { p.subtext1 };
         cmds.push(RenderCommand::Text {
             x: panel_x + PADDING,
             y: row_y + (ROW_HEIGHT - LABEL_FONT_SIZE) / 2.0,
@@ -1068,7 +1097,9 @@ pub fn render_settings_panel(
                 x: detail_x,
                 y: row_y + (ROW_HEIGHT - KEY_FONT_SIZE) / 2.0 + 1.0,
                 text: detail.to_string(),
-                color: theme::OVERLAY0,
+                // Dimmer than either label branch: the app name is an
+                // argument to the action beside it, not a second action.
+                color: p.overlay0,
                 font_size: KEY_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_width * 0.25),
@@ -1094,7 +1125,9 @@ pub fn render_settings_panel(
                 y: badge_y,
                 width: text_width,
                 height: KEY_BADGE_HEIGHT,
-                color: theme::MANTLE,
+                // Judgement 4: the rung *behind* the panel, so a badge reads
+                // as a recess cut into the card in either mode.
+                color: p.mantle,
                 corner_radii: CornerRadii::all(KEY_BADGE_RADIUS),
             });
 
@@ -1104,7 +1137,7 @@ pub fn render_settings_panel(
                 y: badge_y,
                 width: text_width,
                 height: KEY_BADGE_HEIGHT,
-                color: theme::SURFACE1,
+                color: p.surface1,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(KEY_BADGE_RADIUS),
             });
@@ -1114,7 +1147,9 @@ pub fn render_settings_panel(
                 x: badge_x + 6.0,
                 y: badge_y + (KEY_BADGE_HEIGHT - KEY_FONT_SIZE) / 2.0,
                 text: (*part).to_string(),
-                color: theme::SUBTEXT0,
+                // Judgement 4: dimmer than the header. A badge quotes a key;
+                // it is not a heading.
+                color: p.subtext0,
                 font_size: KEY_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1144,8 +1179,17 @@ mod tests {
         clippy::indexing_slicing,
         clippy::arithmetic_side_effects
     )]
+    // The colour tests select a rectangle by the exact literal dimensions the
+    // code under test was handed — a fill 24 units high is *a key badge*, and
+    // nothing else on this panel is. That is the assertion meant: a tolerance
+    // would let a rectangle that has been resized pass as one that has not,
+    // and geometry is the only handle this panel offers on which of its
+    // unnamed boxes is which.
+    #![allow(clippy::float_cmp)]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
+    use guitk::color::Color;
 
     /// The config line splits at its *first* `=`, and the position of that
     /// separator is never carried in a variable that a later expression has to
@@ -1807,7 +1851,7 @@ mod tests {
     #[test]
     fn test_render_settings_panel_nonempty() {
         let reg = HotkeyRegistry::defaults();
-        let cmds = render_settings_panel(&reg, 100.0, 100.0, None);
+        let cmds = render_settings_panel(&reg, &accented(false), 100.0, 100.0, None);
         // Should produce a non-trivial number of render commands:
         // shadow + bg + border + clip + header text + separator + rows.
         assert!(cmds.len() > 10);
@@ -1816,7 +1860,7 @@ mod tests {
     #[test]
     fn test_render_settings_panel_empty_registry() {
         let reg = HotkeyRegistry::new();
-        let cmds = render_settings_panel(&reg, 0.0, 0.0, None);
+        let cmds = render_settings_panel(&reg, &accented(false), 0.0, 0.0, None);
         // Should still render header (shadow + bg + border + clip + header + sep + popclip).
         assert!(cmds.len() >= 6);
     }
@@ -1824,7 +1868,7 @@ mod tests {
     #[test]
     fn test_render_settings_panel_with_selection() {
         let reg = HotkeyRegistry::defaults();
-        let cmds = render_settings_panel(&reg, 50.0, 50.0, Some(0));
+        let cmds = render_settings_panel(&reg, &accented(false), 50.0, 50.0, Some(0));
         // Should have at least one extra FillRect for the selection highlight.
         let fill_rects = cmds
             .iter()
@@ -1832,5 +1876,555 @@ mod tests {
             .count();
         // 1 (shadow is BoxShadow) + 1 bg + 1 selection + N badges.
         assert!(fill_rects >= 3);
+    }
+
+    // ====================================================================
+    // Colour — part 2 of
+    // TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE
+    // ====================================================================
+
+    /// A palette whose accent belongs to no palette.
+    ///
+    /// Judgement 2 is a claim that *nothing* in this panel is accented, and at
+    /// the shipped theme that claim cannot fail: the stock accent **is**
+    /// `blue`, so a site wrongly repainted with the accent would be
+    /// indistinguishable from one correctly drawing a role. Substituting a
+    /// colour outside the palette makes the count of accented commands
+    /// meaningful; the loop proves the substitute really is outside it, rather
+    /// than colliding with a role some other test then reads by accident.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0xFF00FF);
+        for (name, role) in p.roles() {
+            if name == "accent" {
+                continue;
+            }
+            assert_ne!(
+                (role.r, role.g, role.b),
+                (p.accent.r, p.accent.g, p.accent.b),
+                "the substitute accent collides with {name}, so an accent \
+                 assertion would be reading that role instead"
+            );
+        }
+        p
+    }
+
+    /// Every colour any command in `cmds` will put on the screen.
+    fn color_of(cmd: &RenderCommand) -> Option<Color> {
+        match cmd {
+            RenderCommand::FillRect { color, .. }
+            | RenderCommand::StrokeRect { color, .. }
+            | RenderCommand::Text { color, .. }
+            | RenderCommand::Line { color, .. }
+            | RenderCommand::BoxShadow { color, .. } => Some(*color),
+            _ => None,
+        }
+    }
+
+    /// The colour of the one `Text` command reading exactly `s`.
+    fn text_color(cmds: &[RenderCommand], s: &str) -> Color {
+        let hits: Vec<Color> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. } if text == s => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hits.len(), 1, "expected exactly one Text reading {s:?}");
+        hits[0]
+    }
+
+    /// Perceived brightness, the same weighting [`appearance::readable_on`]
+    /// uses — so "dimmer than" means the same thing here as it does there.
+    fn luma(c: Color) -> f32 {
+        0.299 * f32::from(c.r) + 0.587 * f32::from(c.g) + 0.114 * f32::from(c.b)
+    }
+
+    /// The whole-panel sweep: nothing is drawn that the palette cannot
+    /// account for, in either mode, with and without a selection, and with an
+    /// empty registry as well as the default one.
+    ///
+    /// The light render is the one that matters. Every constant this
+    /// conversion deleted was a Catppuccin **Mocha** value, so a substitution
+    /// that was missed is invisible in dark mode — it draws exactly what it
+    /// always drew — and names itself the moment the light palette is handed
+    /// in.
+    #[test]
+    fn every_colour_this_panel_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+            for empty in [false, true] {
+                let reg = if empty {
+                    HotkeyRegistry::new()
+                } else {
+                    HotkeyRegistry::defaults()
+                };
+                let last = reg.len().saturating_sub(1);
+                for sel in [None, Some(0), Some(last)] {
+                    let cmds = render_settings_panel(&reg, &p, 40.0, 60.0, sel);
+                    assert_drawn_from(&p, &cmds, &[], "hotkeys settings panel");
+                }
+            }
+        }
+        // A sweep over a panel that drew nothing would pass vacuously.
+        let p = accented(true);
+        let cmds = render_settings_panel(&HotkeyRegistry::defaults(), &p, 0.0, 0.0, Some(3));
+        assert!(cmds.len() > 40, "the fixture rendered almost nothing");
+    }
+
+    /// None of the ten deleted constants is still drawn.
+    ///
+    /// The sweep above catches a leftover by *membership*; this catches it by
+    /// *name*, so a failure says which constant survived rather than only that
+    /// some colour is foreign. The two overlap deliberately — the overlap is
+    /// what turns "a colour is wrong" into "`MANTLE` is still there".
+    #[test]
+    fn none_of_the_ten_deleted_constants_is_still_drawn() {
+        const DELETED: [(&str, u32); 10] = [
+            ("BASE", 0x001E_1E2E),
+            ("MANTLE", 0x0018_1825),
+            ("SURFACE0", 0x0031_3244),
+            ("SURFACE1", 0x0045_475A),
+            ("SURFACE2", 0x0058_5B70),
+            ("TEXT", 0x00CD_D6F4),
+            ("SUBTEXT0", 0x00A6_ADC8),
+            ("SUBTEXT1", 0x00BA_C2DE),
+            ("OVERLAY0", 0x006C_7086),
+            ("SHADOW", 0x0000_0000),
+        ];
+        let p = accented(true);
+        let reg = HotkeyRegistry::defaults();
+        let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, Some(0));
+        for cmd in &cmds {
+            let Some(c) = color_of(cmd) else { continue };
+            // `SHADOW` was black, and black stays black in both modes on
+            // purpose — a shadow is an absence of light. It is in the list
+            // above only so the list is visibly the whole `mod theme`, and it
+            // is the one entry that cannot be checked this way.
+            if c.r == 0 && c.g == 0 && c.b == 0 {
+                continue;
+            }
+            let rgb = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+            for (name, hex) in DELETED {
+                assert_ne!(
+                    rgb, hex,
+                    "the light render still draws Mocha {name}, so that \
+                     constant survived the conversion"
+                );
+            }
+        }
+    }
+
+    /// Every site draws the role it claims — pinned one site at a time.
+    ///
+    /// A membership sweep cannot see a *permutation*: swap the badge fill and
+    /// the separator and every colour drawn is still a role of the palette, so
+    /// the sweep stays silent while the panel is visibly wrong. Only a table
+    /// indexed by site catches that, which is why this exists beside the sweep
+    /// rather than instead of it.
+    #[test]
+    fn every_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+            let reg = HotkeyRegistry::defaults();
+            let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, Some(0));
+
+            // Panel chrome, identified by the panel's own full width.
+            let shadow = cmds
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::BoxShadow { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .expect("no shadow");
+            assert_eq!((shadow.r, shadow.g, shadow.b), (0, 0, 0), "shadow");
+            assert_eq!(shadow, p.shadow(), "shadow");
+
+            let bg = cmds
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect { width, color, .. } if *width == PANEL_WIDTH => {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .expect("no panel background");
+            assert_eq!(bg, p.panel_bg(), "panel background");
+
+            let border = cmds
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::StrokeRect { width, color, .. } if *width == PANEL_WIDTH => {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .expect("no panel border");
+            assert_eq!(border, p.surface2, "panel border");
+
+            assert_eq!(
+                text_color(&cmds, "Keyboard Shortcuts"),
+                p.text,
+                "header ink"
+            );
+
+            let sep = cmds
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Line { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .expect("no separator");
+            assert_eq!(sep, p.surface1, "header separator");
+
+            // The selection highlight: the only fill of the row's height.
+            let hl: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { height, color, .. }
+                        if *height == ROW_HEIGHT - 4.0 =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(hl, vec![p.surface0], "selection highlight");
+
+            // Badge chrome: every fill and stroke of the badge height.
+            let badge_fills: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { height, color, .. }
+                        if *height == KEY_BADGE_HEIGHT =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(badge_fills.len() > 10, "too few badges to be a check");
+            assert!(
+                badge_fills.iter().all(|c| *c == p.mantle),
+                "badge background"
+            );
+
+            let badge_borders: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect { height, color, .. }
+                        if *height == KEY_BADGE_HEIGHT =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(badge_borders.len(), badge_fills.len(), "badge border count");
+            assert!(
+                badge_borders.iter().all(|c| *c == p.surface1),
+                "badge border"
+            );
+
+            // Badge ink: the `KEY_FONT_SIZE` text that is not the one detail
+            // line the default set produces (`explorer`, for `LaunchApp`).
+            let badge_ink: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text {
+                        font_size,
+                        text,
+                        color,
+                        ..
+                    } if *font_size == KEY_FONT_SIZE && text != "explorer" => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(badge_ink.len(), badge_fills.len(), "badge ink count");
+            assert!(badge_ink.iter().all(|c| *c == p.subtext0), "badge ink");
+
+            assert_eq!(text_color(&cmds, "explorer"), p.overlay0, "detail ink");
+
+            // Both branches of the label, in one render: row 0 is selected
+            // and every other row is not. A fixture that rendered only one
+            // branch would leave the other unchecked.
+            let labels: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text {
+                        font_size, color, ..
+                    } if *font_size == LABEL_FONT_SIZE => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(labels.len(), reg.len(), "one label per row");
+            assert_eq!(labels[0], p.text, "selected label ink");
+            assert!(
+                labels[1..].iter().all(|c| *c == p.subtext1),
+                "unselected label ink"
+            );
+        }
+    }
+
+    /// Judgement 2, stated as a count: this panel accents nothing.
+    ///
+    /// Stated as a count rather than as "the selection is `surface0`" because
+    /// the interesting failure is not the selection changing role — the pin
+    /// table catches that — but some *other* site quietly acquiring the
+    /// accent. Only a count over the whole panel can see that, and only an
+    /// accent that is outside the palette makes the count mean anything.
+    #[test]
+    fn nothing_in_this_panel_is_accented() {
+        for light in [false, true] {
+            let p = accented(light);
+            for empty in [false, true] {
+                let reg = if empty {
+                    HotkeyRegistry::new()
+                } else {
+                    HotkeyRegistry::defaults()
+                };
+                let last = reg.len().saturating_sub(1);
+                for sel in [None, Some(0), Some(last)] {
+                    let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, sel);
+                    let accented_count = cmds
+                        .iter()
+                        .filter_map(color_of)
+                        .filter(|c| (c.r, c.g, c.b) == (p.accent.r, p.accent.g, p.accent.b))
+                        .count();
+                    assert_eq!(
+                        accented_count, 0,
+                        "a hotkey card is read, not operated: nothing on it \
+                         is in force, so nothing on it should wear the \
+                         accent (light={light}, empty={empty}, sel={sel:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Judgement 1: the panel is as transparent as the user asked.
+    ///
+    /// The alpha used to be `240`, frozen into a constant, so this panel
+    /// ignored the transparency setting in both directions at once — visible
+    /// to a user who had turned transparency *off*, and more solid than every
+    /// neighbouring popup for a user who had turned it up. The shadow is
+    /// checked alongside it precisely because it must *not* move: it is black
+    /// at a fixed alpha in both modes, and a fix that made everything follow
+    /// `panel_alpha` would be as wrong as the constant was.
+    #[test]
+    fn the_panel_is_as_transparent_as_the_user_asked() {
+        let reg = HotkeyRegistry::defaults();
+        for light in [false, true] {
+            let mut seen: Vec<u8> = Vec::new();
+            for alpha in [255_u8, 200, 160] {
+                let mut p = accented(light);
+                p.panel_alpha = alpha;
+                let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, None);
+
+                let bg = cmds
+                    .iter()
+                    .find_map(|c| match c {
+                        RenderCommand::FillRect { width, color, .. } if *width == PANEL_WIDTH => {
+                            Some(*color)
+                        }
+                        _ => None,
+                    })
+                    .expect("no panel background");
+                assert_eq!(
+                    bg.a, alpha,
+                    "the panel background ignored panel_alpha={alpha}"
+                );
+                assert_eq!((bg.r, bg.g, bg.b), (p.base.r, p.base.g, p.base.b));
+                seen.push(bg.a);
+
+                let shadow = cmds
+                    .iter()
+                    .find_map(|c| match c {
+                        RenderCommand::BoxShadow { color, .. } => Some(*color),
+                        _ => None,
+                    })
+                    .expect("no shadow");
+                assert_eq!(
+                    shadow,
+                    p.shadow(),
+                    "the shadow followed the transparency setting, but a \
+                     shadow is an absence of light and does not thin out \
+                     when a panel does"
+                );
+            }
+            assert_eq!(seen, vec![255, 200, 160], "the three levels ran");
+        }
+    }
+
+    /// Judgement 3: a selected row is marked twice, and moving the selection
+    /// moves both marks together.
+    ///
+    /// Indexed by row rather than counted, because a count cannot tell a
+    /// selection that landed on the *wrong* row from one that landed on the
+    /// right one — and an off-by-one between the highlight's `y` and the
+    /// label's is exactly the bug a list like this grows.
+    #[test]
+    fn a_selected_row_is_said_twice() {
+        let reg = HotkeyRegistry::defaults();
+        let rows = reg.len();
+        assert!(rows > 3, "the default set is too small to index into");
+        let p = accented(true);
+
+        // With no selection at all, neither saying appears anywhere.
+        let none = render_settings_panel(&reg, &p, 0.0, 0.0, None);
+        assert!(
+            !none.iter().any(|c| matches!(
+                c,
+                RenderCommand::FillRect { height, .. } if *height == ROW_HEIGHT - 4.0
+            )),
+            "an unselected panel drew a selection highlight"
+        );
+        assert!(
+            none.iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text {
+                        font_size, color, ..
+                    } if *font_size == LABEL_FONT_SIZE => Some(*color),
+                    _ => None,
+                })
+                .all(|c| c == p.subtext1),
+            "an unselected panel brightened a label"
+        );
+
+        for sel in [0, 1, rows / 2, rows - 1] {
+            let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, Some(sel));
+
+            // Saying one: exactly one highlight, at the selected row's y.
+            let highlights: Vec<(f32, Color)> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        y, height, color, ..
+                    } if *height == ROW_HEIGHT - 4.0 => Some((*y, *color)),
+                    _ => None,
+                })
+                .collect();
+            let want_y = HEADER_HEIGHT + sel as f32 * ROW_HEIGHT + 2.0;
+            assert_eq!(highlights, vec![(want_y, p.surface0)], "highlight at {sel}");
+
+            // Saying two: exactly one brightened label, and it is that row's.
+            let labels: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text {
+                        font_size, color, ..
+                    } if *font_size == LABEL_FONT_SIZE => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(labels.len(), rows);
+            for (i, c) in labels.iter().enumerate() {
+                let want = if i == sel { p.text } else { p.subtext1 };
+                assert_eq!(*c, want, "label ink at row {i} with row {sel} selected");
+            }
+        }
+
+        // An out-of-range selection selects nothing rather than the last row.
+        let over = render_settings_panel(&reg, &p, 0.0, 0.0, Some(rows));
+        assert!(
+            !over.iter().any(|c| matches!(
+                c,
+                RenderCommand::FillRect { height, .. } if *height == ROW_HEIGHT - 4.0
+            )),
+            "a selection past the end still highlighted a row"
+        );
+    }
+
+    /// Judgement 4, as relations rather than literals.
+    ///
+    /// "The badge is `#181825`" is true in Mocha and false in Latte, so it is
+    /// not the claim worth testing. What must hold in both modes is that a
+    /// badge is *visibly a badge*: a different colour from the card it sits
+    /// on, outlined in something different again, and lettered more quietly
+    /// than the heading above it. Those survive the mode flip; the hex does
+    /// not, which is the whole reason the constants had to go.
+    #[test]
+    fn a_key_badge_stands_off_the_panel_it_sits_on() {
+        let reg = HotkeyRegistry::defaults();
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, None);
+            let mode = if light { "light" } else { "dark" };
+
+            let bg = cmds
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect { width, color, .. } if *width == PANEL_WIDTH => {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .expect("no panel background");
+            let badge = cmds
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect { height, color, .. }
+                        if *height == KEY_BADGE_HEIGHT =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .expect("no badge");
+            let edge = cmds
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::StrokeRect { height, color, .. }
+                        if *height == KEY_BADGE_HEIGHT =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .expect("no badge border");
+
+            assert_ne!(
+                (badge.r, badge.g, badge.b),
+                (bg.r, bg.g, bg.b),
+                "in {mode} mode a key badge is the same colour as the card \
+                 it sits on, so it does not read as a badge at all"
+            );
+            assert_ne!(
+                (edge.r, edge.g, edge.b),
+                (badge.r, badge.g, badge.b),
+                "in {mode} mode a badge's border is the same colour as its \
+                 fill, so the badge has no outline"
+            );
+
+            let header = text_color(&cmds, "Keyboard Shortcuts");
+            let ink = cmds
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text {
+                        font_size,
+                        text,
+                        color,
+                        ..
+                    } if *font_size == KEY_FONT_SIZE && text != "explorer" => Some(*color),
+                    _ => None,
+                })
+                .expect("no badge ink");
+            let detail = text_color(&cmds, "explorer");
+            let quieter = |a: Color, b: Color| {
+                // "Quieter" is distance from the panel, not absolute
+                // darkness: in Latte the dimmer ink is the *lighter* one.
+                (luma(a) - luma(bg)).abs() < (luma(b) - luma(bg)).abs()
+            };
+            assert!(
+                quieter(ink, header),
+                "in {mode} mode a key badge is lettered as loudly as the \
+                 heading; a badge quotes a key, it is not a heading"
+            );
+            assert!(
+                quieter(detail, ink),
+                "in {mode} mode the app name beside an action is as loud as \
+                 the key badges; it is an argument, not an action"
+            );
+        }
     }
 }

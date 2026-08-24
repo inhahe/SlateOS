@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `clearml-init`, `clearml-task`, `clearml-data`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_clearml(args: &[String], prog: &str) -> i32 {
     match prog {
@@ -40,11 +45,14 @@ fn run_clearml(args: &[String], prog: &str) -> i32 {
                     println!("ds-def456    test-data         1.0       500 MB");
                 }
                 "create" => {
-                    let name = args.windows(2).find(|w| w[0] == "--name")
-                        .map(|w| w[1].as_str()).unwrap_or("my-dataset");
-                    println!("Created dataset '{}': ds-ghi789", name);
+                    let name = args
+                        .windows(2)
+                        .find(|w| w[0] == "--name")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("my-dataset");
+                    println!("Created dataset {}: ds-ghi789", quoteaf_os(name));
                 }
-                _ => println!("clearml-data: '{}' completed", subcmd),
+                _ => println!("clearml-data: {} completed", quoteaf_os(subcmd)),
             }
             return 0;
         }
@@ -65,22 +73,31 @@ fn run_clearml(args: &[String], prog: &str) -> i32 {
         println!("  --requirements FILE  Requirements file");
         return 0;
     }
-    let name = args.windows(2).find(|w| w[0] == "--name")
-        .map(|w| w[1].as_str()).unwrap_or("my-task");
-    let queue = args.windows(2).find(|w| w[0] == "--queue")
-        .map(|w| w[1].as_str()).unwrap_or("default");
+    let name = args
+        .windows(2)
+        .find(|w| w[0] == "--name")
+        .map(|w| w[1].as_str())
+        .unwrap_or("my-task");
+    let queue = args
+        .windows(2)
+        .find(|w| w[0] == "--queue")
+        .map(|w| w[1].as_str())
+        .unwrap_or("default");
 
-    println!("Creating task '{}'...", name);
+    println!("Creating task {}...", quoteaf_os(name));
     println!("  Task ID: task-abc123");
     println!("  Project: my-project");
-    println!("  Enqueuing on queue '{}'...", queue);
+    println!("  Enqueuing on queue {}...", quoteaf_os(queue));
     println!("Task enqueued successfully.");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "clearml-task".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "clearml-task".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_clearml(&rest, &prog);
     process::exit(code);
@@ -88,7 +105,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_clearml};
+    use super::{basename, run_clearml, strip_ext};
 
     #[test]
     fn basename_strips_path() {

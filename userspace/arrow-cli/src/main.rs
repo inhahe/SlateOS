@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `arrow`, `parquet`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_arrow(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -51,7 +56,8 @@ fn run_arrow(args: &[String]) -> i32 {
         }
         "head" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("data.arrow");
-            let n = args.windows(2)
+            let n = args
+                .windows(2)
                 .find(|w| w[0] == "-n")
                 .and_then(|w| w[1].parse::<usize>().ok())
                 .unwrap_or(10);
@@ -66,7 +72,8 @@ fn run_arrow(args: &[String]) -> i32 {
         }
         "convert" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("data.arrow");
-            let to = args.windows(2)
+            let to = args
+                .windows(2)
                 .find(|w| w[0] == "--to")
                 .map(|w| w[1].as_str())
                 .unwrap_or("parquet");
@@ -87,7 +94,8 @@ fn run_arrow(args: &[String]) -> i32 {
             println!("  Column: value min=0.01 max=999.99 nulls=150");
         }
         "merge" => {
-            let files: Vec<&str> = args.iter()
+            let files: Vec<&str> = args
+                .iter()
                 .filter(|a| a.ends_with(".arrow") || a.ends_with(".parquet"))
                 .map(|s| s.as_str())
                 .collect();
@@ -95,7 +103,7 @@ fn run_arrow(args: &[String]) -> i32 {
             println!("arrow merge: {} files -> merged.arrow", count);
             println!("  Merged 3,000,000 total rows");
         }
-        _ => println!("arrow: '{}' completed", subcmd),
+        _ => println!("arrow: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -151,7 +159,10 @@ fn run_parquet(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "arrow".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "arrow".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "parquet" => run_parquet(&rest),
@@ -162,7 +173,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_arrow};
+    use super::{basename, run_arrow, strip_ext};
 
     #[test]
     fn basename_strips_path() {

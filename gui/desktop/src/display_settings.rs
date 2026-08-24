@@ -9,26 +9,54 @@
 //! - Multi-monitor per-display settings
 //! - Color profile management (sRGB, DCI-P3, custom ICC)
 //! - Test patterns for calibration (grayscale, color bars, gradient)
+//!
+//! # Colour
+//!
+//! Chrome is read out of the caller's [`Palette`]; part 2 of
+//! `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE` deleted
+//! the nine Mocha constants this module used to carry. Three judgements are
+//! worth stating, because "read it from the palette" does not by itself say
+//! *which* role — and here it is twice the wrong instruction entirely.
+//!
+//! **Three things in this file are instruments, not decoration, and the
+//! palette must not reach them.** A settings page that themes its own
+//! measuring equipment is lying to the user:
+//!
+//! - [`TestPattern::render`] emits a sixteen-step grey ramp, eight SMPTE bars,
+//!   a twenty-four-step hue sweep, a black-and-white checkerboard and
+//!   `rgb(128, 128, 128)`. These are calibration targets. Their whole purpose
+//!   is that they are *exact* and identical on every machine and in every
+//!   theme, so the function takes no `&Palette` and cannot be themed even by
+//!   accident.
+//! - The night-light swatch shows what the screen will physically look like at
+//!   the chosen colour temperature. It is computed by
+//!   [`ColorTemperature::preview_color`] and follows the temperature, not the
+//!   theme.
+//! - The Red, Green and Blue gamma rows are coloured because they *are* the
+//!   red, green and blue channels. That is a label, not a style. They take
+//!   `p.red` / `p.green` / `p.blue`, which shift between modes for legibility
+//!   but never follow the accent — the same reasoning as the recorder's
+//!   transport buttons in `screen_capture`.
+//!
+//! **The deleted `MOCHA_BLUE` was two different things, and the conversion is
+//! where they separate.** It coloured the active tab's label, the filled part
+//! of a slider and the selected pattern chip — all of which mean "this one is
+//! chosen" and become `p.accent` — *and* the Blue Gamma row, which means "the
+//! blue channel" and becomes `p.blue`. Under the shipped theme the accent
+//! **is** blue, so the two were indistinguishable; under any other accent they
+//! are not, and the file previously had no way to say which it meant.
+//!
+//! **The selected chip's lettering was near-black and had to stop being.**
+//! `MOCHA_MANTLE` on Mocha blue is legible; on Latte's blue (`#1D62EC`, luma
+//! 93) it is not, so the ink is [`Palette::on_accent`] — computed from the
+//! fill rather than named beside it.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::daywindow::DailyWindow;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::step;
 use guitk::style::CornerRadii;
-
-// ============================================================================
-// Catppuccin Mocha theme
-// ============================================================================
-
-const MOCHA_BASE: Color = Color::from_hex(0x1E1E2E);
-const MOCHA_SURFACE0: Color = Color::from_hex(0x313244);
-const MOCHA_SURFACE1: Color = Color::from_hex(0x45475A);
-const MOCHA_TEXT: Color = Color::from_hex(0xCDD6F4);
-const MOCHA_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const MOCHA_BLUE: Color = Color::from_hex(0x89B4FA);
-const MOCHA_RED: Color = Color::from_hex(0xF38BA8);
-const MOCHA_GREEN: Color = Color::from_hex(0xA6E3A1);
-const MOCHA_MANTLE: Color = Color::from_hex(0x181825);
 
 // ============================================================================
 // Color temperature
@@ -759,7 +787,14 @@ impl DisplaySettingsManager {
     }
 
     /// Render the display settings panel.
-    pub fn render(&self, x: f32, y: f32, width: f32, height: f32) -> Vec<RenderCommand> {
+    pub fn render(
+        &self,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(64);
 
         // Background
@@ -768,7 +803,7 @@ impl DisplaySettingsManager {
             y,
             width,
             height,
-            color: MOCHA_BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -778,7 +813,7 @@ impl DisplaySettingsManager {
             y: y + 16.0,
             text: "Display Settings".to_string(),
             font_size: 18.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 32.0),
             overflow: TextOverflow::Ellipsis,
@@ -796,7 +831,7 @@ impl DisplaySettingsManager {
                     y: tab_y,
                     width: 130.0,
                     height: 28.0,
-                    color: MOCHA_SURFACE1,
+                    color: p.surface1,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -806,11 +841,8 @@ impl DisplaySettingsManager {
                 y: tab_y + 6.0,
                 text: tab.display_name().to_string(),
                 font_size: 12.0,
-                color: if is_active {
-                    MOCHA_BLUE
-                } else {
-                    MOCHA_SUBTEXT0
-                },
+                // A chosen tab is a selection, so it follows the accent.
+                color: if is_active { p.accent } else { p.subtext0 },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -829,6 +861,7 @@ impl DisplaySettingsManager {
             DisplaySettingsTab::General => {
                 self.render_general_tab(
                     &mut cmds,
+                    p,
                     x + 16.0,
                     content_y,
                     width - 32.0,
@@ -838,6 +871,7 @@ impl DisplaySettingsManager {
             DisplaySettingsTab::NightLight => {
                 self.render_night_light_tab(
                     &mut cmds,
+                    p,
                     x + 16.0,
                     content_y,
                     width - 32.0,
@@ -847,6 +881,7 @@ impl DisplaySettingsManager {
             DisplaySettingsTab::ColorCalibration => {
                 self.render_calibration_tab(
                     &mut cmds,
+                    p,
                     x + 16.0,
                     content_y,
                     width - 32.0,
@@ -856,6 +891,7 @@ impl DisplaySettingsManager {
             DisplaySettingsTab::TestPatterns => {
                 self.render_test_patterns_tab(
                     &mut cmds,
+                    p,
                     x + 16.0,
                     content_y,
                     width - 32.0,
@@ -870,6 +906,7 @@ impl DisplaySettingsManager {
     fn render_general_tab(
         &self,
         cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
         x: f32,
         y: f32,
         width: f32,
@@ -886,7 +923,7 @@ impl DisplaySettingsManager {
                     if d.is_primary { "Primary" } else { "Secondary" }
                 ),
                 font_size: 14.0,
-                color: MOCHA_TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -895,19 +932,27 @@ impl DisplaySettingsManager {
             let mut row_y = y + 30.0;
 
             // Resolution
-            self.render_setting_row(cmds, x, row_y, width, "Resolution", &d.resolution_string());
+            self.render_setting_row(
+                cmds,
+                p,
+                x,
+                row_y,
+                width,
+                "Resolution",
+                &d.resolution_string(),
+            );
             row_y += 28.0;
 
             // Scale
-            self.render_setting_row(cmds, x, row_y, width, "Scale", &d.scale_string());
+            self.render_setting_row(cmds, p, x, row_y, width, "Scale", &d.scale_string());
             row_y += 28.0;
 
             // Brightness slider
-            self.render_slider_row(cmds, x, row_y, width, "Brightness", d.brightness, 100);
+            self.render_slider_row(cmds, p, x, row_y, width, "Brightness", d.brightness, 100);
             row_y += 28.0;
 
             // Contrast slider
-            self.render_slider_row(cmds, x, row_y, width, "Contrast", d.contrast, 100);
+            self.render_slider_row(cmds, p, x, row_y, width, "Contrast", d.contrast, 100);
             row_y += 28.0;
 
             // Rotation
@@ -918,13 +963,14 @@ impl DisplaySettingsManager {
                 270 => "Portrait (flipped)",
                 _ => "Unknown",
             };
-            self.render_setting_row(cmds, x, row_y, width, "Orientation", rotation_str);
+            self.render_setting_row(cmds, p, x, row_y, width, "Orientation", rotation_str);
         }
     }
 
     fn render_night_light_tab(
         &self,
         cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
         x: f32,
         y: f32,
         width: f32,
@@ -937,7 +983,7 @@ impl DisplaySettingsManager {
             y,
             text: "Night Light".to_string(),
             font_size: 14.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -948,6 +994,7 @@ impl DisplaySettingsManager {
         // Schedule
         self.render_setting_row(
             cmds,
+            p,
             x,
             row_y,
             width,
@@ -962,7 +1009,7 @@ impl DisplaySettingsManager {
             y: row_y,
             text: format!("Color Temperature: {}K", nl.temperature.0),
             font_size: 12.0,
-            color: MOCHA_SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.6),
             overflow: TextOverflow::Ellipsis,
@@ -983,6 +1030,7 @@ impl DisplaySettingsManager {
         // Transition
         self.render_setting_row(
             cmds,
+            p,
             x,
             row_y,
             width,
@@ -994,6 +1042,7 @@ impl DisplaySettingsManager {
     fn render_calibration_tab(
         &self,
         cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
         x: f32,
         y: f32,
         width: f32,
@@ -1005,7 +1054,7 @@ impl DisplaySettingsManager {
                 y,
                 text: "Color Calibration".to_string(),
                 font_size: 14.0,
-                color: MOCHA_TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -1016,6 +1065,7 @@ impl DisplaySettingsManager {
             // Color profile
             self.render_setting_row(
                 cmds,
+                p,
                 x,
                 row_y,
                 width,
@@ -1025,30 +1075,35 @@ impl DisplaySettingsManager {
             row_y += 28.0;
 
             // Gamma - Red
-            self.render_gamma_row(cmds, x, row_y, width, "Red Gamma", d.gamma.red, MOCHA_RED);
+            // The channel's own colour, not a theme colour: see the module docs.
+            self.render_gamma_row(cmds, p, x, row_y, width, "Red Gamma", d.gamma.red, p.red);
             row_y += 28.0;
 
             // Gamma - Green
             self.render_gamma_row(
                 cmds,
+                p,
                 x,
                 row_y,
                 width,
                 "Green Gamma",
                 d.gamma.green,
-                MOCHA_GREEN,
+                p.green,
             );
             row_y += 28.0;
 
             // Gamma - Blue
             self.render_gamma_row(
                 cmds,
+                p,
                 x,
                 row_y,
                 width,
                 "Blue Gamma",
                 d.gamma.blue,
-                MOCHA_BLUE,
+                // `p.blue`, not `p.accent`: this one really is the blue
+                // channel, and the deleted constant meant both.
+                p.blue,
             );
             row_y += 28.0;
 
@@ -1058,7 +1113,7 @@ impl DisplaySettingsManager {
                 y: row_y,
                 width: 120.0,
                 height: 28.0,
-                color: MOCHA_SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1066,7 +1121,7 @@ impl DisplaySettingsManager {
                 y: row_y + 6.0,
                 text: "Reset to Defaults".to_string(),
                 font_size: 12.0,
-                color: MOCHA_TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1077,6 +1132,7 @@ impl DisplaySettingsManager {
     fn render_test_patterns_tab(
         &self,
         cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
         x: f32,
         y: f32,
         width: f32,
@@ -1087,7 +1143,7 @@ impl DisplaySettingsManager {
             y,
             text: "Test Patterns".to_string(),
             font_size: 14.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -1099,11 +1155,8 @@ impl DisplaySettingsManager {
             let is_active = self.active_test_pattern == Some(*pattern);
 
             // Button background
-            let bg_color = if is_active {
-                MOCHA_BLUE
-            } else {
-                MOCHA_SURFACE0
-            };
+            // Chosen means accented; unchosen means the neutral rung.
+            let bg_color = if is_active { p.accent } else { p.surface0 };
             cmds.push(RenderCommand::FillRect {
                 x,
                 y: row_y,
@@ -1119,7 +1172,9 @@ impl DisplaySettingsManager {
                 y: row_y + 8.0,
                 text: pattern.display_name().to_string(),
                 font_size: 12.0,
-                color: if is_active { MOCHA_MANTLE } else { MOCHA_TEXT },
+                // Read off the fill rather than named beside it: the
+                // deleted near-black is illegible on a light-mode accent.
+                color: if is_active { p.on_accent() } else { p.text },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1137,6 +1192,7 @@ impl DisplaySettingsManager {
     fn render_setting_row(
         &self,
         cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
         x: f32,
         y: f32,
         width: f32,
@@ -1148,7 +1204,7 @@ impl DisplaySettingsManager {
             y,
             text: label.to_string(),
             font_size: 12.0,
-            color: MOCHA_SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
             overflow: TextOverflow::Ellipsis,
@@ -1158,7 +1214,7 @@ impl DisplaySettingsManager {
             y,
             text: value.to_string(),
             font_size: 12.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
             overflow: TextOverflow::Ellipsis,
@@ -1168,6 +1224,7 @@ impl DisplaySettingsManager {
     fn render_slider_row(
         &self,
         cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
         x: f32,
         y: f32,
         width: f32,
@@ -1181,7 +1238,7 @@ impl DisplaySettingsManager {
             y,
             text: format!("{}: {}%", label, value),
             font_size: 12.0,
-            color: MOCHA_SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
             overflow: TextOverflow::Ellipsis,
@@ -1195,7 +1252,7 @@ impl DisplaySettingsManager {
             y: y + 4.0,
             width: track_w,
             height: 6.0,
-            color: MOCHA_SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -1210,7 +1267,8 @@ impl DisplaySettingsManager {
             y: y + 4.0,
             width: fill_w,
             height: 6.0,
-            color: MOCHA_BLUE,
+            // How much of the setting is chosen, so: the accent.
+            color: p.accent,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -1220,7 +1278,7 @@ impl DisplaySettingsManager {
             y: y + 1.0,
             width: 12.0,
             height: 12.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             corner_radii: CornerRadii::all(6.0),
         });
     }
@@ -1228,6 +1286,7 @@ impl DisplaySettingsManager {
     fn render_gamma_row(
         &self,
         cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
         x: f32,
         y: f32,
         width: f32,
@@ -1254,7 +1313,7 @@ impl DisplaySettingsManager {
             y: y + 4.0,
             width: bar_w,
             height: 6.0,
-            color: MOCHA_SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -1303,6 +1362,162 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
+    use appearance::AccentColor;
+
+    /// A palette whose accent is in neither mode's roles *and* in none of the
+    /// calibration instruments' output.
+    ///
+    /// The stock accent *is* `blue`, so a fixture built from `for_mode` alone
+    /// would let "this site follows the accent" and "this site is hard-coded
+    /// blue" produce identical output. That much is the usual reason for an
+    /// off-palette fixture; the second clause is this module's own trap. The
+    /// obvious off-palette value is magenta — and the SMPTE bars *are*
+    /// magenta, so a chip whose preview happened to be `ColorBars` contributed
+    /// two "accents" to a tab that drew one. The value below has no channel at
+    /// 0 or at 255 and is not a grey, which is exactly what puts it outside
+    /// every pattern: the bars are combinations of 0 and 255, the greyscale
+    /// ramp and the checkerboard are greys, and the hue sweep is fully
+    /// saturated (one channel 0, one 255) at every step.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0x00C8_28A0);
+        assert!(
+            !p.roles()
+                .iter()
+                .any(|(n, r)| *n != "accent" && *r == p.accent),
+            "the fixture's accent collided with a role, so accent tests would \
+             pass for the wrong reason"
+        );
+        assert!(
+            !instrument_colors(&DisplaySettingsManager::default()).contains(&p.accent),
+            "the fixture's accent is a colour an instrument draws, so counting \
+             the accents on a tab would count a calibration target as chrome"
+        );
+        p
+    }
+
+    /// The fourteen named accents the appearance page offers.
+    ///
+    /// Needed wherever the property under test is a *function of* the accent
+    /// rather than "did this follow the accent at all" — `on_accent` is a
+    /// threshold, and one sample characterises a step function only by luck.
+    /// See known-issues.md lesson 20.
+    const OFFERED: [AccentColor; 14] = [
+        AccentColor::Blue,
+        AccentColor::Lavender,
+        AccentColor::Teal,
+        AccentColor::Green,
+        AccentColor::Yellow,
+        AccentColor::Peach,
+        AccentColor::Pink,
+        AccentColor::Mauve,
+        AccentColor::Red,
+        AccentColor::Rosewater,
+        AccentColor::Flamingo,
+        AccentColor::Maroon,
+        AccentColor::Sky,
+        AccentColor::Sapphire,
+    ];
+
+    /// `p` for `light` mode wearing `accent`, as the settings page would build.
+    fn wearing(light: bool, accent: AccentColor) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = if light {
+            accent.color_light()
+        } else {
+            accent.color()
+        };
+        p
+    }
+
+    /// Every colour `cmds` puts on the screen, in draw order.
+    fn colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every colour the four calibration instruments emit.
+    ///
+    /// Declared to the membership sweep rather than themed, because none of
+    /// them is the shell's to theme — see the module docs. Built by calling
+    /// the renderers, which would be a tautology if this were the *test* of
+    /// those values; it is not. `the_test_patterns_are_the_same_in_both_modes`
+    /// and `the_night_light_swatch_shows_the_temperature_not_the_theme` pin
+    /// them against hand-written expectations.
+    fn instrument_colors(mgr: &DisplaySettingsManager) -> Vec<Color> {
+        let mut v: Vec<Color> = TestPattern::ALL
+            .iter()
+            .flat_map(|pat| colors(&pat.render(0.0, 0.0, 80.0, 28.0)))
+            .collect();
+        v.push(mgr.night_light.temperature.preview_color());
+        v
+    }
+
+    /// The one colour on `cmds` that belongs to no palette at all.
+    ///
+    /// This is how the night-light swatch is found, and it is deliberately not
+    /// an index into the command stream: an index is a claim about layout, and
+    /// a heading added above the swatch would silently retarget the assertion
+    /// at the heading — which is a colour that *does* follow the theme, so the
+    /// test would then be asserting the opposite of what it says. Finding it
+    /// by exclusion also states the property being relied on: the swatch is
+    /// the only thing on the page the shell did not choose.
+    fn only_off_palette(p: &Palette, cmds: &[RenderCommand]) -> Color {
+        let dark = Palette::for_mode(false);
+        let light = Palette::for_mode(true);
+        let found: Vec<Color> = colors(cmds)
+            .into_iter()
+            .filter(|c| {
+                ![&dark, &light, p]
+                    .iter()
+                    .any(|q| q.roles().iter().any(|(_, r)| *r == *c))
+            })
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one off-palette colour, found {found:?}"
+        );
+        found[0]
+    }
+
+    /// Every pattern chip's `(fill, lettering)`, in draw order.
+    ///
+    /// A chip is the 32-pixel-high rounded fill and the `Text` immediately
+    /// after it. Paired structurally for the same reason as `only_off_palette`
+    /// above: the previews between the chips vary in length with the pattern,
+    /// so only the *first* chip has a fixed index, and pinning the first chip
+    /// alone would leave the other four unchecked.
+    fn chips(cmds: &[RenderCommand]) -> Vec<(Color, Color)> {
+        let mut out = Vec::new();
+        for pair in cmds.windows(2) {
+            if let (
+                RenderCommand::FillRect {
+                    height,
+                    color: fill,
+                    ..
+                },
+                RenderCommand::Text { color: ink, .. },
+            ) = (&pair[0], &pair[1])
+                && *height == 32.0
+            {
+                out.push((*fill, *ink));
+            }
+        }
+        assert_eq!(
+            out.len(),
+            TestPattern::ALL.len(),
+            "not every chip was found"
+        );
+        out
+    }
 
     // ---- ColorTemperature tests ----
 
@@ -1695,7 +1910,7 @@ mod tests {
     #[test]
     fn test_manager_render_general() {
         let mgr = DisplaySettingsManager::default();
-        let cmds = mgr.render(0.0, 0.0, 600.0, 400.0);
+        let cmds = mgr.render(&accented(false), 0.0, 0.0, 600.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1703,7 +1918,7 @@ mod tests {
     fn test_manager_render_night_light() {
         let mut mgr = DisplaySettingsManager::default();
         mgr.active_tab = DisplaySettingsTab::NightLight;
-        let cmds = mgr.render(0.0, 0.0, 600.0, 400.0);
+        let cmds = mgr.render(&accented(false), 0.0, 0.0, 600.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1711,7 +1926,7 @@ mod tests {
     fn test_manager_render_calibration() {
         let mut mgr = DisplaySettingsManager::default();
         mgr.active_tab = DisplaySettingsTab::ColorCalibration;
-        let cmds = mgr.render(0.0, 0.0, 600.0, 400.0);
+        let cmds = mgr.render(&accented(false), 0.0, 0.0, 600.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1719,7 +1934,7 @@ mod tests {
     fn test_manager_render_test_patterns() {
         let mut mgr = DisplaySettingsManager::default();
         mgr.active_tab = DisplaySettingsTab::TestPatterns;
-        let cmds = mgr.render(0.0, 0.0, 600.0, 400.0);
+        let cmds = mgr.render(&accented(false), 0.0, 0.0, 600.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1749,5 +1964,297 @@ mod tests {
     fn test_hue_to_rgb_blue() {
         let c = hue_to_rgb(2.0 / 3.0);
         assert_eq!(c.b, 255);
+    }
+
+    // ---- Palette conversion ----
+
+    #[test]
+    fn every_colour_the_panel_draws_comes_from_its_palette() {
+        let mut drawn = 0;
+        for light in [false, true] {
+            let p = accented(light);
+            for &tab in DisplaySettingsTab::ALL {
+                for pattern in TestPattern::ALL.iter().map(Some).chain([None]) {
+                    let mut mgr = DisplaySettingsManager::default();
+                    mgr.active_tab = tab;
+                    mgr.active_test_pattern = pattern.copied();
+                    let cmds = mgr.render(&p, 0.0, 0.0, 600.0, 400.0);
+                    drawn += cmds.len();
+                    assert_drawn_from(&p, &cmds, &instrument_colors(&mgr), "display_settings");
+                }
+            }
+        }
+        // Non-vacuity: a sweep over an empty render passes trivially, and the
+        // whole point is that it did not.
+        assert!(drawn > 200, "only {drawn} commands were swept");
+    }
+
+    #[test]
+    fn none_of_the_nine_deleted_constants_is_still_drawn() {
+        // Every one of these is a Mocha value, so a light render that contains
+        // one is a substitution the conversion missed. The instruments are
+        // excluded by construction: they are pure white, pure black and full
+        // primaries, none of which is in this list.
+        const DELETED: [(&str, u32); 9] = [
+            ("MOCHA_BASE", 0x001E_1E2E),
+            ("MOCHA_SURFACE0", 0x0031_3244),
+            ("MOCHA_SURFACE1", 0x0045_475A),
+            ("MOCHA_TEXT", 0x00CD_D6F4),
+            ("MOCHA_SUBTEXT0", 0x00A6_ADC8),
+            ("MOCHA_BLUE", 0x0089_B4FA),
+            ("MOCHA_RED", 0x00F3_8BA8),
+            ("MOCHA_GREEN", 0x00A6_E3A1),
+            ("MOCHA_MANTLE", 0x0018_1825),
+        ];
+        let p = accented(true);
+        for &tab in DisplaySettingsTab::ALL {
+            let mut mgr = DisplaySettingsManager::default();
+            mgr.active_tab = tab;
+            mgr.active_test_pattern = Some(TestPattern::ColorBars);
+            for c in colors(&mgr.render(&p, 0.0, 0.0, 600.0, 400.0)) {
+                let rgb = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+                for (name, hex) in DELETED {
+                    assert_ne!(rgb, hex, "{tab:?} still draws {name} under the light theme");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_site_draws_the_role_it_claims() {
+        // The ordered vector, not the set: half the ways this conversion can
+        // go wrong leave two sites having traded roles, which a membership
+        // table cannot see (module 29).
+        for light in [false, true] {
+            let p = accented(light);
+            let mut mgr = DisplaySettingsManager::default();
+            mgr.active_tab = DisplaySettingsTab::General;
+            assert_eq!(
+                colors(&mgr.render(&p, 0.0, 0.0, 600.0, 400.0)),
+                vec![
+                    p.base,     // panel
+                    p.text,     // title
+                    p.surface1, // the active tab's pill
+                    p.accent,   // the active tab's label
+                    p.subtext0, // three inactive tab labels
+                    p.subtext0, p.subtext0, p.text,     // "Display: ..."
+                    p.subtext0, // Resolution label / value
+                    p.text, p.subtext0, // Scale
+                    p.text, p.subtext0, // Brightness: label, track, fill, thumb
+                    p.surface0, p.accent, p.text, p.subtext0, // Contrast
+                    p.surface0, p.accent, p.text, p.subtext0, // Orientation
+                    p.text,
+                ],
+                "the General tab in {} mode",
+                if light { "light" } else { "dark" }
+            );
+
+            mgr.active_tab = DisplaySettingsTab::ColorCalibration;
+            assert_eq!(
+                colors(&mgr.render(&p, 0.0, 0.0, 600.0, 400.0)),
+                vec![
+                    p.base, p.text, p.subtext0, // General and Night Light, now inactive
+                    p.subtext0,
+                    p.surface1, // the pill, drawn just before the label it sits under
+                    p.accent,   // this tab's label
+                    p.subtext0, // Test Patterns
+                    p.text,     // "Color Calibration"
+                    p.subtext0, // Color Profile label / value
+                    p.text, p.red, // the three gamma rows: channel, track, indicator
+                    p.surface0, p.red, p.green, p.surface0, p.green, p.blue, p.surface0, p.blue,
+                    p.surface0, // Reset button and its label
+                    p.text,
+                ],
+                "the Calibration tab in {} mode",
+                if light { "light" } else { "dark" }
+            );
+        }
+    }
+
+    #[test]
+    fn the_gamma_rows_are_the_channels_and_never_the_accent() {
+        // The deleted `MOCHA_BLUE` meant "chosen" at three sites and "the blue
+        // channel" at this one. Under the shipped theme the accent *is* blue,
+        // so the two were the same colour and the file could not say which it
+        // meant; an off-palette accent is what separates them.
+        for light in [false, true] {
+            let p = accented(light);
+            let mut mgr = DisplaySettingsManager::default();
+            mgr.active_tab = DisplaySettingsTab::ColorCalibration;
+            let cols = colors(&mgr.render(&p, 0.0, 0.0, 600.0, 400.0));
+            for (name, role) in [("red", p.red), ("green", p.green), ("blue", p.blue)] {
+                assert_eq!(
+                    cols.iter().filter(|c| **c == role).count(),
+                    2,
+                    "the {name} gamma row should draw {name} twice — its label \
+                     and its indicator — in {} mode",
+                    if light { "light" } else { "dark" }
+                );
+            }
+            // Exactly one accent on this tab: the active tab's own label. A
+            // gamma row that fell back to the accent would make it two.
+            assert_eq!(
+                cols.iter().filter(|c| **c == p.accent).count(),
+                1,
+                "a calibration row followed the accent"
+            );
+        }
+    }
+
+    #[test]
+    fn the_test_patterns_are_the_same_in_both_modes() {
+        // A calibration target is a measurement, not chrome. This is pinned
+        // against hand-written values rather than against the palette: white
+        // is #FFFFFF because it is white, and if the palette ever grew a role
+        // of that value the pattern would still have to be this.
+        for pattern in TestPattern::ALL {
+            let cols = colors(&pattern.render(0.0, 0.0, 160.0, 40.0));
+            assert!(!cols.is_empty(), "{pattern:?} drew nothing");
+            for c in &cols {
+                assert_eq!(c.a, 255, "{pattern:?} emitted a transparent colour");
+            }
+            match pattern {
+                TestPattern::Grayscale => {
+                    assert_eq!(cols.first(), Some(&Color::rgb(0, 0, 0)));
+                    assert_eq!(cols.last(), Some(&Color::rgb(255, 255, 255)));
+                    for c in &cols {
+                        assert!(c.r == c.g && c.g == c.b, "a grey step was tinted");
+                    }
+                }
+                TestPattern::ColorBars => {
+                    assert_eq!(
+                        cols,
+                        vec![
+                            Color::rgb(255, 255, 255),
+                            Color::rgb(255, 255, 0),
+                            Color::rgb(0, 255, 255),
+                            Color::rgb(0, 255, 0),
+                            Color::rgb(255, 0, 255),
+                            Color::rgb(255, 0, 0),
+                            Color::rgb(0, 0, 255),
+                            Color::rgb(0, 0, 0),
+                        ]
+                    );
+                }
+                TestPattern::Checkerboard => {
+                    for c in &cols {
+                        assert!(
+                            *c == Color::rgb(0, 0, 0) || *c == Color::rgb(255, 255, 255),
+                            "a checkerboard cell was neither black nor white"
+                        );
+                    }
+                }
+                TestPattern::SolidGray => {
+                    assert_eq!(cols, vec![Color::rgb(128, 128, 128)]);
+                }
+                TestPattern::HueGradient => {
+                    // Full saturation and value: every step pins one channel at
+                    // 255 and another at 0.
+                    for c in &cols {
+                        let (lo, hi) = (c.r.min(c.g).min(c.b), c.r.max(c.g).max(c.b));
+                        assert_eq!((lo, hi), (0, 255), "a hue step was desaturated");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_night_light_swatch_shows_the_temperature_not_the_theme() {
+        // What this swatch is for is telling the user what 3000K will actually
+        // look like. It must be identical in both modes, and it must move when
+        // the temperature moves.
+        let mut seen = Vec::new();
+        for temp in [3000_u32, 6500, 15000] {
+            let mut per_mode = Vec::new();
+            for light in [false, true] {
+                let p = accented(light);
+                let mut mgr = DisplaySettingsManager::default();
+                mgr.active_tab = DisplaySettingsTab::NightLight;
+                mgr.set_night_light_temperature(temp);
+                let cmds = mgr.render(&p, 0.0, 0.0, 600.0, 400.0);
+                per_mode.push(only_off_palette(&p, &cmds));
+            }
+            assert_eq!(
+                per_mode[0], per_mode[1],
+                "the {temp}K swatch changed with the theme"
+            );
+            seen.push(per_mode[0]);
+        }
+        // Warm is redder than neutral, which is redder than cool. Stated as
+        // the ordering rather than as three literals: the ordering is the
+        // claim, and it survives a change to the black-body approximation.
+        assert!(
+            seen[0].b < seen[1].b && seen[1].b <= seen[2].b,
+            "the swatch does not get bluer as the temperature rises: {seen:?}"
+        );
+        assert!(
+            seen[0].r >= seen[1].r,
+            "the warm swatch is not at least as red as the neutral one"
+        );
+    }
+
+    #[test]
+    fn a_selected_pattern_chip_is_lettered_for_its_own_fill() {
+        // `MOCHA_MANTLE` — near-black — is legible on Mocha's pale blue and
+        // illegible on Latte's `#1D62EC`. The endpoints are pinned by hand
+        // rather than by calling `readable_on`, because a test that called the
+        // renderer's own function would agree with it however wrong both were.
+        //
+        // Walked over all fourteen accents: `on_accent` is a threshold at luma
+        // 140, and one accent samples one side of it (lesson 20).
+        const NEAR_BLACK: u32 = 0x0011_111B;
+        const NEAR_WHITE: u32 = 0x00EF_F1F5;
+        for light in [false, true] {
+            for accent in OFFERED {
+                let p = wearing(light, accent);
+                let mut mgr = DisplaySettingsManager::default();
+                mgr.active_tab = DisplaySettingsTab::TestPatterns;
+                mgr.active_test_pattern = Some(TestPattern::Grayscale);
+                let cmds = mgr.render(&p, 0.0, 0.0, 600.0, 400.0);
+                let (fill, ink) = chips(&cmds)[0];
+                assert_eq!(fill, p.accent, "the chosen chip is not accented");
+                let luma = 0.299 * f32::from(fill.r)
+                    + 0.587 * f32::from(fill.g)
+                    + 0.114 * f32::from(fill.b);
+                let want = if luma > 140.0 { NEAR_BLACK } else { NEAR_WHITE };
+                let got = (u32::from(ink.r) << 16) | (u32::from(ink.g) << 8) | u32::from(ink.b);
+                assert_eq!(
+                    got,
+                    want,
+                    "{accent:?} in {} mode: a chip of luma {luma:.0} was \
+                     lettered #{got:06X}",
+                    if light { "light" } else { "dark" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unchosen_chip_and_an_unchosen_tab_are_never_the_accent() {
+        // The inverse of the test above, and the one that catches an "always
+        // accented" fix: exactly one tab label and at most one chip may wear
+        // the accent, however many of each are on screen.
+        for light in [false, true] {
+            let p = accented(light);
+            for chosen in [None, Some(TestPattern::HueGradient)] {
+                let mut mgr = DisplaySettingsManager::default();
+                mgr.active_tab = DisplaySettingsTab::TestPatterns;
+                mgr.active_test_pattern = chosen;
+                let cols = colors(&mgr.render(&p, 0.0, 0.0, 600.0, 400.0));
+                let want = 1 + usize::from(chosen.is_some());
+                assert_eq!(
+                    cols.iter().filter(|c| **c == p.accent).count(),
+                    want,
+                    "with {chosen:?} chosen in {} mode, the accent appears the \
+                     wrong number of times",
+                    if light { "light" } else { "dark" }
+                );
+                assert!(
+                    cols.iter().filter(|c| **c == p.surface0).count() >= 4,
+                    "the four unchosen chips are not on the neutral rung"
+                );
+            }
+        }
     }
 }

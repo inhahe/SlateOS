@@ -14,6 +14,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quotef_os;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -539,7 +540,7 @@ fn cmd_cgset(args: &[String]) {
     for group in &groups {
         for (name, value) in &params {
             match write_cgroup_param(group, name, value) {
-                Ok(()) => eprintln!("cgset: {group}: {name} = {value}"),
+                Ok(()) => eprintln!("cgset: {}: {name} = {value}", quotef_os(group)),
                 Err(e) => eprintln!("cgset: {e}"),
             }
         }

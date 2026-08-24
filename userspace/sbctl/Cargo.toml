@@ -3,3 +3,7 @@ name = "sbctl"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# sbctl names EFI binaries, signing keys and certificates by path, all
+# supplied by the caller. It is a secure-boot tool, so a diagnostic that
+# misrepresents which file was signed is a diagnostic that matters.
+quoting = { path = "../quoting" }

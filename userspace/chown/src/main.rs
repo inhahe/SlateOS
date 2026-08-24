@@ -34,6 +34,7 @@
 //! chmod --json 755 FILE               JSON output
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io;
@@ -985,7 +986,8 @@ fn chown_one(path: &str, spec: &OwnerSpec, opts: &Options, follow: bool) -> (boo
                 // honor --from. Skip rather than risk an unwanted change.
                 if !opts.silent {
                     eprintln!(
-                        "chown: cannot verify current ownership of '{path}' for --from; skipping"
+                        "chown: cannot verify current ownership of {} for --from; skipping",
+                        quoteaf_os(path)
                     );
                 }
                 return (false, None);
@@ -1014,12 +1016,12 @@ fn chown_one(path: &str, spec: &OwnerSpec, opts: &Options, follow: bool) -> (boo
                 print_chown_json(path, spec.uid, spec.gid, true, "");
             } else if opts.verbose {
                 if changed {
-                    eprintln!("changed ownership of '{path}' to {owner_str}");
+                    eprintln!("changed ownership of {} to {owner_str}", quoteaf_os(path));
                 } else {
-                    eprintln!("ownership of '{path}' retained as {owner_str}");
+                    eprintln!("ownership of {} retained as {owner_str}", quoteaf_os(path));
                 }
             } else if opts.changes && changed {
-                eprintln!("changed ownership of '{path}' to {owner_str}");
+                eprintln!("changed ownership of {} to {owner_str}", quoteaf_os(path));
             }
             (changed, None)
         }
@@ -1027,7 +1029,10 @@ fn chown_one(path: &str, spec: &OwnerSpec, opts: &Options, follow: bool) -> (boo
             if opts.json {
                 print_chown_json(path, spec.uid, spec.gid, false, &e);
             } else if !opts.silent {
-                eprintln!("chown: cannot change ownership of '{path}': {e}");
+                eprintln!(
+                    "chown: cannot change ownership of {}: {e}",
+                    quoteaf_os(path)
+                );
             }
             (false, Some(e))
         }
@@ -1054,7 +1059,7 @@ fn run_chown(opts: &Options, users: &UserDb, groups: &[GroupEntry]) -> bool {
             },
             Err(e) => {
                 if !opts.silent {
-                    eprintln!("chown: cannot read reference '{refpath}': {e}");
+                    eprintln!("chown: cannot read reference {}: {e}", quoteaf_os(refpath));
                 }
                 return false;
             }
@@ -1135,12 +1140,24 @@ fn chmod_one(
                 print_chmod_json(path, mode_val, true, "");
             } else if opts.verbose {
                 if changed {
-                    eprintln!("mode of '{path}' changed to {:04o}", mode_val & 0o7777);
+                    eprintln!(
+                        "mode of {} changed to {:04o}",
+                        quoteaf_os(path),
+                        mode_val & 0o7777
+                    );
                 } else {
-                    eprintln!("mode of '{path}' retained as {:04o}", mode_val & 0o7777);
+                    eprintln!(
+                        "mode of {} retained as {:04o}",
+                        quoteaf_os(path),
+                        mode_val & 0o7777
+                    );
                 }
             } else if opts.changes && changed {
-                eprintln!("mode of '{path}' changed to {:04o}", mode_val & 0o7777);
+                eprintln!(
+                    "mode of {} changed to {:04o}",
+                    quoteaf_os(path),
+                    mode_val & 0o7777
+                );
             }
             (changed, None)
         }
@@ -1148,7 +1165,7 @@ fn chmod_one(
             if opts.json {
                 print_chmod_json(path, mode_val, false, &e);
             } else if !opts.silent {
-                eprintln!("chmod: cannot change mode of '{path}': {e}");
+                eprintln!("chmod: cannot change mode of {}: {e}", quoteaf_os(path));
             }
             (false, Some(e))
         }
@@ -1170,7 +1187,7 @@ fn run_chmod(opts: &Options) -> bool {
             },
             Err(e) => {
                 if !opts.silent {
-                    eprintln!("chmod: cannot read reference '{refpath}': {e}");
+                    eprintln!("chmod: cannot read reference {}: {e}", quoteaf_os(refpath));
                 }
                 return false;
             }

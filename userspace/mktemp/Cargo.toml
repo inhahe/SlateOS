@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS temp file/user identity utilities"
 [dependencies]
+# mktemp names the template it was given and the file or directory it
+# created, both derived from a caller-supplied prefix.
+quoting = { path = "../quoting" }

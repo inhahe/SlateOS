@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS SFTP file transfer client"
 [dependencies]
+# The glob that matched nothing is echoed back, and a pattern is user-typed
+# text by construction.
+quoting = { path = "../quoting" }
 
 [lints]
 workspace = true

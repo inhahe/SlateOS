@@ -2,3 +2,7 @@
 name = "scribus-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The script it runs and the document it opens are both paths from argv.
+quoting = { path = "../quoting" }

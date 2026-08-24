@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `tempo-cli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_tempo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -36,12 +41,21 @@ fn run_tempo(args: &[String]) -> i32 {
             println!("  Total spans: 3, Duration: 12ms");
         }
         "list" => {
-            println!("Block ID                           Start              End                Spans");
-            println!("abc12345-xxxx-xxxx-xxxx-12345678   2024-06-14 00:00   2024-06-14 02:00   45678");
-            println!("def12345-xxxx-xxxx-xxxx-12345678   2024-06-14 02:00   2024-06-14 04:00   52341");
+            println!(
+                "Block ID                           Start              End                Spans"
+            );
+            println!(
+                "abc12345-xxxx-xxxx-xxxx-12345678   2024-06-14 00:00   2024-06-14 02:00   45678"
+            );
+            println!(
+                "def12345-xxxx-xxxx-xxxx-12345678   2024-06-14 02:00   2024-06-14 04:00   52341"
+            );
         }
         "search" => {
-            let tag = args.get(1).map(|s| s.as_str()).unwrap_or("service.name=api");
+            let tag = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("service.name=api");
             println!("Searching for traces with: {}", tag);
             println!("  abc123def456  HTTP GET /api/users   12ms   2024-06-14T12:00:00Z");
             println!("  ghi789jkl012  HTTP POST /api/users  45ms   2024-06-14T12:01:00Z");
@@ -53,14 +67,17 @@ fn run_tempo(args: &[String]) -> i32 {
             println!("  P99 duration: 150ms");
             println!("  Error rate: 0.5%");
         }
-        _ => println!("tempo-cli: '{}' completed", subcmd),
+        _ => println!("tempo-cli: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "tempo-cli".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "tempo-cli".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_tempo(&rest);
     process::exit(code);
@@ -68,7 +85,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_tempo};
+    use super::{basename, run_tempo, strip_ext};
 
     #[test]
     fn basename_strips_path() {

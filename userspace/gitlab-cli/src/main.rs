@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `glab`, `gitlab-runner`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_glab(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -38,10 +43,14 @@ fn run_glab(args: &[String]) -> i32 {
                     println!("Showing 3 open merge requests:");
                     println!("!42  feat: add new scheduler    main <- feature/scheduler   @alice");
                     println!("!41  fix: memory leak in IPC    main <- fix/ipc-leak        @bob");
-                    println!("!40  docs: update API docs      main <- docs/api-update     @charlie");
+                    println!(
+                        "!40  docs: update API docs      main <- docs/api-update     @charlie"
+                    );
                 }
                 "create" => println!("Creating merge request..."),
-                "view" => println!("!42  feat: add new scheduler\nAuthor: @alice\nStatus: open\nPipeline: passed"),
+                "view" => println!(
+                    "!42  feat: add new scheduler\nAuthor: @alice\nStatus: open\nPipeline: passed"
+                ),
                 _ => println!("glab mr {} completed", cmd),
             }
         }
@@ -73,7 +82,7 @@ fn run_glab(args: &[String]) -> i32 {
             }
         }
         "auth" => println!("Logged in to gitlab.com as @user"),
-        _ => println!("glab: command '{}' completed", subcmd),
+        _ => println!("glab: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -93,12 +102,20 @@ fn run_gitlab_runner(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("list");
     match subcmd {
         "list" => {
-            println!("Listing configured runners                          ConfigFile=/etc/gitlab-runner/config.toml");
-            println!("slateos-runner-1                                      Executor=docker   Token=abcdef12   URL=https://gitlab.com");
-            println!("slateos-runner-2                                      Executor=shell    Token=34567890   URL=https://gitlab.com");
+            println!(
+                "Listing configured runners                          ConfigFile=/etc/gitlab-runner/config.toml"
+            );
+            println!(
+                "slateos-runner-1                                      Executor=docker   Token=abcdef12   URL=https://gitlab.com"
+            );
+            println!(
+                "slateos-runner-2                                      Executor=shell    Token=34567890   URL=https://gitlab.com"
+            );
         }
         "status" => println!("gitlab-runner: Service is running"),
-        "verify" => println!("Verifying runner... is valid                         runner=abcdef12"),
+        "verify" => {
+            println!("Verifying runner... is valid                         runner=abcdef12")
+        }
         _ => println!("gitlab-runner: {} completed", subcmd),
     }
     0
@@ -106,7 +123,10 @@ fn run_gitlab_runner(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "glab".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "glab".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "gitlab-runner" => run_gitlab_runner(&rest),
@@ -117,7 +137,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_glab};
+    use super::{basename, run_glab, strip_ext};
 
     #[test]
     fn basename_strips_path() {

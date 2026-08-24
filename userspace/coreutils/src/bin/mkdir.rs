@@ -87,9 +87,9 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
-/// The file-mode creation mask. There is no read-only spelling of it in POSIX —
-/// reading it means setting it — and `std` exposes no wrapper, so this is the
-/// libc call itself.
+// The file-mode creation mask. There is no read-only spelling of it in POSIX —
+// reading it means setting it — and `std` exposes no wrapper, so this is the
+// libc call itself.
 #[cfg(unix)]
 unsafe extern "C" {
     fn umask(mask: u32) -> u32;

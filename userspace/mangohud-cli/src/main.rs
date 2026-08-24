@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `mangohud`, `mangoapp`, `mangostats`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mangohud(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -31,10 +36,17 @@ fn run_mangohud(args: &[String]) -> i32 {
         return 0;
     }
 
-    let program = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("game");
+    let program = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("game");
     println!("[MangoHud] Initializing overlay");
     println!("[MangoHud] Config: fps_limit=0, cpu_stats=1, gpu_stats=1, ram=1, vram=1");
-    println!("[MangoHud] Hooking Vulkan swapchain for '{}'", program);
+    println!(
+        "[MangoHud] Hooking Vulkan swapchain for {}",
+        quoteaf_os(program)
+    );
     println!("[MangoHud] Overlay active:");
     println!("  GPU: 45°C  |  65% @ 1800 MHz  |  VRAM: 2.1/8.0 GB");
     println!("  CPU: 55°C  |  35% @ 4200 MHz  |  RAM:  8.5/16.0 GB");
@@ -53,7 +65,10 @@ fn run_mangoapp(_args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mangohud".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mangohud".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "mangoapp" | "mangostats" => run_mangoapp(&rest),
@@ -64,7 +79,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mangohud};
+    use super::{basename, run_mangohud, strip_ext};
 
     #[test]
     fn basename_strips_path() {

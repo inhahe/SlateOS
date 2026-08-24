@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS shared library dependency lister"
 [dependencies]
+# It interpolates `ch` into "{PROGRAM_NAME}: invalid option -- {}". That
+# value is an argv word, so it is whatever the user typed and not text this
+# program chose.
+quoting = { path = "../quoting" }
 
 [lints]
 workspace = true

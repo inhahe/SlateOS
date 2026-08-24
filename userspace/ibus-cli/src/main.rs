@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `ibus`, `ibus-daemon`, `ibus-setup`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -61,7 +62,7 @@ fn run_ibus(args: &[String]) -> i32 {
         }
         "engine" => {
             if let Some(name) = args.get(1) {
-                println!("Set engine to '{}'", name);
+                println!("Set engine to {}", quoteaf_os(name));
             } else {
                 println!("xkb:us::eng");
             }
@@ -72,7 +73,7 @@ fn run_ibus(args: &[String]) -> i32 {
         "read-cache" | "write-cache" => println!("Cache operation completed."),
         "emoji" => println!("Opening emoji picker..."),
         _ => {
-            eprintln!("ibus: unknown command '{}'. See --help.", cmd);
+            eprintln!("ibus: unknown command {}. See --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -121,7 +122,8 @@ fn run_ibus_setup(_args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "ibus".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -136,7 +138,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ibus};
+    use super::{basename, run_ibus, strip_ext};
 
     #[test]
     fn basename_strips_path() {

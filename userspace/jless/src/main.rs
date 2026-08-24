@@ -4,6 +4,7 @@
 //!
 //! Single personality: `jless`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -29,15 +30,16 @@ fn run_jless(args: Vec<String>) -> i32 {
 
     let yaml_mode = args.iter().any(|a| a == "--yaml");
 
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
     if let Some(f) = file {
         if yaml_mode {
-            println!("(jless: viewing YAML file '{}')", f);
+            println!("(jless: viewing YAML file {})", quoteaf_os(f));
         } else {
-            println!("(jless: viewing JSON file '{}')", f);
+            println!("(jless: viewing JSON file {})", quoteaf_os(f));
         }
     } else {
         println!("(jless: reading from stdin)");
@@ -71,7 +73,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_jless};
+    use super::run_jless;
 
     #[test]
     fn help_exits_zero() {

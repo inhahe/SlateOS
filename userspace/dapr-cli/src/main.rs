@@ -4,6 +4,7 @@
 //!
 //! Single personality: `dapr`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -47,14 +48,29 @@ fn run_dapr(args: Vec<String>) -> i32 {
             0
         }
         "run" => {
-            let app_id = args.windows(2).find(|w| w[0] == "--app-id")
-                .map(|w| w[1].as_str()).unwrap_or("myapp");
-            let app_port = args.windows(2).find(|w| w[0] == "--app-port")
-                .map(|w| w[1].as_str()).unwrap_or("3000");
-            let dapr_port = args.windows(2).find(|w| w[0] == "--dapr-http-port")
-                .map(|w| w[1].as_str()).unwrap_or("3500");
-            println!("Starting Dapr with id {}. HTTP Port: {}. gRPC Port: 50001", app_id, dapr_port);
-            println!("  Checking if Dapr sidecar is listening on HTTP port {}...", dapr_port);
+            let app_id = args
+                .windows(2)
+                .find(|w| w[0] == "--app-id")
+                .map(|w| w[1].as_str())
+                .unwrap_or("myapp");
+            let app_port = args
+                .windows(2)
+                .find(|w| w[0] == "--app-port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("3000");
+            let dapr_port = args
+                .windows(2)
+                .find(|w| w[0] == "--dapr-http-port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("3500");
+            println!(
+                "Starting Dapr with id {}. HTTP Port: {}. gRPC Port: 50001",
+                app_id, dapr_port
+            );
+            println!(
+                "  Checking if Dapr sidecar is listening on HTTP port {}...",
+                dapr_port
+            );
             println!("  ✔ Dapr sidecar is up and running.");
             println!("  App Port: {}", app_port);
             println!("  App ID: {}", app_id);
@@ -63,9 +79,15 @@ fn run_dapr(args: Vec<String>) -> i32 {
         }
         "list" => {
             println!("  APP ID    HTTP PORT  GRPC PORT  APP PORT  COMMAND     AGE     CREATED");
-            println!("  myapp     3500       50001      3000      node app.js 2h      2024-01-15 12:00:00");
-            println!("  api-gw    3501       50002      8080      ./api       5h      2024-01-15 09:00:00");
-            println!("  worker    3502       50003      9000      python w.py 1d      2024-01-14 14:00:00");
+            println!(
+                "  myapp     3500       50001      3000      node app.js 2h      2024-01-15 12:00:00"
+            );
+            println!(
+                "  api-gw    3501       50002      8080      ./api       5h      2024-01-15 09:00:00"
+            );
+            println!(
+                "  worker    3502       50003      9000      python w.py 1d      2024-01-14 14:00:00"
+            );
             0
         }
         "stop" => {
@@ -75,8 +97,11 @@ fn run_dapr(args: Vec<String>) -> i32 {
             0
         }
         "dashboard" => {
-            let port = args.windows(2).find(|w| w[0] == "-p" || w[0] == "--port")
-                .map(|w| w[1].as_str()).unwrap_or("8080");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "-p" || w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("8080");
             println!("Dapr Dashboard running on http://localhost:{}", port);
             0
         }
@@ -89,26 +114,48 @@ fn run_dapr(args: Vec<String>) -> i32 {
                     println!("  pubsub       pubsub.redis          v1       [myapp, worker]");
                     println!("  binding      bindings.cron         v1       [worker]");
                 }
-                _ => { println!("Component operation: {}", sub); }
+                _ => {
+                    println!("Component operation: {}", sub);
+                }
             }
             0
         }
         "invoke" => {
-            let app_id = args.windows(2).find(|w| w[0] == "--app-id")
-                .map(|w| w[1].as_str()).unwrap_or("myapp");
-            let method = args.windows(2).find(|w| w[0] == "--method")
-                .map(|w| w[1].as_str()).unwrap_or("healthz");
-            println!("Invoking method '{}' on app '{}'...", method, app_id);
+            let app_id = args
+                .windows(2)
+                .find(|w| w[0] == "--app-id")
+                .map(|w| w[1].as_str())
+                .unwrap_or("myapp");
+            let method = args
+                .windows(2)
+                .find(|w| w[0] == "--method")
+                .map(|w| w[1].as_str())
+                .unwrap_or("healthz");
+            println!(
+                "Invoking method {} on app {}...",
+                quoteaf_os(method),
+                quoteaf_os(app_id)
+            );
             println!("  Status: 200 OK");
             println!("  Response: {{\"status\": \"healthy\"}}");
             0
         }
         "publish" => {
-            let pubsub = args.windows(2).find(|w| w[0] == "--pubsub")
-                .map(|w| w[1].as_str()).unwrap_or("pubsub");
-            let topic = args.windows(2).find(|w| w[0] == "--topic")
-                .map(|w| w[1].as_str()).unwrap_or("orders");
-            println!("Published to topic '{}' via '{}'", topic, pubsub);
+            let pubsub = args
+                .windows(2)
+                .find(|w| w[0] == "--pubsub")
+                .map(|w| w[1].as_str())
+                .unwrap_or("pubsub");
+            let topic = args
+                .windows(2)
+                .find(|w| w[0] == "--topic")
+                .map(|w| w[1].as_str())
+                .unwrap_or("orders");
+            println!(
+                "Published to topic {} via {}",
+                quoteaf_os(topic),
+                quoteaf_os(pubsub)
+            );
             0
         }
         "status" => {
@@ -123,7 +170,7 @@ fn run_dapr(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: dapr <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -139,7 +186,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_dapr};
+    use super::run_dapr;
 
     #[test]
     fn help_exits_zero() {

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `nsq_tail`, `nsq_to_file`, `nsqlookupd`, `nsqadmin`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_nsq(args: &[String], prog_name: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -42,16 +47,22 @@ fn run_nsq(args: &[String], prog_name: &str) -> i32 {
     }
     match prog_name {
         "nsq_tail" => {
-            let topic = args.windows(2).find(|w| w[0] == "--topic")
-                .map(|w| w[1].as_str()).unwrap_or("events");
+            let topic = args
+                .windows(2)
+                .find(|w| w[0] == "--topic")
+                .map(|w| w[1].as_str())
+                .unwrap_or("events");
             println!("Tailing topic: {}", topic);
             println!("[2024-06-15 12:00:00] message 1");
             println!("[2024-06-15 12:00:01] message 2");
         }
         "nsq_to_file" => {
-            let topic = args.windows(2).find(|w| w[0] == "--topic")
-                .map(|w| w[1].as_str()).unwrap_or("events");
-            println!("Writing topic '{}' to files...", topic);
+            let topic = args
+                .windows(2)
+                .find(|w| w[0] == "--topic")
+                .map(|w| w[1].as_str())
+                .unwrap_or("events");
+            println!("Writing topic {} to files...", quoteaf_os(topic));
         }
         "nsqlookupd" => {
             println!("nsqlookupd v1.3.0");
@@ -68,7 +79,10 @@ fn run_nsq(args: &[String], prog_name: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "nsq_tail".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "nsq_tail".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_nsq(&rest, &prog);
     process::exit(code);
@@ -76,7 +90,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_nsq};
+    use super::{basename, run_nsq, strip_ext};
 
     #[test]
     fn basename_strips_path() {

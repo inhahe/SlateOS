@@ -45,6 +45,7 @@
 //!       --version           Output version information and exit
 //! ```
 
+use quoting::quoteaf_os;
 use std::collections::VecDeque;
 use std::env;
 use std::fs::File;
@@ -311,7 +312,10 @@ fn parse_args(args: &[String]) -> ParseResult {
                         "name" => follow = FollowMode::Name,
                         "descriptor" => follow = FollowMode::Descriptor,
                         _ => {
-                            eprintln!("{tool_name}: invalid argument '{eq_val}' for '--follow'");
+                            eprintln!(
+                                "{tool_name}: invalid argument {} for '--follow'",
+                                quoteaf_os(eq_val)
+                            );
                             process::exit(1);
                         }
                     }
@@ -336,7 +340,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 match val_str.parse::<u32>() {
                     Ok(pid) => follow_pid = Some(pid),
                     Err(_) => {
-                        eprintln!("{tool_name}: invalid PID: '{val_str}'");
+                        eprintln!("{tool_name}: invalid PID: {}", quoteaf_os(&val_str));
                         process::exit(1);
                     }
                 }
@@ -358,12 +362,15 @@ fn parse_args(args: &[String]) -> ParseResult {
                 match val_str.parse::<f64>() {
                     Ok(secs) if secs >= 0.0 => follow_sleep = secs,
                     _ => {
-                        eprintln!("{tool_name}: invalid sleep interval: '{val_str}'");
+                        eprintln!(
+                            "{tool_name}: invalid sleep interval: {}",
+                            quoteaf_os(&val_str)
+                        );
                         process::exit(1);
                     }
                 }
             } else {
-                eprintln!("{tool_name}: unrecognized option '{arg}'");
+                eprintln!("{tool_name}: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try '{tool_name} --help' for more information.");
                 process::exit(1);
             }
@@ -419,14 +426,20 @@ fn parse_args(args: &[String]) -> ParseResult {
                     match val_str.parse::<f64>() {
                         Ok(secs) if secs >= 0.0 => follow_sleep = secs,
                         _ => {
-                            eprintln!("{tool_name}: invalid sleep interval: '{val_str}'");
+                            eprintln!(
+                                "{tool_name}: invalid sleep interval: {}",
+                                quoteaf_os(&val_str)
+                            );
                             process::exit(1);
                         }
                     }
                     ci = chars.len();
                 }
                 _ => {
-                    eprintln!("{tool_name}: invalid option -- '{ch}'");
+                    eprintln!(
+                        "{tool_name}: invalid option -- {}",
+                        quoteaf_os(ch.to_string())
+                    );
                     eprintln!("Try '{tool_name} --help' for more information.");
                     process::exit(1);
                 }
@@ -471,7 +484,10 @@ fn rest_or_next_arg(
         // Consume the next argument.
         *arg_idx += 1;
         if *arg_idx >= args.len() {
-            eprintln!("{tool_name}: option requires an argument -- '{opt_char}'");
+            eprintln!(
+                "{tool_name}: option requires an argument -- {}",
+                quoteaf_os(opt_char.to_string())
+            );
             process::exit(1);
         }
         args[*arg_idx].clone()
@@ -669,11 +685,7 @@ fn tail_last_lines<R: BufRead, W: Write>(
 }
 
 /// Output the last `n` bytes from a reader.
-fn tail_last_bytes<R: Read, W: Write>(
-    reader: &mut R,
-    writer: &mut W,
-    n: u64,
-) -> io::Result<()> {
+fn tail_last_bytes<R: Read, W: Write>(reader: &mut R, writer: &mut W, n: u64) -> io::Result<()> {
     if n == 0 {
         let mut discard = [0u8; BUF_SIZE];
         while reader.read(&mut discard)? > 0 {}
@@ -736,11 +748,7 @@ fn tail_from_line<R: BufRead, W: Write>(
 }
 
 /// Output starting from byte N (1-indexed). Skips the first N-1 bytes.
-fn tail_from_byte<R: Read, W: Write>(
-    reader: &mut R,
-    writer: &mut W,
-    start: u64,
-) -> io::Result<()> {
+fn tail_from_byte<R: Read, W: Write>(reader: &mut R, writer: &mut W, start: u64) -> io::Result<()> {
     let skip = start.saturating_sub(1);
     let mut buf = [0u8; BUF_SIZE];
     let mut skipped: u64 = 0;
@@ -846,7 +854,11 @@ fn follow_file<W: Write>(
 
 /// Read from `reader` until `delimiter` byte is found (inclusive) or EOF.
 /// Appends to `buf` and returns the number of bytes read (0 at EOF).
-fn read_until_byte<R: BufRead>(reader: &mut R, delimiter: u8, buf: &mut Vec<u8>) -> io::Result<usize> {
+fn read_until_byte<R: BufRead>(
+    reader: &mut R,
+    delimiter: u8,
+    buf: &mut Vec<u8>,
+) -> io::Result<usize> {
     // BufRead::read_until does exactly this.
     reader.read_until(delimiter, buf)
 }
@@ -856,11 +868,7 @@ fn read_until_byte<R: BufRead>(reader: &mut R, delimiter: u8, buf: &mut Vec<u8>)
 // ============================================================================
 
 /// Process a single file (or stdin) according to the configuration.
-fn process_source<W: Write>(
-    config: &Config,
-    path: &str,
-    writer: &mut W,
-) -> io::Result<()> {
+fn process_source<W: Write>(config: &Config, path: &str, writer: &mut W) -> io::Result<()> {
     let delimiter = if config.zero_terminated { 0u8 } else { b'\n' };
 
     if path == "-" {
@@ -868,9 +876,8 @@ fn process_source<W: Write>(
         let mut locked = BufReader::new(stdin.lock());
         dispatch_operation(config, &mut locked, writer, delimiter)
     } else {
-        let file = File::open(path).map_err(|e| {
-            io::Error::new(e.kind(), format!("{path}: {e}"))
-        })?;
+        let file =
+            File::open(path).map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))?;
         let mut reader = BufReader::with_capacity(BUF_SIZE, file);
         dispatch_operation(config, &mut reader, writer, delimiter)
     }
@@ -885,15 +892,11 @@ fn dispatch_operation<R: BufRead, W: Write>(
 ) -> io::Result<()> {
     match config.tool {
         Tool::Head => match (config.count_mode, config.count_value) {
-            (CountMode::Lines, CountValue::Plain(n)) => {
-                head_lines(reader, writer, n, delimiter)
-            }
+            (CountMode::Lines, CountValue::Plain(n)) => head_lines(reader, writer, n, delimiter),
             (CountMode::Lines, CountValue::AllButLast(n)) => {
                 head_all_but_last_lines(reader, writer, n, delimiter)
             }
-            (CountMode::Bytes, CountValue::Plain(n)) => {
-                head_bytes(reader, writer, n)
-            }
+            (CountMode::Bytes, CountValue::Plain(n)) => head_bytes(reader, writer, n),
             (CountMode::Bytes, CountValue::AllButLast(n)) => {
                 head_all_but_last_bytes(reader, writer, n)
             }
@@ -901,9 +904,7 @@ fn dispatch_operation<R: BufRead, W: Write>(
             (CountMode::Lines, CountValue::FromStart(n)) => {
                 head_lines(reader, writer, n, delimiter)
             }
-            (CountMode::Bytes, CountValue::FromStart(n)) => {
-                head_bytes(reader, writer, n)
-            }
+            (CountMode::Bytes, CountValue::FromStart(n)) => head_bytes(reader, writer, n),
         },
         Tool::Tail => match (config.count_mode, config.count_value) {
             (CountMode::Lines, CountValue::Plain(n)) => {
@@ -912,19 +913,13 @@ fn dispatch_operation<R: BufRead, W: Write>(
             (CountMode::Lines, CountValue::FromStart(n)) => {
                 tail_from_line(reader, writer, n, delimiter)
             }
-            (CountMode::Bytes, CountValue::Plain(n)) => {
-                tail_last_bytes(reader, writer, n)
-            }
-            (CountMode::Bytes, CountValue::FromStart(n)) => {
-                tail_from_byte(reader, writer, n)
-            }
+            (CountMode::Bytes, CountValue::Plain(n)) => tail_last_bytes(reader, writer, n),
+            (CountMode::Bytes, CountValue::FromStart(n)) => tail_from_byte(reader, writer, n),
             // AllButLast is head-only; for tail, treat as plain last N.
             (CountMode::Lines, CountValue::AllButLast(n)) => {
                 tail_last_lines(reader, writer, n, delimiter)
             }
-            (CountMode::Bytes, CountValue::AllButLast(n)) => {
-                tail_last_bytes(reader, writer, n)
-            }
+            (CountMode::Bytes, CountValue::AllButLast(n)) => tail_last_bytes(reader, writer, n),
         },
     }
 }
@@ -944,11 +939,7 @@ fn print_header<W: Write>(writer: &mut W, name: &str, is_first: bool) -> io::Res
 
 /// Determine the display name for a source. `-` becomes `standard input`.
 fn display_name(path: &str) -> &str {
-    if path == "-" {
-        "standard input"
-    } else {
-        path
-    }
+    if path == "-" { "standard input" } else { path }
 }
 
 // ============================================================================
@@ -979,14 +970,13 @@ fn run(config: &Config) -> i32 {
     let mut exit_code = 0;
 
     for (idx, path) in sources.iter().enumerate() {
-        if show_headers
-            && let Err(e) = print_header(&mut out, display_name(path), idx == 0) {
-                if is_broken_pipe(&e) {
-                    return 0;
-                }
-                eprintln!("{tool_name}: write error: {e}");
-                return 1;
+        if show_headers && let Err(e) = print_header(&mut out, display_name(path), idx == 0) {
+            if is_broken_pipe(&e) {
+                return 0;
             }
+            eprintln!("{tool_name}: write error: {e}");
+            return 1;
+        }
 
         if let Err(e) = process_source(config, path, &mut out) {
             if is_broken_pipe(&e) {
@@ -1007,21 +997,23 @@ fn run(config: &Config) -> i32 {
     }
 
     // Follow mode (tail only). Only follows the last file.
-    if config.follow != FollowMode::None && config.tool == Tool::Tail
+    if config.follow != FollowMode::None
+        && config.tool == Tool::Tail
         && let Some(last_path) = sources.last()
-            && let Err(e) = follow_file(
-                last_path,
-                &mut out,
-                config.follow_sleep,
-                config.follow,
-                config.follow_pid,
-            ) {
-                if is_broken_pipe(&e) {
-                    return 0;
-                }
-                eprintln!("{tool_name}: {e}");
-                return 1;
-            }
+        && let Err(e) = follow_file(
+            last_path,
+            &mut out,
+            config.follow_sleep,
+            config.follow,
+            config.follow_pid,
+        )
+    {
+        if is_broken_pipe(&e) {
+            return 0;
+        }
+        eprintln!("{tool_name}: {e}");
+        return 1;
+    }
 
     exit_code
 }

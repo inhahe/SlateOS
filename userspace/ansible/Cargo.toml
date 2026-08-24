@@ -3,3 +3,6 @@ name = "ansible"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# ansible names hosts, playbooks and roles, taken from the inventory and
+# from playbook YAML on disk.
+quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `skopeo`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -35,7 +36,10 @@ fn run_skopeo(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "inspect" => {
-            let image = args.get(1).map(|s| s.as_str()).unwrap_or("docker://nginx:latest");
+            let image = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("docker://nginx:latest");
             println!("{{");
             println!("  \"Name\": \"{}\",", image.replace("docker://", ""));
             println!("  \"Digest\": \"sha256:abc123def456789...\",");
@@ -53,7 +57,10 @@ fn run_skopeo(args: Vec<String>) -> i32 {
             0
         }
         "copy" => {
-            let src = args.get(1).map(|s| s.as_str()).unwrap_or("docker://nginx:latest");
+            let src = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("docker://nginx:latest");
             let dst = args.get(2).map(|s| s.as_str()).unwrap_or("dir:/tmp/nginx");
             println!("Getting image source signatures");
             println!("Copying blob abc123 [================>] 32.1MiB / 32.1MiB");
@@ -77,16 +84,21 @@ fn run_skopeo(args: Vec<String>) -> i32 {
             0
         }
         "delete" => {
-            let image = args.get(1).map(|s| s.as_str()).unwrap_or("docker://myregistry/myimage:old");
+            let image = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("docker://myregistry/myimage:old");
             println!("Deleted: {}", image);
             0
         }
         "sync" => {
-            let src = args.windows(2)
+            let src = args
+                .windows(2)
                 .find(|w| w[0] == "--src")
                 .map(|w| w[1].as_str())
                 .unwrap_or("docker");
-            let dst = args.windows(2)
+            let dst = args
+                .windows(2)
                 .find(|w| w[0] == "--dest")
                 .map(|w| w[1].as_str())
                 .unwrap_or("dir");
@@ -108,7 +120,7 @@ fn run_skopeo(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: skopeo <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -124,7 +136,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_skopeo};
+    use super::run_skopeo;
 
     #[test]
     fn help_exits_zero() {

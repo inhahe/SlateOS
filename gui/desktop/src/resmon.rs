@@ -33,35 +33,43 @@
 //! monitor.update(&snapshot);
 //!
 //! // Each frame:
-//! let commands = monitor.render();
+//! let commands = monitor.render(&palette);
 //! ```
+//!
+//! # Colour
+//!
+//! Every colour here is read from the [`Palette`] the caller supplies; this
+//! module holds none of its own. Four judgements govern which role goes where,
+//! and each is a test rather than a comment.
+//!
+//! 1. **A hue here names a measurement, never a state and never a position.**
+//!    This is the one module in the shell that draws *no* accent at all. There
+//!    is nothing to select, nothing to invite, nothing in force — only six
+//!    quantities that have to be told apart. So the accent count is asserted to
+//!    be **zero**, which is a claim that only holds up when the accent is moved
+//!    off blue: `Cpu` is blue, and the stock accent is also blue, so under the
+//!    shipped theme "no accent here" and "the CPU line is accented" draw the
+//!    same pixels.
+//! 2. **Six measurements are six distinct colours, each pinned to the role it
+//!    names.** Distinctness alone is not enough — six distinct hues stay six
+//!    distinct hues under a permutation, and a graph whose CPU line is drawn in
+//!    the memory colour is wrong in a way no set can see.
+//! 3. **The grid is furniture.** It is a surface role, dimmer than any reading
+//!    drawn over it, and it must not collide with any of the six metric hues:
+//!    a gridline the colour of a line is a reading the user did not take.
+//! 4. **A metric's label and its sparkline are one colour said twice**,
+//!    derived from [`ResourceType::color`] rather than named beside it — so
+//!    adding a resource cannot leave a graph drawn in the old one's hue. Two,
+//!    not three: [`ResourceMonitor::render_bar_graph`] is a primitive this
+//!    module offers and never calls, so its hue is the caller's business and
+//!    not a claim this module gets to make.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::history::SampleHistory;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
-
-// ============================================================================
-// Theme — Catppuccin Mocha palette
-// ============================================================================
-
-mod theme {
-    use guitk::color::Color;
-
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT: Color = Color::from_hex(0xA6ADC8);
-
-    pub const CPU: Color = Color::from_hex(0x89B4FA);
-    pub const MEMORY: Color = Color::from_hex(0xA6E3A1);
-    pub const DISK: Color = Color::from_hex(0xFAB387);
-    pub const NETWORK: Color = Color::from_hex(0xCBA6F7);
-    pub const TEMPERATURE: Color = Color::from_hex(0xF38BA8);
-    pub const GPU: Color = Color::from_hex(0xB4BEFE);
-}
 
 // ============================================================================
 // Constants
@@ -125,15 +133,21 @@ impl ResourceType {
         }
     }
 
-    /// Theme color for this resource type.
-    pub fn color(self) -> Color {
+    /// The hue that stands for this resource.
+    ///
+    /// A *named hue*, never `p.accent`, even for `Cpu` — whose colour is the
+    /// same pixel as the stock accent and so cannot be told apart from it until
+    /// the user picks a different one. See judgement 1 in the module docs:
+    /// these answer "which measurement", and this module has nothing at all to
+    /// say about position.
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Cpu => theme::CPU,
-            Self::Memory => theme::MEMORY,
-            Self::Disk => theme::DISK,
-            Self::Network => theme::NETWORK,
-            Self::Gpu => theme::GPU,
-            Self::Temperature => theme::TEMPERATURE,
+            Self::Cpu => p.blue,
+            Self::Memory => p.green,
+            Self::Disk => p.peach,
+            Self::Network => p.mauve,
+            Self::Gpu => p.lavender,
+            Self::Temperature => p.red,
         }
     }
 }
@@ -391,10 +405,10 @@ impl ResourceMonitor {
     }
 
     /// Render the widget into a list of render commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {
         match self.mode {
-            DisplayMode::Compact => self.render_compact(),
-            DisplayMode::Expanded => self.render_expanded(),
+            DisplayMode::Compact => self.render_compact(p),
+            DisplayMode::Expanded => self.render_expanded(p),
         }
     }
 
@@ -403,7 +417,7 @@ impl ResourceMonitor {
     // ======================================================================
 
     /// Render compact mode: a single strip with four mini sparklines.
-    fn render_compact(&self) -> Vec<RenderCommand> {
+    fn render_compact(&self, p: &Palette) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background.
@@ -412,7 +426,7 @@ impl ResourceMonitor {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: theme::BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -422,7 +436,7 @@ impl ResourceMonitor {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: theme::SURFACE0,
+            color: p.surface0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -450,7 +464,7 @@ impl ResourceMonitor {
             let sy = padding;
             let data = self.graph_data(res);
 
-            Self::render_sparkline(&mut cmds, data, sx, sy, slot_w, slot_h, res.color());
+            Self::render_sparkline(&mut cmds, data, sx, sy, slot_w, slot_h, res.color(p));
         }
 
         cmds
@@ -461,7 +475,7 @@ impl ResourceMonitor {
     // ======================================================================
 
     /// Render expanded mode: four stacked graph panels.
-    fn render_expanded(&self) -> Vec<RenderCommand> {
+    fn render_expanded(&self, p: &Palette) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Outer background.
@@ -470,7 +484,7 @@ impl ResourceMonitor {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: theme::BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -480,7 +494,7 @@ impl ResourceMonitor {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: theme::SURFACE0,
+            color: p.surface0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(6.0),
         });
@@ -490,7 +504,7 @@ impl ResourceMonitor {
             x: PANEL_PADDING,
             y: PANEL_PADDING,
             text: "Resource Monitor".to_string(),
-            color: theme::TEXT,
+            color: p.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - PANEL_PADDING * 2.0),
@@ -514,7 +528,7 @@ impl ResourceMonitor {
         for (i, &res) in panels.iter().enumerate() {
             let px = PANEL_PADDING;
             let py = title_area + i as f32 * (panel_h + gap);
-            self.render_panel(&mut cmds, res, px, py, panel_w, panel_h);
+            self.render_panel(&mut cmds, p, res, px, py, panel_w, panel_h);
         }
 
         cmds
@@ -524,13 +538,14 @@ impl ResourceMonitor {
     fn render_panel(
         &self,
         cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
         resource: ResourceType,
         x: f32,
         y: f32,
         w: f32,
         h: f32,
     ) {
-        let color = resource.color();
+        let color = resource.color(p);
         let data = self.graph_data(resource);
 
         // Panel background.
@@ -539,7 +554,7 @@ impl ResourceMonitor {
             y,
             width: w,
             height: h,
-            color: theme::SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -562,7 +577,7 @@ impl ResourceMonitor {
             x: x + w - 80.0,
             y: label_y,
             text: value_text,
-            color: theme::TEXT,
+            color: p.text,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(74.0),
@@ -575,7 +590,7 @@ impl ResourceMonitor {
             x: x + 6.0,
             y: label_y + 12.0,
             text: peak_text,
-            color: theme::SUBTEXT,
+            color: p.subtext0,
             font_size: 9.0,
             font_weight: FontWeightHint::Light,
             max_width: Some(w * 0.5),
@@ -589,7 +604,7 @@ impl ResourceMonitor {
         let graph_h = h - LABEL_HEIGHT - 10.0;
 
         if graph_w > 0.0 && graph_h > 0.0 {
-            Self::render_grid_lines(cmds, graph_x, graph_y, graph_w, graph_h);
+            Self::render_grid_lines(cmds, p, graph_x, graph_y, graph_w, graph_h);
             Self::render_sparkline(cmds, data, graph_x, graph_y, graph_w, graph_h, color);
         }
     }
@@ -682,8 +697,15 @@ impl ResourceMonitor {
     }
 
     /// Render subtle horizontal grid lines across a graph area.
-    fn render_grid_lines(cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
-        let grid_color = theme::SURFACE1;
+    fn render_grid_lines(
+        cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) {
+        let grid_color = p.surface1;
         for i in 1..=GRID_LINE_COUNT {
             let gy = y + (i as f32 / (GRID_LINE_COUNT as f32 + 1.0)) * h;
             cmds.push(RenderCommand::Line {
@@ -752,6 +774,31 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
+
+    /// A palette whose accent belongs to no palette.
+    ///
+    /// The stock accent **is** `blue`, and `blue` is this module's colour
+    /// for `Cpu` — so under the shipped theme "this module draws no accent"
+    /// and "every CPU line is accented" are the same picture. The loop below
+    /// proves the substitute really is outside the palette rather than
+    /// coincidentally equal to a role a test then reads by accident.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0xFF00FF);
+        for (name, role) in p.roles() {
+            if name == "accent" {
+                continue;
+            }
+            assert_ne!(
+                (role.r, role.g, role.b),
+                (p.accent.r, p.accent.g, p.accent.b),
+                "the substitute accent collides with {name}, so an \
+                 accent assertion would be reading that role instead"
+            );
+        }
+        p
+    }
 
     // ======================================================================
     // GraphData tests
@@ -936,8 +983,8 @@ mod tests {
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(
-                    types[i].color(),
-                    types[j].color(),
+                    types[i].color(&accented(false)),
+                    types[j].color(&accented(false)),
                     "{:?} and {:?} should have different colors",
                     types[i],
                     types[j],
@@ -1111,7 +1158,7 @@ mod tests {
     #[test]
     fn test_render_compact_empty_produces_background() {
         let monitor = ResourceMonitor::new(320.0, 40.0);
-        let cmds = monitor.render();
+        let cmds = monitor.render(&accented(false));
 
         // Should have at least background + border.
         assert!(cmds.len() >= 2);
@@ -1121,7 +1168,7 @@ mod tests {
                 corner_radii,
                 ..
             } => {
-                assert_eq!(*color, theme::BASE);
+                assert_eq!(*color, accented(false).base);
                 assert_eq!(*corner_radii, CornerRadii::all(4.0));
             }
             other => panic!("Expected FillRect, got {other:?}"),
@@ -1134,7 +1181,7 @@ mod tests {
         for i in 0..10 {
             monitor.update(&make_snapshot(i as f32 * 10.0, 8192, 50.0, 1_000_000));
         }
-        let cmds = monitor.render();
+        let cmds = monitor.render(&accented(false));
 
         let line_count = cmds
             .iter()
@@ -1150,7 +1197,7 @@ mod tests {
     #[test]
     fn test_render_compact_too_narrow_skips_sparklines() {
         let monitor = ResourceMonitor::new(20.0, 40.0);
-        let cmds = monitor.render();
+        let cmds = monitor.render(&accented(false));
         // Only background and border when too narrow for sparklines.
         assert_eq!(cmds.len(), 2);
     }
@@ -1163,7 +1210,7 @@ mod tests {
     fn test_render_expanded_has_title() {
         let mut monitor = ResourceMonitor::new(320.0, 400.0);
         monitor.set_mode(DisplayMode::Expanded);
-        let cmds = monitor.render();
+        let cmds = monitor.render(&accented(false));
 
         let has_title = cmds.iter().any(|c| {
             matches!(c,
@@ -1181,14 +1228,14 @@ mod tests {
     fn test_render_expanded_has_panel_backgrounds() {
         let mut monitor = ResourceMonitor::new(320.0, 400.0);
         monitor.set_mode(DisplayMode::Expanded);
-        let cmds = monitor.render();
+        let cmds = monitor.render(&accented(false));
 
         // Should have 4 panel backgrounds (Surface0 fill rects) plus the outer bg.
         let surface0_rects = cmds
             .iter()
             .filter(|c| {
                 matches!(c,
-                    RenderCommand::FillRect { color, .. } if *color == theme::SURFACE0
+                    RenderCommand::FillRect { color, .. } if *color == accented(false).surface0
                 )
             })
             .count();
@@ -1200,16 +1247,16 @@ mod tests {
         let mut monitor = ResourceMonitor::new(320.0, 400.0);
         monitor.set_mode(DisplayMode::Expanded);
         monitor.update(&make_snapshot(50.0, 8192, 25.0, 500_000));
-        let cmds = monitor.render();
+        let cmds = monitor.render(&accented(false));
 
         let labels: Vec<&str> = cmds
             .iter()
             .filter_map(|c| match c {
                 RenderCommand::Text { text, color, .. }
-                    if *color == theme::CPU
-                        || *color == theme::MEMORY
-                        || *color == theme::DISK
-                        || *color == theme::NETWORK =>
+                    if *color == accented(false).blue
+                        || *color == accented(false).green
+                        || *color == accented(false).peach
+                        || *color == accented(false).mauve =>
                 {
                     Some(text.as_str())
                 }
@@ -1226,14 +1273,14 @@ mod tests {
     fn test_render_expanded_has_grid_lines() {
         let mut monitor = ResourceMonitor::new(320.0, 400.0);
         monitor.set_mode(DisplayMode::Expanded);
-        let cmds = monitor.render();
+        let cmds = monitor.render(&accented(false));
 
         let grid_lines = cmds
             .iter()
             .filter(|c| {
                 matches!(c,
                     RenderCommand::Line { color, width, .. }
-                    if *color == theme::SURFACE1 && (*width - 0.5).abs() < f32::EPSILON
+                    if *color == accented(false).surface1 && (*width - 0.5).abs() < f32::EPSILON
                 )
             })
             .count();
@@ -1258,7 +1305,15 @@ mod tests {
         data.push(75.0);
 
         let mut cmds = Vec::new();
-        ResourceMonitor::render_bar_graph(&mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU);
+        ResourceMonitor::render_bar_graph(
+            &mut cmds,
+            &data,
+            0.0,
+            0.0,
+            100.0,
+            50.0,
+            accented(false).blue,
+        );
 
         let fill_count = cmds
             .iter()
@@ -1271,7 +1326,15 @@ mod tests {
     fn test_render_bar_graph_empty_data() {
         let data = GraphData::new(GRAPH_BUFFER_SIZE);
         let mut cmds = Vec::new();
-        ResourceMonitor::render_bar_graph(&mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU);
+        ResourceMonitor::render_bar_graph(
+            &mut cmds,
+            &data,
+            0.0,
+            0.0,
+            100.0,
+            50.0,
+            accented(false).blue,
+        );
         assert!(cmds.is_empty(), "Empty data should produce no bar commands");
     }
 
@@ -1285,7 +1348,15 @@ mod tests {
         data.push(50.0);
 
         let mut cmds = Vec::new();
-        ResourceMonitor::render_sparkline(&mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU);
+        ResourceMonitor::render_sparkline(
+            &mut cmds,
+            &data,
+            0.0,
+            0.0,
+            100.0,
+            50.0,
+            accented(false).blue,
+        );
         // Need at least 2 points to draw a line.
         assert!(cmds.is_empty());
     }
@@ -1297,7 +1368,15 @@ mod tests {
         data.push(75.0);
 
         let mut cmds = Vec::new();
-        ResourceMonitor::render_sparkline(&mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU);
+        ResourceMonitor::render_sparkline(
+            &mut cmds,
+            &data,
+            0.0,
+            0.0,
+            100.0,
+            50.0,
+            accented(false).blue,
+        );
         assert_eq!(cmds.len(), 1);
         assert!(matches!(&cmds[0], RenderCommand::Line { .. }));
     }
@@ -1309,7 +1388,15 @@ mod tests {
         data.push(150.0);
 
         let mut cmds = Vec::new();
-        ResourceMonitor::render_sparkline(&mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU);
+        ResourceMonitor::render_sparkline(
+            &mut cmds,
+            &data,
+            0.0,
+            0.0,
+            100.0,
+            50.0,
+            accented(false).blue,
+        );
 
         // Should produce a line; the clamp should prevent y from escaping bounds.
         assert_eq!(cmds.len(), 1);
@@ -1347,5 +1434,466 @@ mod tests {
     #[test]
     fn test_format_bytes_per_sec_gigabytes() {
         assert_eq!(format_bytes_per_sec(1_073_741_824), "1.1 GB/s");
+    }
+    // ======================================================================
+    // Colour — TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE
+    // ======================================================================
+
+    /// A monitor with enough history that every graph actually draws.
+    ///
+    /// `render_sparkline` returns early below two samples and `render_panel`
+    /// draws its grid only when the graph area has positive size — so a monitor
+    /// straight out of `new` renders a background, a border and nothing else.
+    /// A sweep over *that* would check two commands and pass, which is the
+    /// vacuous-coverage trap in its purest form.
+    fn monitor(mode: DisplayMode) -> ResourceMonitor {
+        let mut m = ResourceMonitor::new(320.0, 400.0);
+        m.set_mode(mode);
+        for i in 0..8 {
+            let v = 10.0 + i as f32 * 7.0;
+            m.update(&make_snapshot(v, 4096 + i * 512, v / 2.0, 1_000_000));
+        }
+        m
+    }
+
+    /// Every colour in `cmds`, whatever command carries it.
+    fn all_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. }
+                | RenderCommand::Line { color, .. }
+                | RenderCommand::BoxShadow { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colour of the one `Text` command reading `s`.
+    fn text_color(cmds: &[RenderCommand], s: &str) -> Color {
+        let found: Vec<Color> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. } if text == s => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(found.len(), 1, "expected exactly one command reading {s:?}");
+        found[0]
+    }
+
+    /// The colours of every `Line` of exactly `width` points.
+    fn line_colors(cmds: &[RenderCommand], line_width: f32) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { color, width, .. } if *width == line_width => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The four resources the widget actually graphs, in the order it draws
+    /// them. `ResourceType::ALL` has six; GPU and temperature are collected but
+    /// never plotted, which is a distinction a test that looped over `ALL`
+    /// would silently paper over.
+    const GRAPHED: [(ResourceType, &str); 4] = [
+        (ResourceType::Cpu, "CPU"),
+        (ResourceType::Memory, "RAM"),
+        (ResourceType::Disk, "Disk"),
+        (ResourceType::Network, "Net"),
+    ];
+
+    /// Nothing this monitor draws comes from outside the palette it was given.
+    ///
+    /// Both modes and both display modes: compact and expanded draw different
+    /// trees, and a constant left behind in the one the test does not render is
+    /// a constant the test cannot see.
+    #[test]
+    fn every_colour_this_monitor_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+            for mode in [DisplayMode::Compact, DisplayMode::Expanded] {
+                let cmds = monitor(mode).render(&p);
+                assert!(
+                    cmds.len() > 10,
+                    "{mode:?} drew {} commands, which is not a graph",
+                    cmds.len()
+                );
+                assert_drawn_from(&p, &cmds, &[], "resource monitor");
+            }
+        }
+    }
+
+    /// None of the eleven deleted constants is still drawn.
+    ///
+    /// Every value below is a Catppuccin **Mocha** colour, so a light render
+    /// cannot legitimately produce one — which turns "a substitution was
+    /// missed" from an invisible defect into a named failure.
+    #[test]
+    fn none_of_the_eleven_deleted_constants_is_still_drawn() {
+        const DELETED: [(&str, u32); 11] = [
+            ("BASE", 0x001E_1E2E),
+            ("SURFACE0", 0x0031_3244),
+            ("SURFACE1", 0x0045_475A),
+            ("TEXT", 0x00CD_D6F4),
+            ("SUBTEXT", 0x00A6_ADC8),
+            ("CPU", 0x0089_B4FA),
+            ("MEMORY", 0x00A6_E3A1),
+            ("DISK", 0x00FA_B387),
+            ("NETWORK", 0x00CB_A6F7),
+            ("TEMPERATURE", 0x00F3_8BA8),
+            ("GPU", 0x00B4_BEFE),
+        ];
+
+        let p = accented(true);
+        let mut cmds = monitor(DisplayMode::Expanded).render(&p);
+        cmds.extend(monitor(DisplayMode::Compact).render(&p));
+        for c in all_colors(&cmds) {
+            let rgb = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+            for (name, deleted) in DELETED {
+                assert_ne!(
+                    rgb, deleted,
+                    "the monitor still draws the deleted constant {name} \
+                     (#{deleted:06X}) in a light render"
+                );
+            }
+        }
+    }
+
+    /// Every site, named one at a time, in the role this module claims for it.
+    ///
+    /// The sweep above proves only *membership*, and membership cannot see a
+    /// swap: a panel painted `surface1` instead of `surface0` draws a legal
+    /// colour, and so does a peak reading painted `subtext1`. n source sites
+    /// need n assertions, so this is that table.
+    #[test]
+    fn every_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+
+            // Compact: a background and a border, and nothing else with a fill.
+            let compact = monitor(DisplayMode::Compact).render(&p);
+            assert_eq!(
+                compact.first().map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => *color,
+                    _ => panic!("the compact strip does not start with its background"),
+                }),
+                Some(p.base),
+                "the compact strip's background"
+            );
+            let strokes: Vec<Color> = compact
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(strokes, vec![p.surface0], "the compact strip's border");
+
+            // Expanded: the same two, plus a title, four panels and their text.
+            let cmds = monitor(DisplayMode::Expanded).render(&p);
+            assert_eq!(
+                cmds.first().map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => *color,
+                    _ => panic!("the panel does not start with its background"),
+                }),
+                Some(p.base),
+                "the expanded widget's background"
+            );
+            let strokes: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(strokes, vec![p.surface0], "the expanded widget's border");
+            assert_eq!(
+                text_color(&cmds, "Resource Monitor"),
+                p.text,
+                "the widget's own title is the brightest thing on it"
+            );
+
+            // One panel per graphed resource, all on the same rung.
+            let panels: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { width, color, .. }
+                        if *width == 320.0 - PANEL_PADDING * 2.0 =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(panels.len(), GRAPHED.len(), "one background per panel");
+            assert!(
+                panels.iter().all(|c| *c == p.surface0),
+                "a panel is one rung above the widget it sits in"
+            );
+
+            // Each panel's three lines of text: the label in the metric's own
+            // hue, the current reading in ordinary ink, the peak a rung dimmer.
+            for (resource, label) in GRAPHED {
+                assert_eq!(
+                    text_color(&cmds, label),
+                    resource.color(&p),
+                    "the {label} label is not drawn in its own metric's hue"
+                );
+            }
+            let values: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text {
+                        color, font_size, ..
+                    } if *font_size == 11.0 => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            // Four labels and four readings share the 11pt row; the labels are
+            // the metric hues, so what is left over is the readings.
+            let readings = values.iter().filter(|c| **c == p.text).count();
+            assert_eq!(readings, GRAPHED.len(), "one current reading per panel");
+            let peaks: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text {
+                        color, font_size, ..
+                    } if *font_size == 9.0 => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(peaks.len(), GRAPHED.len(), "one peak reading per panel");
+            assert!(
+                peaks.iter().all(|c| *c == p.subtext0),
+                "a peak is a rung dimmer than the reading it qualifies"
+            );
+
+            // The grid, which is the module's only half-point line.
+            let grid = line_colors(&cmds, 0.5);
+            assert_eq!(
+                grid.len(),
+                GRID_LINE_COUNT * GRAPHED.len(),
+                "four grid lines per panel"
+            );
+            assert!(
+                grid.iter().all(|c| *c == p.surface1),
+                "the grid is furniture, drawn on the surface rungs"
+            );
+        }
+    }
+
+    /// Judgement 1: this module draws no accent at all.
+    ///
+    /// There is nothing here to select, nothing to invite and nothing in
+    /// force — only quantities that have to be told apart. That claim is worth
+    /// nothing at the shipped accent, which *is* `blue`, which is `Cpu`: every
+    /// CPU line would answer to it and the count would read 40 rather than 0
+    /// for a reason that has nothing to do with position. Hence the off-palette
+    /// accent, without which this test would be asserting the opposite of what
+    /// it says.
+    #[test]
+    fn no_colour_in_this_module_marks_a_position() {
+        for light in [false, true] {
+            let p = accented(light);
+            for mode in [DisplayMode::Compact, DisplayMode::Expanded] {
+                let cmds = monitor(mode).render(&p);
+                let n = all_colors(&cmds).iter().filter(|c| **c == p.accent).count();
+                assert_eq!(
+                    n, 0,
+                    "{mode:?} draws {n} accented commands, but a monitor has \
+                     nothing to say about where you are"
+                );
+            }
+        }
+    }
+
+    /// Judgement 2: six measurements are six distinct colours, each pinned to
+    /// the role it names.
+    ///
+    /// The table is the point. `test_resource_type_colors_distinct` already
+    /// checks the six are distinct, and distinctness survives a permutation
+    /// untouched — six distinct hues rotated by one are still six distinct
+    /// hues, and every graph in the widget is then drawn in its neighbour's
+    /// colour. Only naming the pairs can fail that, and comparing a drawn
+    /// command to `ResourceType::color` cannot, because that asks the code
+    /// under test what it meant.
+    #[test]
+    fn each_measurement_is_pinned_to_the_role_it_names() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = monitor(DisplayMode::Expanded).render(&p);
+            for (resource, expected, label) in [
+                (ResourceType::Cpu, p.blue, "CPU"),
+                (ResourceType::Memory, p.green, "RAM"),
+                (ResourceType::Disk, p.peach, "Disk"),
+                (ResourceType::Network, p.mauve, "Net"),
+                (ResourceType::Gpu, p.lavender, "GPU"),
+                (ResourceType::Temperature, p.red, "Temp"),
+            ] {
+                assert_eq!(resource.color(&p), expected, "{label} names the wrong role");
+            }
+            // And the four that reach the screen are drawn in those hues.
+            for (resource, label) in GRAPHED {
+                assert_eq!(
+                    text_color(&cmds, label),
+                    resource.color(&p),
+                    "the {label} panel is drawn in another metric's hue"
+                );
+            }
+        }
+    }
+
+    /// Judgement 3: the grid is furniture and never collides with a reading.
+    ///
+    /// A gridline the colour of a line is a reading the user did not take. The
+    /// claim is checked against the six metric hues rather than the four drawn
+    /// ones, so that plotting GPU or temperature later cannot quietly make the
+    /// grid ambiguous.
+    #[test]
+    fn no_gridline_can_be_mistaken_for_a_reading() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = monitor(DisplayMode::Expanded).render(&p);
+
+            let grid = line_colors(&cmds, 0.5);
+            assert!(!grid.is_empty(), "no grid was drawn to check");
+            for g in &grid {
+                for resource in ResourceType::ALL {
+                    assert_ne!(
+                        *g,
+                        resource.color(&p),
+                        "a gridline is the same colour as the {} graph",
+                        resource.label()
+                    );
+                }
+                assert_ne!(*g, p.text, "a gridline is as bright as a reading");
+            }
+        }
+    }
+
+    /// Judgement 4: a metric's label and its sparkline are one colour said
+    /// twice.
+    ///
+    /// Derived from [`ResourceType::color`] at each site rather than named
+    /// beside it, so that adding a resource cannot leave a graph drawn in the
+    /// old one's hue. Asserted purely as a *relationship* between commands —
+    /// which colour is never said here, only that the two agree — because
+    /// pinning a metric to a named role is
+    /// [`each_measurement_is_pinned_to_the_role_it_names`]'s job and a test
+    /// that quietly does both cannot be read as a coverage claim about either.
+    ///
+    /// It used to do both, and the harness said so: four hue-map defects
+    /// reported this test as an **undeclared** catcher, because the bar-graph
+    /// section ended `== p.blue` — a pin wearing a relationship's docstring.
+    /// Those bars were doubly out of place, since `render_bar_graph` is a
+    /// primitive this module never calls; the claim that it draws in the hue
+    /// it is handed now lives beside the other bar tests, where it is about
+    /// the primitive rather than about a metric.
+    #[test]
+    fn a_metric_is_one_colour_wherever_it_appears() {
+        for light in [false, true] {
+            let p = accented(light);
+            // Both display modes, because the compact strip plots the same
+            // four metrics from a *different* call site with its own copy of
+            // the hue lookup — and the strip carries no labels at all, so
+            // there is nothing else in the module that could notice its lines
+            // being drawn in the wrong metric's colour.
+            for mode in [DisplayMode::Compact, DisplayMode::Expanded] {
+                let cmds = monitor(mode).render(&p);
+
+                // The sparklines are the module's only 1.5-point lines.
+                let plotted = line_colors(&cmds, 1.5);
+                assert!(!plotted.is_empty(), "{mode:?} drew no sparkline to check");
+                for (resource, _) in GRAPHED {
+                    let hue = resource.color(&p);
+                    assert!(
+                        plotted.contains(&hue),
+                        "{:?} plots nothing in the {} hue, so one metric is \
+                         drawn in another's colour",
+                        mode,
+                        resource.label()
+                    );
+                }
+                // And nothing is plotted in a colour that is not a metric's.
+                for c in &plotted {
+                    assert!(
+                        ResourceType::ALL.iter().any(|r| r.color(&p) == *c),
+                        "{mode:?} draws a line in {c:?}, which is not any \
+                         metric's hue"
+                    );
+                }
+            }
+
+            // Expanded alone carries the labels, and each names the graph
+            // beneath it: same hue, two commands, one claim.
+            let cmds = monitor(DisplayMode::Expanded).render(&p);
+            let plotted = line_colors(&cmds, 1.5);
+            for (resource, label) in GRAPHED {
+                let hue = resource.color(&p);
+                assert_eq!(text_color(&cmds, label), hue, "the {label} label");
+                assert!(
+                    plotted.contains(&hue),
+                    "the {label} label is drawn in a hue no line on the screen \
+                     uses, so the label names a graph that is not there"
+                );
+            }
+        }
+    }
+
+    /// The bar primitive draws in the colour it is handed, and in no other.
+    ///
+    /// A small claim, and deliberately about `render_bar_graph` rather than
+    /// about a metric: this module never calls it, so whichever hue reaches it
+    /// is the caller's decision. What the primitive owes its caller is that it
+    /// does not substitute a default — which is the one way a bar chart could
+    /// come out a colour nobody chose.
+    #[test]
+    fn the_bar_primitive_draws_in_the_colour_it_is_given() {
+        for light in [false, true] {
+            let p = accented(light);
+            let data = monitor(DisplayMode::Expanded)
+                .graph_data(ResourceType::Cpu)
+                .clone();
+            // The accent, precisely because nothing in this module draws it:
+            // a bar that came back in a metric hue, an ink or a surface would
+            // be a bar the primitive chose for itself.
+            for handed in [p.accent, p.green, p.text] {
+                let mut bars = Vec::new();
+                ResourceMonitor::render_bar_graph(&mut bars, &data, 0.0, 0.0, 100.0, 50.0, handed);
+                assert!(!bars.is_empty(), "no bars were drawn to check");
+                assert!(
+                    all_colors(&bars).iter().all(|c| *c == handed),
+                    "the bar primitive substituted a colour of its own"
+                );
+            }
+        }
+    }
+
+    /// The widget reads as a stack of panels in either mode.
+    ///
+    /// Asserted as an *ordering* — the panel is nearer the foreground than the
+    /// widget behind it — rather than as a pair of literals, so it fails on a
+    /// palette whose surface rung was made darker than its base instead of
+    /// passing because two particular hexes were typed correctly.
+    #[test]
+    fn a_panel_reads_as_raised_above_the_widget_behind_it() {
+        for light in [false, true] {
+            let p = accented(light);
+            let luma =
+                |c: Color| 0.299 * f32::from(c.r) + 0.587 * f32::from(c.g) + 0.114 * f32::from(c.b);
+            let toward_fg = if light { -1.0 } else { 1.0 };
+            assert!(
+                (luma(p.surface0) - luma(p.base)) * toward_fg > 0.0,
+                "a panel on the {} palette does not stand out from the widget \
+                 it sits in",
+                if light { "light" } else { "dark" }
+            );
+            assert!(
+                (luma(p.surface1) - luma(p.surface0)) * toward_fg > 0.0,
+                "the grid does not stand out from the panel it is drawn on"
+            );
+        }
     }
 }

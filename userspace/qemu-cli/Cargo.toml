@@ -2,3 +2,8 @@
 name = "qemu-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# qemu-cli names disk images, formats and machine types, all supplied on the
+# command line.
+quoting = { path = "../quoting" }

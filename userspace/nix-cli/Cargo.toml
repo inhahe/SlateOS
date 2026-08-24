@@ -2,3 +2,8 @@
 name = "nix-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# nix-cli names store paths, derivations and flake references, all of which
+# come from the command line or from a flake fetched off the network.
+quoting = { path = "../quoting" }

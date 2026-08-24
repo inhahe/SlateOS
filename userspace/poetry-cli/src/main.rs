@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `poetry`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_poetry(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -79,7 +84,9 @@ fn run_poetry(args: &[String]) -> i32 {
         }
         "add" => {
             let pkg = args.get(1).map(|s| s.as_str()).unwrap_or("requests");
-            let dev = args.iter().any(|a| a == "--dev" || a == "-D" || a == "--group=dev");
+            let dev = args
+                .iter()
+                .any(|a| a == "--dev" || a == "-D" || a == "--group=dev");
             if dev {
                 println!("Using version ^8.2 for {}", pkg);
                 println!("Updating dependencies (dev)");
@@ -120,8 +127,12 @@ fn run_poetry(args: &[String]) -> i32 {
                     println!("  idna >=2.5,<4");
                     println!("  urllib3 >=1.21.1,<3");
                 } else {
-                    println!("certifi             2024.6.2   Python package for providing Mozilla's CA Bundle.");
-                    println!("charset-normalizer  3.3.2      The Real First Universal Charset Detector.");
+                    println!(
+                        "certifi             2024.6.2   Python package for providing Mozilla's CA Bundle."
+                    );
+                    println!(
+                        "charset-normalizer  3.3.2      The Real First Universal Charset Detector."
+                    );
                     println!("requests            2.32.3     Python HTTP for Humans.");
                 }
             }
@@ -154,38 +165,48 @@ fn run_poetry(args: &[String]) -> i32 {
                     println!("Virtualenv");
                     println!("Python:         3.12.4");
                     println!("Implementation: CPython");
-                    println!("Path:           /home/user/.cache/pypoetry/virtualenvs/mypackage-py3.12");
-                    println!("Executable:     /home/user/.cache/pypoetry/virtualenvs/mypackage-py3.12/bin/python");
+                    println!(
+                        "Path:           /home/user/.cache/pypoetry/virtualenvs/mypackage-py3.12"
+                    );
+                    println!(
+                        "Executable:     /home/user/.cache/pypoetry/virtualenvs/mypackage-py3.12/bin/python"
+                    );
                     println!("Valid:          True");
                 }
                 "list" => {
                     println!("mypackage-abc12345-py3.12 (Activated)");
                 }
                 "remove" => println!("Deleted virtualenv"),
-                _ => println!("poetry env: '{}' completed", sub),
+                _ => println!("poetry env: {} completed", quoteaf_os(sub)),
             }
         }
         "version" => {
             let bump = args.get(1).map(|s| s.as_str());
             if let Some(b) = bump {
-                println!("Bumping version from 0.1.0 to {}", match b {
-                    "patch" => "0.1.1",
-                    "minor" => "0.2.0",
-                    "major" => "1.0.0",
-                    v => v,
-                });
+                println!(
+                    "Bumping version from 0.1.0 to {}",
+                    match b {
+                        "patch" => "0.1.1",
+                        "minor" => "0.2.0",
+                        "major" => "1.0.0",
+                        v => v,
+                    }
+                );
             } else {
                 println!("mypackage 0.1.0");
             }
         }
-        _ => println!("poetry: '{}' completed", subcmd),
+        _ => println!("poetry: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "poetry".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "poetry".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_poetry(&rest);
     process::exit(code);
@@ -193,7 +214,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_poetry};
+    use super::{basename, run_poetry, strip_ext};
 
     #[test]
     fn basename_strips_path() {

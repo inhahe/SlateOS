@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `esphome`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -61,7 +62,11 @@ fn run_esphome(args: &[String]) -> i32 {
             println!("[12:34:57][I][sensor:029]: Humidity: 45.2%");
         }
         "dashboard" => {
-            let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("6052");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("6052");
             println!("ESPHome Dashboard starting...");
             println!("  Listening on http://0.0.0.0:{}/", port);
             println!("  Ready.");
@@ -77,7 +82,7 @@ fn run_esphome(args: &[String]) -> i32 {
             println!("Cleaning build files...");
             println!("Done.");
         }
-        _ => println!("esphome: '{}' completed", subcmd),
+        _ => println!("esphome: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -91,7 +96,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_esphome};
+    use super::run_esphome;
 
     #[test]
     fn help_exits_zero() {

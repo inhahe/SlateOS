@@ -24,6 +24,7 @@
 //! fuser -v /var/log/syslog
 //! ```
 
+use quoting::quotef_os;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -360,10 +361,7 @@ fn parse_pv_args(args: &[String]) -> Result<PvConfig, String> {
             cfg.buffer_size = parse_size(rest)? as usize;
         } else if arg == "-N" {
             i += 1;
-            let val = args
-                .get(i)
-                .ok_or("-N requires a NAME argument")?
-                .clone();
+            let val = args.get(i).ok_or("-N requires a NAME argument")?.clone();
             cfg.name = Some(val);
         } else if arg.starts_with('-') && arg != "-" {
             return Err(format!("unknown option: {arg}"));
@@ -459,9 +457,7 @@ fn run_pv(args: &[String]) -> Result<(), String> {
                     if rate_window_bytes >= limit {
                         let sleep_ms = 1000u128.saturating_sub(window_elapsed);
                         if sleep_ms > 0 {
-                            std::thread::sleep(std::time::Duration::from_millis(
-                                sleep_ms as u64,
-                            ));
+                            std::thread::sleep(std::time::Duration::from_millis(sleep_ms as u64));
                         }
                         rate_window_start = Instant::now();
                         rate_window_bytes = 0;
@@ -575,20 +571,12 @@ fn parse_truncate_args(args: &[String]) -> Result<TruncateConfig, String> {
             cfg.no_create = true;
         } else if arg == "-s" || arg == "--size" {
             i += 1;
-            cfg.size_spec = Some(
-                args.get(i)
-                    .ok_or("-s requires a SIZE argument")?
-                    .clone(),
-            );
+            cfg.size_spec = Some(args.get(i).ok_or("-s requires a SIZE argument")?.clone());
         } else if let Some(rest) = arg.strip_prefix("--size=") {
             cfg.size_spec = Some(rest.to_string());
         } else if arg == "-r" || arg == "--reference" {
             i += 1;
-            cfg.reference = Some(
-                args.get(i)
-                    .ok_or("-r requires a FILE argument")?
-                    .clone(),
-            );
+            cfg.reference = Some(args.get(i).ok_or("-r requires a FILE argument")?.clone());
         } else if let Some(rest) = arg.strip_prefix("--reference=") {
             cfg.reference = Some(rest.to_string());
         } else if arg.starts_with('-') {
@@ -807,7 +795,11 @@ struct XorShift64 {
 impl XorShift64 {
     fn new(seed: u64) -> Self {
         Self {
-            state: if seed == 0 { 0xDEAD_BEEF_CAFE_BABE } else { seed },
+            state: if seed == 0 {
+                0xDEAD_BEEF_CAFE_BABE
+            } else {
+                seed
+            },
         }
     }
 
@@ -860,12 +852,13 @@ fn run_shred(args: &[String]) -> Result<(), String> {
     for path in &cfg.files {
         // If force, try to make the file writable.
         if cfg.force
-            && let Ok(meta) = fs::metadata(path) {
-                let mut perms = meta.permissions();
-                #[allow(clippy::permissions_set_readonly_false)]
-                perms.set_readonly(false);
-                let _ = fs::set_permissions(path, perms);
-            }
+            && let Ok(meta) = fs::metadata(path)
+        {
+            let mut perms = meta.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            let _ = fs::set_permissions(path, perms);
+        }
 
         let file_size = fs::metadata(path)
             .map_err(|e| format!("cannot stat '{path}': {e}"))?
@@ -880,9 +873,9 @@ fn run_shred(args: &[String]) -> Result<(), String> {
             .map_err(|e| format!("cannot open '{path}' for writing: {e}"))?;
 
         // Use the file path hash as a seed component for reproducibility in tests.
-        let path_hash = path.bytes().fold(0u64, |acc, b| {
-            acc.wrapping_mul(31).wrapping_add(b as u64)
-        });
+        let path_hash = path
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
 
         let total_passes = if cfg.add_zero_pass {
             cfg.iterations + 1
@@ -899,7 +892,7 @@ fn run_shred(args: &[String]) -> Result<(), String> {
                 } else {
                     format!("{}/{}", pass + 1, cfg.iterations)
                 };
-                eprintln!("shred: {path}: pass {pass_label}");
+                eprintln!("shred: {}: pass {pass_label}", quotef_os(path));
             }
 
             file.seek(SeekFrom::Start(0))
@@ -936,10 +929,9 @@ fn run_shred(args: &[String]) -> Result<(), String> {
             file.set_len(0)
                 .map_err(|e| format!("truncate error on '{path}': {e}"))?;
             drop(file);
-            fs::remove_file(path)
-                .map_err(|e| format!("cannot remove '{path}': {e}"))?;
+            fs::remove_file(path).map_err(|e| format!("cannot remove '{path}': {e}"))?;
             if cfg.verbose {
-                eprintln!("shred: {path}: removed");
+                eprintln!("shred: {}: removed", quotef_os(path));
             }
         }
     }
@@ -1139,10 +1131,7 @@ fn parse_fuser_args(args: &[String]) -> Result<FuserConfig, String> {
                 "file" | "tcp" | "udp" => cfg.namespace = rest.to_string(),
                 _ => return Err(format!("unknown namespace: {rest}")),
             }
-        } else if arg.starts_with('-')
-            && arg.len() > 1
-            && arg.as_bytes()[1].is_ascii_uppercase()
-        {
+        } else if arg.starts_with('-') && arg.len() > 1 && arg.as_bytes()[1].is_ascii_uppercase() {
             // -SIGNAL shorthand (e.g. -KILL, -HUP, -9)
             let sig_str = &arg[1..];
             cfg.signal = signal_name_to_number(sig_str)?;
@@ -1251,45 +1240,48 @@ fn find_file_users(target: &str) -> Vec<ProcessUse> {
                 };
 
                 if let Some(link_target) = parse_proc_fd_link(pid, fd_num)
-                    && link_target == canonical {
-                        results.push(ProcessUse {
-                            pid,
-                            user: read_proc_user(pid),
-                            access: AccessType::Fd,
-                            command: read_proc_comm(pid),
-                        });
-                        break; // One entry per PID
-                    }
+                    && link_target == canonical
+                {
+                    results.push(ProcessUse {
+                        pid,
+                        user: read_proc_user(pid),
+                        access: AccessType::Fd,
+                        command: read_proc_comm(pid),
+                    });
+                    break; // One entry per PID
+                }
             }
         }
 
         // Check /proc/<pid>/cwd
         let cwd_path = format!("/proc/{pid}/cwd");
         if let Ok(link) = fs::read_link(&cwd_path)
-            && link.to_string_lossy() == canonical {
-                // Only add if not already found via fd
-                if !results.iter().any(|r| r.pid == pid) {
-                    results.push(ProcessUse {
-                        pid,
-                        user: read_proc_user(pid),
-                        access: AccessType::Cwd,
-                        command: read_proc_comm(pid),
-                    });
-                }
+            && link.to_string_lossy() == canonical
+        {
+            // Only add if not already found via fd
+            if !results.iter().any(|r| r.pid == pid) {
+                results.push(ProcessUse {
+                    pid,
+                    user: read_proc_user(pid),
+                    access: AccessType::Cwd,
+                    command: read_proc_comm(pid),
+                });
             }
+        }
 
         // Check /proc/<pid>/exe
         let exe_path = format!("/proc/{pid}/exe");
         if let Ok(link) = fs::read_link(&exe_path)
             && link.to_string_lossy() == canonical
-                && !results.iter().any(|r| r.pid == pid) {
-                    results.push(ProcessUse {
-                        pid,
-                        user: read_proc_user(pid),
-                        access: AccessType::Exe,
-                        command: read_proc_comm(pid),
-                    });
-                }
+            && !results.iter().any(|r| r.pid == pid)
+        {
+            results.push(ProcessUse {
+                pid,
+                user: read_proc_user(pid),
+                access: AccessType::Exe,
+                command: read_proc_comm(pid),
+            });
+        }
     }
 
     results
@@ -1318,12 +1310,13 @@ fn find_net_users(port_str: &str, proto: &str) -> Result<Vec<ProcessUse>, String
         let local_addr = fields[1];
         if let Some(port_hex) = local_addr.split(':').nth(1)
             && let Ok(p) = u16::from_str_radix(port_hex, 16)
-                && p == port {
-                    // Field 9 is the inode
-                    if let Ok(inode) = fields[9].parse::<u64>() {
-                        inodes.push(inode);
-                    }
-                }
+            && p == port
+        {
+            // Field 9 is the inode
+            if let Ok(inode) = fields[9].parse::<u64>() {
+                inodes.push(inode);
+            }
+        }
     }
 
     if inodes.is_empty() {
@@ -1350,25 +1343,22 @@ fn find_net_users(port_str: &str, proto: &str) -> Result<Vec<ProcessUse>, String
             for fd_entry in fds.flatten() {
                 if let Some(link_target) = parse_proc_fd_link(
                     pid,
-                    fd_entry
-                        .file_name()
-                        .to_string_lossy()
-                        .parse()
-                        .unwrap_or(0),
+                    fd_entry.file_name().to_string_lossy().parse().unwrap_or(0),
                 ) {
                     // Socket inodes appear as "socket:[12345]"
                     if let Some(rest) = link_target.strip_prefix("socket:[")
                         && let Some(inode_str) = rest.strip_suffix(']')
-                            && let Ok(inode) = inode_str.parse::<u64>()
-                                && inodes.contains(&inode) {
-                                    results.push(ProcessUse {
-                                        pid,
-                                        user: read_proc_user(pid),
-                                        access: AccessType::Fd,
-                                        command: read_proc_comm(pid),
-                                    });
-                                    break;
-                                }
+                        && let Ok(inode) = inode_str.parse::<u64>()
+                        && inodes.contains(&inode)
+                    {
+                        results.push(ProcessUse {
+                            pid,
+                            user: read_proc_user(pid),
+                            access: AccessType::Fd,
+                            command: read_proc_comm(pid),
+                        });
+                        break;
+                    }
                 }
             }
         }
@@ -1438,13 +1428,16 @@ fn run_fuser(args: &[String]) -> Result<(), String> {
             }
         } else {
             // Standard output: file: PID PID ...
-            let pids: Vec<String> = users.iter().map(|u| {
-                let mut s = u.pid.to_string();
-                if cfg.show_user {
-                    s.push_str(&format!("({})", u.user));
-                }
-                s
-            }).collect();
+            let pids: Vec<String> = users
+                .iter()
+                .map(|u| {
+                    let mut s = u.pid.to_string();
+                    if cfg.show_user {
+                        s.push_str(&format!("({})", u.user));
+                    }
+                    s
+                })
+                .collect();
             // PID list goes to stdout, filename header to stderr
             eprintln!("{target}:");
             println!("{}", pids.join(" "));
@@ -1580,10 +1573,7 @@ mod tests {
 
     #[test]
     fn test_parse_size_terabytes() {
-        assert_eq!(
-            parse_size("1T").unwrap(),
-            1024u64 * 1024 * 1024 * 1024
-        );
+        assert_eq!(parse_size("1T").unwrap(), 1024u64 * 1024 * 1024 * 1024);
     }
 
     #[test]
@@ -1681,93 +1671,60 @@ mod tests {
 
     #[test]
     fn test_compute_truncate_extend() {
-        assert_eq!(
-            compute_truncate_size(500, Some('+'), 200).unwrap(),
-            700
-        );
+        assert_eq!(compute_truncate_size(500, Some('+'), 200).unwrap(), 700);
     }
 
     #[test]
     fn test_compute_truncate_shrink() {
-        assert_eq!(
-            compute_truncate_size(500, Some('-'), 200).unwrap(),
-            300
-        );
+        assert_eq!(compute_truncate_size(500, Some('-'), 200).unwrap(), 300);
     }
 
     #[test]
     fn test_compute_truncate_shrink_underflow() {
         // Saturating subtraction: 100 - 500 => 0
-        assert_eq!(
-            compute_truncate_size(100, Some('-'), 500).unwrap(),
-            0
-        );
+        assert_eq!(compute_truncate_size(100, Some('-'), 500).unwrap(), 0);
     }
 
     #[test]
     fn test_compute_truncate_at_most_smaller() {
-        assert_eq!(
-            compute_truncate_size(300, Some('<'), 500).unwrap(),
-            300
-        );
+        assert_eq!(compute_truncate_size(300, Some('<'), 500).unwrap(), 300);
     }
 
     #[test]
     fn test_compute_truncate_at_most_larger() {
-        assert_eq!(
-            compute_truncate_size(800, Some('<'), 500).unwrap(),
-            500
-        );
+        assert_eq!(compute_truncate_size(800, Some('<'), 500).unwrap(), 500);
     }
 
     #[test]
     fn test_compute_truncate_at_least_smaller() {
-        assert_eq!(
-            compute_truncate_size(300, Some('>'), 500).unwrap(),
-            500
-        );
+        assert_eq!(compute_truncate_size(300, Some('>'), 500).unwrap(), 500);
     }
 
     #[test]
     fn test_compute_truncate_at_least_larger() {
-        assert_eq!(
-            compute_truncate_size(800, Some('>'), 500).unwrap(),
-            800
-        );
+        assert_eq!(compute_truncate_size(800, Some('>'), 500).unwrap(), 800);
     }
 
     #[test]
     fn test_compute_truncate_round_down() {
         // 1000 rounded down to nearest multiple of 300 => 900
-        assert_eq!(
-            compute_truncate_size(1000, Some('/'), 300).unwrap(),
-            900
-        );
+        assert_eq!(compute_truncate_size(1000, Some('/'), 300).unwrap(), 900);
     }
 
     #[test]
     fn test_compute_truncate_round_down_exact() {
-        assert_eq!(
-            compute_truncate_size(900, Some('/'), 300).unwrap(),
-            900
-        );
+        assert_eq!(compute_truncate_size(900, Some('/'), 300).unwrap(), 900);
     }
 
     #[test]
     fn test_compute_truncate_round_up() {
         // 1000 rounded up to nearest multiple of 300 => 1200
-        assert_eq!(
-            compute_truncate_size(1000, Some('%'), 300).unwrap(),
-            1200
-        );
+        assert_eq!(compute_truncate_size(1000, Some('%'), 300).unwrap(), 1200);
     }
 
     #[test]
     fn test_compute_truncate_round_up_exact() {
-        assert_eq!(
-            compute_truncate_size(900, Some('%'), 300).unwrap(),
-            900
-        );
+        assert_eq!(compute_truncate_size(900, Some('%'), 300).unwrap(), 900);
     }
 
     #[test]
@@ -2190,11 +2147,7 @@ mod tests {
 
     #[test]
     fn test_fuser_parse_namespace() {
-        let args = vec![
-            "-n".to_string(),
-            "tcp".to_string(),
-            "80".to_string(),
-        ];
+        let args = vec!["-n".to_string(), "tcp".to_string(), "80".to_string()];
         let cfg = parse_fuser_args(&args).unwrap();
         assert_eq!(cfg.namespace, "tcp");
     }

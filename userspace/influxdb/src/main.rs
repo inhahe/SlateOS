@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `influxd` (server daemon), `influx` (CLI)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -37,17 +38,30 @@ fn run_influxd(args: Vec<String>) -> i32 {
         println!("  report-tsm      Report information about TSM files");
         return 0;
     }
-    let addr = args.iter().position(|a| a == "--http-bind-address")
+    let addr = args
+        .iter()
+        .position(|a| a == "--http-bind-address")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or(":8086");
-    println!("ts=2025-05-22T10:00:00.000000Z lvl=info msg=\"Welcome to InfluxDB\" version=v2.7.6 log_id=abc123");
-    println!("ts=2025-05-22T10:00:00.100000Z lvl=info msg=\"Resources opened\" bolt_path=/var/lib/influxdb2/influxd.bolt");
+    println!(
+        "ts=2025-05-22T10:00:00.000000Z lvl=info msg=\"Welcome to InfluxDB\" version=v2.7.6 log_id=abc123"
+    );
+    println!(
+        "ts=2025-05-22T10:00:00.100000Z lvl=info msg=\"Resources opened\" bolt_path=/var/lib/influxdb2/influxd.bolt"
+    );
     println!("ts=2025-05-22T10:00:00.200000Z lvl=info msg=\"Bringing up metadata migrations\"");
-    println!("ts=2025-05-22T10:00:00.500000Z lvl=info msg=\"Using data dir\" path=/var/lib/influxdb2/engine");
-    println!("ts=2025-05-22T10:00:01.000000Z lvl=info msg=\"Configuring InfluxQL statement executor\"");
+    println!(
+        "ts=2025-05-22T10:00:00.500000Z lvl=info msg=\"Using data dir\" path=/var/lib/influxdb2/engine"
+    );
+    println!(
+        "ts=2025-05-22T10:00:01.000000Z lvl=info msg=\"Configuring InfluxQL statement executor\""
+    );
     println!("ts=2025-05-22T10:00:01.500000Z lvl=info msg=\"Starting query controller\"");
-    println!("ts=2025-05-22T10:00:02.000000Z lvl=info msg=\"Listening\" transport=http addr={}", addr);
+    println!(
+        "ts=2025-05-22T10:00:02.000000Z lvl=info msg=\"Listening\" transport=http addr={}",
+        addr
+    );
     println!("ts=2025-05-22T10:00:02.001000Z lvl=info msg=\"Listening for signals\"");
     0
 }
@@ -97,12 +111,21 @@ fn run_influx_cli(args: Vec<String>) -> i32 {
             0
         }
         "query" => {
-            let query_str = cmd_args.first().map(|s| s.as_str()).unwrap_or("from(bucket:\"b\")");
+            let query_str = cmd_args
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("from(bucket:\"b\")");
             let _ = query_str;
             println!("result,table,_start,_stop,_time,_value,_field,_measurement,host");
-            println!(",0,2025-05-22T00:00:00Z,2025-05-22T10:00:00Z,2025-05-22T09:30:00Z,42.5,cpu_usage,system,slateos-host-1");
-            println!(",0,2025-05-22T00:00:00Z,2025-05-22T10:00:00Z,2025-05-22T09:35:00Z,38.2,cpu_usage,system,slateos-host-1");
-            println!(",0,2025-05-22T00:00:00Z,2025-05-22T10:00:00Z,2025-05-22T09:40:00Z,45.1,cpu_usage,system,slateos-host-1");
+            println!(
+                ",0,2025-05-22T00:00:00Z,2025-05-22T10:00:00Z,2025-05-22T09:30:00Z,42.5,cpu_usage,system,slateos-host-1"
+            );
+            println!(
+                ",0,2025-05-22T00:00:00Z,2025-05-22T10:00:00Z,2025-05-22T09:35:00Z,38.2,cpu_usage,system,slateos-host-1"
+            );
+            println!(
+                ",0,2025-05-22T00:00:00Z,2025-05-22T10:00:00Z,2025-05-22T09:40:00Z,45.1,cpu_usage,system,slateos-host-1"
+            );
             0
         }
         "bucket" => {
@@ -157,7 +180,9 @@ fn run_influx_cli(args: Vec<String>) -> i32 {
             match sub {
                 "list" | "ls" => {
                     println!("ID\t\t\tDescription\t\tToken\t\t\t\tUser Name\tPermissions");
-                    println!("auth123abc456\tadmin's Token\thvs.EXAMPLE_TOKEN\tadmin\t\t[read:*,write:*]");
+                    println!(
+                        "auth123abc456\tadmin's Token\thvs.EXAMPLE_TOKEN\tadmin\t\t[read:*,write:*]"
+                    );
                 }
                 "create" => println!("Authorization created successfully"),
                 _ => println!("Usage: influx auth <list|create>"),
@@ -186,7 +211,10 @@ fn run_influx_cli(args: Vec<String>) -> i32 {
             println!("dash123abc\tSystem Monitor\tDefault system monitoring dashboard");
             0
         }
-        other => { eprintln!("influx: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("influx: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -197,7 +225,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -212,7 +242,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_influxd};
+    use super::run_influxd;
 
     #[test]
     fn help_exits_zero() {

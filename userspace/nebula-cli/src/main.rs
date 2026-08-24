@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `nebula`, `nebula-cert`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_nebula(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -59,7 +64,9 @@ fn run_nebula(args: &[String]) -> i32 {
         println!("    Not After: 2025-01-01 00:00:00 +0000 UTC");
         println!("    Is CA: false");
         println!("    Issuer: aabbccdd11223344556677889900aabbccddeeff11223344556677889900aabb");
-        println!("    Public key: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+        println!(
+            "    Public key: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+        );
         println!("  }}");
         println!("  Fingerprint: sha256:aabb...eeff");
         println!("  Signature: 0011...eeff");
@@ -67,10 +74,12 @@ fn run_nebula(args: &[String]) -> i32 {
         return 0;
     }
 
-    let config = args.windows(2).find(|w| w[0] == "-config")
+    let config = args
+        .windows(2)
+        .find(|w| w[0] == "-config")
         .map(|w| w[1].as_str())
         .unwrap_or("/etc/nebula/config.yml");
-    println!("nebula: loading config from '{}'", config);
+    println!("nebula: loading config from {}", quoteaf_os(config));
     println!("nebula: Firewall has been enabled");
     println!("nebula: Handshake manager ready");
     println!("nebula: Main HostMap created (capacity: 1024)");
@@ -99,21 +108,27 @@ fn run_nebula_cert(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("print");
     match subcmd {
         "ca" => {
-            let name = args.windows(2).find(|w| w[0] == "-name")
+            let name = args
+                .windows(2)
+                .find(|w| w[0] == "-name")
                 .map(|w| w[1].as_str())
                 .unwrap_or("Slate OS Nebula CA");
-            println!("Generated CA certificate for '{}':", name);
+            println!("Generated CA certificate for {}:", quoteaf_os(name));
             println!("  ca.crt (certificate)");
             println!("  ca.key (private key)");
         }
         "sign" => {
-            let name = args.windows(2).find(|w| w[0] == "-name")
+            let name = args
+                .windows(2)
+                .find(|w| w[0] == "-name")
                 .map(|w| w[1].as_str())
                 .unwrap_or("slateos-desktop");
-            let ip = args.windows(2).find(|w| w[0] == "-ip")
+            let ip = args
+                .windows(2)
+                .find(|w| w[0] == "-ip")
                 .map(|w| w[1].as_str())
                 .unwrap_or("10.42.0.5/24");
-            println!("Signed certificate for '{}' with IP {}", name, ip);
+            println!("Signed certificate for {} with IP {ip}", quoteaf_os(name));
             println!("  {}.crt (certificate)", name);
             println!("  {}.key (private key)", name);
         }
@@ -130,7 +145,9 @@ fn run_nebula_cert(args: &[String]) -> i32 {
             println!("}}");
         }
         "verify" => {
-            let cert = args.windows(2).find(|w| w[0] == "-crt")
+            let cert = args
+                .windows(2)
+                .find(|w| w[0] == "-crt")
                 .map(|w| w[1].as_str())
                 .unwrap_or("host.crt");
             println!("{}: certificate is valid", cert);
@@ -141,7 +158,7 @@ fn run_nebula_cert(args: &[String]) -> i32 {
             println!("  host.pub (public key)");
         }
         _ => {
-            eprintln!("nebula-cert: unknown command '{}'", subcmd);
+            eprintln!("nebula-cert: unknown command {}", quoteaf_os(subcmd));
             return 1;
         }
     }
@@ -150,7 +167,10 @@ fn run_nebula_cert(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "nebula".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "nebula".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "nebula-cert" => run_nebula_cert(&rest),
@@ -161,7 +181,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_nebula};
+    use super::{basename, run_nebula, strip_ext};
 
     #[test]
     fn basename_strips_path() {

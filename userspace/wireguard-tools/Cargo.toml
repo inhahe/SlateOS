@@ -2,3 +2,8 @@
 name = "wireguard-tools"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# wg and wg-quick echo the rejected command name back, and that word is
+# whatever the user typed.
+quoting = { path = "../quoting" }

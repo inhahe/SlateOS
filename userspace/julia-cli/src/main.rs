@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `julia`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -24,14 +25,18 @@ fn run_julia(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-e") {
-        let code = args.windows(2).find(|w| w[0] == "-e").map(|w| w[1].as_str()).unwrap_or("println(\"hello\")");
+        let code = args
+            .windows(2)
+            .find(|w| w[0] == "-e")
+            .map(|w| w[1].as_str())
+            .unwrap_or("println(\"hello\")");
         println!("julia> {}", code);
         println!("[executed]");
         return 0;
     }
     let script = args.iter().find(|a| a.ends_with(".jl")).map(|s| s.as_str());
     if let Some(s) = script {
-        println!("julia: loading '{}'", s);
+        println!("julia: loading {}", quoteaf_os(s));
         println!("[script completed]");
     } else {
         println!("               _");
@@ -57,7 +62,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_julia};
+    use super::run_julia;
 
     #[test]
     fn help_exits_zero() {

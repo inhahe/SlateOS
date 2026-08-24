@@ -2,3 +2,8 @@
 name = "mcfly"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The shell-history search query and the rejected command name are argv
+# words; history queries routinely contain quotes.
+quoting = { path = "../quoting" }

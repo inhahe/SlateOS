@@ -35867,6 +35867,12 @@ B-Q7 is open. Priced properly, it is not cheap and it is not honest:
   `B-BCS-COMMAND-LINE-EXITED-0-ON-EVERY-KIND-OF-FAILURE`). Widening it is not a
   side-fix: `scripts/quote-names-scope.py` prices a tree-wide version at 1796
   call sites in 777 crates (`TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY`).
+  *(Amended 2026-08-23: that script is superseded by `scripts/quote-names.py` —
+  the same two detectors plus a baseline, a `--check` and a `--selftest`, wired
+  in as pre-push gate 8. This bullet is now weaker than when it was written: a
+  standalone crate is no longer outside all mechanical checking, only outside
+  the strict-zero one. The 1796 sites remain unrepaired; what changed is that
+  they can no longer grow.)*
 - **It needs a dependency edge nobody has drawn yet.** After the 2026-08-22
   rewrite `bc` uses `coreutils`'s `getopt`, `quote` and `errmsg`. A standalone
   `userspace/bc` must either depend on the library inside the bundle §8 retires,
@@ -39216,7 +39222,6 @@ is how a port acquires undocumented divergence.
 ---
 
 ## §290 — Access control lives in one gate that every path operation must pass, and a build-time checker holds the door rather than a code review
-
 **Date:** 2026-08-23
 **Decided by:** Claude (autonomous)
 
@@ -39351,3 +39356,175 @@ therefore asserts the cache against a fresh scan of the table after every kind
 of mutation the module offers. The cache is recomputed absolutely rather than
 incremented, because a missed decrement drifts silently while a recompute
 cannot.
+
+---
+
+## §369 — A diagnostic that names a byte the terminal cannot decode prints it as `\377`, not raw, and never as U+FFFD
+
+**Date:** 2026-08-23
+**Decided by:** Claude (autonomous)
+
+**In short:** Command-line arguments and file names on SlateOS are bytes, not
+text — any byte except `/` and NUL is legal — so a user can perfectly well type
+`find t -type $'\377'`, where `\377` is a single byte (255) that is not part of
+any valid UTF-8 character. `find` then has to write an error message that names
+the offending byte. There are three ways to do that and they are not equally
+honest. GNU writes the byte **raw**, so the terminal shows `M-^?` or a black
+diamond. Our code used to convert it to a Rust `String`, which is required to be
+valid UTF-8, and the conversion silently replaces the byte with U+FFFD, the
+replacement character `\u{FFFD}` — so the message named a *different* byte from
+the one the user typed. We now print `\377`: a backslash and the byte's value in
+octal. That is not byte-identical to GNU, and `scripts/find-diff.sh` records
+five cases where we and GNU differ for exactly this reason, on purpose.
+
+### What was actually wrong
+
+`find`'s error plumbing is `String`-typed: `Fatal::new(format!(…))` all the way
+down. Twenty-nine sites reached it by calling `String::from_utf8_lossy` on a
+path, an argument, or a format directive. "Lossy" is the whole problem —
+`from_utf8_lossy` does not fail on an undecodable byte, it *substitutes* one.
+Three further sites were worse in a way that is easy to miss: they wrote
+`c as char`, which is not a decode at all. Rust's `u8 as char` reinterprets the
+byte as a Unicode scalar with the same number, i.e. as Latin-1, so byte `0xFF`
+becomes U+00FF `ÿ`, which is then encoded back out as the *two* bytes
+`0xC3 0xBF`. The differential harness caught this immediately: GNU printed
+`M-^?` (one byte) where we printed `M-CM-?` (two). Neither corruption announced
+itself; both produced a plausible-looking message naming a byte that was never
+in the input.
+
+### The three options
+
+| | What the user sees for byte `0xFF` | Cost |
+|---|---|---|
+| **Raw** (GNU) | `M-^?` — whatever the terminal makes of one undecodable byte | Requires converting `find`'s entire diagnostic path from `String` to `Vec<u8>` |
+| **Escaped** (chosen) | `\377` | Not byte-identical to GNU; five harness cases must be marked deliberate |
+| **Lossy** (what we had) | `\u{FFFD}` or `ÿ` | Free, and silently wrong |
+
+Lossy is out on its own: a diagnostic whose entire job is to tell the user
+*which* byte it could not accept, and which then names a different byte, is
+worse than no diagnostic. That leaves raw versus escaped.
+
+Raw is byte-identical to GNU, which is the standing goal for this port, and it
+is what `-ok`'s confirmation prompt already does — that prompt writes straight
+to a locked `io::Stderr` with `write_all`, no `String` anywhere, because a
+prompt that showed the user a *different* path from the one about to be handed
+to the command would be asking them to confirm the wrong thing. So the
+technique exists and is in use where it matters most.
+
+It is not adopted everywhere because the cost is not the twenty-nine call sites
+— it is `Fatal`, `errmsg`, and every `?` between them. Making that path
+byte-typed means a diagnostic can no longer be built with `format!`, which is
+how all of them are built, and the change would have to reach the other
+forty-odd binaries that share `errmsg` for the types to stay consistent. That
+is a real refactor of the shared error plumbing, and it should be done
+deliberately, on its own, not as a rider on a byte-safety fix.
+
+### Why escaping is a good answer and not merely a cheap one
+
+`quote::escape_unprintable` is **lossless and reversible**: printable bytes
+render as themselves, every other byte as exactly one three-digit octal escape,
+one escape per byte. From `\377` the reader can recover the input; from `M-^?`
+they can too, if they know their terminal's conventions; from U+FFFD nobody
+can. And the divergence from GNU is *visible* — the harness fails the case and
+forces us to write down why — where the lossy divergence was invisible, which
+is how it survived twenty-nine sites.
+
+The escape is also what our own `find -ls` and `find -print` already do for a
+name that is not text, and what GNU's own `ls` does by default, so it is not a
+foreign convention inside this tool.
+
+### What is left
+
+`scripts/find-diff.sh` marks five cases as deliberate for this reason:
+`-type`, `-used`, `-size`, `-printf %\377` and the unknown predicate `-\377`.
+They are the complete set of `find` diagnostics that quote a single
+undecodable byte back to the user. When the `Fatal`/`errmsg` path becomes
+byte-typed, all five should flip to plain passes and this section should be
+amended rather than deleted — the reasoning for *why lossy is never acceptable*
+survives the refactor even though the raw-versus-escaped choice does not.
+
+## §370 — Name quoting is a crate of its own, `userspace/quoting`, because 777 utility crates need it and none of them may depend on `coreutils`
+
+**Date:** 2026-08-23
+**Decided by:** Claude (autonomous)
+**Where it bites:** `userspace/quoting/` (new, was `userspace/coreutils/src/quote.rs`);
+`userspace/coreutils/src/lib.rs` (`pub use quoting as quote;`);
+`userspace/coreutils/Cargo.toml`; every one of the 777 utility crates under
+`userspace/` that prints a diagnostic naming a file; `scripts/quote-names.py`
+and pre-push gate 8, which is the thing that measured the problem.
+
+**In short:** A file's name can contain a newline. So an error message that
+prints the name raw — `cut: {path}: {e}` — lets whoever *named* the file write
+extra lines into `cut`'s error output, and the fake lines look exactly like
+real ones. The function that renders a name safely lived inside the `coreutils`
+crate, and the other 777 utility crates in the tree do not depend on
+`coreutils` — so a scan found 1798 diagnostics in them doing it the unsafe way,
+each one a single call away from being fixed by a function they could not
+reach. The only question was where to put the function. It moved into a small
+crate of its own; `coreutils` re-exports it under its old name, so nothing that
+already called it changed.
+
+### The options
+
+| | *What changes* |
+|---|---|
+| **A. Its own crate, `quoting`** (chosen) | Any utility crate can `quoting = { path = "../quoting" }` and fix its diagnostics; the workspace gains one small library crate. |
+| **B. Leave it in `coreutils`; dependents import the bundle** | `btrfs`, `cups`, `flatpak` &c. each take a dependency on an 86-binary bundle to reach one function. |
+| **C. Leave it in `coreutils`; the other 777 stay unfixable** | The 1798 sites can never be repaired; the pre-push gate can only stop new ones. |
+
+### Why A
+
+This is the same shape as §364 (`modechange`) and §322 (`ere`), and it is
+decided by the same fact: **the callers are not all in `coreutils`, and cannot
+be.** `userspace/btrfs`, `userspace/cups`, `userspace/flatpak` and 774 others
+are separate binaries with their own crates. What is different here is only the
+scale — `modechange` had four callers, this has 778 — and scale argues the same
+way, harder.
+
+B is the option worth arguing with, because two crates (`stat`, `oils`) already
+do exactly that, so the precedent exists. It is wrong at 777. `coreutils`
+depends on `ere`, `bignum`, `charwidth`, `modechange`, `sha2`, `pwdb` and
+`localtime`; making `btrfs` depend on `coreutils` to reach `quotef_os` drags
+all seven in behind it, and does it 777 times. It also points the dependency
+graph the wrong way for `design.txt` §8, which wants one tool per crate: a
+per-tool crate importing the bundle §8 retires is the exact edge
+`design-decisions.md` §359 was written to avoid.
+
+C is what "don't refactor, just gate it" amounts to, and it is the option the
+pre-push gate quietly makes *tempting* — with the ratchet in place the number
+stops growing, and it is easy to call that done. It is not: 1798 diagnostics
+would remain permanently forgeable, in exactly the tools (`btrfs`, `parted`,
+`losetup`, `mkfs`, `cups`) whose entire job is to take a path from the user and
+report what went wrong with it.
+
+### What it cost
+
+Almost nothing, which is itself the argument. `quote.rs` referred to the rest
+of `coreutils` in exactly two places, both **doc comments** — a link to
+`getopt::Program::argmatch` and one to `xnum::strtol_fatal` — so the move was a
+`git mv`, a crate-level lint header, and demoting those two links to plain
+code spans. No function signature changed, no caller changed, and
+`coreutils::quote::quotef_os` still resolves because `lib.rs` says
+`pub use quoting as quote;`.
+
+That the extraction was this cheap is worth recording for the next one: a
+1743-line module with two doc-comment couplings was *already* a crate, and had
+been for some time. The thing that kept it inside `coreutils` was that nobody
+had asked who else needed it — which is precisely what the tree-wide scan
+finally asked.
+
+### Interaction with B-Q7
+
+This move is **neutral on B-Q7 and cheaper under either answer**, which is part
+of why it did not wait for one. If B-Q7 resolves as **A** (standalone crates
+canonical, `coreutils` retired), `quoting` has to exist as a standalone library
+anyway, and this is that work done early. If it resolves as **B** (`coreutils`
+canonical), `coreutils::quote` keeps working untouched and the only residue is
+one extra path entry in a `Cargo.toml`. There is no answer to B-Q7 under which
+this has to be undone.
+
+It does weaken one bullet of the B-Q7 write-up, and `open-questions.md` has
+been amended to say so: "moving a tool out of `coreutils/src/bin` costs it the
+only mechanical name-quoting check it has" was true when written and is now
+only half true, since gate 8 holds every crate at *no worse than today* even
+though only `coreutils/src/bin` is held at *zero*.

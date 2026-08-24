@@ -2,3 +2,8 @@
 name = "paraview-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# pvbatch and pvpython each name the script they are about to run, from a
+# path on the command line.
+quoting = { path = "../quoting" }

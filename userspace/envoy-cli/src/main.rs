@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `envoy`, `istioctl`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_envoy(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -69,22 +74,33 @@ fn run_istioctl(args: &[String]) -> i32 {
             println!("data plane version: 1.21.0 (4 proxies)");
         }
         "proxy-status" => {
-            println!("NAME                              CLUSTER   CDS    LDS    EDS    RDS    ECDS   ISTIOD");
-            println!("web-server-abc123.default         Kubernetes SYNCED SYNCED SYNCED SYNCED        istiod-xyz");
-            println!("api-server-def456.default         Kubernetes SYNCED SYNCED SYNCED SYNCED        istiod-xyz");
-            println!("gateway-ghi789.istio-system       Kubernetes SYNCED SYNCED SYNCED SYNCED        istiod-xyz");
+            println!(
+                "NAME                              CLUSTER   CDS    LDS    EDS    RDS    ECDS   ISTIOD"
+            );
+            println!(
+                "web-server-abc123.default         Kubernetes SYNCED SYNCED SYNCED SYNCED        istiod-xyz"
+            );
+            println!(
+                "api-server-def456.default         Kubernetes SYNCED SYNCED SYNCED SYNCED        istiod-xyz"
+            );
+            println!(
+                "gateway-ghi789.istio-system       Kubernetes SYNCED SYNCED SYNCED SYNCED        istiod-xyz"
+            );
         }
         "analyze" => {
             println!("✔ No validation issues found when analyzing namespace: default.");
         }
-        _ => println!("istioctl: command '{}' completed", subcmd),
+        _ => println!("istioctl: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "envoy".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "envoy".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "istioctl" => run_istioctl(&rest),
@@ -95,7 +111,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_envoy};
+    use super::{basename, run_envoy, strip_ext};
 
     #[test]
     fn basename_strips_path() {

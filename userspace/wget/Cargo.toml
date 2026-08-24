@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS HTTP file download utility"
 [dependencies]
+# The output file name in the final `saved` line is derived from the *URL*
+# -- a server chooses it through Content-Disposition, so it is remote input.
+quoting = { path = "../quoting" }
 
 # Inherit the workspace lint configuration. This crate had none at all: it was
 # not in the `[lints] workspace = true` set and set no `#![deny]`/`#![warn]` of

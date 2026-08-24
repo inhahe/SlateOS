@@ -2,3 +2,8 @@
 name = "mlrun-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# mlrun-cli names projects, functions and artifacts, identifiers created on
+# the server side rather than by this tool.
+quoting = { path = "../quoting" }

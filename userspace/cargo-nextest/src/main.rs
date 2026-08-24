@@ -4,6 +4,7 @@
 //!
 //! Single personality: `cargo-nextest`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -41,7 +42,8 @@ fn run_cargo_nextest(args: Vec<String>) -> i32 {
             0
         }
         "run" => {
-            let filter: Option<&str> = subargs.iter()
+            let filter: Option<&str> = subargs
+                .iter()
                 .skip(1)
                 .find(|a| !a.starts_with('-'))
                 .map(|s| s.as_str());
@@ -101,7 +103,7 @@ fn run_cargo_nextest(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", subcmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(subcmd));
             1
         }
     }
@@ -116,7 +118,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_cargo_nextest};
+    use super::run_cargo_nextest;
 
     #[test]
     fn help_exits_zero() {

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `certbot`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -46,7 +47,8 @@ fn run_certbot(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "certonly" => {
-            let domain = args.windows(2)
+            let domain = args
+                .windows(2)
                 .find(|w| w[0] == "-d" || w[0] == "--domain")
                 .map(|w| w[1].as_str())
                 .unwrap_or("example.com");
@@ -60,8 +62,14 @@ fn run_certbot(args: Vec<String>) -> i32 {
                 println!("  (dry run) Certificate not saved.");
             } else {
                 println!("  Successfully received certificate.");
-                println!("  Certificate: /etc/letsencrypt/live/{}/fullchain.pem", domain);
-                println!("  Key:         /etc/letsencrypt/live/{}/privkey.pem", domain);
+                println!(
+                    "  Certificate: /etc/letsencrypt/live/{}/fullchain.pem",
+                    domain
+                );
+                println!(
+                    "  Key:         /etc/letsencrypt/live/{}/privkey.pem",
+                    domain
+                );
                 println!("  Expiry:      2024-04-15");
             }
             0
@@ -87,7 +95,8 @@ fn run_certbot(args: Vec<String>) -> i32 {
             0
         }
         "delete" => {
-            let domain = args.windows(2)
+            let domain = args
+                .windows(2)
                 .find(|w| w[0] == "-d" || w[0] == "--cert-name")
                 .map(|w| w[1].as_str())
                 .unwrap_or("example.com");
@@ -98,7 +107,7 @@ fn run_certbot(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: certbot <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -114,7 +123,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_certbot};
+    use super::run_certbot;
 
     #[test]
     fn help_exits_zero() {

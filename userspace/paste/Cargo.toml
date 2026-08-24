@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS line-merge utility"
 [dependencies]
+# paste names its input files, taken from the command line.
+quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `ruff`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -67,13 +68,17 @@ fn run_ruff(args: Vec<String>) -> i32 {
         }
         "rule" => {
             let rule = args.get(1).map(|s| s.as_str()).unwrap_or("F401");
-            println!("# {} ({})", rule, match rule {
-                "F401" => "unused-import",
-                "E501" => "line-too-long",
-                "E712" => "true-false-comparison",
-                "I001" => "unsorted-imports",
-                _ => "unknown",
-            });
+            println!(
+                "# {} ({})",
+                rule,
+                match rule {
+                    "F401" => "unused-import",
+                    "E501" => "line-too-long",
+                    "E712" => "true-false-comparison",
+                    "I001" => "unsorted-imports",
+                    _ => "unknown",
+                }
+            );
             println!();
             println!("Derived from the **Pyflakes** linter.");
             println!();
@@ -97,7 +102,7 @@ fn run_ruff(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -112,7 +117,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ruff};
+    use super::run_ruff;
 
     #[test]
     fn help_exits_zero() {

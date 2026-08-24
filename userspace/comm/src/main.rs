@@ -27,6 +27,7 @@
 //! Use `-` as FILE1 or FILE2 to read from standard input.
 //! ```
 
+use quoting::{quoteaf, quoteaf_os};
 use std::cmp::Ordering;
 use std::env;
 use std::fs::File;
@@ -134,7 +135,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 }
                 output_delimiter = Some(args[i].clone());
             } else {
-                eprintln!("comm: unrecognized option '{arg}'");
+                eprintln!("comm: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'comm --help' for more information.");
                 process::exit(1);
             }
@@ -154,8 +155,11 @@ fn parse_args(args: &[String]) -> ParseResult {
                 b'i' => case_insensitive = true,
                 b'z' => zero_terminated = true,
                 _ => {
-                    let ch = arg_bytes[j] as char;
-                    eprintln!("comm: invalid option -- '{ch}'");
+                    // The byte, not `as char`: `u8 as char` is a Latin-1
+                    // widening, so an option byte of 0xE9 would be reported
+                    // as 'é' -- a character that cannot have been typed as
+                    // the single byte that actually arrived.
+                    eprintln!("comm: invalid option -- {}", quoteaf(&[arg_bytes[j]]));
                     eprintln!("Try 'comm --help' for more information.");
                     process::exit(1);
                 }
@@ -167,10 +171,7 @@ fn parse_args(args: &[String]) -> ParseResult {
     }
 
     if positionals.len() != 2 {
-        eprintln!(
-            "comm: expected 2 file operands, got {}",
-            positionals.len()
-        );
+        eprintln!("comm: expected 2 file operands, got {}", positionals.len());
         eprintln!("Try 'comm --help' for more information.");
         process::exit(1);
     }
@@ -209,10 +210,7 @@ struct LineReader {
 
 impl LineReader {
     /// Create a `LineReader` from a buffered reader.
-    fn from_reader(
-        reader: Box<dyn BufRead>,
-        zero_terminated: bool,
-    ) -> io::Result<Self> {
+    fn from_reader(reader: Box<dyn BufRead>, zero_terminated: bool) -> io::Result<Self> {
         let mut lines = Vec::new();
         if zero_terminated {
             let mut buf_reader = reader;
@@ -252,11 +250,7 @@ impl LineReader {
 
 /// Read bytes from `reader` until `delim` is found or EOF. Appends to `buf`
 /// including the delimiter byte. Returns the number of bytes read.
-fn read_until_byte(
-    reader: &mut dyn BufRead,
-    delim: u8,
-    buf: &mut Vec<u8>,
-) -> io::Result<usize> {
+fn read_until_byte(reader: &mut dyn BufRead, delim: u8, buf: &mut Vec<u8>) -> io::Result<usize> {
     let mut total = 0;
     loop {
         let available = reader.fill_buf()?;
@@ -337,12 +331,7 @@ enum Column {
 }
 
 /// Write one line to the appropriate column in the default tab-delimited format.
-fn write_line(
-    out: &mut dyn Write,
-    config: &Config,
-    col: &Column,
-    line: &str,
-) -> io::Result<()> {
+fn write_line(out: &mut dyn Write, config: &Config, col: &Column, line: &str) -> io::Result<()> {
     let (suppressed, prefix_count) = match col {
         Column::Only1 => (config.suppress_col1, 0_usize),
         Column::Only2 => (config.suppress_col2, 1_usize),
@@ -424,14 +413,16 @@ fn merge_and_output(
                 // Check sort order for file1.
                 if config.check_order
                     && let Some(ref p) = prev1
-                        && !is_sorted_pair(p, l1, config.case_insensitive) {
-                            eprintln!(
-                                "comm: file 1 is not in sorted order"
-                            );
-                            exit_code = 1;
-                        }
+                    && !is_sorted_pair(p, l1, config.case_insensitive)
+                {
+                    eprintln!("comm: file 1 is not in sorted order");
+                    exit_code = 1;
+                }
                 if config.json {
-                    json_entries.push(JsonEntry { column: 1, line: l1.clone() });
+                    json_entries.push(JsonEntry {
+                        column: 1,
+                        line: l1.clone(),
+                    });
                 } else {
                     write_line(out, config, &Column::Only1, l1)?;
                 }
@@ -443,14 +434,16 @@ fn merge_and_output(
                 // Check sort order for file2.
                 if config.check_order
                     && let Some(ref p) = prev2
-                        && !is_sorted_pair(p, l2, config.case_insensitive) {
-                            eprintln!(
-                                "comm: file 2 is not in sorted order"
-                            );
-                            exit_code = 1;
-                        }
+                    && !is_sorted_pair(p, l2, config.case_insensitive)
+                {
+                    eprintln!("comm: file 2 is not in sorted order");
+                    exit_code = 1;
+                }
                 if config.json {
-                    json_entries.push(JsonEntry { column: 2, line: l2.clone() });
+                    json_entries.push(JsonEntry {
+                        column: 2,
+                        line: l2.clone(),
+                    });
                 } else {
                     write_line(out, config, &Column::Only2, l2)?;
                 }
@@ -462,25 +455,26 @@ fn merge_and_output(
                 // Check sort order for both files.
                 if config.check_order {
                     if let Some(ref p) = prev1
-                        && !is_sorted_pair(p, l1, config.case_insensitive) {
-                            eprintln!(
-                                "comm: file 1 is not in sorted order"
-                            );
-                            exit_code = 1;
-                        }
+                        && !is_sorted_pair(p, l1, config.case_insensitive)
+                    {
+                        eprintln!("comm: file 1 is not in sorted order");
+                        exit_code = 1;
+                    }
                     if let Some(ref p) = prev2
-                        && !is_sorted_pair(p, l2, config.case_insensitive) {
-                            eprintln!(
-                                "comm: file 2 is not in sorted order"
-                            );
-                            exit_code = 1;
-                        }
+                        && !is_sorted_pair(p, l2, config.case_insensitive)
+                    {
+                        eprintln!("comm: file 2 is not in sorted order");
+                        exit_code = 1;
+                    }
                 }
 
                 match compare_lines(l1, l2, config.case_insensitive) {
                     Ordering::Less => {
                         if config.json {
-                            json_entries.push(JsonEntry { column: 1, line: l1.clone() });
+                            json_entries.push(JsonEntry {
+                                column: 1,
+                                line: l1.clone(),
+                            });
                         } else {
                             write_line(out, config, &Column::Only1, l1)?;
                         }
@@ -489,7 +483,10 @@ fn merge_and_output(
                     }
                     Ordering::Greater => {
                         if config.json {
-                            json_entries.push(JsonEntry { column: 2, line: l2.clone() });
+                            json_entries.push(JsonEntry {
+                                column: 2,
+                                line: l2.clone(),
+                            });
                         } else {
                             write_line(out, config, &Column::Only2, l2)?;
                         }
@@ -498,7 +495,10 @@ fn merge_and_output(
                     }
                     Ordering::Equal => {
                         if config.json {
-                            json_entries.push(JsonEntry { column: 3, line: l1.clone() });
+                            json_entries.push(JsonEntry {
+                                column: 3,
+                                line: l1.clone(),
+                            });
                         } else {
                             write_line(out, config, &Column::Common, l1)?;
                         }
@@ -690,10 +690,11 @@ fn run(config: &Config) -> i32 {
 
     // Flush output.
     if let Err(e) = out.flush()
-        && e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("comm: write error: {e}");
-            return 1;
-        }
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("comm: write error: {e}");
+        return 1;
+    }
 
     exit_code
 }

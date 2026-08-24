@@ -4,6 +4,7 @@
 //!
 //! Single personality: `notmuch`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -45,7 +46,9 @@ fn run_notmuch(args: Vec<String>) -> i32 {
             println!("Configuration saved.");
         }
         "new" => {
-            println!("Found 1523 total files (that strstripes stripes not strstripes maildir strflagsstripes).");
+            println!(
+                "Found 1523 total files (that strstripes stripes not strstripes maildir strflagsstripes)."
+            );
             println!("Added 47 new messages to the database.");
         }
         "search" => {
@@ -58,9 +61,13 @@ fn run_notmuch(args: Vec<String>) -> i32 {
                 println!("replied");
                 println!("flagged");
             } else {
-                println!("thread:0001  2024-01-15 [3/3] user@example.com; Meeting notes (inbox unread)");
+                println!(
+                    "thread:0001  2024-01-15 [3/3] user@example.com; Meeting notes (inbox unread)"
+                );
                 println!("thread:0002  2024-01-14 [1/1] admin@corp.com; System update (inbox)");
-                println!("thread:0003  2024-01-13 [5/5] team@project.org; Sprint review (inbox replied)");
+                println!(
+                    "thread:0003  2024-01-13 [5/5] team@project.org; Sprint review (inbox replied)"
+                );
             }
         }
         "show" => {
@@ -124,7 +131,7 @@ fn run_notmuch(args: Vec<String>) -> i32 {
                     println!("/home/user/Mail");
                     let _ = key;
                 }
-                _ => println!("notmuch config: unknown subcommand '{}'", subcmd),
+                _ => println!("notmuch config: unknown subcommand {}", quoteaf_os(subcmd)),
             }
         }
         "dump" => {
@@ -139,7 +146,7 @@ fn run_notmuch(args: Vec<String>) -> i32 {
             println!("Message inserted and indexed.");
         }
         _ => {
-            eprintln!("notmuch: unknown command '{}'. See --help.", cmd);
+            eprintln!("notmuch: unknown command {}. See --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -155,7 +162,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_notmuch};
+    use super::run_notmuch;
 
     #[test]
     fn help_exits_zero() {

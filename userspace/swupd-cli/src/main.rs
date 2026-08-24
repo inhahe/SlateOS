@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `swupd`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -75,7 +76,7 @@ fn run_swupd(args: &[String]) -> i32 {
         }
         "search-file" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("vim");
-            println!("Searching for '{}'...", file);
+            println!("Searching for {}...", quoteaf_os(file));
             println!("  Bundle: editors");
             println!("    /usr/bin/{}", file);
         }
@@ -99,7 +100,7 @@ fn run_swupd(args: &[String]) -> i32 {
             println!("Cleaning cached files...");
             println!("  200 MiB freed");
         }
-        _ => println!("swupd: '{}' completed", subcmd),
+        _ => println!("swupd: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -113,7 +114,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_swupd};
+    use super::run_swupd;
 
     #[test]
     fn help_exits_zero() {

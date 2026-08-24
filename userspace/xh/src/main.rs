@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `xh`, `xhs` (HTTPS default)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -75,7 +76,8 @@ fn run_xh(args: Vec<String>, https_default: bool) -> i32 {
     let curl_mode = args.iter().any(|a| a == "--curl" || a == "--curl-long");
 
     // Find method and URL
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -109,7 +111,15 @@ fn run_xh(args: Vec<String>, https_default: bool) -> i32 {
     };
 
     if curl_mode {
-        println!("curl -X {} '{}'", method, display_url);
+        // This line is a *command someone may paste into a shell*, and both
+        // halves are argv-derived: the method word and the URL. The
+        // hand-written quotes around the URL were the only thing standing
+        // between a URL containing `'` and a second command on that line.
+        println!(
+            "curl -X {} {}",
+            quoteaf_os(&method),
+            quoteaf_os(&display_url)
+        );
         return 0;
     }
 
@@ -154,7 +164,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_xh};
+    use super::run_xh;
 
     #[test]
     fn help_exits_zero() {

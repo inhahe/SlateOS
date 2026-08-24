@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS btrfs utility"
 [dependencies]
+# One rendering of a name inside a message. A device path may contain a newline,
+# and `btrfs`'s whole job is to take a device path from the user and report on
+# it. See design-decisions.md §370.
+quoting = { path = "../quoting" }

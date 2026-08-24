@@ -3,3 +3,7 @@ name = "xz"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# The name of the file it reports having removed is the input path -- the
+# one message that tells a user their file is gone, so it must be
+# unambiguous.
+quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `circleci`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -35,7 +36,10 @@ fn run_circleci(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("validate");
             match sub {
                 "validate" => {
-                    let file = args.get(2).map(|s| s.as_str()).unwrap_or(".circleci/config.yml");
+                    let file = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or(".circleci/config.yml");
                     println!("Config file at {} is valid.", file);
                 }
                 "process" => {
@@ -57,7 +61,8 @@ fn run_circleci(args: Vec<String>) -> i32 {
         "local" => {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("execute");
             if sub == "execute" {
-                let job = args.windows(2)
+                let job = args
+                    .windows(2)
                     .find(|w| w[0] == "--job")
                     .map(|w| w[1].as_str())
                     .unwrap_or("build");
@@ -70,7 +75,7 @@ fn run_circleci(args: Vec<String>) -> i32 {
                 println!("====>> npm install");
                 println!("====>> npm test");
                 println!();
-                println!("Success! Job '{}' completed.", job);
+                println!("Success! Job {} completed.", quoteaf_os(job));
             }
             0
         }
@@ -110,9 +115,11 @@ fn run_circleci(args: Vec<String>) -> i32 {
                 }
                 "create" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("new-context");
-                    println!("Context '{}' created.", name);
+                    println!("Context {} created.", quoteaf_os(name));
                 }
-                _ => println!("Usage: circleci context <list|create|delete|show|store-secret|remove-secret>"),
+                _ => println!(
+                    "Usage: circleci context <list|create|delete|show|store-secret|remove-secret>"
+                ),
             }
             0
         }
@@ -124,7 +131,7 @@ fn run_circleci(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: circleci <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -140,7 +147,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_circleci};
+    use super::run_circleci;
 
     #[test]
     fn help_exits_zero() {

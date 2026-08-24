@@ -3,3 +3,7 @@ name = "gpg"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# gpg names key IDs, user IDs and files. A user ID is text the key's creator
+# chose, so every name gpg prints for a key it just imported came from
+# whoever made that key.
+quoting = { path = "../quoting" }

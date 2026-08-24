@@ -2,3 +2,11 @@
 name = "espeak-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# It interpolates `wav`, `voice`, `speed` and the positional text into
+# "Writing to {}: voice={}, speed={} wpm" and its two sibling lines. Every
+# one of those is a raw argv string taken from `-w`, `-v`, `-s` or the
+# command line tail, and none is ever parsed -- so `speed` can hold a
+# newline exactly as the path can.
+quoting = { path = "../quoting" }

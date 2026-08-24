@@ -9,6 +9,12 @@ description = "SlateOS user account management — useradd, userdel, passwd, use
 # login manager's — so an account created here could not log in. See
 # `design-decisions.md` §330.
 [dependencies]
+# One rendering of untrusted text inside a diagnostic. User and group names,
+# home directories and shells are argv words or fields read out of
+# /etc/passwd, and both may hold a newline -- so a message that pastes one in
+# raw lets whoever supplied it write extra lines of this program's output. See
+# `userspace/quoting`.
+quoting = { path = "../quoting" }
 userdb = { path = "../userdb" }
 
 [lints]

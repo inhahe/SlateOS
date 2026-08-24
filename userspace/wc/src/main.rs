@@ -23,6 +23,7 @@
 //!       --version           Output version information and exit
 //! ```
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
@@ -69,8 +70,7 @@ impl Counts {
 
 /// Which columns to display. When no flags are given, lines+words+bytes is the
 /// default (matching GNU wc).
-#[derive(Clone, Copy)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct DisplayFlags {
     lines: bool,
     words: bool,
@@ -93,7 +93,6 @@ impl DisplayFlags {
         self.bytes = true;
     }
 }
-
 
 // ============================================================================
 // Parsed configuration
@@ -172,7 +171,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 };
                 files0_from = Some(val);
             } else {
-                eprintln!("wc: unrecognized option '{arg}'");
+                eprintln!("wc: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'wc --help' for more information.");
                 process::exit(1);
             }
@@ -190,7 +189,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 'm' => display.chars = true,
                 'L' => display.max_line_len = true,
                 _ => {
-                    eprintln!("wc: invalid option -- '{ch}'");
+                    eprintln!("wc: invalid option -- {}", quoteaf_os(ch.to_string()));
                     eprintln!("Try 'wc --help' for more information.");
                     process::exit(1);
                 }
@@ -211,7 +210,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 }
             }
             Err(e) => {
-                eprintln!("wc: cannot open '{f0}' for reading: {e}");
+                eprintln!("wc: cannot open {} for reading: {e}", quoteaf_os(&f0));
                 process::exit(1);
             }
         }
@@ -322,15 +321,14 @@ fn count_reader<R: Read>(reader: &mut R, display: &DisplayFlags) -> io::Result<C
             // does not match the continuation pattern 10xxxxxx. Invalid bytes
             // (bare continuations) each count as one character, matching the
             // behavior of counting "replacement characters."
-            if need_chars
-                && (byte & 0xC0) != 0x80 {
-                    counts.chars += 1;
-                    if need_max_line {
-                        cur_line_chars += 1;
-                    }
+            if need_chars && (byte & 0xC0) != 0x80 {
+                counts.chars += 1;
+                if need_max_line {
+                    cur_line_chars += 1;
                 }
-                // Continuation bytes: part of a multi-byte char, don't
-                // increment char count or line-char-length.
+            }
+            // Continuation bytes: part of a multi-byte char, don't
+            // increment char count or line-char-length.
         }
     }
 
@@ -381,7 +379,7 @@ fn column_width(total: &Counts, display: &DisplayFlags) -> usize {
     let vals = selected_values(total, display);
     let max_val = vals.iter().copied().max().unwrap_or(0);
     // Number of digits in the largest value, minimum 1.
-    
+
     if max_val == 0 {
         1
     } else {
@@ -527,7 +525,7 @@ fn run(config: &Config) -> i32 {
                     count_reader(&mut reader, &config.display)
                 }
                 Err(e) => {
-                    eprintln!("wc: {path}: {e}");
+                    eprintln!("wc: {}: {e}", quotef_os(path));
                     had_error = true;
                     continue;
                 }
@@ -545,8 +543,12 @@ fn run(config: &Config) -> i32 {
                 results.push((label, counts));
             }
             Err(e) => {
-                let display_name = if path == "-" { "standard input" } else { path.as_str() };
-                eprintln!("wc: {display_name}: {e}");
+                let display_name = if path == "-" {
+                    "standard input"
+                } else {
+                    path.as_str()
+                };
+                eprintln!("wc: {}: {e}", quotef_os(display_name));
                 had_error = true;
             }
         }
@@ -582,10 +584,11 @@ fn run(config: &Config) -> i32 {
         }
 
         if results.len() > 1
-            && let Err(e) = print_row(&mut out, &total, &config.display, width, "total") {
-                eprintln!("wc: write error: {e}");
-                return 1;
-            }
+            && let Err(e) = print_row(&mut out, &total, &config.display, width, "total")
+        {
+            eprintln!("wc: write error: {e}");
+            return 1;
+        }
     }
 
     if had_error { 1 } else { 0 }

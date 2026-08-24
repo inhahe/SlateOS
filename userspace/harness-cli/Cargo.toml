@@ -2,3 +2,8 @@
 name = "harness-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# harness-cli names pipelines, services and environments -- identifiers
+# defined on the server side, not by this tool.
+quoting = { path = "../quoting" }

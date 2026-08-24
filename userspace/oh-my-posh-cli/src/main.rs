@@ -4,11 +4,16 @@
 //!
 //! Single personality: `oh-my-posh`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_omp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -36,8 +41,11 @@ fn run_omp(args: &[String], _prog: &str) -> i32 {
         println!("  version             Show version");
         return 0;
     }
-    let cmd = args.iter().find(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("version");
+    let cmd = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("version");
     match cmd {
         "version" => println!("oh-my-posh 23.6.4 (Slate OS)"),
         "init" => {
@@ -46,8 +54,12 @@ fn run_omp(args: &[String], _prog: &str) -> i32 {
             println!("eval \"$(oh-my-posh init {})\"", shell);
         }
         "print" => {
-            let what = args.iter().skip_while(|a| a.as_str() != "print").nth(1)
-                .map(|s| s.as_str()).unwrap_or("primary");
+            let what = args
+                .iter()
+                .skip_while(|a| a.as_str() != "print")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("primary");
             match what {
                 "primary" => println!("\x1b[32m❯\x1b[0m "),
                 "secondary" => println!(".. "),
@@ -57,8 +69,12 @@ fn run_omp(args: &[String], _prog: &str) -> i32 {
             }
         }
         "config" => {
-            let sub = args.iter().skip_while(|a| a.as_str() != "config").nth(1)
-                .map(|s| s.as_str()).unwrap_or("edit");
+            let sub = args
+                .iter()
+                .skip_while(|a| a.as_str() != "config")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("edit");
             match sub {
                 "edit" => println!("oh-my-posh: Opening config editor..."),
                 "export" => println!("oh-my-posh: Config exported."),
@@ -67,8 +83,12 @@ fn run_omp(args: &[String], _prog: &str) -> i32 {
             }
         }
         "get" => {
-            let what = args.iter().skip_while(|a| a.as_str() != "get").nth(1)
-                .map(|s| s.as_str()).unwrap_or("shell");
+            let what = args
+                .iter()
+                .skip_while(|a| a.as_str() != "get")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("shell");
             match what {
                 "shell" => println!("bash"),
                 "millis" => println!("1716422400000"),
@@ -77,26 +97,37 @@ fn run_omp(args: &[String], _prog: &str) -> i32 {
         }
         "cache" => println!("oh-my-posh: Cache cleared."),
         "font" => {
-            let sub = args.iter().skip_while(|a| a.as_str() != "font").nth(1)
-                .map(|s| s.as_str()).unwrap_or("install");
+            let sub = args
+                .iter()
+                .skip_while(|a| a.as_str() != "font")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("install");
             if sub == "install" {
-                let name = args.iter().skip_while(|a| a.as_str() != "install").nth(1)
-                    .map(|s| s.as_str()).unwrap_or("JetBrainsMono");
-                println!("oh-my-posh: Installing font '{}'...", name);
+                let name = args
+                    .iter()
+                    .skip_while(|a| a.as_str() != "install")
+                    .nth(1)
+                    .map(|s| s.as_str())
+                    .unwrap_or("JetBrainsMono");
+                println!("oh-my-posh: Installing font {}...", quoteaf_os(name));
             } else {
                 println!("oh-my-posh font: {}", sub);
             }
         }
         "notice" => println!("oh-my-posh: No updates available."),
         "upgrade" => println!("oh-my-posh: Already up to date."),
-        _ => println!("oh-my-posh: unknown command '{}'", cmd),
+        _ => println!("oh-my-posh: unknown command {}", quoteaf_os(cmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "oh-my-posh".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "oh-my-posh".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_omp(&rest, &prog);
     process::exit(code);
@@ -104,7 +135,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_omp};
+    use super::{basename, run_omp, strip_ext};
 
     #[test]
     fn basename_strips_path() {

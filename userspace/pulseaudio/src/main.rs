@@ -13,6 +13,14 @@
 use std::env;
 use std::process;
 
+// A file name, a sink name and an option word are all attacker-chosen text: a
+// path may hold any byte but `/` and NUL, including a newline, and argv holds
+// whatever the caller typed. `quoteaf_os` renders an ordinary word as `'abc'`
+// -- byte for byte what the hand-written quotes here used to print -- and
+// escapes a hostile one so it cannot close the quotes and keep writing.
+// See `userspace/quoting`.
+use quoting::quoteaf_os;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -1385,7 +1393,7 @@ fn run_pactl(args: &[String]) -> i32 {
     let cmd = match PactlCommand::from_str_opt(cmd_str) {
         Some(c) => c,
         None => {
-            eprintln!("pactl: unknown command '{cmd_str}'");
+            eprintln!("pactl: unknown command {}", quoteaf_os(cmd_str));
             return 1;
         }
     };
@@ -1449,7 +1457,7 @@ fn run_pactl_list(args: &[String], state: &PulseState) -> i32 {
         match ListEntity::from_str_opt(&args[0]) {
             Some(e) => e,
             None => {
-                eprintln!("pactl: invalid list type '{}'", args[0]);
+                eprintln!("pactl: invalid list type {}", quoteaf_os(&args[0]));
                 return 1;
             }
         }
@@ -1629,7 +1637,7 @@ fn run_pactl_set_sink_volume(args: &[String], state: &mut PulseState) -> i32 {
     let pos = match state.find_sink_by_name_or_index(sink_id) {
         Some(p) => p,
         None => {
-            eprintln!("pactl: sink '{sink_id}' not found");
+            eprintln!("pactl: sink {} not found", quoteaf_os(sink_id));
             return 1;
         }
     };
@@ -1658,7 +1666,7 @@ fn run_pactl_set_source_volume(args: &[String], state: &mut PulseState) -> i32 {
     let pos = match state.find_source_by_name_or_index(source_id) {
         Some(p) => p,
         None => {
-            eprintln!("pactl: source '{source_id}' not found");
+            eprintln!("pactl: source {} not found", quoteaf_os(source_id));
             return 1;
         }
     };
@@ -1687,7 +1695,7 @@ fn run_pactl_set_sink_mute(args: &[String], state: &mut PulseState) -> i32 {
     let pos = match state.find_sink_by_name_or_index(sink_id) {
         Some(p) => p,
         None => {
-            eprintln!("pactl: sink '{sink_id}' not found");
+            eprintln!("pactl: sink {} not found", quoteaf_os(sink_id));
             return 1;
         }
     };
@@ -1715,7 +1723,7 @@ fn run_pactl_set_source_mute(args: &[String], state: &mut PulseState) -> i32 {
     let pos = match state.find_source_by_name_or_index(source_id) {
         Some(p) => p,
         None => {
-            eprintln!("pactl: source '{source_id}' not found");
+            eprintln!("pactl: source {} not found", quoteaf_os(source_id));
             return 1;
         }
     };
@@ -1741,7 +1749,7 @@ fn run_pactl_set_default_sink(args: &[String], state: &mut PulseState) -> i32 {
 
     // Verify sink exists
     if state.find_sink_by_name_or_index(sink_id).is_none() {
-        eprintln!("pactl: sink '{sink_id}' not found");
+        eprintln!("pactl: sink {} not found", quoteaf_os(sink_id));
         return 1;
     }
 
@@ -1764,7 +1772,7 @@ fn run_pactl_set_default_source(args: &[String], state: &mut PulseState) -> i32 
     let source_id = &args[0];
 
     if state.find_source_by_name_or_index(source_id).is_none() {
-        eprintln!("pactl: source '{source_id}' not found");
+        eprintln!("pactl: source {} not found", quoteaf_os(source_id));
         return 1;
     }
 
@@ -1786,7 +1794,7 @@ fn run_pactl_move_sink_input(args: &[String], state: &mut PulseState) -> i32 {
     let input_idx: u32 = match args[0].parse() {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("pactl: invalid sink input index '{}'", args[0]);
+            eprintln!("pactl: invalid sink input index {}", quoteaf_os(&args[0]));
             return 1;
         }
     };
@@ -1803,7 +1811,7 @@ fn run_pactl_move_sink_input(args: &[String], state: &mut PulseState) -> i32 {
     let sink_pos = match state.find_sink_by_name_or_index(sink_id) {
         Some(p) => p,
         None => {
-            eprintln!("pactl: sink '{sink_id}' not found");
+            eprintln!("pactl: sink {} not found", quoteaf_os(sink_id));
             return 1;
         }
     };
@@ -1820,7 +1828,10 @@ fn run_pactl_move_source_output(args: &[String], state: &mut PulseState) -> i32 
     let output_idx: u32 = match args[0].parse() {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("pactl: invalid source output index '{}'", args[0]);
+            eprintln!(
+                "pactl: invalid source output index {}",
+                quoteaf_os(&args[0])
+            );
             return 1;
         }
     };
@@ -1837,7 +1848,7 @@ fn run_pactl_move_source_output(args: &[String], state: &mut PulseState) -> i32 
     let source_pos = match state.find_source_by_name_or_index(source_id) {
         Some(p) => p,
         None => {
-            eprintln!("pactl: source '{source_id}' not found");
+            eprintln!("pactl: source {} not found", quoteaf_os(source_id));
             return 1;
         }
     };
@@ -1885,7 +1896,7 @@ fn run_pactl_unload_module(args: &[String], state: &mut PulseState) -> i32 {
     let idx: u32 = match args[0].parse() {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("pactl: invalid module index '{}'", args[0]);
+            eprintln!("pactl: invalid module index {}", quoteaf_os(&args[0]));
             return 1;
         }
     };
@@ -1913,7 +1924,7 @@ fn run_pactl_set_card_profile(args: &[String], state: &mut PulseState) -> i32 {
     let pos = match state.find_card_by_name_or_index(card_id) {
         Some(p) => p,
         None => {
-            eprintln!("pactl: card '{card_id}' not found");
+            eprintln!("pactl: card {} not found", quoteaf_os(card_id));
             return 1;
         }
     };
@@ -1924,7 +1935,11 @@ fn run_pactl_set_card_profile(args: &[String], state: &mut PulseState) -> i32 {
         .any(|p| p.name == *profile_name);
 
     if !has_profile {
-        eprintln!("pactl: profile '{profile_name}' not found on card '{card_id}'");
+        eprintln!(
+            "pactl: profile {} not found on card {}",
+            quoteaf_os(profile_name),
+            quoteaf_os(card_id)
+        );
         return 1;
     }
 
@@ -2063,7 +2078,7 @@ fn run_pacmd(args: &[String]) -> i32 {
             0
         }
         _ => {
-            eprintln!("pacmd: unknown command '{cmd}'");
+            eprintln!("pacmd: unknown command {}", quoteaf_os(cmd));
             1
         }
     }
@@ -2251,7 +2266,7 @@ fn run_paplay(args: &[String]) -> i32 {
                 opts.channels = match args[i].parse() {
                     Ok(c) => c,
                     Err(_) => {
-                        eprintln!("paplay: invalid channel count '{}'", args[i]);
+                        eprintln!("paplay: invalid channel count {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 };
@@ -2265,7 +2280,7 @@ fn run_paplay(args: &[String]) -> i32 {
                 opts.rate = match args[i].parse() {
                     Ok(r) => r,
                     Err(_) => {
-                        eprintln!("paplay: invalid sample rate '{}'", args[i]);
+                        eprintln!("paplay: invalid sample rate {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 };
@@ -2279,7 +2294,7 @@ fn run_paplay(args: &[String]) -> i32 {
                 opts.format = match SampleFormat::from_str_opt(&args[i]) {
                     Some(f) => f,
                     None => {
-                        eprintln!("paplay: unknown format '{}'", args[i]);
+                        eprintln!("paplay: unknown format {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 };
@@ -2293,7 +2308,7 @@ fn run_paplay(args: &[String]) -> i32 {
                 opts.volume = match args[i].parse() {
                     Ok(v) => Some(v),
                     Err(_) => {
-                        eprintln!("paplay: invalid volume '{}'", args[i]);
+                        eprintln!("paplay: invalid volume {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 };
@@ -2307,7 +2322,7 @@ fn run_paplay(args: &[String]) -> i32 {
                 opts._latency_msec = match args[i].parse() {
                     Ok(l) => l,
                     Err(_) => {
-                        eprintln!("paplay: invalid latency '{}'", args[i]);
+                        eprintln!("paplay: invalid latency {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 };
@@ -2321,7 +2336,7 @@ fn run_paplay(args: &[String]) -> i32 {
                 opts._process_time_msec = match args[i].parse() {
                     Ok(p) => p,
                     Err(_) => {
-                        eprintln!("paplay: invalid process time '{}'", args[i]);
+                        eprintln!("paplay: invalid process time {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 };
@@ -2334,7 +2349,7 @@ fn run_paplay(args: &[String]) -> i32 {
             }
             _ => {
                 if a.starts_with('-') {
-                    eprintln!("paplay: unknown option '{a}'");
+                    eprintln!("paplay: unknown option {}", quoteaf_os(a));
                     return 1;
                 }
                 opts.filename = Some(a.clone());
@@ -2364,7 +2379,11 @@ fn run_paplay(args: &[String]) -> i32 {
     let bps = spec.bytes_per_second();
     let device_name = opts.device.as_deref().unwrap_or("default sink");
 
-    println!("Playing '{filename}' on '{device_name}'...");
+    println!(
+        "Playing {} on {}...",
+        quoteaf_os(&filename),
+        quoteaf_os(device_name)
+    );
     println!(
         "  Format: {}, {} channels, {} Hz",
         opts.format.as_str(),
@@ -2475,7 +2494,7 @@ fn run_parecord(args: &[String]) -> i32 {
                 opts.channels = match args[i].parse() {
                     Ok(c) => c,
                     Err(_) => {
-                        eprintln!("parecord: invalid channel count '{}'", args[i]);
+                        eprintln!("parecord: invalid channel count {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 };
@@ -2489,7 +2508,7 @@ fn run_parecord(args: &[String]) -> i32 {
                 opts.rate = match args[i].parse() {
                     Ok(r) => r,
                     Err(_) => {
-                        eprintln!("parecord: invalid sample rate '{}'", args[i]);
+                        eprintln!("parecord: invalid sample rate {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 };
@@ -2503,7 +2522,7 @@ fn run_parecord(args: &[String]) -> i32 {
                 opts.format = match SampleFormat::from_str_opt(&args[i]) {
                     Some(f) => f,
                     None => {
-                        eprintln!("parecord: unknown format '{}'", args[i]);
+                        eprintln!("parecord: unknown format {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 };
@@ -2517,7 +2536,7 @@ fn run_parecord(args: &[String]) -> i32 {
                 opts.volume = match args[i].parse() {
                     Ok(v) => Some(v),
                     Err(_) => {
-                        eprintln!("parecord: invalid volume '{}'", args[i]);
+                        eprintln!("parecord: invalid volume {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 };
@@ -2531,7 +2550,7 @@ fn run_parecord(args: &[String]) -> i32 {
                 opts._latency_msec = match args[i].parse() {
                     Ok(l) => l,
                     Err(_) => {
-                        eprintln!("parecord: invalid latency '{}'", args[i]);
+                        eprintln!("parecord: invalid latency {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 };
@@ -2545,7 +2564,7 @@ fn run_parecord(args: &[String]) -> i32 {
                 opts._process_time_msec = match args[i].parse() {
                     Ok(p) => p,
                     Err(_) => {
-                        eprintln!("parecord: invalid process time '{}'", args[i]);
+                        eprintln!("parecord: invalid process time {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 };
@@ -2579,14 +2598,14 @@ fn run_parecord(args: &[String]) -> i32 {
                 opts._monitor_stream = match args[i].parse() {
                     Ok(m) => Some(m),
                     Err(_) => {
-                        eprintln!("parecord: invalid stream index '{}'", args[i]);
+                        eprintln!("parecord: invalid stream index {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 };
             }
             _ => {
                 if a.starts_with('-') {
-                    eprintln!("parecord: unknown option '{a}'");
+                    eprintln!("parecord: unknown option {}", quoteaf_os(a));
                     return 1;
                 }
                 opts.filename = Some(a.clone());
@@ -2607,7 +2626,11 @@ fn run_parecord(args: &[String]) -> i32 {
     let bps = spec.bytes_per_second();
     let device_name = opts.device.as_deref().unwrap_or("default source");
 
-    println!("Recording to '{filename}' from '{device_name}'...");
+    println!(
+        "Recording to {} from {}...",
+        quoteaf_os(&filename),
+        quoteaf_os(device_name)
+    );
     println!(
         "  Format: {}, {} channels, {} Hz",
         opts.format.as_str(),
@@ -2703,7 +2726,10 @@ fn run_pasuspender(args: &[String]) -> i32 {
     let server_name = server
         .as_deref()
         .unwrap_or("unix:/run/user/1000/pulse/native");
-    println!("Suspending PulseAudio on server '{server_name}'...");
+    println!(
+        "Suspending PulseAudio on server {}...",
+        quoteaf_os(server_name)
+    );
     println!("Running: {command}");
     println!("Command completed (simulated).");
     println!("Resuming PulseAudio...");
@@ -2821,7 +2847,7 @@ fn run_pulseaudio(args: &[String]) -> i32 {
                 opts._log_level = match args[i].parse() {
                     Ok(l) => l,
                     Err(_) => {
-                        eprintln!("pulseaudio: invalid log level '{}'", args[i]);
+                        eprintln!("pulseaudio: invalid log level {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 };
@@ -2843,7 +2869,7 @@ fn run_pulseaudio(args: &[String]) -> i32 {
                 opts._exit_idle_time = match args[i].parse() {
                     Ok(t) => t,
                     Err(_) => {
-                        eprintln!("pulseaudio: invalid idle time '{}'", args[i]);
+                        eprintln!("pulseaudio: invalid idle time {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 };
@@ -2857,7 +2883,10 @@ fn run_pulseaudio(args: &[String]) -> i32 {
                 opts._scache_idle_time = match args[i].parse() {
                     Ok(t) => t,
                     Err(_) => {
-                        eprintln!("pulseaudio: invalid scache idle time '{}'", args[i]);
+                        eprintln!(
+                            "pulseaudio: invalid scache idle time {}",
+                            quoteaf_os(&args[i])
+                        );
                         return 1;
                     }
                 };
@@ -2893,7 +2922,7 @@ fn run_pulseaudio(args: &[String]) -> i32 {
             }
             _ => {
                 if a.starts_with('-') {
-                    eprintln!("pulseaudio: unknown option '{a}'");
+                    eprintln!("pulseaudio: unknown option {}", quoteaf_os(a));
                     return 1;
                 }
             }
@@ -4791,10 +4820,7 @@ mod tests {
 
     #[test]
     fn test_pasuspender_with_command() {
-        assert_eq!(
-            run_pasuspender(&["--".to_string(), "aplay".to_string()]),
-            0
-        );
+        assert_eq!(run_pasuspender(&["--".to_string(), "aplay".to_string()]), 0);
     }
 
     #[test]
@@ -4849,10 +4875,7 @@ mod tests {
 
     #[test]
     fn test_pulseaudio_dump_resample_methods() {
-        assert_eq!(
-            run_pulseaudio(&["--dump-resample-methods".to_string()]),
-            0
-        );
+        assert_eq!(run_pulseaudio(&["--dump-resample-methods".to_string()]), 0);
     }
 
     #[test]

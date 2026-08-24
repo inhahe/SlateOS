@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `luarocks`, `luarocks-admin`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_luarocks(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -45,7 +50,7 @@ fn run_luarocks(args: &[String]) -> i32 {
         }
         "search" => {
             let term = args.get(1).map(|s| s.as_str()).unwrap_or("socket");
-            println!("Search results for '{}':", term);
+            println!("Search results for {}:", quoteaf_os(term));
             println!("  luasocket   3.1.0-1    Network support for Lua");
             println!("  copas       4.7.1-1    Coroutine Oriented Portable Async Services");
         }
@@ -71,14 +76,17 @@ fn run_luarocks(args: &[String]) -> i32 {
             println!("Created {}-dev-1.rockspec", name);
             println!("Created .luarocks/config-5.4.lua");
         }
-        _ => println!("luarocks: '{}' completed", subcmd),
+        _ => println!("luarocks: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "luarocks".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "luarocks".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_luarocks(&rest);
     process::exit(code);
@@ -86,7 +94,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_luarocks};
+    use super::{basename, run_luarocks, strip_ext};
 
     #[test]
     fn basename_strips_path() {

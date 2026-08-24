@@ -2,3 +2,8 @@
 name = "ttfdump-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The font table name is an argv word, echoed both when dumping it and when
+# falling through.
+quoting = { path = "../quoting" }

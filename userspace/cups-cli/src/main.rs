@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `cupsctl`, `cupsenable`, `cupsdisable`, `cupsaccept`, `cupsreject`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -64,7 +65,7 @@ fn run_cupsenable(args: &[String]) -> i32 {
         return 0;
     }
     for printer in args.iter().filter(|a| !a.starts_with('-')) {
-        println!("Printer '{}' enabled.", printer);
+        println!("Printer {} enabled.", quoteaf_os(printer));
     }
     0
 }
@@ -80,7 +81,7 @@ fn run_cupsdisable(args: &[String]) -> i32 {
         return 0;
     }
     for printer in args.iter().filter(|a| !a.starts_with('-')) {
-        println!("Printer '{}' disabled.", printer);
+        println!("Printer {} disabled.", quoteaf_os(printer));
     }
     0
 }
@@ -93,7 +94,7 @@ fn run_cupsaccept(args: &[String]) -> i32 {
         return 0;
     }
     for printer in args.iter().filter(|a| !a.starts_with('-')) {
-        println!("Printer '{}' now accepting jobs.", printer);
+        println!("Printer {} now accepting jobs.", quoteaf_os(printer));
     }
     0
 }
@@ -106,14 +107,15 @@ fn run_cupsreject(args: &[String]) -> i32 {
         return 0;
     }
     for printer in args.iter().filter(|a| !a.starts_with('-')) {
-        println!("Printer '{}' now rejecting jobs.", printer);
+        println!("Printer {} now rejecting jobs.", quoteaf_os(printer));
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "cupsctl".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -130,7 +132,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_cupsctl};
+    use super::{basename, run_cupsctl, strip_ext};
 
     #[test]
     fn basename_strips_path() {

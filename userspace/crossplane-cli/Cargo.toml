@@ -2,3 +2,8 @@
 name = "crossplane-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# crossplane-cli names compositions, claims and providers, identifiers
+# applied to the cluster by someone else.
+quoting = { path = "../quoting" }

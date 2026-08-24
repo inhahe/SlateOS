@@ -8,6 +8,7 @@
 //! - `zramctl` (default) — manage zram devices
 //! - `zram-generator` — automatic zram setup from config
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -102,25 +103,23 @@ impl Default for ZramGenConfig {
 // ── Simulated data ────────────────────────────────────────────────────
 
 fn read_zram_devices() -> Vec<ZramDevice> {
-    vec![
-        ZramDevice {
-            name: "zram0".to_string(),
-            disksize: 8_589_934_592,  // 8 GiB
-            algorithm: CompressionAlgo::Zstd,
-            orig_data_size: 4_294_967_296,  // 4 GiB uncompressed
-            compr_data_size: 1_073_741_824, // 1 GiB compressed (4:1)
-            mem_used_total: 1_107_296_256,  // slightly more than compressed
-            _mem_limit: 0,
-            _mem_used_max: 1_200_000_000,
-            zero_pages: 262_144,
-            _same_pages: 65_536,
-            num_reads: 12_345_678,
-            num_writes: 9_876_543,
-            _back_dev: None,
-            streams: 8,
-            _mountpoint: Some("[SWAP]".to_string()),
-        },
-    ]
+    vec![ZramDevice {
+        name: "zram0".to_string(),
+        disksize: 8_589_934_592, // 8 GiB
+        algorithm: CompressionAlgo::Zstd,
+        orig_data_size: 4_294_967_296,  // 4 GiB uncompressed
+        compr_data_size: 1_073_741_824, // 1 GiB compressed (4:1)
+        mem_used_total: 1_107_296_256,  // slightly more than compressed
+        _mem_limit: 0,
+        _mem_used_max: 1_200_000_000,
+        zero_pages: 262_144,
+        _same_pages: 65_536,
+        num_reads: 12_345_678,
+        num_writes: 9_876_543,
+        _back_dev: None,
+        streams: 8,
+        _mountpoint: Some("[SWAP]".to_string()),
+    }]
 }
 
 fn available_algorithms() -> Vec<&'static str> {
@@ -175,7 +174,11 @@ fn run_zramctl(args: Vec<String>) -> i32 {
         "--algorithms" | "algorithms" => {
             println!("Available compression algorithms:");
             for algo in available_algorithms() {
-                let current = if algo == "zstd" { " (current default)" } else { "" };
+                let current = if algo == "zstd" {
+                    " (current default)"
+                } else {
+                    ""
+                };
                 println!("  {}{}", algo, current);
             }
             0
@@ -191,12 +194,8 @@ fn run_zramctl(args: Vec<String>) -> i32 {
             0
         }
         "--raw" => zramctl_list(true),
-        s if s.starts_with("-s") || s == "--size" => {
-            zramctl_setup(&cmd, &cmd_args)
-        }
-        s if s.starts_with("/dev/") || s.starts_with("zram") => {
-            zramctl_show_device(s)
-        }
+        s if s.starts_with("-s") || s == "--size" => zramctl_setup(&cmd, &cmd_args),
+        s if s.starts_with("/dev/") || s.starts_with("zram") => zramctl_show_device(s),
         _ => {
             // Try as device name or setup flags
             zramctl_setup(&cmd, &cmd_args)
@@ -216,21 +215,33 @@ fn zramctl_list(raw: bool) -> i32 {
 
     if raw {
         for dev in &devices {
-            println!("{} {} {} {} {} {} {}",
-                dev.name, dev.disksize, dev.algorithm,
-                dev.orig_data_size, dev.compr_data_size,
-                dev.mem_used_total, dev.streams);
+            println!(
+                "{} {} {} {} {} {} {}",
+                dev.name,
+                dev.disksize,
+                dev.algorithm,
+                dev.orig_data_size,
+                dev.compr_data_size,
+                dev.mem_used_total,
+                dev.streams
+            );
         }
     } else {
-        println!("{:<8} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8} MOUNTPOINT",
-            "NAME", "ALGORITHM", "DISKSIZE", "DATA", "COMPR", "TOTAL", "STREAMS");
+        println!(
+            "{:<8} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8} MOUNTPOINT",
+            "NAME", "ALGORITHM", "DISKSIZE", "DATA", "COMPR", "TOTAL", "STREAMS"
+        );
         for dev in &devices {
             let ratio = if dev.compr_data_size > 0 {
-                format!("{:.1}:1", dev.orig_data_size as f64 / dev.compr_data_size as f64)
+                format!(
+                    "{:.1}:1",
+                    dev.orig_data_size as f64 / dev.compr_data_size as f64
+                )
             } else {
                 "N/A".to_string()
             };
-            println!("{:<8} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8} {} ({})",
+            println!(
+                "{:<8} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8} {} ({})",
                 format!("/dev/{}", dev.name),
                 dev.algorithm,
                 format_bytes(dev.disksize),
@@ -239,7 +250,8 @@ fn zramctl_list(raw: bool) -> i32 {
                 format_bytes(dev.mem_used_total),
                 dev.streams,
                 dev._mountpoint.as_deref().unwrap_or("-"),
-                ratio);
+                ratio
+            );
         }
     }
     0
@@ -259,8 +271,10 @@ fn zramctl_show_device(dev_name: &str) -> i32 {
             println!("  Compressed data: {}", format_bytes(dev.compr_data_size));
             println!("  Memory used:     {}", format_bytes(dev.mem_used_total));
             if dev.compr_data_size > 0 {
-                println!("  Compression:     {:.1}:1",
-                    dev.orig_data_size as f64 / dev.compr_data_size as f64);
+                println!(
+                    "  Compression:     {:.1}:1",
+                    dev.orig_data_size as f64 / dev.compr_data_size as f64
+                );
             }
             println!("  Zero pages:      {}", dev.zero_pages);
             println!("  Reads:           {}", dev.num_reads);
@@ -284,18 +298,29 @@ fn zramctl_setup(first_arg: &str, args: &[String]) -> i32 {
     let mut streams: Option<&str> = None;
 
     // Parse mixed args
-    let all_args: Vec<&str> = std::iter::once(first_arg).chain(args.iter().map(|s| s.as_str())).collect();
+    let all_args: Vec<&str> = std::iter::once(first_arg)
+        .chain(args.iter().map(|s| s.as_str()))
+        .collect();
     let mut i = 0;
     while i < all_args.len() {
         match all_args[i] {
             "-s" | "--size" => {
-                if let Some(&val) = all_args.get(i + 1) { size = Some(val); i += 1; }
+                if let Some(&val) = all_args.get(i + 1) {
+                    size = Some(val);
+                    i += 1;
+                }
             }
             "-a" | "--algorithm" => {
-                if let Some(&val) = all_args.get(i + 1) { algo = Some(val); i += 1; }
+                if let Some(&val) = all_args.get(i + 1) {
+                    algo = Some(val);
+                    i += 1;
+                }
             }
             "-t" | "--streams" => {
-                if let Some(&val) = all_args.get(i + 1) { streams = Some(val); i += 1; }
+                if let Some(&val) = all_args.get(i + 1) {
+                    streams = Some(val);
+                    i += 1;
+                }
             }
             s if s.starts_with("/dev/") || s.starts_with("zram") => {
                 device = s;
@@ -306,15 +331,19 @@ fn zramctl_setup(first_arg: &str, args: &[String]) -> i32 {
     }
 
     println!("zramctl: setting up /dev/{}", device);
-    if let Some(s) = size { println!("  Size: {}", s); }
+    if let Some(s) = size {
+        println!("  Size: {}", s);
+    }
     if let Some(a) = algo {
         if CompressionAlgo::from_str(a).is_none() {
-            eprintln!("zramctl: unknown algorithm '{}'", a);
+            eprintln!("zramctl: unknown algorithm {}", quoteaf_os(a));
             return 1;
         }
         println!("  Algorithm: {}", a);
     }
-    if let Some(t) = streams { println!("  Streams: {}", t); }
+    if let Some(t) = streams {
+        println!("  Streams: {}", t);
+    }
     println!("Device configured (simulated)");
     0
 }
@@ -343,11 +372,9 @@ fn run_generator(args: Vec<String>) -> i32 {
         }
         "run" => generator_run(),
         "show-config" => generator_show_config(),
-        "status" => {
-            zramctl_list(false)
-        }
+        "status" => zramctl_list(false),
         other => {
-            eprintln!("zram-generator: unknown command '{}'", other);
+            eprintln!("zram-generator: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -370,9 +397,15 @@ fn generator_run() -> i32 {
     println!("  Algorithm: {}", config._compression_algorithm);
     println!("  Swap priority: {}", config._swap_priority);
     println!();
-    println!("zram-generator: creating zram0 with {} MB, algorithm {}", zram_size_mb, config._compression_algorithm);
+    println!(
+        "zram-generator: creating zram0 with {} MB, algorithm {}",
+        zram_size_mb, config._compression_algorithm
+    );
     println!("zram-generator: mkswap /dev/zram0");
-    println!("zram-generator: swapon -p {} /dev/zram0", config._swap_priority);
+    println!(
+        "zram-generator: swapon -p {} /dev/zram0",
+        config._swap_priority
+    );
     println!("zram-generator: done");
     0
 }
@@ -382,7 +415,10 @@ fn generator_show_config() -> i32 {
     println!("zram-generator configuration:");
     println!("  Config file: {}", _ZRAM_CONF);
     println!("  zram-fraction: {:.1}", config._zram_fraction);
-    println!("  max-zram-size: {} MB", config._max_zram_size_mb.unwrap_or(0));
+    println!(
+        "  max-zram-size: {} MB",
+        config._max_zram_size_mb.unwrap_or(0)
+    );
     println!("  compression-algorithm: {}", config._compression_algorithm);
     println!("  swap-priority: {}", config._swap_priority);
     println!("  num-devices: {}", config._num_devices);
@@ -448,9 +484,15 @@ mod tests {
 
     #[test]
     fn test_algo_from_str() {
-        assert_eq!(CompressionAlgo::from_str("zstd"), Some(CompressionAlgo::Zstd));
+        assert_eq!(
+            CompressionAlgo::from_str("zstd"),
+            Some(CompressionAlgo::Zstd)
+        );
         assert_eq!(CompressionAlgo::from_str("lz4"), Some(CompressionAlgo::Lz4));
-        assert_eq!(CompressionAlgo::from_str("lzo-rle"), Some(CompressionAlgo::LzoRle));
+        assert_eq!(
+            CompressionAlgo::from_str("lzo-rle"),
+            Some(CompressionAlgo::LzoRle)
+        );
         assert_eq!(CompressionAlgo::from_str("invalid"), None);
     }
 

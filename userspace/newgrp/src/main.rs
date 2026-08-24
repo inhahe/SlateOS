@@ -9,6 +9,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::io::{self, Write};
 use std::process;
@@ -196,10 +197,7 @@ fn exec_with_group(gid: u32, command: Option<&[String]>) -> i32 {
             eprintln!(
                 "newgrp: would setgid({}) and exec: {}",
                 gid,
-                cmd.iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                cmd.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
             );
         }
         _ => {
@@ -242,7 +240,7 @@ fn newgrp_main(args: &[String]) -> i32 {
                 group_name = Some(s.to_string());
             }
             other => {
-                eprintln!("newgrp: invalid option '{other}'");
+                eprintln!("newgrp: invalid option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -256,7 +254,7 @@ fn newgrp_main(args: &[String]) -> i32 {
         Some(name) => match find_group_by_name(&group_db, name) {
             Some(g) => g,
             None => {
-                eprintln!("newgrp: group '{name}' does not exist");
+                eprintln!("newgrp: group {} does not exist", quoteaf_os(name));
                 return 1;
             }
         },
@@ -284,7 +282,10 @@ fn newgrp_main(args: &[String]) -> i32 {
 
     if login_shell {
         // Would set up a clean environment for login shell.
-        eprintln!("newgrp: starting login shell with group '{}'", target_group.name);
+        eprintln!(
+            "newgrp: starting login shell with group {}",
+            quoteaf_os(&target_group.name)
+        );
     }
 
     exec_with_group(target_group.gid, None)
@@ -353,7 +354,7 @@ fn sg_main(args: &[String]) -> i32 {
     let target_group = match find_group_by_name(&group_db, &group_name) {
         Some(g) => g,
         None => {
-            eprintln!("sg: group '{group_name}' does not exist");
+            eprintln!("sg: group {} does not exist", quoteaf_os(&group_name));
             return 1;
         }
     };

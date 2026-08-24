@@ -13,6 +13,11 @@ description = "SlateOS sudo utility"
 # else on the system: it is the prompt that grants root. See
 # `design-decisions.md` §354.
 [dependencies]
+# sudo names the command, the target user and the host in the line it prints
+# when it refuses. It is the privilege boundary, so a word an unprivileged
+# caller chooses is reaching the most privileged output on the system -- and
+# that line is also what gets logged.
+quoting = { path = "../quoting" }
 authlib = { path = "../authlib" }
 userdb = { path = "../userdb" }
 

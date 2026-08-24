@@ -2,3 +2,8 @@
 name = "shortcut-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# shortcut-cli names stories, workflow states and epics, identifiers created
+# on the service side.
+quoting = { path = "../quoting" }

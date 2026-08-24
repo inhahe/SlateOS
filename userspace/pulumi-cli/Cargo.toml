@@ -2,3 +2,7 @@
 name = "pulumi-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The stack name it switches to and the subcommand name are argv words.
+quoting = { path = "../quoting" }

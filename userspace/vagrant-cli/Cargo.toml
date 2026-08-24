@@ -2,3 +2,8 @@
 name = "vagrant-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# vagrant-cli names boxes, machines and providers, read from the command
+# line and from a Vagrantfile this tool did not write.
+quoting = { path = "../quoting" }

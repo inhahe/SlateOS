@@ -32,12 +32,9 @@
 // offsets bounded by archive/file length and ASCII-decimal sizes parsed
 // from headers; indexing is gated by preceding length checks. Errors
 // return Err.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    dead_code,
-)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, dead_code)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, BufWriter, Write};
@@ -487,7 +484,10 @@ fn parse_header_octal(field: &[u8]) -> Result<u32, String> {
 }
 
 /// Decode a BSD extended name (`#1/N` format).
-fn decode_bsd_name<'a>(raw_name: &str, member_data: &'a [u8]) -> Result<(String, &'a [u8]), String> {
+fn decode_bsd_name<'a>(
+    raw_name: &str,
+    member_data: &'a [u8],
+) -> Result<(String, &'a [u8]), String> {
     let prefix = AR_BSD_NAME_PREFIX;
     if !raw_name.starts_with(prefix) {
         return Err(format!("expected BSD name prefix, got: {raw_name}"));
@@ -541,12 +541,12 @@ fn align2(offset: usize) -> usize {
 /// Minimal ELF header information.
 #[derive(Debug, Clone)]
 struct ElfInfo {
-    class: u8,         // ELFCLASS32 or ELFCLASS64
+    class: u8, // ELFCLASS32 or ELFCLASS64
     little_endian: bool,
-    shoff: u64,        // section header table offset
-    shentsize: u16,    // section header entry size
-    shnum: u16,        // number of section headers
-    shstrndx: u16,     // section name string table index
+    shoff: u64,     // section header table offset
+    shentsize: u16, // section header entry size
+    shnum: u16,     // number of section headers
+    shstrndx: u16,  // section name string table index
 }
 
 /// Parsed ELF section header.
@@ -559,7 +559,7 @@ struct ElfSection {
     size: u64,
     link: u32,
     entsize: u64,
-    name: String,      // resolved name
+    name: String, // resolved name
 }
 
 /// Parsed ELF symbol.
@@ -946,7 +946,8 @@ fn strip_elf(data: &[u8], opts: &StripOptions) -> Result<Vec<u8>, String> {
             // Check keep-symbol: if this is .symtab and we have keep-symbols,
             // we might still want to keep it. For simplicity, if any
             // keep-symbol is specified and this is .symtab, keep it.
-            keep[i] = !opts.keep_symbols.is_empty() && (sec.name == ".symtab" || sec.name == ".strtab");
+            keep[i] =
+                !opts.keep_symbols.is_empty() && (sec.name == ".symtab" || sec.name == ".strtab");
         }
     }
 
@@ -962,9 +963,10 @@ fn strip_elf(data: &[u8], opts: &StripOptions) -> Result<Vec<u8>, String> {
                     // If the linking section is also being removed or is a
                     // strtab for a removed symtab, mark it too. But only if
                     // it isn't needed by a kept section.
-                    let needed_by_kept = sections.iter().enumerate().any(|(k, s)| {
-                        k != j && keep[k] && s.link as usize == j
-                    });
+                    let needed_by_kept = sections
+                        .iter()
+                        .enumerate()
+                        .any(|(k, s)| k != j && keep[k] && s.link as usize == j);
                     if !needed_by_kept && sections[j].sh_type == SHT_STRTAB && j != shstrtab_idx {
                         keep[j] = false;
                     }
@@ -983,12 +985,7 @@ fn strip_elf(data: &[u8], opts: &StripOptions) -> Result<Vec<u8>, String> {
 }
 
 /// Rebuild an ELF file, including only the sections marked as kept.
-fn rebuild_elf(
-    data: &[u8],
-    info: &ElfInfo,
-    sections: &[ElfSection],
-    keep: &[bool],
-) -> Vec<u8> {
+fn rebuild_elf(data: &[u8], info: &ElfInfo, sections: &[ElfSection], keep: &[bool]) -> Vec<u8> {
     // Map old section indices to new indices
     let mut new_index = vec![0u16; sections.len()];
     let mut new_count: u16 = 0;
@@ -1090,7 +1087,12 @@ fn rebuild_elf(
         let old_link = sec.link as usize;
         if old_link < new_index.len() {
             let link_offset = if info.class == ELFCLASS64 { 40 } else { 24 };
-            write_u32(&mut sh_data, link_offset, new_index[old_link] as u32, info.little_endian);
+            write_u32(
+                &mut sh_data,
+                link_offset,
+                new_index[old_link] as u32,
+                info.little_endian,
+            );
         }
 
         output.extend_from_slice(&sh_data);
@@ -1127,12 +1129,12 @@ fn rebuild_elf(
 /// Options/modifiers for ar operations.
 #[derive(Debug, Clone)]
 struct ArOptions {
-    operation: char,         // r, d, t, x, q, p
-    verbose: bool,           // v
-    create_silently: bool,   // c
-    write_symtab: bool,      // s
-    update_only: bool,       // u
-    deterministic: bool,     // D
+    operation: char,                 // r, d, t, x, q, p
+    verbose: bool,                   // v
+    create_silently: bool,           // c
+    write_symtab: bool,              // s
+    update_only: bool,               // u
+    deterministic: bool,             // D
     position_after: Option<String>,  // a <member>
     position_before: Option<String>, // b/i <member>
 }
@@ -1332,7 +1334,7 @@ fn ar_delete(opts: &ArOptions, archive_path: &str, member_names: &[String]) -> R
                 eprintln!("d - {name}");
             }
         } else {
-            eprintln!("ar: '{name}': no such member");
+            eprintln!("ar: {}: no such member", quoteaf_os(name));
         }
     }
 
@@ -1617,8 +1619,7 @@ fn run_strip(args: &[String]) -> Result<(), String> {
     let (opts, files) = parse_strip_args(args)?;
 
     for file_path in &files {
-        let data =
-            fs::read(file_path).map_err(|e| format!("cannot read '{file_path}': {e}"))?;
+        let data = fs::read(file_path).map_err(|e| format!("cannot read '{file_path}': {e}"))?;
 
         let stripped = strip_elf(&data, &opts)?;
 
@@ -2002,8 +2003,7 @@ mod tests {
         elf[text_offset..text_offset + text_data.len()].copy_from_slice(&text_data);
         elf[symtab_offset..symtab_offset + symtab_data.len()].copy_from_slice(&symtab_data);
         elf[strtab_offset..strtab_offset + strtab.len()].copy_from_slice(&strtab);
-        elf[shstrtab_data_offset..shstrtab_data_offset + shstrtab.len()]
-            .copy_from_slice(&shstrtab);
+        elf[shstrtab_data_offset..shstrtab_data_offset + shstrtab.len()].copy_from_slice(&shstrtab);
 
         // Section headers
         let sh = |idx: usize| shoff + idx * shent_size;
@@ -2360,8 +2360,12 @@ mod tests {
         };
         let formatted = format!(
             "{:o} {}/{} {:>6} {} {}",
-            hdr.mode, hdr.uid, hdr.gid, hdr.size,
-            format_timestamp(hdr.mtime), hdr.name
+            hdr.mode,
+            hdr.uid,
+            hdr.gid,
+            hdr.size,
+            format_timestamp(hdr.mtime),
+            hdr.name
         );
         assert!(formatted.contains("100644"));
         assert!(formatted.contains("1000/1000"));
@@ -2424,13 +2428,23 @@ mod tests {
         let mut ar = Archive::new();
         ar.members.push(ArMember {
             header: ArHeader {
-                name: "a.o".into(), mtime: 0, uid: 0, gid: 0, mode: 0o100644, size: 1,
+                name: "a.o".into(),
+                mtime: 0,
+                uid: 0,
+                gid: 0,
+                mode: 0o100644,
+                size: 1,
             },
             data: b"a".to_vec(),
         });
         ar.members.push(ArMember {
             header: ArHeader {
-                name: "c.o".into(), mtime: 0, uid: 0, gid: 0, mode: 0o100644, size: 1,
+                name: "c.o".into(),
+                mtime: 0,
+                uid: 0,
+                gid: 0,
+                mode: 0o100644,
+                size: 1,
             },
             data: b"c".to_vec(),
         });
@@ -2449,12 +2463,20 @@ mod tests {
         let insert_idx = find_insert_position(&ar, &opts);
         assert_eq!(insert_idx, 1); // after a.o (index 0) = index 1
 
-        ar.members.insert(insert_idx, ArMember {
-            header: ArHeader {
-                name: "b.o".into(), mtime: 0, uid: 0, gid: 0, mode: 0o100644, size: 1,
+        ar.members.insert(
+            insert_idx,
+            ArMember {
+                header: ArHeader {
+                    name: "b.o".into(),
+                    mtime: 0,
+                    uid: 0,
+                    gid: 0,
+                    mode: 0o100644,
+                    size: 1,
+                },
+                data: b"b".to_vec(),
             },
-            data: b"b".to_vec(),
-        });
+        );
 
         assert_eq!(ar.members[0].header.name, "a.o");
         assert_eq!(ar.members[1].header.name, "b.o");
@@ -2466,13 +2488,23 @@ mod tests {
         let mut ar = Archive::new();
         ar.members.push(ArMember {
             header: ArHeader {
-                name: "a.o".into(), mtime: 0, uid: 0, gid: 0, mode: 0o100644, size: 1,
+                name: "a.o".into(),
+                mtime: 0,
+                uid: 0,
+                gid: 0,
+                mode: 0o100644,
+                size: 1,
             },
             data: b"a".to_vec(),
         });
         ar.members.push(ArMember {
             header: ArHeader {
-                name: "c.o".into(), mtime: 0, uid: 0, gid: 0, mode: 0o100644, size: 1,
+                name: "c.o".into(),
+                mtime: 0,
+                uid: 0,
+                gid: 0,
+                mode: 0o100644,
+                size: 1,
             },
             data: b"c".to_vec(),
         });
@@ -2491,12 +2523,20 @@ mod tests {
         let insert_idx = find_insert_position(&ar, &opts);
         assert_eq!(insert_idx, 1); // before c.o (index 1) = index 1
 
-        ar.members.insert(insert_idx, ArMember {
-            header: ArHeader {
-                name: "b.o".into(), mtime: 0, uid: 0, gid: 0, mode: 0o100644, size: 1,
+        ar.members.insert(
+            insert_idx,
+            ArMember {
+                header: ArHeader {
+                    name: "b.o".into(),
+                    mtime: 0,
+                    uid: 0,
+                    gid: 0,
+                    mode: 0o100644,
+                    size: 1,
+                },
+                data: b"b".to_vec(),
             },
-            data: b"b".to_vec(),
-        });
+        );
 
         assert_eq!(ar.members[0].header.name, "a.o");
         assert_eq!(ar.members[1].header.name, "b.o");
@@ -2921,7 +2961,10 @@ mod tests {
         let members: Vec<(String, Vec<u8>)> = (0..50)
             .map(|i| (format!("m{i:03}.o"), format!("data_{i}").into_bytes()))
             .collect();
-        let member_refs: Vec<(&str, &[u8])> = members.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+        let member_refs: Vec<(&str, &[u8])> = members
+            .iter()
+            .map(|(n, d)| (n.as_str(), d.as_slice()))
+            .collect();
         let data = make_archive(&member_refs);
         let ar = Archive::parse(&data).unwrap();
         assert_eq!(ar.members.len(), 50);

@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `elasticsearch` (server), `elasticsearch-plugin` (plugin manager)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -22,13 +23,27 @@ fn run_elasticsearch(args: Vec<String>) -> i32 {
         println!("Version: 8.13.0 (Slate OS), Build: abc1234/2025-05-22");
         return 0;
     }
-    println!("[2025-05-22T10:00:00,000][INFO ][o.e.n.Node               ] [slateos-node-1] version[8.13.0], pid[12345]");
-    println!("[2025-05-22T10:00:00,500][INFO ][o.e.n.Node               ] [slateos-node-1] JVM: 21.0.2 (Slate OS)");
-    println!("[2025-05-22T10:00:01,000][INFO ][o.e.e.NodeEnvironment    ] [slateos-node-1] using [1] data paths, mounts [[/ (/)]]");
-    println!("[2025-05-22T10:00:02,000][INFO ][o.e.g.GatewayService     ] [slateos-node-1] recovered [0] indices");
-    println!("[2025-05-22T10:00:02,500][INFO ][o.e.c.s.MasterService    ] [slateos-node-1] elected-as-master");
-    println!("[2025-05-22T10:00:03,000][INFO ][o.e.h.AbstractHttpServerTransport] [slateos-node-1] publish_address {{127.0.0.1:9200}}");
-    println!("[2025-05-22T10:00:03,000][INFO ][o.e.n.Node               ] [slateos-node-1] started");
+    println!(
+        "[2025-05-22T10:00:00,000][INFO ][o.e.n.Node               ] [slateos-node-1] version[8.13.0], pid[12345]"
+    );
+    println!(
+        "[2025-05-22T10:00:00,500][INFO ][o.e.n.Node               ] [slateos-node-1] JVM: 21.0.2 (Slate OS)"
+    );
+    println!(
+        "[2025-05-22T10:00:01,000][INFO ][o.e.e.NodeEnvironment    ] [slateos-node-1] using [1] data paths, mounts [[/ (/)]]"
+    );
+    println!(
+        "[2025-05-22T10:00:02,000][INFO ][o.e.g.GatewayService     ] [slateos-node-1] recovered [0] indices"
+    );
+    println!(
+        "[2025-05-22T10:00:02,500][INFO ][o.e.c.s.MasterService    ] [slateos-node-1] elected-as-master"
+    );
+    println!(
+        "[2025-05-22T10:00:03,000][INFO ][o.e.h.AbstractHttpServerTransport] [slateos-node-1] publish_address {{127.0.0.1:9200}}"
+    );
+    println!(
+        "[2025-05-22T10:00:03,000][INFO ][o.e.n.Node               ] [slateos-node-1] started"
+    );
     0
 }
 
@@ -47,7 +62,10 @@ fn run_es_plugin(args: Vec<String>) -> i32 {
             0
         }
         "install" => {
-            let plugin = cmd_args.first().map(|s| s.as_str()).unwrap_or("analysis-icu");
+            let plugin = cmd_args
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("analysis-icu");
             println!("-> Installing {}", plugin);
             println!("-> Downloading {}...", plugin);
             println!("-> Installed {}", plugin);
@@ -65,7 +83,13 @@ fn run_es_plugin(args: Vec<String>) -> i32 {
             println!("repository-s3");
             0
         }
-        other => { eprintln!("elasticsearch-plugin: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!(
+                "elasticsearch-plugin: unknown command {}",
+                quoteaf_os(other)
+            );
+            1
+        }
     }
 }
 
@@ -76,7 +100,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -91,7 +117,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_elasticsearch};
+    use super::run_elasticsearch;
 
     #[test]
     fn help_exits_zero() {

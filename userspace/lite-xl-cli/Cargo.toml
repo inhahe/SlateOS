@@ -2,3 +2,9 @@
 name = "lite-xl-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# It interpolates `p` into "lite-xl: Opening {}". That value is a path from
+# the command line, and a path may hold any byte but `/` and NUL -- a
+# newline included.
+quoting = { path = "../quoting" }

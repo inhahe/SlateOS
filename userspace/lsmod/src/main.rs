@@ -15,6 +15,7 @@
 //! rmmod -f <module>               Force removal
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -169,10 +170,7 @@ fn parse_modules_dep(content: &str) -> Vec<DepEntry> {
         let deps: Vec<String> = if deps_str.is_empty() {
             Vec::new()
         } else {
-            deps_str
-                .split_whitespace()
-                .map(|s| s.to_string())
-                .collect()
+            deps_str.split_whitespace().map(|s| s.to_string()).collect()
         };
 
         let name = module_name_from_path(&path);
@@ -237,7 +235,10 @@ fn resolve_deps_recursive(
     visited: &mut Vec<String>,
 ) -> Result<(), String> {
     if visited.contains(&entry.name) {
-        return Err(format!("circular dependency detected involving '{}'", entry.name));
+        return Err(format!(
+            "circular dependency detected involving '{}'",
+            entry.name
+        ));
     }
 
     // Already in result means we processed it; skip.
@@ -352,7 +353,7 @@ fn run_lsmod(args: &[String]) -> i32 {
                 return 0;
             }
             other => {
-                eprintln!("lsmod: unexpected argument '{other}'");
+                eprintln!("lsmod: unexpected argument {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -636,7 +637,10 @@ fn modprobe_remove(opts: &ModprobeOpts, dep_entries: &[DepEntry]) -> i32 {
         // Don't remove dependencies that are still in use by other modules.
         if *name != opts.module.replace('-', "_") && entry.refcount > 0 {
             if opts.verbose {
-                println!("modprobe -r: {name} still in use (refcount {}), skipping", entry.refcount);
+                println!(
+                    "modprobe -r: {name} still in use (refcount {}), skipping",
+                    entry.refcount
+                );
             }
             continue;
         }
@@ -716,13 +720,13 @@ fn run_insmod(args: &[String]) -> i32 {
     let image = match fs::read(module_path) {
         Ok(data) => data,
         Err(e) => {
-            eprintln!("insmod: cannot read '{module_path}': {e}");
+            eprintln!("insmod: cannot read {}: {e}", quoteaf_os(module_path));
             return 1;
         }
     };
 
     if image.is_empty() {
-        eprintln!("insmod: '{module_path}' is empty");
+        eprintln!("insmod: {} is empty", quoteaf_os(module_path));
         return 1;
     }
 
@@ -767,7 +771,7 @@ fn run_rmmod(args: &[String]) -> i32 {
                 return 0;
             }
             s if s.starts_with('-') => {
-                eprintln!("rmmod: unknown option '{s}'");
+                eprintln!("rmmod: unknown option {}", quoteaf_os(s));
                 return 1;
             }
             _ => module_name = Some(arg.clone()),
@@ -836,9 +840,7 @@ fn detect_personality(argv0: &str) -> Personality {
         .unwrap_or(argv0);
 
     // Strip common extensions (.exe on Windows dev, nothing on target OS).
-    let name = basename
-        .strip_suffix(".exe")
-        .unwrap_or(basename);
+    let name = basename.strip_suffix(".exe").unwrap_or(basename);
 
     if name.contains("modprobe") {
         Personality::Modprobe
@@ -900,7 +902,8 @@ mod tests {
 
     #[test]
     fn parse_module_with_deps() {
-        let content = "snd_hda_codec 131072 2 snd_hda_intel,snd_hda_codec_realtek, Live 0xffffffffc0900000\n";
+        let content =
+            "snd_hda_codec 131072 2 snd_hda_intel,snd_hda_codec_realtek, Live 0xffffffffc0900000\n";
         let entries = parse_proc_modules(content);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "snd_hda_codec");
@@ -1124,7 +1127,10 @@ kernel/b.ko: kernel/a.ko
         let result = resolve_dependencies("a", &entries);
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("circular"), "Expected circular dependency error, got: {msg}");
+        assert!(
+            msg.contains("circular"),
+            "Expected circular dependency error, got: {msg}"
+        );
     }
 
     #[test]
@@ -1141,7 +1147,10 @@ kernel/b.ko: kernel/a.ko
         let result = resolve_dependencies("a", &entries);
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("missing"), "Expected missing dependency error, got: {msg}");
+        assert!(
+            msg.contains("missing"),
+            "Expected missing dependency error, got: {msg}"
+        );
     }
 
     #[test]
@@ -1193,10 +1202,7 @@ kernel/b.ko: kernel/a.ko
 
     #[test]
     fn detect_with_backslash_path() {
-        assert_eq!(
-            detect_personality("C:\\bin\\rmmod.exe"),
-            Personality::Rmmod
-        );
+        assert_eq!(detect_personality("C:\\bin\\rmmod.exe"), Personality::Rmmod);
     }
 
     // === Argument parsing (modprobe) ===

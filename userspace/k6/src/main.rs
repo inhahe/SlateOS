@@ -4,6 +4,7 @@
 //!
 //! Single personality: `k6`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -46,12 +47,21 @@ fn run_k6(args: Vec<String>) -> i32 {
                 return 0;
             }
 
-            let script = args.iter().filter(|a| !a.starts_with('-')).nth(1).map(|s| s.as_str()).unwrap_or("script.js");
-            let vus = args.iter().position(|a| a == "--vus")
+            let script = args
+                .iter()
+                .filter(|a| !a.starts_with('-'))
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("script.js");
+            let vus = args
+                .iter()
+                .position(|a| a == "--vus")
                 .and_then(|i| args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("1");
-            let duration = args.iter().position(|a| a == "--duration")
+            let duration = args
+                .iter()
+                .position(|a| a == "--duration")
                 .and_then(|i| args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("10s");
@@ -68,17 +78,37 @@ fn run_k6(args: Vec<String>) -> i32 {
             println!();
             println!("     data_received..................: 1.2 MB  120 kB/s");
             println!("     data_sent......................: 45 kB   4.5 kB/s");
-            println!("     http_req_blocked...............: avg=1.2ms   min=0.5ms  max=15ms   p(90)=2.1ms  p(95)=3.5ms");
-            println!("     http_req_connecting............: avg=0.8ms   min=0.3ms  max=12ms   p(90)=1.5ms  p(95)=2.8ms");
-            println!("     http_req_duration..............: avg=21ms    min=5ms    max=120ms  p(90)=35ms   p(95)=42ms");
-            println!("     http_req_receiving.............: avg=0.1ms   min=0.05ms max=2ms    p(90)=0.2ms  p(95)=0.3ms");
-            println!("     http_req_sending...............: avg=0.05ms  min=0.02ms max=1ms    p(90)=0.1ms  p(95)=0.15ms");
-            println!("     http_req_waiting...............: avg=20.8ms  min=4.9ms  max=118ms  p(90)=34ms   p(95)=41ms");
+            println!(
+                "     http_req_blocked...............: avg=1.2ms   min=0.5ms  max=15ms   p(90)=2.1ms  p(95)=3.5ms"
+            );
+            println!(
+                "     http_req_connecting............: avg=0.8ms   min=0.3ms  max=12ms   p(90)=1.5ms  p(95)=2.8ms"
+            );
+            println!(
+                "     http_req_duration..............: avg=21ms    min=5ms    max=120ms  p(90)=35ms   p(95)=42ms"
+            );
+            println!(
+                "     http_req_receiving.............: avg=0.1ms   min=0.05ms max=2ms    p(90)=0.2ms  p(95)=0.3ms"
+            );
+            println!(
+                "     http_req_sending...............: avg=0.05ms  min=0.02ms max=1ms    p(90)=0.1ms  p(95)=0.15ms"
+            );
+            println!(
+                "     http_req_waiting...............: avg=20.8ms  min=4.9ms  max=118ms  p(90)=34ms   p(95)=41ms"
+            );
             println!("     http_reqs......................: 500     50/s");
-            println!("     iteration_duration.............: avg=22ms    min=6ms    max=125ms  p(90)=37ms   p(95)=45ms");
+            println!(
+                "     iteration_duration.............: avg=22ms    min=6ms    max=125ms  p(90)=37ms   p(95)=45ms"
+            );
             println!("     iterations.....................: 500     50/s");
-            println!("     vus...........................: {}       min={}  max={}", vus, vus, vus);
-            println!("     vus_max.......................: {}       min={}  max={}", vus, vus, vus);
+            println!(
+                "     vus...........................: {}       min={}  max={}",
+                vus, vus, vus
+            );
+            println!(
+                "     vus_max.......................: {}       min={}  max={}",
+                vus, vus, vus
+            );
         }
         "inspect" => {
             println!("{{");
@@ -97,7 +127,7 @@ fn run_k6(args: Vec<String>) -> i32 {
             println!("VUs: 10, Duration: 15s/30s");
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -113,7 +143,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_k6};
+    use super::run_k6;
 
     #[test]
     fn help_exits_zero() {

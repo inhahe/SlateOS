@@ -4,6 +4,7 @@
 //!
 //! Single personality: `k6`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -32,8 +33,16 @@ fn run_k6(args: Vec<String>) -> i32 {
     match cmd {
         "run" => {
             let script = args.get(1).map(|s| s.as_str()).unwrap_or("script.js");
-            let vus = args.windows(2).find(|w| w[0] == "--vus").map(|w| w[1].as_str()).unwrap_or("10");
-            let duration = args.windows(2).find(|w| w[0] == "--duration").map(|w| w[1].as_str()).unwrap_or("30s");
+            let vus = args
+                .windows(2)
+                .find(|w| w[0] == "--vus")
+                .map(|w| w[1].as_str())
+                .unwrap_or("10");
+            let duration = args
+                .windows(2)
+                .find(|w| w[0] == "--duration")
+                .map(|w| w[1].as_str())
+                .unwrap_or("30s");
 
             println!("          /\\      |‾‾| /‾‾/   /‾‾/");
             println!("     /\\  /  \\     |  |/  /   /  /");
@@ -46,7 +55,10 @@ fn run_k6(args: Vec<String>) -> i32 {
             println!("     output: -");
             println!();
             println!("  scenarios:");
-            println!("    default: {} looping VUs for {} (exec: default)", vus, duration);
+            println!(
+                "    default: {} looping VUs for {} (exec: default)",
+                vus, duration
+            );
             println!();
             println!("  running ({}, {} VUs, {} max)...", duration, vus, vus);
             println!();
@@ -61,7 +73,10 @@ fn run_k6(args: Vec<String>) -> i32 {
             println!("     http_reqs.............: 3000   100/s");
             println!("     iteration_duration....: avg=95ms   p(95)=245ms");
             println!("     iterations............: 3000   100/s");
-            println!("     vus...................: {}    min={}  max={}", vus, vus, vus);
+            println!(
+                "     vus...................: {}    min={}  max={}",
+                vus, vus, vus
+            );
             0
         }
         "inspect" => {
@@ -91,7 +106,7 @@ fn run_k6(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: k6 <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -107,7 +122,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_k6};
+    use super::run_k6;
 
     #[test]
     fn help_exits_zero() {

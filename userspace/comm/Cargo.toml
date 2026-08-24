@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS sorted file comparison utility"
 [dependencies]
+# The unrecognized option text is the argv word itself, and the invalid
+# single-option case reports one byte of it.
+quoting = { path = "../quoting" }

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `linuxcnc`, `halcmd`, `halrun`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_linuxcnc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +29,11 @@ fn run_linuxcnc(args: &[String]) -> i32 {
         println!("EMC2 - Enhanced Machine Controller");
         return 0;
     }
-    let config = args.iter().find(|a| a.ends_with(".ini")).map(|s| s.as_str()).unwrap_or("machine.ini");
+    let config = args
+        .iter()
+        .find(|a| a.ends_with(".ini"))
+        .map(|s| s.as_str())
+        .unwrap_or("machine.ini");
     println!("LinuxCNC 2.9.2 starting...");
     println!("  Configuration: {}", config);
     println!("  Loading HAL configuration...");
@@ -73,7 +82,7 @@ fn run_halcmd(args: &[String]) -> i32 {
         }
         "loadrt" => {
             let module = args.get(1).map(|s| s.as_str()).unwrap_or("stepgen");
-            println!("halcmd: loading realtime module '{}'", module);
+            println!("halcmd: loading realtime module {}", quoteaf_os(module));
             println!("Module loaded.");
         }
         "net" => {
@@ -82,7 +91,7 @@ fn run_halcmd(args: &[String]) -> i32 {
         "setp" => {
             println!("halcmd: parameter set.");
         }
-        _ => println!("halcmd: '{}' completed", subcmd),
+        _ => println!("halcmd: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -94,9 +103,12 @@ fn run_halrun(args: &[String]) -> i32 {
         println!("  -U          Unload all HAL");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".hal")).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".hal"))
+        .map(|s| s.as_str());
     if let Some(f) = file {
-        println!("halrun: executing '{}'", f);
+        println!("halrun: executing {}", quoteaf_os(f));
         println!("HAL configuration loaded.");
     } else {
         println!("halcmd:");
@@ -106,7 +118,10 @@ fn run_halrun(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "linuxcnc".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "linuxcnc".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "halcmd" => run_halcmd(&rest),
@@ -118,7 +133,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_linuxcnc};
+    use super::{basename, run_linuxcnc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

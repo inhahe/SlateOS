@@ -4,6 +4,7 @@
 //!
 //! Single personality: `heroku`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -43,7 +44,11 @@ fn run_heroku(args: Vec<String>) -> i32 {
     }
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
-    let app = args.windows(2).find(|w| w[0] == "-a" || w[0] == "--app").map(|w| w[1].as_str()).unwrap_or("my-app");
+    let app = args
+        .windows(2)
+        .find(|w| w[0] == "-a" || w[0] == "--app")
+        .map(|w| w[1].as_str())
+        .unwrap_or("my-app");
 
     match cmd {
         "auth:login" | "login" => {
@@ -75,14 +80,19 @@ fn run_heroku(args: Vec<String>) -> i32 {
                     println!("Stack:         heroku-22");
                     println!("Web URL:       https://{}.herokuapp.com/", app);
                 }
-                _ => { println!("Apps operation: {}", sub); }
+                _ => {
+                    println!("Apps operation: {}", sub);
+                }
             }
             0
         }
         "create" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("new-app");
             println!("Creating ⬢ {}... done", name);
-            println!("https://{}.herokuapp.com/ | https://git.heroku.com/{}.git", name, name);
+            println!(
+                "https://{}.herokuapp.com/ | https://git.heroku.com/{}.git",
+                name, name
+            );
             0
         }
         "info" => {
@@ -105,7 +115,9 @@ fn run_heroku(args: Vec<String>) -> i32 {
                     println!("=== worker (Standard-1X): node worker.js (1)");
                     println!("worker.1: up 2024/01/15 14:00:00 +0000 (~ 2h ago)");
                 }
-                _ => { println!("Dyno operation: {}", sub); }
+                _ => {
+                    println!("Dyno operation: {}", sub);
+                }
             }
             0
         }
@@ -116,9 +128,13 @@ fn run_heroku(args: Vec<String>) -> i32 {
         }
         "logs" => {
             let tail = args.iter().any(|a| a == "--tail" || a == "-t");
-            println!("2024-01-15T14:00:00.000000+00:00 heroku[web.1]: State changed from starting to up");
+            println!(
+                "2024-01-15T14:00:00.000000+00:00 heroku[web.1]: State changed from starting to up"
+            );
             println!("2024-01-15T14:00:01.000000+00:00 app[web.1]: Listening on port 3000");
-            println!("2024-01-15T14:00:02.000000+00:00 heroku[router]: at=info method=GET path=\"/\" status=200 bytes=1234");
+            println!(
+                "2024-01-15T14:00:02.000000+00:00 heroku[router]: at=info method=GET path=\"/\" status=200 bytes=1234"
+            );
             println!("2024-01-15T14:00:03.000000+00:00 app[web.1]: GET / 200 12ms");
             if tail {
                 println!("(streaming logs, press Ctrl+C to stop)");
@@ -145,7 +161,9 @@ fn run_heroku(args: Vec<String>) -> i32 {
                     println!("Unsetting {}... done", key);
                     println!("Restarting ⬢ {}... done", app);
                 }
-                _ => { println!("Config operation: {}", sub); }
+                _ => {
+                    println!("Config operation: {}", sub);
+                }
             }
             0
         }
@@ -154,16 +172,27 @@ fn run_heroku(args: Vec<String>) -> i32 {
             match sub {
                 "list" | "" => {
                     println!("=== Resources for {}", app);
-                    println!("Plan                         Name                     Price    State");
-                    println!("heroku-postgresql:essential-0 postgresql-cubed-12345   $5/mo    created");
-                    println!("heroku-redis:mini             redis-cubic-67890        $3/mo    created");
+                    println!(
+                        "Plan                         Name                     Price    State"
+                    );
+                    println!(
+                        "heroku-postgresql:essential-0 postgresql-cubed-12345   $5/mo    created"
+                    );
+                    println!(
+                        "heroku-redis:mini             redis-cubic-67890        $3/mo    created"
+                    );
                 }
                 "create" => {
-                    let addon = args.get(2).map(|s| s.as_str()).unwrap_or("heroku-postgresql:essential-0");
+                    let addon = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("heroku-postgresql:essential-0");
                     println!("Creating {}... done", addon);
                     println!("Created postgresql-cubed-99999 as DATABASE_URL");
                 }
-                _ => { println!("Addons operation: {}", sub); }
+                _ => {
+                    println!("Addons operation: {}", sub);
+                }
             }
             0
         }
@@ -176,7 +205,10 @@ fn run_heroku(args: Vec<String>) -> i32 {
         }
         "run" => {
             let command_str = args.get(1).map(|s| s.as_str()).unwrap_or("bash");
-            println!("Running {} on ⬢ {}... up, run.1234 (Standard-1X)", command_str, app);
+            println!(
+                "Running {} on ⬢ {}... up, run.1234 (Standard-1X)",
+                command_str, app
+            );
             0
         }
         "pg" => {
@@ -197,16 +229,24 @@ fn run_heroku(args: Vec<String>) -> i32 {
                     println!("--> Connecting to postgresql-cubed-12345");
                     println!("psql (16.1)");
                 }
-                _ => { println!("Postgres operation: {}", sub); }
+                _ => {
+                    println!("Postgres operation: {}", sub);
+                }
             }
             0
         }
         "maintenance" => {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("status");
             match sub {
-                "on" => { println!("Enabling maintenance mode for ⬢ {}... done", app); }
-                "off" => { println!("Disabling maintenance mode for ⬢ {}... done", app); }
-                _ => { println!("Maintenance mode is off for {}.", app); }
+                "on" => {
+                    println!("Enabling maintenance mode for ⬢ {}... done", app);
+                }
+                "off" => {
+                    println!("Disabling maintenance mode for ⬢ {}... done", app);
+                }
+                _ => {
+                    println!("Maintenance mode is off for {}.", app);
+                }
             }
             0
         }
@@ -214,7 +254,7 @@ fn run_heroku(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: heroku <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -230,7 +270,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_heroku};
+    use super::run_heroku;
 
     #[test]
     fn help_exits_zero() {

@@ -2,3 +2,9 @@
 name = "aspell-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The file being spell-checked and the rejected command name are argv words;
+# a document name is exactly the kind of string a user did not choose
+# carefully.
+quoting = { path = "../quoting" }

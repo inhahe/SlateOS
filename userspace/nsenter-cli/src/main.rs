@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `nsenter`, `lsns`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -35,11 +36,15 @@ fn run_nsenter(args: &[String]) -> i32 {
         return 0;
     }
 
-    let pid = args.windows(2).find(|w| w[0] == "-t" || w[0] == "--target")
-        .map(|w| w[1].as_str()).unwrap_or("1");
+    let pid = args
+        .windows(2)
+        .find(|w| w[0] == "-t" || w[0] == "--target")
+        .map(|w| w[1].as_str())
+        .unwrap_or("1");
     let all = args.iter().any(|a| a == "-a" || a == "--all");
 
-    let cmd = args.iter()
+    let cmd = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("/bin/sh");
@@ -47,23 +52,30 @@ fn run_nsenter(args: &[String]) -> i32 {
     if all {
         println!("nsenter: entering all namespaces of PID {}", pid);
     } else {
-        let namespaces: Vec<&str> = args.iter().filter_map(|a| match a.as_str() {
-            "-m" | "--mount" => Some("mnt"),
-            "-u" | "--uts" => Some("uts"),
-            "-i" | "--ipc" => Some("ipc"),
-            "-n" | "--net" => Some("net"),
-            "-p" | "--pid" => Some("pid"),
-            "-U" | "--user" => Some("user"),
-            "-C" | "--cgroup" => Some("cgroup"),
-            _ => None,
-        }).collect();
+        let namespaces: Vec<&str> = args
+            .iter()
+            .filter_map(|a| match a.as_str() {
+                "-m" | "--mount" => Some("mnt"),
+                "-u" | "--uts" => Some("uts"),
+                "-i" | "--ipc" => Some("ipc"),
+                "-n" | "--net" => Some("net"),
+                "-p" | "--pid" => Some("pid"),
+                "-U" | "--user" => Some("user"),
+                "-C" | "--cgroup" => Some("cgroup"),
+                _ => None,
+            })
+            .collect();
         if namespaces.is_empty() {
             println!("nsenter: no namespaces specified for PID {}", pid);
         } else {
-            println!("nsenter: entering namespaces ({}) of PID {}", namespaces.join(", "), pid);
+            println!(
+                "nsenter: entering namespaces ({}) of PID {}",
+                namespaces.join(", "),
+                pid
+            );
         }
     }
-    println!("nsenter: running '{}'", cmd);
+    println!("nsenter: running {}", quoteaf_os(cmd));
     0
 }
 
@@ -85,10 +97,18 @@ fn run_lsns(args: &[String]) -> i32 {
 
     if json {
         println!("{{\"namespaces\": [");
-        println!("  {{\"ns\": 4026531840, \"type\": \"mnt\", \"nprocs\": 45, \"pid\": 1, \"command\": \"init\"}},");
-        println!("  {{\"ns\": 4026531992, \"type\": \"net\", \"nprocs\": 45, \"pid\": 1, \"command\": \"init\"}},");
-        println!("  {{\"ns\": 4026531836, \"type\": \"pid\", \"nprocs\": 45, \"pid\": 1, \"command\": \"init\"}},");
-        println!("  {{\"ns\": 4026531837, \"type\": \"user\", \"nprocs\": 45, \"pid\": 1, \"command\": \"init\"}}");
+        println!(
+            "  {{\"ns\": 4026531840, \"type\": \"mnt\", \"nprocs\": 45, \"pid\": 1, \"command\": \"init\"}},"
+        );
+        println!(
+            "  {{\"ns\": 4026531992, \"type\": \"net\", \"nprocs\": 45, \"pid\": 1, \"command\": \"init\"}},"
+        );
+        println!(
+            "  {{\"ns\": 4026531836, \"type\": \"pid\", \"nprocs\": 45, \"pid\": 1, \"command\": \"init\"}},"
+        );
+        println!(
+            "  {{\"ns\": 4026531837, \"type\": \"user\", \"nprocs\": 45, \"pid\": 1, \"command\": \"init\"}}"
+        );
         println!("]}}");
     } else {
         println!("        NS TYPE   NPROCS   PID USER    COMMAND");
@@ -107,7 +127,8 @@ fn run_lsns(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "nsenter".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -121,7 +142,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_nsenter};
+    use super::{basename, run_nsenter, strip_ext};
 
     #[test]
     fn basename_strips_path() {

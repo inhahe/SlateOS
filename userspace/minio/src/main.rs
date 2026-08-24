@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `minio` (server), `mc` (client)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -25,7 +26,9 @@ fn run_minio_server(args: Vec<String>) -> i32 {
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("server");
     if cmd == "server" || cmd == "--address" {
-        let addr = args.iter().position(|a| a == "--address")
+        let addr = args
+            .iter()
+            .position(|a| a == "--address")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or(":9000");
@@ -113,12 +116,18 @@ fn run_mc(args: Vec<String>) -> i32 {
             0
         }
         "mb" => {
-            let bucket = cmd_args.first().map(|s| s.as_str()).unwrap_or("local/mybucket");
+            let bucket = cmd_args
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("local/mybucket");
             println!("Bucket created successfully `{}`.", bucket);
             0
         }
         "rb" => {
-            let bucket = cmd_args.first().map(|s| s.as_str()).unwrap_or("local/mybucket");
+            let bucket = cmd_args
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("local/mybucket");
             println!("Removed `{}` successfully.", bucket);
             0
         }
@@ -139,7 +148,10 @@ fn run_mc(args: Vec<String>) -> i32 {
             0
         }
         "stat" => {
-            let path = cmd_args.first().map(|s| s.as_str()).unwrap_or("local/bucket/file");
+            let path = cmd_args
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("local/bucket/file");
             println!("Name      : {}", path);
             println!("Date      : 2025-05-22 10:00:00 UTC");
             println!("Size      : 4.2 MiB");
@@ -187,7 +199,9 @@ fn run_mc(args: Vec<String>) -> i32 {
                 "service" => {
                     let action = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("status");
                     match action {
-                        "status" => println!("●  localhost:9000  (1 drives online, 0 drives offline)"),
+                        "status" => {
+                            println!("●  localhost:9000  (1 drives online, 0 drives offline)")
+                        }
                         "restart" => println!("Restarted MinIO server successfully."),
                         "stop" => println!("Stopped MinIO server successfully."),
                         _ => println!("Usage: mc admin service <status|restart|stop>"),
@@ -197,7 +211,10 @@ fn run_mc(args: Vec<String>) -> i32 {
             }
             0
         }
-        other => { eprintln!("mc: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("mc: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -208,7 +225,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -223,7 +242,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_minio_server};
+    use super::run_minio_server;
 
     #[test]
     fn help_exits_zero() {

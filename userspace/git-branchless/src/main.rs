@@ -4,6 +4,7 @@
 //!
 //! Single personality: `git-branchless`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -96,11 +97,15 @@ fn run_git_branchless(args: Vec<String>) -> i32 {
         }
         "hide" | "unhide" => {
             let target = subargs.get(1).map(|s| s.as_str()).unwrap_or("HEAD");
-            println!("{}: {}", if cmd == "hide" { "Hidden" } else { "Unhidden" }, target);
+            println!(
+                "{}: {}",
+                if cmd == "hide" { "Hidden" } else { "Unhidden" },
+                target
+            );
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -115,7 +120,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_git_branchless};
+    use super::run_git_branchless;
 
     #[test]
     fn help_exits_zero() {

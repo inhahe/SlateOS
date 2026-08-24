@@ -4,6 +4,7 @@
 //!
 //! Single personality: `zig`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -45,7 +46,11 @@ fn run_zig(args: Vec<String>) -> i32 {
             println!("}}");
         }
         "build" => {
-            let mode = if args.iter().any(|a| a == "-Doptimize=ReleaseFast") { "ReleaseFast" } else { "Debug" };
+            let mode = if args.iter().any(|a| a == "-Doptimize=ReleaseFast") {
+                "ReleaseFast"
+            } else {
+                "Debug"
+            };
             println!("Compiling...");
             println!("Build {} succeeded", mode);
         }
@@ -71,7 +76,9 @@ fn run_zig(args: Vec<String>) -> i32 {
             println!("info: created src/main.zig");
         }
         "targets" => {
-            println!("Architectures: aarch64, arm, x86, x86_64, riscv64, mips, powerpc, sparc, wasm32");
+            println!(
+                "Architectures: aarch64, arm, x86, x86_64, riscv64, mips, powerpc, sparc, wasm32"
+            );
             println!("OS: linux, macos, windows, freebsd, slateos, freestanding");
             println!("(partial list — simulated)");
         }
@@ -82,7 +89,7 @@ fn run_zig(args: Vec<String>) -> i32 {
             println!("({} — simulated)", cmd);
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -98,7 +105,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_zig};
+    use super::run_zig;
 
     #[test]
     fn help_exits_zero() {

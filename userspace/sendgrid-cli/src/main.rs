@@ -4,6 +4,7 @@
 //!
 //! Single personality: `sendgrid`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -32,9 +33,21 @@ fn run_sendgrid(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "send" => {
-            let to = args.windows(2).find(|w| w[0] == "--to").map(|w| w[1].as_str()).unwrap_or("recipient@example.com");
-            let from = args.windows(2).find(|w| w[0] == "--from").map(|w| w[1].as_str()).unwrap_or("sender@example.com");
-            let subject = args.windows(2).find(|w| w[0] == "--subject").map(|w| w[1].as_str()).unwrap_or("Hello");
+            let to = args
+                .windows(2)
+                .find(|w| w[0] == "--to")
+                .map(|w| w[1].as_str())
+                .unwrap_or("recipient@example.com");
+            let from = args
+                .windows(2)
+                .find(|w| w[0] == "--from")
+                .map(|w| w[1].as_str())
+                .unwrap_or("sender@example.com");
+            let subject = args
+                .windows(2)
+                .find(|w| w[0] == "--subject")
+                .map(|w| w[1].as_str())
+                .unwrap_or("Hello");
             println!("✔ Email sent");
             println!("  From:    {}", from);
             println!("  To:      {}", to);
@@ -47,10 +60,18 @@ fn run_sendgrid(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    println!("ID                                   Name                    Updated");
-                    println!("d-abc123def456                       Welcome Email           2024-01-15");
-                    println!("d-def789ghi012                       Password Reset          2024-01-10");
-                    println!("d-jkl345mno678                       Order Confirmation      2024-01-08");
+                    println!(
+                        "ID                                   Name                    Updated"
+                    );
+                    println!(
+                        "d-abc123def456                       Welcome Email           2024-01-15"
+                    );
+                    println!(
+                        "d-def789ghi012                       Password Reset          2024-01-10"
+                    );
+                    println!(
+                        "d-jkl345mno678                       Order Confirmation      2024-01-08"
+                    );
                 }
                 "get" => {
                     let id = args.get(2).map(|s| s.as_str()).unwrap_or("d-abc123def456");
@@ -59,7 +80,9 @@ fn run_sendgrid(args: Vec<String>) -> i32 {
                     println!("  Versions: 2");
                     println!("  Active:   Version 2 (2024-01-15)");
                 }
-                _ => { println!("Template operation: {}", sub); }
+                _ => {
+                    println!("Template operation: {}", sub);
+                }
             }
             0
         }
@@ -70,7 +93,9 @@ fn run_sendgrid(args: Vec<String>) -> i32 {
                     println!("Total contacts: 1,234");
                     println!();
                     println!("Email                        First Name    Last Name    Lists");
-                    println!("alice@example.com            Alice         Smith        Newsletter, VIP");
+                    println!(
+                        "alice@example.com            Alice         Smith        Newsletter, VIP"
+                    );
                     println!("bob@example.com              Bob           Jones        Newsletter");
                     println!("charlie@example.com          Charlie       Brown        VIP");
                 }
@@ -79,7 +104,9 @@ fn run_sendgrid(args: Vec<String>) -> i32 {
                     println!("  Subscribed:  1,100");
                     println!("  Unsubscribed: 134");
                 }
-                _ => { println!("Contacts operation: {}", sub); }
+                _ => {
+                    println!("Contacts operation: {}", sub);
+                }
             }
             0
         }
@@ -96,7 +123,9 @@ fn run_sendgrid(args: Vec<String>) -> i32 {
                     println!("  Spam Reports:      5 (0.1%)");
                     println!("  Unsubscribes:     15 (0.3%)");
                 }
-                _ => { println!("Stats operation: {}", sub); }
+                _ => {
+                    println!("Stats operation: {}", sub);
+                }
             }
             0
         }
@@ -116,7 +145,9 @@ fn run_sendgrid(args: Vec<String>) -> i32 {
                     println!("  SPF:   ✔");
                     println!("✔ Domain verified.");
                 }
-                _ => { println!("Domains operation: {}", sub); }
+                _ => {
+                    println!("Domains operation: {}", sub);
+                }
             }
             0
         }
@@ -133,7 +164,9 @@ fn run_sendgrid(args: Vec<String>) -> i32 {
                     println!("✔ API key created: {}", name);
                     println!("  Key: SG.newkey123...(save this, it won't be shown again)");
                 }
-                _ => { println!("API keys operation: {}", sub); }
+                _ => {
+                    println!("API keys operation: {}", sub);
+                }
             }
             0
         }
@@ -146,7 +179,9 @@ fn run_sendgrid(args: Vec<String>) -> i32 {
                     println!("spam_report     angry@example.com        2024-01-13");
                     println!("unsubscribe     done@example.com         2024-01-12");
                 }
-                _ => { println!("Suppressions operation: {}", sub); }
+                _ => {
+                    println!("Suppressions operation: {}", sub);
+                }
             }
             0
         }
@@ -154,7 +189,7 @@ fn run_sendgrid(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: sendgrid <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -170,7 +205,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_sendgrid};
+    use super::run_sendgrid;
 
     #[test]
     fn help_exits_zero() {

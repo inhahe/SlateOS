@@ -18,6 +18,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
@@ -307,11 +308,7 @@ struct FileContext {
 
 impl fmt::Display for FileContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}\t{}\t{}",
-            self.pattern, self.file_type, self.context
-        )
+        write!(f, "{}\t{}\t{}", self.pattern, self.file_type, self.context)
     }
 }
 
@@ -653,11 +650,7 @@ impl Default for PolicyDb {
                     source: "unconfined_t".into(),
                     target: "unconfined_t".into(),
                     class: "process".into(),
-                    permissions: vec![
-                        "signal".into(),
-                        "sigchld".into(),
-                        "transition".into(),
-                    ],
+                    permissions: vec!["signal".into(), "sigchld".into(), "transition".into()],
                 },
                 PolicyRule {
                     kind: RuleKind::Allow,
@@ -891,9 +884,7 @@ fn extract_field(line: &str, key: &str) -> Option<String> {
     let start = line.find(key)? + key.len();
     let rest = &line[start..];
     // Value ends at whitespace or end-of-string
-    let end = rest
-        .find(|c: char| c.is_whitespace())
-        .unwrap_or(rest.len());
+    let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
     let val = &rest[..end];
     if val.is_empty() {
         None
@@ -1085,10 +1076,7 @@ fn pattern_matches(pattern: &str, path: &str) -> bool {
 }
 
 /// Find the best matching file context for a path.
-fn find_file_context<'a>(
-    file_contexts: &'a [FileContext],
-    path: &str,
-) -> Option<&'a FileContext> {
+fn find_file_context<'a>(file_contexts: &'a [FileContext], path: &str) -> Option<&'a FileContext> {
     // Use longest prefix match
     let mut best: Option<&FileContext> = None;
     let mut best_len = 0;
@@ -1127,7 +1115,7 @@ fn cmd_setenforce(args: &[String]) -> i32 {
         "enforcing" | "1" => EnforceMode::Enforcing,
         "permissive" | "0" => EnforceMode::Permissive,
         other => {
-            eprintln!("setenforce: invalid mode '{}'", other);
+            eprintln!("setenforce: invalid mode {}", quoteaf_os(other));
             return 1;
         }
     };
@@ -1146,21 +1134,47 @@ fn cmd_sestatus(args: &[String]) -> i32 {
     let verbose = args.iter().any(|a| a == "-v");
     let status = read_sestatus();
 
-    println!("SELinux status:                 {}", if status.enabled { "enabled" } else { "disabled" });
+    println!(
+        "SELinux status:                 {}",
+        if status.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     println!("SELinuxfs mount:                {}", SELINUX_FS);
     println!("SELinux root directory:          {}", POLICY_DIR);
     println!("Loaded policy name:             {}", status.policy_name);
     println!("Current mode:                   {}", status.mode);
     println!("Mode from config:               {}", status.config_mode);
-    println!("Policy MLS status:              {}", if status.mls_enabled { "enabled" } else { "disabled" });
-    println!("Policy deny_unknown status:     {}", if status.deny_unknown { "denied" } else { "allowed" });
+    println!(
+        "Policy MLS status:              {}",
+        if status.mls_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!(
+        "Policy deny_unknown status:     {}",
+        if status.deny_unknown {
+            "denied"
+        } else {
+            "allowed"
+        }
+    );
     println!("Memory protection checking:     actual (secure)");
-    println!("Max kernel policy version:      {}", status.max_kernel_policy);
+    println!(
+        "Max kernel policy version:      {}",
+        status.max_kernel_policy
+    );
 
     if verbose {
         println!();
         println!("Process contexts:");
-        println!("Current context:                unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023");
+        println!(
+            "Current context:                unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023"
+        );
         println!("Init context:                   system_u:system_r:init_t:s0");
         println!();
         println!("File contexts:");
@@ -1196,7 +1210,7 @@ fn cmd_semanage(args: &[String]) -> i32 {
             0
         }
         other => {
-            eprintln!("semanage: unknown subcommand '{}'", other);
+            eprintln!("semanage: unknown subcommand {}", quoteaf_os(other));
             print_semanage_usage();
             1
         }
@@ -1295,7 +1309,10 @@ fn semanage_port(args: &[String]) -> i32 {
         println!();
         for p in &db.ports {
             if p.port_low == p.port_high {
-                println!("{:<31}{:<9}{}", p.context.context_type, p.protocol, p.port_low);
+                println!(
+                    "{:<31}{:<9}{}",
+                    p.context.context_type, p.protocol, p.port_low
+                );
             } else {
                 println!(
                     "{:<31}{:<9}{}-{}",
@@ -1349,7 +1366,7 @@ fn semanage_port(args: &[String]) -> i32 {
     }
 
     if Protocol::from_str(proto_str).is_none() {
-        eprintln!("semanage port: invalid protocol '{}'", proto_str);
+        eprintln!("semanage port: invalid protocol {}", quoteaf_os(proto_str));
         return 1;
     }
 
@@ -1461,7 +1478,10 @@ fn semanage_fcontext(args: &[String]) -> i32 {
                         }
                     }
                     None => {
-                        eprintln!("semanage fcontext: invalid file type '{}'", file_type_str);
+                        eprintln!(
+                            "semanage fcontext: invalid file type {}",
+                            quoteaf_os(file_type_str)
+                        );
                         return 1;
                     }
                 }
@@ -1704,10 +1724,11 @@ fn cmd_setsebool(args: &[String]) -> i32 {
 
     // Support "name=value" format
     if value_str.is_empty()
-        && let Some(eq_pos) = name.find('=') {
-            value_str = &name[eq_pos + 1..];
-            name = &name[..eq_pos];
-        }
+        && let Some(eq_pos) = name.find('=')
+    {
+        value_str = &name[eq_pos + 1..];
+        name = &name[..eq_pos];
+    }
 
     if name.is_empty() || value_str.is_empty() {
         eprintln!("usage: setsebool [-P] boolean value");
@@ -1718,7 +1739,10 @@ fn cmd_setsebool(args: &[String]) -> i32 {
         "on" | "1" | "true" => true,
         "off" | "0" | "false" => false,
         _ => {
-            eprintln!("setsebool: invalid value '{}' (use on/off, 1/0, true/false)", value_str);
+            eprintln!(
+                "setsebool: invalid value {} (use on/off, 1/0, true/false)",
+                quoteaf_os(value_str)
+            );
             return 1;
         }
     };
@@ -1841,36 +1865,25 @@ fn restorecon_path(
                     .as_ref()
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "<<none>>".into());
-                println!(
-                    "Relabeled {} from {} to {}",
-                    path, old_str, fc.context
-                );
+                println!("Relabeled {} from {} to {}", path, old_str, fc.context);
             }
-            if !dry_run
-                && let Err(e) = set_file_context(path, &fc.context) {
-                    eprintln!("restorecon: {}", e);
-                    errors += 1;
-                }
+            if !dry_run && let Err(e) = set_file_context(path, &fc.context) {
+                eprintln!("restorecon: {}", e);
+                errors += 1;
+            }
         }
     }
 
-    if recursive
-        && let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let child_path = entry.path();
-                if let Some(child_str) = child_path.to_str() {
-                    // Convert backslashes to forward slashes for consistency
-                    let normalized = child_str.replace('\\', "/");
-                    errors += restorecon_path(
-                        &normalized,
-                        recursive,
-                        verbose,
-                        dry_run,
-                        file_contexts,
-                    );
-                }
+    if recursive && let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let child_path = entry.path();
+            if let Some(child_str) = child_path.to_str() {
+                // Convert backslashes to forward slashes for consistency
+                let normalized = child_str.replace('\\', "/");
+                errors += restorecon_path(&normalized, recursive, verbose, dry_run, file_contexts);
             }
         }
+    }
 
     errors
 }
@@ -1920,8 +1933,12 @@ fn cmd_chcon(args: &[String]) -> i32 {
             "-v" => verbose = true,
             other => {
                 // If no component flags given, first positional arg is the full context
-                if user.is_empty() && role.is_empty() && type_str.is_empty()
-                    && range.is_empty() && full_context.is_empty() && paths.is_empty()
+                if user.is_empty()
+                    && role.is_empty()
+                    && type_str.is_empty()
+                    && range.is_empty()
+                    && full_context.is_empty()
+                    && paths.is_empty()
                     && other.contains(':')
                 {
                     full_context = other;
@@ -1934,7 +1951,9 @@ fn cmd_chcon(args: &[String]) -> i32 {
     }
 
     if paths.is_empty() {
-        eprintln!("usage: chcon [-u USER] [-r ROLE] [-t TYPE] [-l RANGE] [-R] [-v] CONTEXT FILE...");
+        eprintln!(
+            "usage: chcon [-u USER] [-r ROLE] [-t TYPE] [-l RANGE] [-R] [-v] CONTEXT FILE..."
+        );
         eprintln!("   or: chcon [-u USER] [-r ROLE] [-t TYPE] [-l RANGE] [-R] [-v] FILE...");
         return 1;
     }
@@ -1946,7 +1965,7 @@ fn cmd_chcon(args: &[String]) -> i32 {
             match SecurityContext::parse(full_context) {
                 Some(c) => c,
                 None => {
-                    eprintln!("chcon: invalid context '{}'", full_context);
+                    eprintln!("chcon: invalid context {}", quoteaf_os(full_context));
                     return 1;
                 }
             }
@@ -1984,7 +2003,7 @@ fn chcon_apply(path: &str, ctx: &SecurityContext, recursive: bool, verbose: bool
     let mut errors = 0;
 
     if verbose {
-        println!("changing security context of '{}'", path);
+        println!("changing security context of {}", quoteaf_os(path));
     }
 
     if let Err(e) = set_file_context(path, ctx) {
@@ -1992,16 +2011,15 @@ fn chcon_apply(path: &str, ctx: &SecurityContext, recursive: bool, verbose: bool
         errors += 1;
     }
 
-    if recursive
-        && let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let child_path = entry.path();
-                if let Some(child_str) = child_path.to_str() {
-                    let normalized = child_str.replace('\\', "/");
-                    errors += chcon_apply(&normalized, ctx, recursive, verbose);
-                }
+    if recursive && let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let child_path = entry.path();
+            if let Some(child_str) = child_path.to_str() {
+                let normalized = child_str.replace('\\', "/");
+                errors += chcon_apply(&normalized, ctx, recursive, verbose);
             }
         }
+    }
 
     errors
 }
@@ -2021,9 +2039,27 @@ fn cmd_seinfo(args: &[String]) -> i32 {
         println!("  Booleans:         {}", db.booleans.len());
         println!("  Classes:          {}", db.classes.len());
         println!("  Permissions:      {}", db.permissions.len());
-        println!("  Allow rules:      {}", db.rules.iter().filter(|r| r.kind == RuleKind::Allow).count());
-        println!("  Dontaudit rules:  {}", db.rules.iter().filter(|r| r.kind == RuleKind::Dontaudit).count());
-        println!("  Type trans rules: {}", db.rules.iter().filter(|r| r.kind == RuleKind::TypeTransition).count());
+        println!(
+            "  Allow rules:      {}",
+            db.rules
+                .iter()
+                .filter(|r| r.kind == RuleKind::Allow)
+                .count()
+        );
+        println!(
+            "  Dontaudit rules:  {}",
+            db.rules
+                .iter()
+                .filter(|r| r.kind == RuleKind::Dontaudit)
+                .count()
+        );
+        println!(
+            "  Type trans rules: {}",
+            db.rules
+                .iter()
+                .filter(|r| r.kind == RuleKind::TypeTransition)
+                .count()
+        );
         println!("  Total rules:      {}", db.rules.len());
         return 0;
     }
@@ -2043,7 +2079,7 @@ fn cmd_seinfo(args: &[String]) -> i32 {
                         .collect();
                     println!("  Referenced in {} rules", related.len());
                 } else {
-                    eprintln!("seinfo: type '{}' not found", name);
+                    eprintln!("seinfo: type {} not found", quoteaf_os(name));
                     return 1;
                 }
             } else {
@@ -2058,17 +2094,14 @@ fn cmd_seinfo(args: &[String]) -> i32 {
                 let name = &args[1];
                 if db.roles.contains(name) {
                     println!("Role: {}", name);
-                    let users: Vec<_> = db
-                        .users
-                        .iter()
-                        .filter(|u| u.roles.contains(name))
-                        .collect();
+                    let users: Vec<_> =
+                        db.users.iter().filter(|u| u.roles.contains(name)).collect();
                     println!("  Users with this role:");
                     for u in &users {
                         println!("    {}", u.name);
                     }
                 } else {
-                    eprintln!("seinfo: role '{}' not found", name);
+                    eprintln!("seinfo: role {} not found", quoteaf_os(name));
                     return 1;
                 }
             } else {
@@ -2087,7 +2120,7 @@ fn cmd_seinfo(args: &[String]) -> i32 {
                     println!("  Level: {}", u.mls_level);
                     println!("  Range: {}", u.mls_range);
                 } else {
-                    eprintln!("seinfo: user '{}' not found", name);
+                    eprintln!("seinfo: user {} not found", quoteaf_os(name));
                     return 1;
                 }
             } else {
@@ -2105,7 +2138,7 @@ fn cmd_seinfo(args: &[String]) -> i32 {
                     println!("  Active: {}", if b.active { "on" } else { "off" });
                     println!("  Pending: {}", if b.pending { "on" } else { "off" });
                 } else {
-                    eprintln!("seinfo: boolean '{}' not found", name);
+                    eprintln!("seinfo: boolean {} not found", quoteaf_os(name));
                     return 1;
                 }
             } else {
@@ -2125,7 +2158,7 @@ fn cmd_seinfo(args: &[String]) -> i32 {
                         db.rules.iter().filter(|r| r.class == *name).collect();
                     println!("  Used in {} rules", rules_using.len());
                 } else {
-                    eprintln!("seinfo: class '{}' not found", name);
+                    eprintln!("seinfo: class {} not found", quoteaf_os(name));
                     return 1;
                 }
             } else {
@@ -2158,7 +2191,7 @@ fn cmd_seinfo(args: &[String]) -> i32 {
             eprintln!("  -c [CLASS]   List classes or show class info");
         }
         other => {
-            eprintln!("seinfo: unknown option '{}'", other);
+            eprintln!("seinfo: unknown option {}", quoteaf_os(other));
             return 1;
         }
     }
@@ -2216,7 +2249,7 @@ fn cmd_sesearch(args: &[String]) -> i32 {
                 return 0;
             }
             other => {
-                eprintln!("sesearch: unknown option '{}'", other);
+                eprintln!("sesearch: unknown option {}", quoteaf_os(other));
                 print_sesearch_usage();
                 return 1;
             }
@@ -2229,25 +2262,30 @@ fn cmd_sesearch(args: &[String]) -> i32 {
         .iter()
         .filter(|r| {
             if let Some(kind) = rule_kind
-                && r.kind != kind {
-                    return false;
-                }
+                && r.kind != kind
+            {
+                return false;
+            }
             if let Some(src) = source_filter
-                && r.source != src {
-                    return false;
-                }
+                && r.source != src
+            {
+                return false;
+            }
             if let Some(tgt) = target_filter
-                && r.target != tgt {
-                    return false;
-                }
+                && r.target != tgt
+            {
+                return false;
+            }
             if let Some(cls) = class_filter
-                && r.class != cls {
-                    return false;
-                }
+                && r.class != cls
+            {
+                return false;
+            }
             if let Some(perm) = perm_filter
-                && !r.permissions.iter().any(|p| p == perm) {
-                    return false;
-                }
+                && !r.permissions.iter().any(|p| p == perm)
+            {
+                return false;
+            }
             true
         })
         .collect();
@@ -2328,7 +2366,7 @@ fn cmd_audit2allow(args: &[String]) -> i32 {
         match fs::read_to_string(path) {
             Ok(content) => content.lines().map(String::from).collect(),
             Err(e) => {
-                eprintln!("audit2allow: cannot read '{}': {}", path, e);
+                eprintln!("audit2allow: cannot read {}: {}", quoteaf_os(path), e);
                 return 1;
             }
         }
@@ -2389,11 +2427,7 @@ fn cmd_audit2allow(args: &[String]) -> i32 {
                 }
             }
             perms.sort();
-            println!(
-                "        class {} {{ {} }};",
-                c,
-                perms.join(" ")
-            );
+            println!("        class {} {{ {} }};", c, perms.join(" "));
         }
         println!("}}");
         println!();
@@ -2461,7 +2495,10 @@ fn main() {
         "sesearch" => cmd_sesearch(&rest),
         "audit2allow" => cmd_audit2allow(&rest),
         other => {
-            eprintln!("selinux: unknown personality '{}', defaulting to getenforce", other);
+            eprintln!(
+                "selinux: unknown personality {}, defaulting to getenforce",
+                quoteaf_os(other)
+            );
             cmd_getenforce(&rest)
         }
     };
@@ -2576,7 +2613,11 @@ mod tests {
 
     #[test]
     fn test_enforce_mode_roundtrip() {
-        for mode in [EnforceMode::Enforcing, EnforceMode::Permissive, EnforceMode::Disabled] {
+        for mode in [
+            EnforceMode::Enforcing,
+            EnforceMode::Permissive,
+            EnforceMode::Disabled,
+        ] {
             assert_eq!(EnforceMode::from_value(mode.to_value()), mode);
         }
     }
@@ -2595,15 +2636,30 @@ mod tests {
 
     #[test]
     fn test_rule_kind_from_str_type_transition() {
-        assert_eq!(RuleKind::_from_str("type_transition"), Some(RuleKind::TypeTransition));
+        assert_eq!(
+            RuleKind::_from_str("type_transition"),
+            Some(RuleKind::TypeTransition)
+        );
     }
 
     #[test]
     fn test_rule_kind_from_str_all_variants() {
-        assert_eq!(RuleKind::_from_str("auditallow"), Some(RuleKind::Auditallow));
-        assert_eq!(RuleKind::_from_str("type_change"), Some(RuleKind::_TypeChange));
-        assert_eq!(RuleKind::_from_str("type_member"), Some(RuleKind::_TypeMember));
-        assert_eq!(RuleKind::_from_str("neverallow"), Some(RuleKind::Neverallow));
+        assert_eq!(
+            RuleKind::_from_str("auditallow"),
+            Some(RuleKind::Auditallow)
+        );
+        assert_eq!(
+            RuleKind::_from_str("type_change"),
+            Some(RuleKind::_TypeChange)
+        );
+        assert_eq!(
+            RuleKind::_from_str("type_member"),
+            Some(RuleKind::_TypeMember)
+        );
+        assert_eq!(
+            RuleKind::_from_str("neverallow"),
+            Some(RuleKind::Neverallow)
+        );
     }
 
     #[test]
@@ -2698,10 +2754,7 @@ mod tests {
             port_high: 80,
             context: SecurityContext::parse("system_u:object_r:http_port_t:s0").unwrap(),
         };
-        assert_eq!(
-            pc.to_string(),
-            "tcp 80 system_u:object_r:http_port_t:s0"
-        );
+        assert_eq!(pc.to_string(), "tcp 80 system_u:object_r:http_port_t:s0");
     }
 
     #[test]
@@ -2724,13 +2777,34 @@ mod tests {
     fn test_file_context_type_from_flag() {
         assert_eq!(FileContextType::from_flag("a"), Some(FileContextType::All));
         assert_eq!(FileContextType::from_flag("--"), Some(FileContextType::All));
-        assert_eq!(FileContextType::from_flag("f"), Some(FileContextType::Regular));
-        assert_eq!(FileContextType::from_flag("-d"), Some(FileContextType::Directory));
-        assert_eq!(FileContextType::from_flag("-c"), Some(FileContextType::CharDevice));
-        assert_eq!(FileContextType::from_flag("-b"), Some(FileContextType::BlockDevice));
-        assert_eq!(FileContextType::from_flag("-s"), Some(FileContextType::Socket));
-        assert_eq!(FileContextType::from_flag("-l"), Some(FileContextType::SymLink));
-        assert_eq!(FileContextType::from_flag("-p"), Some(FileContextType::Pipe));
+        assert_eq!(
+            FileContextType::from_flag("f"),
+            Some(FileContextType::Regular)
+        );
+        assert_eq!(
+            FileContextType::from_flag("-d"),
+            Some(FileContextType::Directory)
+        );
+        assert_eq!(
+            FileContextType::from_flag("-c"),
+            Some(FileContextType::CharDevice)
+        );
+        assert_eq!(
+            FileContextType::from_flag("-b"),
+            Some(FileContextType::BlockDevice)
+        );
+        assert_eq!(
+            FileContextType::from_flag("-s"),
+            Some(FileContextType::Socket)
+        );
+        assert_eq!(
+            FileContextType::from_flag("-l"),
+            Some(FileContextType::SymLink)
+        );
+        assert_eq!(
+            FileContextType::from_flag("-p"),
+            Some(FileContextType::Pipe)
+        );
     }
 
     #[test]
@@ -2852,7 +2926,11 @@ mod tests {
     fn test_policy_db_default_has_booleans() {
         let db = PolicyDb::default();
         assert!(!db.booleans.is_empty());
-        assert!(db.booleans.iter().any(|b| b.name == "httpd_can_network_connect"));
+        assert!(
+            db.booleans
+                .iter()
+                .any(|b| b.name == "httpd_can_network_connect")
+        );
     }
 
     #[test]
@@ -2875,7 +2953,11 @@ mod tests {
     fn test_policy_db_default_has_rules() {
         let db = PolicyDb::default();
         assert!(!db.rules.is_empty());
-        let allow_rules: Vec<_> = db.rules.iter().filter(|r| r.kind == RuleKind::Allow).collect();
+        let allow_rules: Vec<_> = db
+            .rules
+            .iter()
+            .filter(|r| r.kind == RuleKind::Allow)
+            .collect();
         assert!(!allow_rules.is_empty());
     }
 
@@ -2972,8 +3054,7 @@ mod tests {
 
     #[test]
     fn test_extract_braces_in_context() {
-        let result =
-            extract_braces("prefix { open getattr } suffix").unwrap();
+        let result = extract_braces("prefix { open getattr } suffix").unwrap();
         assert_eq!(result, vec!["open", "getattr"]);
     }
 
@@ -3290,7 +3371,12 @@ mod tests {
     #[test]
     fn test_semanage_port_add_missing_proto() {
         assert_eq!(
-            semanage_port(&["-a".into(), "-t".into(), "http_port_t".into(), "8080".into()]),
+            semanage_port(&[
+                "-a".into(),
+                "-t".into(),
+                "http_port_t".into(),
+                "8080".into()
+            ]),
             1
         );
     }
@@ -3367,25 +3453,24 @@ mod tests {
     #[test]
     fn test_semanage_login_add() {
         assert_eq!(
-            semanage_login(&["-a".into(), "-s".into(), "staff_u".into(), "testuser".into()]),
+            semanage_login(&[
+                "-a".into(),
+                "-s".into(),
+                "staff_u".into(),
+                "testuser".into()
+            ]),
             0
         );
     }
 
     #[test]
     fn test_semanage_login_add_missing_seuser() {
-        assert_eq!(
-            semanage_login(&["-a".into(), "testuser".into()]),
-            1
-        );
+        assert_eq!(semanage_login(&["-a".into(), "testuser".into()]), 1);
     }
 
     #[test]
     fn test_semanage_login_delete() {
-        assert_eq!(
-            semanage_login(&["-d".into(), "testuser".into()]),
-            0
-        );
+        assert_eq!(semanage_login(&["-d".into(), "testuser".into()]), 0);
     }
 
     #[test]
@@ -3408,18 +3493,12 @@ mod tests {
 
     #[test]
     fn test_semanage_user_add_missing_roles() {
-        assert_eq!(
-            semanage_user(&["-a".into(), "new_user_u".into()]),
-            1
-        );
+        assert_eq!(semanage_user(&["-a".into(), "new_user_u".into()]), 1);
     }
 
     #[test]
     fn test_semanage_user_delete() {
-        assert_eq!(
-            semanage_user(&["-d".into(), "old_user_u".into()]),
-            0
-        );
+        assert_eq!(semanage_user(&["-d".into(), "old_user_u".into()]), 0);
     }
 
     // ---- cmd_setenforce tests ----
@@ -3586,7 +3665,10 @@ mod tests {
 
     #[test]
     fn test_sesearch_source_filter() {
-        assert_eq!(cmd_sesearch(&["-A".into(), "-s".into(), "httpd_t".into()]), 0);
+        assert_eq!(
+            cmd_sesearch(&["-A".into(), "-s".into(), "httpd_t".into()]),
+            0
+        );
     }
 
     #[test]
@@ -3596,18 +3678,12 @@ mod tests {
 
     #[test]
     fn test_sesearch_class_filter() {
-        assert_eq!(
-            cmd_sesearch(&["-A".into(), "-c".into(), "file".into()]),
-            0
-        );
+        assert_eq!(cmd_sesearch(&["-A".into(), "-c".into(), "file".into()]), 0);
     }
 
     #[test]
     fn test_sesearch_perm_filter() {
-        assert_eq!(
-            cmd_sesearch(&["-A".into(), "-p".into(), "read".into()]),
-            0
-        );
+        assert_eq!(cmd_sesearch(&["-A".into(), "-p".into(), "read".into()]), 0);
     }
 
     #[test]
@@ -3679,7 +3755,9 @@ mod tests {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -3692,7 +3770,9 @@ mod tests {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -3705,7 +3785,9 @@ mod tests {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -3718,7 +3800,9 @@ mod tests {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -3731,7 +3815,9 @@ mod tests {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);

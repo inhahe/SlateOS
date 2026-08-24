@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS environment variable utility"
 [dependencies]
+# env names the program it failed to exec and the variables it was asked to
+# set, every one of them from the command line.
+quoting = { path = "../quoting" }

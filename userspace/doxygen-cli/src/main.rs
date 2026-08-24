@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `doxygen`, `doxyindexer`, `doxysearch.cgi`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_doxygen(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -30,19 +35,30 @@ fn run_doxygen(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-g") {
-        let file = args.windows(2)
+        let file = args
+            .windows(2)
             .find(|w| w[0] == "-g")
-            .and_then(|w| if w[1].starts_with('-') { None } else { Some(w[1].as_str()) })
+            .and_then(|w| {
+                if w[1].starts_with('-') {
+                    None
+                } else {
+                    Some(w[1].as_str())
+                }
+            })
             .unwrap_or("Doxyfile");
-        println!("Configuration file '{}' created.", file);
-        println!("  Edit and run 'doxygen {}' to generate documentation.", file);
+        println!("Configuration file {} created.", quoteaf_os(file));
+        println!(
+            "  Edit and run 'doxygen {}' to generate documentation.",
+            file
+        );
         return 0;
     }
     if args.iter().any(|a| a == "-l") {
         println!("Layout file 'DoxygenLayout.xml' created.");
         return 0;
     }
-    let config = args.iter()
+    let config = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("Doxyfile");
@@ -72,7 +88,8 @@ fn run_doxyindexer(args: &[String]) -> i32 {
         println!("  -o DIR    Output directory for index (default: doxysearch.db)");
         return 0;
     }
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| a.ends_with(".xml"))
         .map(|s| s.as_str())
         .collect();
@@ -98,7 +115,10 @@ fn run_doxysearch(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "doxygen".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "doxygen".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "doxyindexer" => run_doxyindexer(&rest),
@@ -110,7 +130,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_doxygen};
+    use super::{basename, run_doxygen, strip_ext};
 
     #[test]
     fn basename_strips_path() {

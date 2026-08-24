@@ -5,6 +5,7 @@
 //! - `yes`: repeatedly output a string
 //! - `expr`: evaluate expressions
 
+use quoting::quoteaf_os;
 use std::env;
 use std::io::{self, Write};
 use std::process;
@@ -91,7 +92,10 @@ fn run_seq(args: &[String]) -> i32 {
             let last = match positional[0].parse::<f64>() {
                 Ok(v) => v,
                 Err(_) => {
-                    eprintln!("seq: invalid floating point argument: '{}'", positional[0]);
+                    eprintln!(
+                        "seq: invalid floating point argument: {}",
+                        quoteaf_os(&positional[0])
+                    );
                     return 1;
                 }
             };
@@ -101,14 +105,20 @@ fn run_seq(args: &[String]) -> i32 {
             let first = match positional[0].parse::<f64>() {
                 Ok(v) => v,
                 Err(_) => {
-                    eprintln!("seq: invalid floating point argument: '{}'", positional[0]);
+                    eprintln!(
+                        "seq: invalid floating point argument: {}",
+                        quoteaf_os(&positional[0])
+                    );
                     return 1;
                 }
             };
             let last = match positional[1].parse::<f64>() {
                 Ok(v) => v,
                 Err(_) => {
-                    eprintln!("seq: invalid floating point argument: '{}'", positional[1]);
+                    eprintln!(
+                        "seq: invalid floating point argument: {}",
+                        quoteaf_os(&positional[1])
+                    );
                     return 1;
                 }
             };
@@ -119,21 +129,30 @@ fn run_seq(args: &[String]) -> i32 {
             let first = match positional[0].parse::<f64>() {
                 Ok(v) => v,
                 Err(_) => {
-                    eprintln!("seq: invalid floating point argument: '{}'", positional[0]);
+                    eprintln!(
+                        "seq: invalid floating point argument: {}",
+                        quoteaf_os(&positional[0])
+                    );
                     return 1;
                 }
             };
             let inc = match positional[1].parse::<f64>() {
                 Ok(v) => v,
                 Err(_) => {
-                    eprintln!("seq: invalid floating point argument: '{}'", positional[1]);
+                    eprintln!(
+                        "seq: invalid floating point argument: {}",
+                        quoteaf_os(&positional[1])
+                    );
                     return 1;
                 }
             };
             let last = match positional[2].parse::<f64>() {
                 Ok(v) => v,
                 Err(_) => {
-                    eprintln!("seq: invalid floating point argument: '{}'", positional[2]);
+                    eprintln!(
+                        "seq: invalid floating point argument: {}",
+                        quoteaf_os(&positional[2])
+                    );
                     return 1;
                 }
             };
@@ -145,7 +164,7 @@ fn run_seq(args: &[String]) -> i32 {
             return 1;
         }
         _ => {
-            eprintln!("seq: extra operand '{}'", positional[3]);
+            eprintln!("seq: extra operand {}", quoteaf_os(&positional[3]));
             return 1;
         }
     };

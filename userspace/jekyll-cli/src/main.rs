@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `jekyll`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -36,7 +37,11 @@ fn run_jekyll(args: &[String]) -> i32 {
             println!(" Auto-regeneration: disabled.");
         }
         "serve" | "s" => {
-            let port = args.windows(2).find(|w| w[0] == "--port" || w[0] == "-P").map(|w| w[1].as_str()).unwrap_or("4000");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port" || w[0] == "-P")
+                .map(|w| w[1].as_str())
+                .unwrap_or("4000");
             println!("Configuration file: _config.yml");
             println!("    Server address: http://127.0.0.1:{}/", port);
             println!("  Server running... press ctrl-c to stop.");
@@ -50,7 +55,7 @@ fn run_jekyll(args: &[String]) -> i32 {
             println!("Your test results are in!");
             println!("No issues found.");
         }
-        _ => println!("jekyll: '{}' completed", subcmd),
+        _ => println!("jekyll: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -64,7 +69,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_jekyll};
+    use super::run_jekyll;
 
     #[test]
     fn help_exits_zero() {

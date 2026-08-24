@@ -4,6 +4,7 @@
 //!
 //! Single personality: `navi`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -62,7 +63,10 @@ fn run_navi(args: Vec<String>) -> i32 {
             let subcmd = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match subcmd {
                 "add" => {
-                    let url = args.get(2).map(|s| s.as_str()).unwrap_or("https://github.com/denisidoro/cheats");
+                    let url = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("https://github.com/denisidoro/cheats");
                     println!("Adding cheatsheet repo: {}", url);
                     println!("Done.");
                 }
@@ -95,7 +99,7 @@ fn run_navi(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -110,7 +114,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_navi};
+    use super::run_navi;
 
     #[test]
     fn help_exits_zero() {

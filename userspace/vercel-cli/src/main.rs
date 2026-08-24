@@ -4,6 +4,7 @@
 //!
 //! Single personality: `vercel`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -65,7 +66,11 @@ fn run_vercel(args: Vec<String>) -> i32 {
             0
         }
         "dev" => {
-            let port = args.windows(2).find(|w| w[0] == "--listen").map(|w| w[1].as_str()).unwrap_or("3000");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--listen")
+                .map(|w| w[1].as_str())
+                .unwrap_or("3000");
             println!("Vercel CLI 33.3.0 dev (beta) — https://vercel.com");
             println!("> Ready! Available at http://localhost:{}", port);
             0
@@ -89,7 +94,10 @@ fn run_vercel(args: Vec<String>) -> i32 {
             0
         }
         "inspect" => {
-            let url = args.get(1).map(|s| s.as_str()).unwrap_or("https://my-project-abc123.vercel.app");
+            let url = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("https://my-project-abc123.vercel.app");
             println!("  Deployment:    {}", url);
             println!("  Project:       my-project");
             println!("  Team:          my-team");
@@ -113,13 +121,21 @@ fn run_vercel(args: Vec<String>) -> i32 {
                 }
                 "add" => {
                     let key = args.get(2).map(|s| s.as_str()).unwrap_or("KEY");
-                    println!("✔ Added Environment Variable {} to project my-project.", key);
+                    println!(
+                        "✔ Added Environment Variable {} to project my-project.",
+                        key
+                    );
                 }
                 "rm" => {
                     let key = args.get(2).map(|s| s.as_str()).unwrap_or("KEY");
-                    println!("✔ Removed Environment Variable {} from project my-project.", key);
+                    println!(
+                        "✔ Removed Environment Variable {} from project my-project.",
+                        key
+                    );
                 }
-                _ => { println!("Env operation: {}", sub); }
+                _ => {
+                    println!("Env operation: {}", sub);
+                }
             }
             0
         }
@@ -143,12 +159,17 @@ fn run_vercel(args: Vec<String>) -> i32 {
                     let domain = args.get(2).map(|s| s.as_str()).unwrap_or("new.example.com");
                     println!("✔ Domain {} added to project my-project.", domain);
                 }
-                _ => { println!("Domains operation: {}", sub); }
+                _ => {
+                    println!("Domains operation: {}", sub);
+                }
             }
             0
         }
         "logs" => {
-            let url = args.get(1).map(|s| s.as_str()).unwrap_or("my-project-abc123.vercel.app");
+            let url = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("my-project-abc123.vercel.app");
             println!("Tailing logs for {} ...", url);
             println!("2024-01-15T14:00:00.000Z  GET    200  /           12ms");
             println!("2024-01-15T14:00:01.000Z  GET    200  /api/data   45ms");
@@ -169,7 +190,9 @@ fn run_vercel(args: Vec<String>) -> i32 {
                     println!("  ID              Name        Slug        Created");
                     println!("  team_abc123     My Team     my-team     2024-01-01");
                 }
-                _ => { println!("Teams operation: {}", sub); }
+                _ => {
+                    println!("Teams operation: {}", sub);
+                }
             }
             0
         }
@@ -177,7 +200,7 @@ fn run_vercel(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: vercel <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -193,7 +216,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_vercel};
+    use super::run_vercel;
 
     #[test]
     fn help_exits_zero() {

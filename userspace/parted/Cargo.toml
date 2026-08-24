@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS parted utility"
 [dependencies]
+# One rendering of untrusted text inside a diagnostic. Device paths, partition
+# names and filesystem-type words are argv words, and a path may hold any byte
+# but `/` and NUL -- including a newline. A message that pastes one in raw lets
+# whoever wrote the argv write extra lines of this program's output. See
+# `userspace/quoting`.
+quoting = { path = "../quoting" }

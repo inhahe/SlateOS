@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `snap`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -41,7 +42,8 @@ fn run_snap(args: &[String]) -> i32 {
         }
         "install" => {
             let snap = args.get(1).map(|s| s.as_str()).unwrap_or("hello");
-            let channel = args.windows(2)
+            let channel = args
+                .windows(2)
                 .find(|w| w[0] == "--channel")
                 .map(|w| w[1].as_str())
                 .unwrap_or("stable");
@@ -62,8 +64,14 @@ fn run_snap(args: &[String]) -> i32 {
         "find" => {
             let query = args.get(1).map(|s| s.as_str()).unwrap_or("hello");
             println!("Name              Version     Publisher    Notes  Summary");
-            println!("{}            1.0.0       canonical    -      Hello World", query);
-            println!("{}-cli         0.5.0       community    -      CLI tools", query);
+            println!(
+                "{}            1.0.0       canonical    -      Hello World",
+                query
+            );
+            println!(
+                "{}-cli         0.5.0       community    -      CLI tools",
+                query
+            );
         }
         "info" => {
             let snap = args.get(1).map(|s| s.as_str()).unwrap_or("hello");
@@ -97,7 +105,7 @@ fn run_snap(args: &[String]) -> i32 {
             let snap = args.get(1).map(|s| s.as_str()).unwrap_or("hello");
             println!("{} reverted to revision 41", snap);
         }
-        _ => println!("snap: '{}' completed", subcmd),
+        _ => println!("snap: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -111,7 +119,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_snap};
+    use super::run_snap;
 
     #[test]
     fn help_exits_zero() {

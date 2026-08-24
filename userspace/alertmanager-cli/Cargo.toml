@@ -2,3 +2,9 @@
 name = "alertmanager-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The file name amtool checks and the subcommand name it echoes back are
+# both argv words: a rule file called `x\ny: ok` would otherwise forge a
+# second result line.
+quoting = { path = "../quoting" }

@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS base64/base32/uuencode/uudecode - encoding tools"
 [dependencies]
+# base64 names its input file and echoes back the option and wrap size it
+# could not parse, all from the command line.
+quoting = { path = "../quoting" }

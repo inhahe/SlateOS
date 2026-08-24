@@ -4,11 +4,15 @@
 //!
 //! Single personality: `aspell`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
 fn run_aspell(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "help")
+    {
         println!("Usage: aspell [OPTIONS] COMMAND");
         println!();
         println!("GNU Aspell — spell checker (Slate OS).");
@@ -31,8 +35,13 @@ fn run_aspell(args: Vec<String>) -> i32 {
         println!("  --sug-mode MODE    Suggestion mode (ultra/fast/normal/slow/bad-spellers)");
         return 0;
     }
-    if args.iter().any(|a| a == "--version" || a == "-v" || a == "version") {
-        println!("@(#) International Ispell Version 3.1.20 (but really Aspell 0.60.8.1) (Slate OS)");
+    if args
+        .iter()
+        .any(|a| a == "--version" || a == "-v" || a == "version")
+    {
+        println!(
+            "@(#) International Ispell Version 3.1.20 (but really Aspell 0.60.8.1) (Slate OS)"
+        );
         return 0;
     }
 
@@ -78,10 +87,10 @@ fn run_aspell(args: Vec<String>) -> i32 {
         }
         "check" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("(stdin)");
-            println!("aspell: checking '{}'...", file);
+            println!("aspell: checking {}...", quoteaf_os(file));
         }
         _ => {
-            eprintln!("aspell: unknown command '{}'. See --help.", cmd);
+            eprintln!("aspell: unknown command {}. See --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -97,7 +106,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_aspell};
+    use super::run_aspell;
 
     #[test]
     fn help_exits_zero() {

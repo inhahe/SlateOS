@@ -4,6 +4,7 @@
 //!
 //! Single personality: `nu`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -43,9 +44,7 @@ fn run_nu(args: Vec<String>) -> i32 {
     // Check for -c / --commands or -e / --execute
     let mut cmd_idx = None;
     for (i, a) in args.iter().enumerate() {
-        if (a == "-c" || a == "--commands" || a == "-e" || a == "--execute")
-            && i + 1 < args.len()
-        {
+        if (a == "-c" || a == "--commands" || a == "-e" || a == "--execute") && i + 1 < args.len() {
             cmd_idx = Some(i + 1);
             break;
         }
@@ -82,18 +81,22 @@ fn run_nu(args: Vec<String>) -> i32 {
             println!("│  3 │  201 │ cargo        │ 28.50 │  256 MiB │");
             println!("╰────┴──────┴──────────────┴───────┴──────────╯");
         } else {
-            println!("(nu: executed '{}' — structured output simulated)", command);
+            println!(
+                "(nu: executed {} — structured output simulated)",
+                quoteaf_os(command)
+            );
         }
         return 0;
     }
 
     // Check for a script file
-    let script: Option<&str> = args.iter()
+    let script: Option<&str> = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
     if let Some(file) = script {
-        println!("(nu: executing script '{}' — simulated)", file);
+        println!("(nu: executing script {} — simulated)", quoteaf_os(file));
         return 0;
     }
 
@@ -114,7 +117,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_nu};
+    use super::run_nu;
 
     #[test]
     fn help_exits_zero() {

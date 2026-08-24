@@ -15,6 +15,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -1791,7 +1792,7 @@ fn run_tune2fs(args: &[String]) -> i32 {
 
     if let Some(ref label) = opts.label {
         img.superblock.set_label(label);
-        println!("tune2fs: setting label to '{label}'");
+        println!("tune2fs: setting label to {}", quoteaf_os(label));
         changed = true;
     }
 
@@ -3037,7 +3038,7 @@ fn run_e2label(args: &[String]) -> i32 {
     }
 
     img.superblock.set_label(new_label);
-    println!("e2label: setting label to '{new_label}'");
+    println!("e2label: setting label to {}", quoteaf_os(new_label));
     0
 }
 
@@ -3125,8 +3126,9 @@ fn run_e2image(args: &[String]) -> i32 {
 
     if opts.install {
         println!(
-            "e2image: installing image from '{}' to '{}'",
-            opts.output, opts.device
+            "e2image: installing image from {} to {}",
+            quoteaf_os(&opts.output),
+            quoteaf_os(&opts.device)
         );
         println!("  Restoring superblock...");
         println!("  Restoring block group descriptors...");
@@ -3142,8 +3144,9 @@ fn run_e2image(args: &[String]) -> i32 {
     };
 
     println!(
-        "e2image: saving {} format image of '{}' to '{}'",
-        format_name, opts.device, opts.output
+        "e2image: saving {format_name} format image of {} to {}",
+        quoteaf_os(&opts.device),
+        quoteaf_os(&opts.output)
     );
 
     // Simulate writing metadata

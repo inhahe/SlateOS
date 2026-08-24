@@ -7,7 +7,7 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are thirteen so far. Three are about the interface these programs share
+//! There are fourteen so far. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -192,6 +192,22 @@
 //! [`Flags::PATHNAME`]: fnmatch::Flags::PATHNAME
 //! [`Flags::PERIOD`]: fnmatch::Flags::PERIOD
 //!
+//! The fourteenth is the narrowest of them — one grammar, read by two
+//! utilities — and is here because those two must name the *same account*:
+//!
+//! - [`userspec`] — the `OWNER[:GROUP]` operand. `chown alice:staff f` and
+//!   `id alice` ask one question of one database, and upstream answers both
+//!   from a single gnulib file (`userspec.c`) rather than from either utility.
+//!   A disagreement here is not a cosmetic one: `chown` would change the file
+//!   `id` says it did not. The grammar has more corners than its size suggests
+//!   — a leading `+` that suppresses the *name* lookup (the only way to mean
+//!   uid 1000 on a machine that also has an account called `1000`), a trailing
+//!   separator that means "and that account's login group" and is therefore an
+//!   error after a number, a `.` that separates only as a fallback so that an
+//!   account genuinely named `a.b` still resolves, and a number read by
+//!   `strtoul` rather than `str::parse`, which accepts `" +007"` and rejects
+//!   `4294967295` because that one is the kernel's "leave this field alone".
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -206,8 +222,15 @@ pub mod fnmatch;
 pub mod getopt;
 pub mod human;
 pub mod pathname;
-pub mod quote;
+/// How a name is rendered inside a diagnostic — now `userspace/quoting`.
+///
+/// Re-exported under its old path so that `use coreutils::quote::quotef_os`
+/// keeps working across all 86 bins. It left this crate because the 777 other
+/// utility crates in the tree need it too and cannot depend on the bundle; see
+/// that crate's docs and `design-decisions.md` §370.
+pub use quoting as quote;
 pub mod shell;
 pub mod tabstops;
+pub mod userspec;
 pub mod vercmp;
 pub mod xnum;

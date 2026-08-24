@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `avrdude`, `esptool`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -34,14 +35,29 @@ fn run_avrdude(args: &[String]) -> i32 {
         println!("  -D           No auto-erase before flash write");
         return 0;
     }
-    if args.iter().any(|a| a == "--version" || a == "-v" && args.len() == 1) {
+    if args
+        .iter()
+        .any(|a| a == "--version" || a == "-v" && args.len() == 1)
+    {
         println!("avrdude version 7.3 (Slate OS)");
         return 0;
     }
 
-    let part = args.windows(2).find(|w| w[0] == "-p").map(|w| w[1].as_str()).unwrap_or("m328p");
-    let programmer = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].as_str()).unwrap_or("arduino");
-    let port = args.windows(2).find(|w| w[0] == "-P").map(|w| w[1].as_str()).unwrap_or("/dev/ttyACM0");
+    let part = args
+        .windows(2)
+        .find(|w| w[0] == "-p")
+        .map(|w| w[1].as_str())
+        .unwrap_or("m328p");
+    let programmer = args
+        .windows(2)
+        .find(|w| w[0] == "-c")
+        .map(|w| w[1].as_str())
+        .unwrap_or("arduino");
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "-P")
+        .map(|w| w[1].as_str())
+        .unwrap_or("/dev/ttyACM0");
 
     println!("avrdude: AVR Part \"{}\"", part);
     println!("avrdude: Programmer Type   : {}", programmer);
@@ -90,8 +106,16 @@ fn run_esptool(args: &[String]) -> i32 {
         return 0;
     }
 
-    let chip = args.windows(2).find(|w| w[0] == "--chip").map(|w| w[1].as_str()).unwrap_or("esp32");
-    let subcmd = args.iter().find(|a| !a.starts_with('-') && !a.starts_with("esp")).map(|s| s.as_str()).unwrap_or("chip_id");
+    let chip = args
+        .windows(2)
+        .find(|w| w[0] == "--chip")
+        .map(|w| w[1].as_str())
+        .unwrap_or("esp32");
+    let subcmd = args
+        .iter()
+        .find(|a| !a.starts_with('-') && !a.starts_with("esp"))
+        .map(|s| s.as_str())
+        .unwrap_or("chip_id");
 
     println!("esptool.py v4.7.0");
     println!("Serial port /dev/ttyUSB0");
@@ -117,7 +141,7 @@ fn run_esptool(args: &[String]) -> i32 {
             println!("Erasing flash (this may take a while)...");
             println!("Chip erase completed successfully in 5.2s");
         }
-        _ => println!("esptool: command '{}' completed", subcmd),
+        _ => println!("esptool: command {} completed", quoteaf_os(subcmd)),
     }
     println!("Hard resetting via RTS pin...");
     0
@@ -125,7 +149,8 @@ fn run_esptool(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "avrdude".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -139,7 +164,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_avrdude};
+    use super::{basename, run_avrdude, strip_ext};
 
     #[test]
     fn basename_strips_path() {

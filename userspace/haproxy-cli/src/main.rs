@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `haproxy`, `hatop`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_haproxy(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -51,18 +56,25 @@ fn run_haproxy(args: &[String]) -> i32 {
     }
 
     if args.iter().any(|a| a == "-c") {
-        let config = args.windows(2).find(|w| w[0] == "-f")
+        let config = args
+            .windows(2)
+            .find(|w| w[0] == "-f")
             .map(|w| w[1].as_str())
             .unwrap_or("/etc/haproxy/haproxy.cfg");
         println!("Configuration file is valid: {}", config);
         return 0;
     }
 
-    let config = args.windows(2).find(|w| w[0] == "-f")
+    let config = args
+        .windows(2)
+        .find(|w| w[0] == "-f")
         .map(|w| w[1].as_str())
         .unwrap_or("/etc/haproxy/haproxy.cfg");
     println!("[NOTICE]   (1) : haproxy version is 2.9.4-1 (Slate OS)");
-    println!("[NOTICE]   (1) : Loading config from '{}'", config);
+    println!(
+        "[NOTICE]   (1) : Loading config from {}",
+        quoteaf_os(config)
+    );
     println!("[WARNING]  (1) : config : missing stats socket");
     println!("[NOTICE]   (1) : New worker (2) forked");
     println!("[NOTICE]   (1) : Loading success.");
@@ -105,7 +117,10 @@ fn run_hatop(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "haproxy".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "haproxy".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "hatop" => run_hatop(&rest),
@@ -116,7 +131,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_haproxy};
+    use super::{basename, run_haproxy, strip_ext};
 
     #[test]
     fn basename_strips_path() {

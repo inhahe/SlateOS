@@ -2,3 +2,8 @@
 name = "bridge-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# bridge-cli names bridges, ports and VLAN identifiers that come from the
+# command line and from the kernel's own view of the link layer.
+quoting = { path = "../quoting" }

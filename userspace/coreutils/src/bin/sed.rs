@@ -360,7 +360,7 @@ impl Parser<'_> {
         };
         match r {
             Ok(re) => Ok(Some(Rc::new(re))),
-            Err(e) => Err(String::from_utf8_lossy(&e.0).into_owned()),
+            Err(e) => Err(String::from_utf8_lossy(&e.detail).into_owned()),
         }
     }
 

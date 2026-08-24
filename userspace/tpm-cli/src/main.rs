@@ -5,6 +5,7 @@
 //! Multi-personality: `tpm2_getcap`, `tpm2_getrandom`, `tpm2_pcrread`,
 //! `tpm2_createprimary`, `tpm2_nvdefine`, `tpm2_nvread`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -26,7 +27,11 @@ fn run_tpm2_getcap(args: &[String]) -> i32 {
         return 0;
     }
 
-    let cap = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("properties-fixed");
+    let cap = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("properties-fixed");
     match cap {
         "algorithms" => {
             println!("sha1:");
@@ -70,7 +75,7 @@ fn run_tpm2_getcap(args: &[String]) -> i32 {
             println!("TPM2_CC_PCR_Read: 0x0000017E");
             println!("TPM2_CC_GetRandom: 0x0000017B");
         }
-        _ => println!("tpm2_getcap: capability '{}' listed", cap),
+        _ => println!("tpm2_getcap: capability {} listed", quoteaf_os(cap)),
     }
     0
 }
@@ -84,7 +89,11 @@ fn run_tpm2_getrandom(args: &[String]) -> i32 {
     }
 
     let hex = args.iter().any(|a| a == "--hex");
-    let size_str = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("32");
+    let size_str = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("32");
     let size: usize = size_str.parse().unwrap_or(32);
 
     if hex {
@@ -144,7 +153,8 @@ fn run_default(prog: &str, args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "tpm2_getcap".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -161,7 +171,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_tpm2_getcap};
+    use super::{basename, run_tpm2_getcap, strip_ext};
 
     #[test]
     fn basename_strips_path() {

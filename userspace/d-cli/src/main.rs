@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `dmd`, `dub`, `rdmd`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_dmd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -30,7 +35,11 @@ fn run_dmd(args: &[String]) -> i32 {
         println!("Copyright (c) 1999-2024, The D Language Foundation");
         return 0;
     }
-    let files: Vec<&str> = args.iter().filter(|a| a.ends_with(".d")).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| a.ends_with(".d"))
+        .map(|s| s.as_str())
+        .collect();
     if files.is_empty() {
         println!("dmd: no input files");
         return 1;
@@ -81,7 +90,7 @@ fn run_dub(args: &[String]) -> i32 {
         }
         "init" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("myproject");
-            println!("Creating project '{}'...", name);
+            println!("Creating project {}...", quoteaf_os(name));
             println!("  Created: {}/source/app.d", name);
             println!("  Created: {}/dub.sdl", name);
         }
@@ -90,7 +99,7 @@ fn run_dub(args: &[String]) -> i32 {
             println!("Fetching {}...", pkg);
         }
         "clean" => println!("Cleaning build files..."),
-        _ => println!("dub: '{}' completed", subcmd),
+        _ => println!("dub: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -103,14 +112,21 @@ fn run_rdmd(args: &[String]) -> i32 {
         println!("  --build-only  Only compile, don't run");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".d")).map(|s| s.as_str()).unwrap_or("script.d");
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".d"))
+        .map(|s| s.as_str())
+        .unwrap_or("script.d");
     println!("rdmd: compiling and running {}", file);
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "dmd".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "dmd".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "dub" => run_dub(&rest),
@@ -122,7 +138,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_dmd};
+    use super::{basename, run_dmd, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `matplotlib`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -30,7 +31,9 @@ fn run_matplotlib(args: &[String]) -> i32 {
         }
         "backends" => {
             println!("Available backends:");
-            println!("  Interactive: GTK3Agg, GTK3Cairo, GTK4Agg, GTK4Cairo, Qt5Agg, Qt5Cairo, TkAgg, WxAgg");
+            println!(
+                "  Interactive: GTK3Agg, GTK3Cairo, GTK4Agg, GTK4Cairo, Qt5Agg, Qt5Cairo, TkAgg, WxAgg"
+            );
             println!("  Non-interactive: agg, cairo, pdf, pgf, ps, svg, template");
             println!("  Current: agg");
         }
@@ -54,7 +57,7 @@ fn run_matplotlib(args: &[String]) -> i32 {
             println!("test_text: 89 passed");
             println!("All 902 tests passed.");
         }
-        _ => println!("matplotlib: command '{}' completed", subcmd),
+        _ => println!("matplotlib: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -68,7 +71,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_matplotlib};
+    use super::run_matplotlib;
 
     #[test]
     fn help_exits_zero() {

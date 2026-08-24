@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `hyprctl`, `hyprpm`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_hyprland(args: &[String], prog: &str) -> i32 {
     if prog == "hyprpm" {
@@ -36,22 +41,22 @@ fn run_hyprland(args: &[String], prog: &str) -> i32 {
             "reload" => println!("hyprpm: Plugins reloaded."),
             "add" => {
                 let url = args.get(1).map(|s| s.as_str()).unwrap_or("<url>");
-                println!("hyprpm: Adding repository '{}'...", url);
+                println!("hyprpm: Adding repository {}...", quoteaf_os(url));
                 println!("hyprpm: Done.");
             }
             "remove" => {
                 let name = args.get(1).map(|s| s.as_str()).unwrap_or("<plugin>");
-                println!("hyprpm: Removing '{}'...", name);
+                println!("hyprpm: Removing {}...", quoteaf_os(name));
             }
             "enable" => {
                 let name = args.get(1).map(|s| s.as_str()).unwrap_or("<plugin>");
-                println!("hyprpm: Enabled '{}'.", name);
+                println!("hyprpm: Enabled {}.", quoteaf_os(name));
             }
             "disable" => {
                 let name = args.get(1).map(|s| s.as_str()).unwrap_or("<plugin>");
-                println!("hyprpm: Disabled '{}'.", name);
+                println!("hyprpm: Disabled {}.", quoteaf_os(name));
             }
-            _ => println!("hyprpm: unknown command '{}'", cmd),
+            _ => println!("hyprpm: unknown command {}", quoteaf_os(cmd)),
         }
         return 0;
     }
@@ -83,13 +88,18 @@ fn run_hyprland(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     let json = args.iter().any(|a| a == "-j");
-    let cmd = args.iter().find(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("version");
+    let cmd = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("version");
 
     match cmd {
         "version" => {
             if json {
-                println!("{{\"branch\":\"\",\"commit\":\"main\",\"tag\":\"v0.40.0\",\"flags\":[]}}");
+                println!(
+                    "{{\"branch\":\"\",\"commit\":\"main\",\"tag\":\"v0.40.0\",\"flags\":[]}}"
+                );
             } else {
                 println!("Hyprland, built from branch main at commit main (Slate OS).");
                 println!("Tag: v0.40.0");
@@ -97,7 +107,9 @@ fn run_hyprland(args: &[String], prog: &str) -> i32 {
         }
         "monitors" => {
             if json {
-                println!("[{{\"id\":0,\"name\":\"DP-1\",\"description\":\"Dell U2723QE\",\"width\":2560,\"height\":1440,\"refreshRate\":60.0,\"x\":0,\"y\":0,\"scale\":1.0,\"focused\":true}}]");
+                println!(
+                    "[{{\"id\":0,\"name\":\"DP-1\",\"description\":\"Dell U2723QE\",\"width\":2560,\"height\":1440,\"refreshRate\":60.0,\"x\":0,\"y\":0,\"scale\":1.0,\"focused\":true}}]"
+                );
             } else {
                 println!("Monitor DP-1 (ID 0):");
                 println!("  2560x1440@60.00 at 0x0");
@@ -107,7 +119,9 @@ fn run_hyprland(args: &[String], prog: &str) -> i32 {
         }
         "workspaces" => {
             if json {
-                println!("[{{\"id\":1,\"name\":\"1\",\"monitor\":\"DP-1\",\"windows\":2,\"lastwindow\":\"0x1234\"}}]");
+                println!(
+                    "[{{\"id\":1,\"name\":\"1\",\"monitor\":\"DP-1\",\"windows\":2,\"lastwindow\":\"0x1234\"}}]"
+                );
             } else {
                 println!("workspace ID 1 (1) on monitor DP-1:");
                 println!("  windows: 2");
@@ -124,7 +138,9 @@ fn run_hyprland(args: &[String], prog: &str) -> i32 {
         }
         "clients" => {
             if json {
-                println!("[{{\"address\":\"0x1234\",\"mapped\":true,\"title\":\"Terminal\",\"class\":\"kitty\",\"workspace\":{{\"id\":1,\"name\":\"1\"}}}}]");
+                println!(
+                    "[{{\"address\":\"0x1234\",\"mapped\":true,\"title\":\"Terminal\",\"class\":\"kitty\",\"workspace\":{{\"id\":1,\"name\":\"1\"}}}}]"
+                );
             } else {
                 println!("Window 0x1234 -> Terminal:");
                 println!("  class: kitty");
@@ -133,7 +149,9 @@ fn run_hyprland(args: &[String], prog: &str) -> i32 {
         }
         "activewindow" => {
             if json {
-                println!("{{\"address\":\"0x1234\",\"title\":\"Terminal\",\"class\":\"kitty\",\"workspace\":{{\"id\":1}}}}");
+                println!(
+                    "{{\"address\":\"0x1234\",\"title\":\"Terminal\",\"class\":\"kitty\",\"workspace\":{{\"id\":1}}}}"
+                );
             } else {
                 println!("Window 0x1234 -> Terminal:");
                 println!("  class: kitty");
@@ -141,7 +159,9 @@ fn run_hyprland(args: &[String], prog: &str) -> i32 {
         }
         "devices" => {
             if json {
-                println!("{{\"mice\":[],\"keyboards\":[{{\"address\":\"0x01\",\"name\":\"AT keyboard\",\"rules\":{{}}}}],\"tablets\":[],\"touch\":[]}}");
+                println!(
+                    "{{\"mice\":[],\"keyboards\":[{{\"address\":\"0x01\",\"name\":\"AT keyboard\",\"rules\":{{}}}}],\"tablets\":[],\"touch\":[]}}"
+                );
             } else {
                 println!("keyboards:");
                 println!("  AT keyboard at 0x01");
@@ -150,8 +170,12 @@ fn run_hyprland(args: &[String], prog: &str) -> i32 {
         "layers" => println!("Namespace: (no layers)"),
         "binds" => println!("(no binds configured)"),
         "dispatch" => {
-            let action = args.iter().skip_while(|a| a.as_str() != "dispatch").nth(1)
-                .map(|s| s.as_str()).unwrap_or("exec");
+            let action = args
+                .iter()
+                .skip_while(|a| a.as_str() != "dispatch")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("exec");
             println!("ok (dispatched: {})", action);
         }
         "keyword" => println!("ok"),
@@ -165,7 +189,10 @@ fn run_hyprland(args: &[String], prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "hyprctl".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "hyprctl".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_hyprland(&rest, &prog);
     process::exit(code);
@@ -173,7 +200,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_hyprland};
+    use super::{basename, run_hyprland, strip_ext};
 
     #[test]
     fn basename_strips_path() {

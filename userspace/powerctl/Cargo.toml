@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS power management — shutdown, reboot, suspend, hibernate"
 [dependencies]
+# It interpolates `other` into "error: unknown action {} (expected shutdown
+# or reboot)". That value is an argv word, so it is whatever the user typed
+# and not text this program chose.
+quoting = { path = "../quoting" }

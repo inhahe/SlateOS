@@ -4,11 +4,16 @@
 //!
 //! Single personality: `oxipng`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_oxipng(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -34,7 +39,8 @@ fn run_oxipng(args: &[String], _prog: &str) -> i32 {
         println!("oxipng 9.1.2 (Slate OS)");
         return 0;
     }
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -43,7 +49,7 @@ fn run_oxipng(args: &[String], _prog: &str) -> i32 {
         return 1;
     }
     for f in &files {
-        println!("oxipng: Optimizing '{}' (RGBA, 1920x1080)", f);
+        println!("oxipng: Optimizing {} (RGBA, 1920x1080)", quoteaf_os(f));
         println!("  Original: 2048000 bytes");
         println!("  Optimized: 1843200 bytes (10.0% reduction)");
     }
@@ -52,7 +58,10 @@ fn run_oxipng(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "oxipng".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "oxipng".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_oxipng(&rest, &prog);
     process::exit(code);
@@ -60,7 +69,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_oxipng};
+    use super::{basename, run_oxipng, strip_ext};
 
     #[test]
     fn basename_strips_path() {

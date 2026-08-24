@@ -2,3 +2,8 @@
 name = "gitbook-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# gitbook-cli names books, chapters and output directories, read from the
+# command line and from the book's own config.
+quoting = { path = "../quoting" }

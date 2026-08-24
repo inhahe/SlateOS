@@ -4,6 +4,7 @@
 //!
 //! Single personality: `prisma`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -34,8 +35,11 @@ fn run_prisma(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "init" => {
-            let datasource = args.windows(2).find(|w| w[0] == "--datasource-provider")
-                .map(|w| w[1].as_str()).unwrap_or("postgresql");
+            let datasource = args
+                .windows(2)
+                .find(|w| w[0] == "--datasource-provider")
+                .map(|w| w[1].as_str())
+                .unwrap_or("postgresql");
             println!("✔ Your Prisma schema was created at prisma/schema.prisma");
             println!("  Datasource: {}", datasource);
             println!();
@@ -49,7 +53,9 @@ fn run_prisma(args: Vec<String>) -> i32 {
         "generate" => {
             println!("Prisma schema loaded from prisma/schema.prisma");
             println!();
-            println!("✔ Generated Prisma Client (v5.8.1) to ./node_modules/@prisma/client in 234ms");
+            println!(
+                "✔ Generated Prisma Client (v5.8.1) to ./node_modules/@prisma/client in 234ms"
+            );
             println!();
             println!("  3 models: User, Post, Comment");
             println!("  12 operations generated");
@@ -81,7 +87,9 @@ fn run_prisma(args: Vec<String>) -> i32 {
                     println!("  Created 50 comments");
                     println!("🌱 Database seeded successfully.");
                 }
-                _ => { println!("Database operation: {}", sub); }
+                _ => {
+                    println!("Database operation: {}", sub);
+                }
             }
             0
         }
@@ -89,8 +97,11 @@ fn run_prisma(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("dev");
             match sub {
                 "dev" => {
-                    let name = args.windows(2).find(|w| w[0] == "--name")
-                        .map(|w| w[1].as_str()).unwrap_or("add_users");
+                    let name = args
+                        .windows(2)
+                        .find(|w| w[0] == "--name")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("add_users");
                     println!("Prisma schema loaded from prisma/schema.prisma");
                     println!("Datasource \"db\": PostgreSQL database \"mydb\"");
                     println!();
@@ -121,13 +132,18 @@ fn run_prisma(args: Vec<String>) -> i32 {
                     println!("  Database reset and all migrations applied.");
                     println!("  Seed data applied.");
                 }
-                _ => { println!("Migrate operation: {}", sub); }
+                _ => {
+                    println!("Migrate operation: {}", sub);
+                }
             }
             0
         }
         "studio" => {
-            let port = args.windows(2).find(|w| w[0] == "--port")
-                .map(|w| w[1].as_str()).unwrap_or("5555");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("5555");
             println!("Prisma Studio is up on http://localhost:{}", port);
             0
         }
@@ -145,7 +161,7 @@ fn run_prisma(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: prisma <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -161,7 +177,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_prisma};
+    use super::run_prisma;
 
     #[test]
     fn help_exits_zero() {

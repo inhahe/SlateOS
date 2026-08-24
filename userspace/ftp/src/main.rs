@@ -69,11 +69,9 @@
 // defensive `arithmetic_side_effects`, `indexing_slicing`, and
 // `slicing` lints fire on every such site (30+ warnings) with no real
 // DoS risk; the wire data is length-validated by the read layer.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fmt;
 use std::fs;
@@ -1457,7 +1455,7 @@ impl FtpSession {
         };
 
         if matching.is_empty() {
-            println!("No files match '{pattern}'.");
+            println!("No files match {}.", quoteaf_os(pattern));
             return Ok(());
         }
 
@@ -1496,7 +1494,7 @@ impl FtpSession {
         };
 
         if matching.is_empty() {
-            println!("No local files match '{pattern}'.");
+            println!("No local files match {}.", quoteaf_os(pattern));
             return Ok(());
         }
 

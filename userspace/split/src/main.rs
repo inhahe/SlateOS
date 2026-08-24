@@ -25,6 +25,7 @@
 //!       --version             Output version information and exit
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -157,7 +158,7 @@ fn parse_args(args: &[String]) -> ParseResult {
             } else if prefix.is_none() {
                 prefix = Some(arg.clone());
             } else {
-                eprintln!("split: extra operand '{arg}'");
+                eprintln!("split: extra operand {}", quoteaf_os(arg));
                 eprintln!("Try 'split --help' for more information.");
                 process::exit(1);
             }
@@ -219,7 +220,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     filter = Some(v.to_string());
                 }
                 _ => {
-                    eprintln!("split: unrecognized option '{arg}'");
+                    eprintln!("split: unrecognized option {}", quoteaf_os(arg));
                     eprintln!("Try 'split --help' for more information.");
                     process::exit(1);
                 }
@@ -267,7 +268,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     break;
                 }
                 _ => {
-                    eprintln!("split: invalid option -- '{ch}'");
+                    eprintln!("split: invalid option -- {}", quoteaf_os(ch.to_string()));
                     eprintln!("Try 'split --help' for more information.");
                     process::exit(1);
                 }
@@ -309,7 +310,7 @@ fn collect_or_next(
     }
     *i += 1;
     if *i >= args.len() {
-        eprintln!("split: option '{flag}' requires an argument");
+        eprintln!("split: option {} requires an argument", quoteaf_os(flag));
         eprintln!("Try 'split --help' for more information.");
         process::exit(1);
     }
@@ -333,7 +334,7 @@ fn parse_positive(s: &str, flag: &str) -> u64 {
     match s.parse::<u64>() {
         Ok(n) if n > 0 => n,
         _ => {
-            eprintln!("split: invalid number of {flag}: '{s}'");
+            eprintln!("split: invalid number of {flag}: {}", quoteaf_os(s));
             process::exit(1);
         }
     }
@@ -344,7 +345,10 @@ fn parse_byte_val(s: &str, flag: &str) -> u64 {
     match parse_byte_size(s) {
         Some(n) if n > 0 => n,
         _ => {
-            eprintln!("split: invalid number of bytes for {flag}: '{s}'");
+            eprintln!(
+                "split: invalid number of bytes for {flag}: {}",
+                quoteaf_os(s)
+            );
             process::exit(1);
         }
     }
@@ -385,7 +389,10 @@ fn make_suffix(idx: u64, len: usize, numeric: bool) -> Option<String> {
 /// Build the full output filename for piece `idx`.
 fn output_name(config: &Config, idx: u64) -> Option<String> {
     let suffix = make_suffix(idx, config.suffix_len, config.numeric)?;
-    Some(format!("{}{}{}", config.prefix, suffix, config.additional_suffix))
+    Some(format!(
+        "{}{}{}",
+        config.prefix, suffix, config.additional_suffix
+    ))
 }
 
 // ============================================================================
@@ -395,7 +402,7 @@ fn output_name(config: &Config, idx: u64) -> Option<String> {
 /// Create (or truncate) an output file and optionally print a diagnostic.
 fn open_output(path: &str, verbose: bool) -> io::Result<File> {
     if verbose {
-        eprintln!("creating file '{path}'");
+        eprintln!("creating file {}", quoteaf_os(path));
     }
     File::create(path)
 }
@@ -427,9 +434,8 @@ fn split_by_lines(config: &Config, reader: &mut dyn BufRead) -> io::Result<()> {
         if line_count.is_multiple_of(chunk_lines) {
             // Flush previous file (drop closes it).
             drop(out.take());
-            let name = output_name(config, file_idx).ok_or_else(|| {
-                io::Error::other("output file suffixes exhausted")
-            })?;
+            let name = output_name(config, file_idx)
+                .ok_or_else(|| io::Error::other("output file suffixes exhausted"))?;
             out = Some(open_output(&name, config.verbose)?);
             file_idx += 1;
         }
@@ -465,9 +471,8 @@ fn split_by_bytes(config: &Config, reader: &mut dyn Read) -> io::Result<()> {
         while offset < n {
             // Open a new file if needed.
             if out.is_none() {
-                let name = output_name(config, file_idx).ok_or_else(|| {
-                    io::Error::other("output file suffixes exhausted")
-                })?;
+                let name = output_name(config, file_idx)
+                    .ok_or_else(|| io::Error::other("output file suffixes exhausted"))?;
                 out = Some(open_output(&name, config.verbose)?);
                 file_idx += 1;
                 bytes_in_chunk = 0;
@@ -524,9 +529,8 @@ fn split_by_line_bytes(config: &Config, reader: &mut dyn BufRead) -> io::Result<
 
         // Open a new file if needed.
         if out.is_none() {
-            let name = output_name(config, file_idx).ok_or_else(|| {
-                io::Error::other("output file suffixes exhausted")
-            })?;
+            let name = output_name(config, file_idx)
+                .ok_or_else(|| io::Error::other("output file suffixes exhausted"))?;
             out = Some(open_output(&name, config.verbose)?);
             file_idx += 1;
         }
@@ -565,7 +569,11 @@ fn split_by_number(config: &Config, reader: &mut dyn Read) -> io::Result<()> {
 
     let total = data.len() as u64;
     // Size of each chunk (last one may be smaller).
-    let chunk_size = if total == 0 { 0 } else { total.div_ceil(num_files) };
+    let chunk_size = if total == 0 {
+        0
+    } else {
+        total.div_ceil(num_files)
+    };
 
     let mut offset: u64 = 0;
     for idx in 0..num_files {
@@ -578,9 +586,8 @@ fn split_by_number(config: &Config, reader: &mut dyn Read) -> io::Result<()> {
             continue;
         }
 
-        let name = output_name(config, idx).ok_or_else(|| {
-            io::Error::other("output file suffixes exhausted")
-        })?;
+        let name = output_name(config, idx)
+            .ok_or_else(|| io::Error::other("output file suffixes exhausted"))?;
         let mut f = open_output(&name, config.verbose)?;
         f.write_all(piece)?;
 
@@ -597,9 +604,10 @@ fn elide_empty_files(config: &Config, count: u64) {
     for idx in 0..count {
         if let Some(name) = output_name(config, idx)
             && let Ok(meta) = fs::metadata(&name)
-                && meta.len() == 0 {
-                    let _ = fs::remove_file(&name);
-                }
+            && meta.len() == 0
+        {
+            let _ = fs::remove_file(&name);
+        }
     }
 }
 
@@ -679,9 +687,8 @@ fn run_split(config: &Config) -> io::Result<()> {
             let mut reader: Box<dyn BufRead> = if config.input_path == "-" {
                 Box::new(stdin.lock())
             } else {
-                let f = File::open(&config.input_path).map_err(|e| {
-                    io::Error::new(e.kind(), format!("{}: {e}", config.input_path))
-                })?;
+                let f = File::open(&config.input_path)
+                    .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", config.input_path)))?;
                 Box::new(BufReader::new(f))
             };
             split_by_lines(config, &mut *reader)?;
@@ -696,9 +703,8 @@ fn run_split(config: &Config) -> io::Result<()> {
             let mut reader: Box<dyn Read> = if config.input_path == "-" {
                 Box::new(stdin.lock())
             } else {
-                let f = File::open(&config.input_path).map_err(|e| {
-                    io::Error::new(e.kind(), format!("{}: {e}", config.input_path))
-                })?;
+                let f = File::open(&config.input_path)
+                    .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", config.input_path)))?;
                 Box::new(BufReader::new(f))
             };
             split_by_bytes(config, &mut *reader)?;
@@ -711,9 +717,8 @@ fn run_split(config: &Config) -> io::Result<()> {
             let mut reader: Box<dyn BufRead> = if config.input_path == "-" {
                 Box::new(stdin.lock())
             } else {
-                let f = File::open(&config.input_path).map_err(|e| {
-                    io::Error::new(e.kind(), format!("{}: {e}", config.input_path))
-                })?;
+                let f = File::open(&config.input_path)
+                    .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", config.input_path)))?;
                 Box::new(BufReader::new(f))
             };
             split_by_line_bytes(config, &mut *reader)?;
@@ -726,9 +731,8 @@ fn run_split(config: &Config) -> io::Result<()> {
             let mut reader: Box<dyn Read> = if config.input_path == "-" {
                 Box::new(stdin.lock())
             } else {
-                let f = File::open(&config.input_path).map_err(|e| {
-                    io::Error::new(e.kind(), format!("{}: {e}", config.input_path))
-                })?;
+                let f = File::open(&config.input_path)
+                    .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", config.input_path)))?;
                 Box::new(BufReader::new(f))
             };
             split_by_number(config, &mut *reader)?;

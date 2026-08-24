@@ -2,3 +2,8 @@
 name = "ghdl-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# ghdl-cli names VHDL source files and the unit and entity names parsed out
+# of them, so both the paths and the identifiers are the user's.
+quoting = { path = "../quoting" }

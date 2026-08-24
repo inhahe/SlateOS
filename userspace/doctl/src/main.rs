@@ -4,6 +4,7 @@
 //!
 //! Single personality: `doctl`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -73,8 +74,12 @@ fn run_doctl(args: Vec<String>) -> i32 {
             0
         }
         "balance" => {
-            println!("Month-to-Date Balance     Account Balance     Month-to-Date Usage     Generated At");
-            println!("$12.34                    $0.00               $12.34                  2024-01-15T14:00:00Z");
+            println!(
+                "Month-to-Date Balance     Account Balance     Month-to-Date Usage     Generated At"
+            );
+            println!(
+                "$12.34                    $0.00               $12.34                  2024-01-15T14:00:00Z"
+            );
             0
         }
         "compute" => {
@@ -83,35 +88,55 @@ fn run_doctl(args: Vec<String>) -> i32 {
                     let sub = args.get(2).map(|s| s.as_str()).unwrap_or("list");
                     match sub {
                         "list" => {
-                            println!("ID          Name            Public IPv4      Region    Status    Size");
-                            println!("12345678    web-1           167.172.5.100    nyc1      active    s-2vcpu-4gb");
-                            println!("23456789    web-2           167.172.5.101    nyc1      active    s-2vcpu-4gb");
-                            println!("34567890    db-1            167.172.5.102    nyc1      active    s-4vcpu-8gb");
+                            println!(
+                                "ID          Name            Public IPv4      Region    Status    Size"
+                            );
+                            println!(
+                                "12345678    web-1           167.172.5.100    nyc1      active    s-2vcpu-4gb"
+                            );
+                            println!(
+                                "23456789    web-2           167.172.5.101    nyc1      active    s-2vcpu-4gb"
+                            );
+                            println!(
+                                "34567890    db-1            167.172.5.102    nyc1      active    s-4vcpu-8gb"
+                            );
                         }
                         "create" => {
                             let name = args.get(3).map(|s| s.as_str()).unwrap_or("new-droplet");
-                            println!("ID          Name           Public IPv4       Region    Status");
+                            println!(
+                                "ID          Name           Public IPv4       Region    Status"
+                            );
                             println!("45678901    {}    167.172.5.103    nyc1      new", name);
                         }
                         "delete" => {
                             let id = args.get(3).map(|s| s.as_str()).unwrap_or("12345678");
                             println!("Droplet {} deleted.", id);
                         }
-                        _ => { println!("Droplet operation: {}", sub); }
+                        _ => {
+                            println!("Droplet operation: {}", sub);
+                        }
                     }
                 }
                 "volume" => {
                     let sub = args.get(2).map(|s| s.as_str()).unwrap_or("list");
                     match sub {
                         "list" => {
-                            println!("ID                                      Name        Size      Region    Droplet IDs");
-                            println!("abc123-def456-ghi789                    data-vol    100 GiB   nyc1      12345678");
+                            println!(
+                                "ID                                      Name        Size      Region    Droplet IDs"
+                            );
+                            println!(
+                                "abc123-def456-ghi789                    data-vol    100 GiB   nyc1      12345678"
+                            );
                         }
-                        _ => { println!("Volume operation: {}", sub); }
+                        _ => {
+                            println!("Volume operation: {}", sub);
+                        }
                     }
                 }
                 _ => {
-                    eprintln!("Usage: doctl compute <droplet|volume|load-balancer|...>. See --help.");
+                    eprintln!(
+                        "Usage: doctl compute <droplet|volume|load-balancer|...>. See --help."
+                    );
                     return 1;
                 }
             }
@@ -123,8 +148,12 @@ fn run_doctl(args: Vec<String>) -> i32 {
                     let sub = args.get(2).map(|s| s.as_str()).unwrap_or("list");
                     match sub {
                         "list" => {
-                            println!("ID                                      Name           Region    Version         Nodes    Status");
-                            println!("abc-123-def-456                         prod-k8s       nyc1      1.28.2-do.0     3        running");
+                            println!(
+                                "ID                                      Name           Region    Version         Nodes    Status"
+                            );
+                            println!(
+                                "abc-123-def-456                         prod-k8s       nyc1      1.28.2-do.0     3        running"
+                            );
                         }
                         "kubeconfig" => {
                             let subsub = args.get(3).map(|s| s.as_str()).unwrap_or("save");
@@ -132,7 +161,9 @@ fn run_doctl(args: Vec<String>) -> i32 {
                                 println!("Notice: Adding cluster credentials to kubeconfig.");
                             }
                         }
-                        _ => { println!("Cluster operation: {}", sub); }
+                        _ => {
+                            println!("Cluster operation: {}", sub);
+                        }
                     }
                 }
                 _ => {
@@ -145,8 +176,12 @@ fn run_doctl(args: Vec<String>) -> i32 {
         "apps" => {
             match command {
                 "list" => {
-                    println!("ID                                      Spec Name      Default Ingress    Active Deployment    Updated At");
-                    println!("abc-123-def-456                         my-app         my-app.ondigitalocean.app    12345    2024-01-15T14:00:00Z");
+                    println!(
+                        "ID                                      Spec Name      Default Ingress    Active Deployment    Updated At"
+                    );
+                    println!(
+                        "abc-123-def-456                         my-app         my-app.ondigitalocean.app    12345    2024-01-15T14:00:00Z"
+                    );
                 }
                 "create" => {
                     println!("Notice: App created successfully.");
@@ -154,7 +189,9 @@ fn run_doctl(args: Vec<String>) -> i32 {
                     println!("Default Ingress: my-new-app.ondigitalocean.app");
                 }
                 _ => {
-                    eprintln!("Usage: doctl apps <list|create|get|update|delete|logs>. See --help.");
+                    eprintln!(
+                        "Usage: doctl apps <list|create|get|update|delete|logs>. See --help."
+                    );
                     return 1;
                 }
             }
@@ -173,7 +210,9 @@ fn run_doctl(args: Vec<String>) -> i32 {
                     }
                 }
                 _ => {
-                    eprintln!("Usage: doctl registry <login|create|get|repository|...>. See --help.");
+                    eprintln!(
+                        "Usage: doctl registry <login|create|get|repository|...>. See --help."
+                    );
                     return 1;
                 }
             }
@@ -183,7 +222,7 @@ fn run_doctl(args: Vec<String>) -> i32 {
             if group.is_empty() {
                 eprintln!("Usage: doctl <group> <command>. See --help.");
             } else {
-                eprintln!("Error: unknown group '{}'. See --help.", group);
+                eprintln!("Error: unknown group {}. See --help.", quoteaf_os(group));
             }
             1
         }
@@ -199,7 +238,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_doctl};
+    use super::run_doctl;
 
     #[test]
     fn help_exits_zero() {

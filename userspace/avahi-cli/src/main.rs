@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `avahi-browse`, `avahi-resolve`, `avahi-publish`, `avahi-daemon`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_avahi_browse(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -28,19 +33,34 @@ fn run_avahi_browse(args: &[String]) -> i32 {
     let resolve = args.iter().any(|a| a == "-r" || a == "--resolve");
 
     if all {
-        println!("+   eth0 IPv4 slateos-desktop                          _workstation._tcp    local");
-        println!("+   eth0 IPv4 slateos-desktop                          _ssh._tcp            local");
-        println!("+   eth0 IPv4 slateos-desktop                          _sftp-ssh._tcp       local");
+        println!(
+            "+   eth0 IPv4 slateos-desktop                          _workstation._tcp    local"
+        );
+        println!(
+            "+   eth0 IPv4 slateos-desktop                          _ssh._tcp            local"
+        );
+        println!(
+            "+   eth0 IPv4 slateos-desktop                          _sftp-ssh._tcp       local"
+        );
         println!("+   eth0 IPv4 Living Room Speaker                    _raop._tcp           local");
         println!("+   eth0 IPv4 Printer-HP4500                         _ipp._tcp            local");
         println!("+   eth0 IPv4 NAS-Storage                            _smb._tcp            local");
     } else {
-        let stype = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("_http._tcp");
-        println!("+   eth0 IPv4 Web Server                             {}    local", stype);
+        let stype = args
+            .iter()
+            .find(|a| !a.starts_with('-'))
+            .map(|s| s.as_str())
+            .unwrap_or("_http._tcp");
+        println!(
+            "+   eth0 IPv4 Web Server                             {}    local",
+            stype
+        );
     }
 
     if resolve {
-        println!("=   eth0 IPv4 slateos-desktop                          _ssh._tcp            local");
+        println!(
+            "=   eth0 IPv4 slateos-desktop                          _ssh._tcp            local"
+        );
         println!("   hostname = [slateos-desktop.local]");
         println!("   address = [192.168.1.100]");
         println!("   port = [22]");
@@ -56,7 +76,11 @@ fn run_avahi_resolve(args: &[String]) -> i32 {
         return 0;
     }
 
-    let target = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("slateos-desktop.local");
+    let target = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("slateos-desktop.local");
     if args.iter().any(|a| a == "-a") {
         println!("{}\tslateos-desktop.local", target);
     } else {
@@ -73,8 +97,12 @@ fn run_avahi_publish(args: &[String]) -> i32 {
         return 0;
     }
 
-    let name = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("My Service");
-    println!("Established under name '{}'", name);
+    let name = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("My Service");
+    println!("Established under name {}", quoteaf_os(name));
     0
 }
 
@@ -107,11 +135,18 @@ fn run_avahi_daemon(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "avahi-browse".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "avahi-browse".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
-        "avahi-resolve" | "avahi-resolve-host-name" | "avahi-resolve-address" => run_avahi_resolve(&rest),
-        "avahi-publish" | "avahi-publish-service" | "avahi-publish-address" => run_avahi_publish(&rest),
+        "avahi-resolve" | "avahi-resolve-host-name" | "avahi-resolve-address" => {
+            run_avahi_resolve(&rest)
+        }
+        "avahi-publish" | "avahi-publish-service" | "avahi-publish-address" => {
+            run_avahi_publish(&rest)
+        }
         "avahi-daemon" => run_avahi_daemon(&rest),
         _ => run_avahi_browse(&rest),
     };
@@ -120,7 +155,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_avahi_browse};
+    use super::{basename, run_avahi_browse, strip_ext};
 
     #[test]
     fn basename_strips_path() {

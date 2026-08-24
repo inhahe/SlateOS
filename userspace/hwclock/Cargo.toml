@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS hardware clock and time management"
 [dependencies]
+# It interpolates `tz` into "warning: unknown timezone {}, using UTC". That
+# value is whatever followed `--timezone`/`--tz` on the command line, and
+# the message is printed precisely because it was *not* recognised -- so it
+# is by construction a string this program never chose.
+quoting = { path = "../quoting" }
 
 # The POSIX `TZ`-rule engine, shared with the libc (`posix`), the shell
 # (`userspace/oils`), the desktop shell and the world clock. `hwclock` is the

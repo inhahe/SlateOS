@@ -23,6 +23,7 @@
 //! Each entry records the syscall number, PID, arguments, return value,
 //! timestamp, and duration.
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -928,7 +929,7 @@ fn run_trace(config: &Config) {
         match fs::File::create(path) {
             Ok(f) => Box::new(io::BufWriter::new(f)),
             Err(e) => {
-                eprintln!("strace: cannot open output file '{path}': {e}");
+                eprintln!("strace: cannot open output file {}: {e}", quoteaf_os(path));
                 process::exit(1);
             }
         }
@@ -1179,7 +1180,10 @@ fn parse_args() -> Config {
                 let expr = value(&mut it, "-e", "a filter expression");
                 let filter = parse_filter(&expr, &table);
                 if filter.is_empty() {
-                    eprintln!("strace: warning: filter '{expr}' matched no syscalls");
+                    eprintln!(
+                        "strace: warning: filter {} matched no syscalls",
+                        quoteaf_os(&expr)
+                    );
                 }
                 config.filter_syscalls.extend(filter);
             }

@@ -4,11 +4,16 @@
 //!
 //! Single personality: `navi`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_navi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -36,7 +41,9 @@ fn run_navi(args: &[String], _prog: &str) -> i32 {
         println!("navi 2.23.0 (Slate OS)");
         return 0;
     }
-    let cmd = args.iter().find(|a| !a.starts_with('-'))
+    let cmd = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
     match cmd {
         Some("info") => {
@@ -46,42 +53,73 @@ fn run_navi(args: &[String], _prog: &str) -> i32 {
             println!("  shell: bash");
         }
         Some("repo") => {
-            let sub = args.iter().skip_while(|a| a.as_str() != "repo").nth(1)
-                .map(|s| s.as_str()).unwrap_or("browse");
+            let sub = args
+                .iter()
+                .skip_while(|a| a.as_str() != "repo")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("browse");
             match sub {
                 "add" => {
-                    let url = args.iter().skip_while(|a| a.as_str() != "add").nth(1)
-                        .map(|s| s.as_str()).unwrap_or("<url>");
-                    println!("navi: Adding repo '{}'...", url);
+                    let url = args
+                        .iter()
+                        .skip_while(|a| a.as_str() != "add")
+                        .nth(1)
+                        .map(|s| s.as_str())
+                        .unwrap_or("<url>");
+                    println!("navi: Adding repo {}...", quoteaf_os(url));
                 }
                 "browse" => println!("navi: Opening cheat repo browser..."),
                 _ => println!("navi repo: {}", sub),
             }
         }
         Some("widget") => {
-            let shell = args.iter().skip_while(|a| a.as_str() != "widget").nth(1)
-                .map(|s| s.as_str()).unwrap_or("bash");
+            let shell = args
+                .iter()
+                .skip_while(|a| a.as_str() != "widget")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("bash");
             println!("# navi widget for {}", shell);
             println!("eval \"$(navi widget {})\"", shell);
         }
         Some("best") => {
-            let query = args.iter().skip_while(|a| a.as_str() != "best").nth(1)
-                .map(|s| s.as_str()).unwrap_or("find");
-            println!("navi best match for '{}': find . -name '*.txt'", query);
+            let query = args
+                .iter()
+                .skip_while(|a| a.as_str() != "best")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("find");
+            println!(
+                "navi best match for {}: find . -name '*.txt'",
+                quoteaf_os(query)
+            );
         }
         Some("fn") => {
-            let func = args.iter().skip_while(|a| a.as_str() != "fn").nth(1)
-                .map(|s| s.as_str()).unwrap_or("<func>");
-            println!("navi fn: Executing '{}'", func);
+            let func = args
+                .iter()
+                .skip_while(|a| a.as_str() != "fn")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("<func>");
+            println!("navi fn: Executing {}", quoteaf_os(func));
         }
         _ => {
             if args.iter().any(|a| a == "--cheatsh") {
-                let query = args.iter().skip_while(|a| a.as_str() != "--cheatsh").nth(1)
-                    .map(|s| s.as_str()).unwrap_or("tar");
+                let query = args
+                    .iter()
+                    .skip_while(|a| a.as_str() != "--cheatsh")
+                    .nth(1)
+                    .map(|s| s.as_str())
+                    .unwrap_or("tar");
                 println!("navi (cheat.sh): {}", query);
             } else if args.iter().any(|a| a == "--tldr") {
-                let query = args.iter().skip_while(|a| a.as_str() != "--tldr").nth(1)
-                    .map(|s| s.as_str()).unwrap_or("tar");
+                let query = args
+                    .iter()
+                    .skip_while(|a| a.as_str() != "--tldr")
+                    .nth(1)
+                    .map(|s| s.as_str())
+                    .unwrap_or("tar");
                 println!("navi (tldr): {}", query);
             } else {
                 println!("navi: Interactive cheatsheet browser...");
@@ -93,7 +131,10 @@ fn run_navi(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "navi".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "navi".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_navi(&rest, &prog);
     process::exit(code);
@@ -101,7 +142,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_navi};
+    use super::{basename, run_navi, strip_ext};
 
     #[test]
     fn basename_strips_path() {

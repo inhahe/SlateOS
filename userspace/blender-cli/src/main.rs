@@ -4,6 +4,7 @@
 //!
 //! Single personality: `blender`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -41,12 +42,28 @@ fn run_blender(args: Vec<String>) -> i32 {
 
     let background = args.iter().any(|a| a == "-b" || a == "--background");
     let render_anim = args.iter().any(|a| a == "-a" || a == "--render-anim");
-    let render_frame = args.windows(2).find(|w| w[0] == "-f" || w[0] == "--render-frame").map(|w| w[1].as_str());
-    let engine = args.windows(2).find(|w| w[0] == "-E" || w[0] == "--engine").map(|w| w[1].as_str()).unwrap_or("CYCLES");
-    let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--render-output").map(|w| w[1].as_str());
-    let python = args.windows(2).find(|w| w[0] == "-P" || w[0] == "--python").map(|w| w[1].as_str());
+    let render_frame = args
+        .windows(2)
+        .find(|w| w[0] == "-f" || w[0] == "--render-frame")
+        .map(|w| w[1].as_str());
+    let engine = args
+        .windows(2)
+        .find(|w| w[0] == "-E" || w[0] == "--engine")
+        .map(|w| w[1].as_str())
+        .unwrap_or("CYCLES");
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o" || w[0] == "--render-output")
+        .map(|w| w[1].as_str());
+    let python = args
+        .windows(2)
+        .find(|w| w[0] == "-P" || w[0] == "--python")
+        .map(|w| w[1].as_str());
 
-    let file = args.iter().rfind(|a| !a.starts_with('-') && a.ends_with(".blend")).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .rfind(|a| !a.starts_with('-') && a.ends_with(".blend"))
+        .map(|s| s.as_str());
 
     if background {
         println!("Blender 4.0.2 (sub 0)");
@@ -70,7 +87,7 @@ fn run_blender(args: Vec<String>) -> i32 {
             println!("Saved: /tmp/frame{}.png", frame);
         }
     } else if let Some(f) = file {
-        println!("Blender 4.0.2 — opening '{}'", f);
+        println!("Blender 4.0.2 — opening {}", quoteaf_os(f));
     } else {
         println!("Blender 4.0.2 (Slate OS)");
         println!("Starting Blender GUI...");
@@ -87,7 +104,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_blender};
+    use super::run_blender;
 
     #[test]
     fn help_exits_zero() {

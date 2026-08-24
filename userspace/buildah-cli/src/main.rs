@@ -4,6 +4,7 @@
 //!
 //! Single personality: `buildah`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -54,7 +55,8 @@ fn run_buildah(args: Vec<String>) -> i32 {
             0
         }
         "bud" | "build" => {
-            let tag = args.windows(2)
+            let tag = args
+                .windows(2)
                 .find(|w| w[0] == "-t" || w[0] == "--tag")
                 .map(|w| w[1].as_str())
                 .unwrap_or("myimage:latest");
@@ -75,12 +77,19 @@ fn run_buildah(args: Vec<String>) -> i32 {
             0
         }
         "containers" => {
-            println!("CONTAINER ID  BUILDER  IMAGE ID       IMAGE NAME                CONTAINER NAME");
-            println!("abc123def4    *        def456abc789   docker.io/library/ubuntu  working-container-1");
+            println!(
+                "CONTAINER ID  BUILDER  IMAGE ID       IMAGE NAME                CONTAINER NAME"
+            );
+            println!(
+                "abc123def4    *        def456abc789   docker.io/library/ubuntu  working-container-1"
+            );
             0
         }
         "commit" => {
-            let container = args.get(1).map(|s| s.as_str()).unwrap_or("working-container-1");
+            let container = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("working-container-1");
             let image = args.get(2).map(|s| s.as_str()).unwrap_or("myimage:latest");
             println!("Getting image source signatures");
             println!("Copying blob abc123 done");
@@ -102,7 +111,7 @@ fn run_buildah(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: buildah <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -118,7 +127,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_buildah};
+    use super::run_buildah;
 
     #[test]
     fn help_exits_zero() {

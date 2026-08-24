@@ -48,7 +48,7 @@
 //! and there is no spelling that would quietly do the wrong thing.
 
 use crate::ch::{BStr, Ch, Str, chars};
-use crate::engine::{EreError, Regex};
+use crate::engine::{EreError, RegCode, Regex};
 
 /// Compile a BRE, with `ci` selecting case-insensitive matching.
 ///
@@ -85,7 +85,10 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
         match c.as_ascii() {
             Some('\\') => {
                 let Some(&e) = cs.get(i.saturating_add(1)) else {
-                    return Err(EreError(b"trailing backslash in regex".to_vec()));
+                    return Err(EreError::new(
+                        RegCode::TrailingBackslash,
+                        b"trailing backslash in regex".to_vec(),
+                    ));
                 };
                 i = i.saturating_add(2);
                 match e.as_ascii() {
@@ -96,7 +99,10 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                     }
                     Some(')') => {
                         if depth == 0 {
-                            return Err(EreError(br"unmatched \)".to_vec()));
+                            return Err(EreError::new(
+                                RegCode::UnmatchedRightParen,
+                                br"unmatched \)".to_vec(),
+                            ));
                         }
                         out.push(b')');
                         depth = depth.saturating_sub(1);
@@ -104,18 +110,27 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                     }
                     Some('{') => {
                         if !prev_atom {
-                            return Err(EreError(br"nothing to repeat before \{".to_vec()));
+                            return Err(EreError::new(
+                                RegCode::BadRepeat,
+                                br"nothing to repeat before \{".to_vec(),
+                            ));
                         }
                         i = copy_interval(&cs, i, &mut out)?;
                     }
-                    Some('}') => return Err(EreError(br"unmatched \}".to_vec())),
+                    Some('}') => {
+                        return Err(EreError::new(
+                            RegCode::UnmatchedBrace,
+                            br"unmatched \}".to_vec(),
+                        ));
+                    }
                     Some('|') => {
                         out.push(b'|');
                         prev_atom = false;
                     }
                     Some(q @ ('+' | '?')) => {
                         if !prev_atom {
-                            return Err(EreError(
+                            return Err(EreError::new(
+                                RegCode::BadRepeat,
                                 [b"nothing to repeat before \\".as_slice(), &[q as u8]].concat(),
                             ));
                         }
@@ -141,7 +156,8 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                         prev_atom = true;
                     }
                     Some(w @ ('<' | '>' | 'b' | 'B')) => {
-                        return Err(EreError(
+                        return Err(EreError::new(
+                            RegCode::BadPattern,
                             [
                                 b"word boundary \\".as_slice(),
                                 &[w as u8],
@@ -226,7 +242,10 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
     }
 
     if depth != 0 {
-        return Err(EreError(br"unmatched \(".to_vec()));
+        return Err(EreError::new(
+            RegCode::UnmatchedParen,
+            br"unmatched \(".to_vec(),
+        ));
     }
     Ok(out)
 }
@@ -254,7 +273,10 @@ fn copy_interval(cs: &[Ch], i: usize, out: &mut Str) -> Result<usize, EreError> 
     let mut body = Str::new();
     loop {
         let Some(&c) = cs.get(j) else {
-            return Err(EreError(br"unmatched \{".to_vec()));
+            return Err(EreError::new(
+                RegCode::UnmatchedBrace,
+                br"unmatched \{".to_vec(),
+            ));
         };
         if c.as_ascii() == Some('\\')
             && cs.get(j.saturating_add(1)).and_then(|n| n.as_ascii()) == Some('}')
@@ -282,21 +304,34 @@ fn copy_interval(cs: &[Ch], i: usize, out: &mut Str) -> Result<usize, EreError> 
 /// `[.coll.]` and `[=equiv=]` may contain a `]` of their own — all three are
 /// why the end of a bracket expression cannot be found by scanning for `]`.
 fn copy_bracket(cs: &[Ch], i: usize, out: &mut Str) -> Result<usize, EreError> {
-    let unmatched = || EreError(b"unmatched [ in regex".to_vec());
+    let unmatched = || EreError::new(RegCode::UnmatchedBracket, b"unmatched [ in regex".to_vec());
     let mut j = i.saturating_add(1);
     out.push(b'[');
     if cs.get(j).and_then(|c| c.as_ascii()) == Some('^') {
         out.push(b'^');
         j = j.saturating_add(1);
     }
+    // Whether the bracket got as far as holding anything. It decides only which
+    // *code* an unterminated bracket reports, and glibc draws the line here
+    // rather than anywhere sensible: `[` and `[^` are `REG_BADPAT`, while `[]`,
+    // `[^]` and `[a` are `REG_EBRACK`. A `[` at the very end of the pattern
+    // reaches glibc's "premature end" path before it reaches the one that knows
+    // a bracket was open. Measured against findutils 4.9.0 on glibc 2.39.
+    let mut saw_member = false;
     if cs.get(j).and_then(|c| c.as_ascii()) == Some(']') {
         out.push(b']');
         j = j.saturating_add(1);
+        saw_member = true;
     }
     loop {
         let Some(&c) = cs.get(j) else {
-            return Err(unmatched());
+            return Err(if saw_member {
+                unmatched()
+            } else {
+                EreError::new(RegCode::BadPattern, b"unmatched [ in regex".to_vec())
+            });
         };
+        saw_member = true;
         match c.as_ascii() {
             Some(']') => {
                 out.push(b']');
@@ -357,13 +392,14 @@ mod tests {
     }
 
     fn err(bre: &str) -> String {
-        String::from_utf8(to_ere(bre.as_bytes()).unwrap_err().0).unwrap()
+        String::from_utf8(to_ere(bre.as_bytes()).unwrap_err().detail).unwrap()
     }
 
     fn m(bre: &str, subject: &str) -> bool {
         compile(bre.as_bytes(), false)
             .unwrap()
-            .is_match(subject.as_bytes()).unwrap()
+            .is_match(subject.as_bytes())
+            .unwrap()
     }
 
     #[test]
@@ -505,15 +541,25 @@ mod tests {
         // second copy of the rule to keep in step with the first.
         let e = compile(br"\(a\)\2", false).unwrap_err();
         assert!(
-            String::from_utf8_lossy(&e.0).contains("invalid backreference"),
+            String::from_utf8_lossy(&e.detail).contains("invalid backreference"),
             "{}",
-            String::from_utf8_lossy(&e.0)
+            String::from_utf8_lossy(&e.detail)
         );
     }
 
     #[test]
     fn case_folding_reaches_the_translated_pattern() {
-        assert!(compile(b"^[a-z]*$", true).unwrap().is_match(b"ABC").unwrap());
-        assert!(compile(br"\(ab\)\{2\}", true).unwrap().is_match(b"ABAB").unwrap());
+        assert!(
+            compile(b"^[a-z]*$", true)
+                .unwrap()
+                .is_match(b"ABC")
+                .unwrap()
+        );
+        assert!(
+            compile(br"\(ab\)\{2\}", true)
+                .unwrap()
+                .is_match(b"ABAB")
+                .unwrap()
+        );
     }
 }

@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS tput/reset/clear - terminal capability tools"
 [dependencies]
+# It interpolates `cap_name` into "tput: unknown terminfo capability {}".
+# That value is the first word of an argv operand, or -- under `-S` -- the
+# first word of a line read from stdin, so it is outside data twice over and
+# not text this program chose.
+quoting = { path = "../quoting" }

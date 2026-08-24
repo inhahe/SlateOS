@@ -2,3 +2,8 @@
 name = "trivy-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# trivy-cli names images, packages and vulnerability identifiers taken from
+# a scanned image's own metadata.
+quoting = { path = "../quoting" }

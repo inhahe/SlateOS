@@ -4,6 +4,7 @@
 //!
 //! Single personality: `gitea`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -37,19 +38,32 @@ fn run_gitea(args: Vec<String>) -> i32 {
             0
         }
         "web" => {
-            let port = cmd_args.iter().position(|a| a == "--port" || a == "-p")
+            let port = cmd_args
+                .iter()
+                .position(|a| a == "--port" || a == "-p")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("3000");
             println!("2025/05/22 10:00:00 cmd/web.go:180: Starting Gitea on PID: 12345");
-            println!("2025/05/22 10:00:00 ...s/setting/log.go:120: Log mode: console(console:info)");
+            println!(
+                "2025/05/22 10:00:00 ...s/setting/log.go:120: Log mode: console(console:info)"
+            );
             println!("2025/05/22 10:00:00 ...s/setting/database.go:100: Database type: sqlite3");
             println!("2025/05/22 10:00:01 cmd/web.go:220: Global init");
             println!("2025/05/22 10:00:01 ...d/web/routing/logger.go:102: Router init");
-            println!("2025/05/22 10:00:01 ...s/graceful/server.go:62: Starting new Web server: tcp:0.0.0.0:{}", port);
+            println!(
+                "2025/05/22 10:00:01 ...s/graceful/server.go:62: Starting new Web server: tcp:0.0.0.0:{}",
+                port
+            );
             println!("2025/05/22 10:00:02 cmd/web.go:240: Gitea version: 1.22.0");
-            println!("2025/05/22 10:00:02 cmd/web.go:241: App URL: http://localhost:{}/", port);
-            println!("2025/05/22 10:00:02 cmd/web.go:242: Listening on http://0.0.0.0:{}", port);
+            println!(
+                "2025/05/22 10:00:02 cmd/web.go:241: App URL: http://localhost:{}/",
+                port
+            );
+            println!(
+                "2025/05/22 10:00:02 cmd/web.go:242: Listening on http://0.0.0.0:{}",
+                port
+            );
             0
         }
         "admin" => {
@@ -69,7 +83,9 @@ fn run_gitea(args: Vec<String>) -> i32 {
                     let action = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("list");
                     match action {
                         "list" => {
-                            println!("ID   Username     Email                    IsAdmin  IsActive");
+                            println!(
+                                "ID   Username     Email                    IsAdmin  IsActive"
+                            );
                             println!("1    admin        admin@localhost          true     true");
                             println!("2    alice        alice@example.com        false    true");
                             println!("3    bob          bob@example.com          false    true");
@@ -77,7 +93,9 @@ fn run_gitea(args: Vec<String>) -> i32 {
                         "create" => println!("New user created successfully!"),
                         "delete" => println!("User deleted successfully."),
                         "change-password" => println!("Password changed successfully."),
-                        _ => println!("Usage: gitea admin user <list|create|delete|change-password>"),
+                        _ => {
+                            println!("Usage: gitea admin user <list|create|delete|change-password>")
+                        }
                     }
                 }
                 "repo" => {
@@ -113,7 +131,9 @@ fn run_gitea(args: Vec<String>) -> i32 {
             0
         }
         "dump" => {
-            let output = cmd_args.iter().position(|a| a == "-f" || a == "--file")
+            let output = cmd_args
+                .iter()
+                .position(|a| a == "-f" || a == "--file")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("gitea-dump.zip");
@@ -143,7 +163,10 @@ fn run_gitea(args: Vec<String>) -> i32 {
             }
             0
         }
-        other => { eprintln!("gitea: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("gitea: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -156,7 +179,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_gitea};
+    use super::run_gitea;
 
     #[test]
     fn help_exits_zero() {

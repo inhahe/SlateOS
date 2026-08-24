@@ -24,6 +24,7 @@
 //! vmstat --help            Show help
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -176,13 +177,15 @@ fn read_file(path: &str) -> Option<String> {
 fn get_kv_value(content: &str, key: &str) -> u64 {
     for line in content.lines() {
         if let Some((k, v)) = line.split_once(':')
-            && k.trim() == key {
-                let trimmed = v.trim()
-                    .trim_end_matches(" kB")
-                    .trim_end_matches(" KB")
-                    .trim();
-                return trimmed.parse().unwrap_or(0);
-            }
+            && k.trim() == key
+        {
+            let trimmed = v
+                .trim()
+                .trim_end_matches(" kB")
+                .trim_end_matches(" KB")
+                .trim();
+            return trimmed.parse().unwrap_or(0);
+        }
     }
     0
 }
@@ -194,9 +197,10 @@ fn get_space_kv(content: &str, key: &str) -> u64 {
         let mut parts = line.split_whitespace();
         if let Some(k) = parts.next()
             && k == key
-                && let Some(v) = parts.next() {
-                    return v.parse().unwrap_or(0);
-                }
+            && let Some(v) = parts.next()
+        {
+            return v.parse().unwrap_or(0);
+        }
     }
     0
 }
@@ -224,8 +228,14 @@ fn read_meminfo() -> Option<MemInfo> {
 fn read_stat() -> Option<StatInfo> {
     let content = read_file("/proc/stat")?;
     let mut cpu = CpuTimes {
-        user: 0, nice: 0, system: 0, idle: 0,
-        iowait: 0, irq: 0, softirq: 0, steal: 0,
+        user: 0,
+        nice: 0,
+        system: 0,
+        idle: 0,
+        iowait: 0,
+        irq: 0,
+        softirq: 0,
+        steal: 0,
     };
     let mut interrupts: u64 = 0;
     let mut context_switches: u64 = 0;
@@ -334,8 +344,12 @@ fn take_snapshot() -> Option<Snapshot> {
     let mem = read_meminfo()?;
     let stat = read_stat()?;
     let vmstat = read_vmstat().unwrap_or(VmStatCounters {
-        pgpgin: 0, pgpgout: 0, pswpin: 0, pswpout: 0,
-        pgfault: 0, pgmajfault: 0,
+        pgpgin: 0,
+        pgpgout: 0,
+        pswpin: 0,
+        pswpout: 0,
+        pgfault: 0,
+        pgmajfault: 0,
     });
     Some(Snapshot { mem, stat, vmstat })
 }
@@ -364,7 +378,8 @@ fn convert_kib(kib: u64, unit: DisplayUnit) -> u64 {
 
 /// Total CPU ticks across all fields.
 fn cpu_total(c: &CpuTimes) -> u64 {
-    c.user.saturating_add(c.nice)
+    c.user
+        .saturating_add(c.nice)
         .saturating_add(c.system)
         .saturating_add(c.idle)
         .saturating_add(c.iowait)
@@ -394,12 +409,20 @@ fn cpu_percentages(delta: &CpuTimes) -> (u64, u64, u64, u64, u64) {
         return (0, 0, 100, 0, 0);
     }
     let us = (delta.user.saturating_add(delta.nice)).saturating_mul(100) / total;
-    let sy = (delta.system.saturating_add(delta.irq).saturating_add(delta.softirq))
-        .saturating_mul(100) / total;
+    let sy = (delta
+        .system
+        .saturating_add(delta.irq)
+        .saturating_add(delta.softirq))
+    .saturating_mul(100)
+        / total;
     let wa = delta.iowait.saturating_mul(100) / total;
     let st = delta.steal.saturating_mul(100) / total;
     // Idle gets the remainder so percentages always sum to 100.
-    let id = 100_u64.saturating_sub(us).saturating_sub(sy).saturating_sub(wa).saturating_sub(st);
+    let id = 100_u64
+        .saturating_sub(us)
+        .saturating_sub(sy)
+        .saturating_sub(wa)
+        .saturating_sub(st);
     (us, sy, id, wa, st)
 }
 
@@ -463,18 +486,22 @@ fn is_leap(year: u64) -> bool {
 fn current_epoch_secs() -> u64 {
     // Try /proc/uptime first for elapsed seconds, combined with btime.
     if let Some(content) = read_file("/proc/uptime") {
-        let uptime_secs: u64 = content.split_whitespace()
+        let uptime_secs: u64 = content
+            .split_whitespace()
             .next()
             .and_then(|s| {
                 // uptime may be a float like "12345.67"
-                s.split('.').next().and_then(|int_part| int_part.parse().ok())
+                s.split('.')
+                    .next()
+                    .and_then(|int_part| int_part.parse().ok())
             })
             .unwrap_or(0);
         // Read btime from /proc/stat.
         if let Some(stat_content) = read_file("/proc/stat") {
             for line in stat_content.lines() {
                 if line.starts_with("btime ") {
-                    let btime: u64 = line.split_whitespace()
+                    let btime: u64 = line
+                        .split_whitespace()
                         .nth(1)
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
@@ -494,7 +521,11 @@ fn current_epoch_secs() -> u64 {
 
 /// Print the vmstat header line.
 fn print_header(config: &Config) {
-    let w = if config.wide { WIDE_WIDTH } else { NARROW_WIDTH };
+    let w = if config.wide {
+        WIDE_WIDTH
+    } else {
+        NARROW_WIDTH
+    };
 
     // Top grouping line. (Currently identical for wide/narrow — wide
     // adds extra columns to the per-row format, not the grouping bar.)
@@ -509,22 +540,36 @@ fn print_header(config: &Config) {
     if config.active_mode {
         print!(
             "   {:>w$} {:>w$} {:>w$} {:>w$}",
-            "swpd", "free", "inact", "active",
+            "swpd",
+            "free",
+            "inact",
+            "active",
             w = w,
         );
     } else {
         print!(
             "   {:>w$} {:>w$} {:>w$} {:>w$}",
-            "swpd", "free", "buff", "cache",
+            "swpd",
+            "free",
+            "buff",
+            "cache",
             w = w,
         );
     }
     print!(
         "   {:>w$} {:>w$}    {:>w$} {:>w$}   {:>w$} {:>w$}",
-        "si", "so", "bi", "bo", "in", "cs",
+        "si",
+        "so",
+        "bi",
+        "bo",
+        "in",
+        "cs",
         w = w,
     );
-    print!(" {:>2} {:>2} {:>2} {:>2} {:>2}", "us", "sy", "id", "wa", "st");
+    print!(
+        " {:>2} {:>2} {:>2} {:>2} {:>2}",
+        "us", "sy", "id", "wa", "st"
+    );
     if config.timestamp {
         print!("  {:>19}", "timestamp");
     }
@@ -536,13 +581,12 @@ fn print_header(config: &Config) {
 /// If `prev` is `None`, this is the first (since-boot) report: rates are
 /// computed by dividing totals by uptime in seconds.
 /// If `prev` is `Some`, delta-mode: rates are (cur - prev) / interval.
-fn print_row(
-    cur: &Snapshot,
-    prev: Option<&Snapshot>,
-    interval: u64,
-    config: &Config,
-) {
-    let w = if config.wide { WIDE_WIDTH } else { NARROW_WIDTH };
+fn print_row(cur: &Snapshot, prev: Option<&Snapshot>, interval: u64, config: &Config) {
+    let w = if config.wide {
+        WIDE_WIDTH
+    } else {
+        NARROW_WIDTH
+    };
 
     // Determine the divisor for rate calculations.
     let divisor = if prev.is_some() {
@@ -579,10 +623,7 @@ fn print_row(
             cur.vmstat.pswpin.saturating_sub(p.vmstat.pswpin) / divisor,
             cur.vmstat.pswpout.saturating_sub(p.vmstat.pswpout) / divisor,
         ),
-        None => (
-            cur.vmstat.pswpin / divisor,
-            cur.vmstat.pswpout / divisor,
-        ),
+        None => (cur.vmstat.pswpin / divisor, cur.vmstat.pswpout / divisor),
     };
 
     // Block I/O rates (KiB/s from /proc/vmstat pgpgin/pgpgout which are in KiB).
@@ -591,17 +632,17 @@ fn print_row(
             cur.vmstat.pgpgin.saturating_sub(p.vmstat.pgpgin) / divisor,
             cur.vmstat.pgpgout.saturating_sub(p.vmstat.pgpgout) / divisor,
         ),
-        None => (
-            cur.vmstat.pgpgin / divisor,
-            cur.vmstat.pgpgout / divisor,
-        ),
+        None => (cur.vmstat.pgpgin / divisor, cur.vmstat.pgpgout / divisor),
     };
 
     // System rates (interrupts/s, context switches/s).
     let (int_rate, cs_rate) = match prev {
         Some(p) => (
             cur.stat.interrupts.saturating_sub(p.stat.interrupts) / divisor,
-            cur.stat.context_switches.saturating_sub(p.stat.context_switches) / divisor,
+            cur.stat
+                .context_switches
+                .saturating_sub(p.stat.context_switches)
+                / divisor,
         ),
         None => (
             cur.stat.interrupts / divisor,
@@ -632,12 +673,20 @@ fn print_row(
     print!(" {:>2} {:>2}", r, b);
     print!(
         "   {:>w$} {:>w$} {:>w$} {:>w$}",
-        swpd, free, mem_col3, mem_col4,
+        swpd,
+        free,
+        mem_col3,
+        mem_col4,
         w = w,
     );
     print!(
         "   {:>w$} {:>w$}    {:>w$} {:>w$}   {:>w$} {:>w$}",
-        si, so, bi, bo, int_rate, cs_rate,
+        si,
+        so,
+        bi,
+        bo,
+        int_rate,
+        cs_rate,
         w = w,
     );
     print!(" {:>2} {:>2} {:>2} {:>2} {:>2}", us, sy, id, wa, st);
@@ -653,7 +702,8 @@ fn print_row(
 /// Read system uptime in seconds from `/proc/uptime`.
 fn read_uptime_secs() -> Option<u64> {
     let content = read_file("/proc/uptime")?;
-    content.split_whitespace()
+    content
+        .split_whitespace()
         .next()
         .and_then(|s| s.split('.').next())
         .and_then(|s| s.parse().ok())
@@ -685,9 +735,10 @@ fn run_default(config: &Config) -> i32 {
     loop {
         // Check count limit. count includes the first (boot-average) report.
         if let Some(max) = config.count
-            && reports >= max {
-                break;
-            }
+            && reports >= max
+        {
+            break;
+        }
 
         std::thread::sleep(Duration::from_secs(interval));
 
@@ -737,11 +788,26 @@ fn run_default_json(config: &Config) -> i32 {
     println!("  }},");
     println!("  \"memory\": {{");
     println!("    \"swpd\": {},", convert_kib(swap_used, config.unit));
-    println!("    \"free\": {},", convert_kib(snap.mem.mem_free, config.unit));
-    println!("    \"buff\": {},", convert_kib(snap.mem.buffers, config.unit));
-    println!("    \"cache\": {},", convert_kib(snap.mem.cached, config.unit));
-    println!("    \"active\": {},", convert_kib(snap.mem.active, config.unit));
-    println!("    \"inactive\": {}", convert_kib(snap.mem.inactive, config.unit));
+    println!(
+        "    \"free\": {},",
+        convert_kib(snap.mem.mem_free, config.unit)
+    );
+    println!(
+        "    \"buff\": {},",
+        convert_kib(snap.mem.buffers, config.unit)
+    );
+    println!(
+        "    \"cache\": {},",
+        convert_kib(snap.mem.cached, config.unit)
+    );
+    println!(
+        "    \"active\": {},",
+        convert_kib(snap.mem.active, config.unit)
+    );
+    println!(
+        "    \"inactive\": {}",
+        convert_kib(snap.mem.inactive, config.unit)
+    );
     println!("  }},");
     println!("  \"swap\": {{");
     println!("    \"si\": {},", snap.vmstat.pswpin / uptime);
@@ -810,8 +876,12 @@ fn run_stats(config: &Config) -> i32 {
         }
     };
     let vmstat = read_vmstat().unwrap_or(VmStatCounters {
-        pgpgin: 0, pgpgout: 0, pswpin: 0, pswpout: 0,
-        pgfault: 0, pgmajfault: 0,
+        pgpgin: 0,
+        pgpgout: 0,
+        pswpin: 0,
+        pswpout: 0,
+        pgfault: 0,
+        pgmajfault: 0,
     });
 
     let u = config.unit;
@@ -820,14 +890,20 @@ fn run_stats(config: &Config) -> i32 {
         println!("{{");
         println!("  \"memory\": {{");
         println!("    \"total\": {},", convert_kib(mem.mem_total, u));
-        println!("    \"used\": {},", convert_kib(mem.mem_total.saturating_sub(mem.mem_free), u));
+        println!(
+            "    \"used\": {},",
+            convert_kib(mem.mem_total.saturating_sub(mem.mem_free), u)
+        );
         println!("    \"active\": {},", convert_kib(mem.active, u));
         println!("    \"inactive\": {},", convert_kib(mem.inactive, u));
         println!("    \"free\": {},", convert_kib(mem.mem_free, u));
         println!("    \"buffer\": {},", convert_kib(mem.buffers, u));
         println!("    \"swap_cache\": {},", convert_kib(mem.cached, u));
         println!("    \"swap_total\": {},", convert_kib(mem.swap_total, u));
-        println!("    \"swap_used\": {},", convert_kib(mem.swap_total.saturating_sub(mem.swap_free), u));
+        println!(
+            "    \"swap_used\": {},",
+            convert_kib(mem.swap_total.saturating_sub(mem.swap_free), u)
+        );
         println!("    \"swap_free\": {}", convert_kib(mem.swap_free, u));
         println!("  }},");
         println!("  \"cpu_ticks\": {{");
@@ -864,16 +940,56 @@ fn run_stats(config: &Config) -> i32 {
     };
 
     // Memory stats section.
-    println!("{:>12} {} total memory", convert_kib(mem.mem_total, u), unit_label);
-    println!("{:>12} {} used memory", convert_kib(mem.mem_total.saturating_sub(mem.mem_free), u), unit_label);
-    println!("{:>12} {} active memory", convert_kib(mem.active, u), unit_label);
-    println!("{:>12} {} inactive memory", convert_kib(mem.inactive, u), unit_label);
-    println!("{:>12} {} free memory", convert_kib(mem.mem_free, u), unit_label);
-    println!("{:>12} {} buffer memory", convert_kib(mem.buffers, u), unit_label);
-    println!("{:>12} {} swap cache", convert_kib(mem.cached, u), unit_label);
-    println!("{:>12} {} total swap", convert_kib(mem.swap_total, u), unit_label);
-    println!("{:>12} {} used swap", convert_kib(mem.swap_total.saturating_sub(mem.swap_free), u), unit_label);
-    println!("{:>12} {} free swap", convert_kib(mem.swap_free, u), unit_label);
+    println!(
+        "{:>12} {} total memory",
+        convert_kib(mem.mem_total, u),
+        unit_label
+    );
+    println!(
+        "{:>12} {} used memory",
+        convert_kib(mem.mem_total.saturating_sub(mem.mem_free), u),
+        unit_label
+    );
+    println!(
+        "{:>12} {} active memory",
+        convert_kib(mem.active, u),
+        unit_label
+    );
+    println!(
+        "{:>12} {} inactive memory",
+        convert_kib(mem.inactive, u),
+        unit_label
+    );
+    println!(
+        "{:>12} {} free memory",
+        convert_kib(mem.mem_free, u),
+        unit_label
+    );
+    println!(
+        "{:>12} {} buffer memory",
+        convert_kib(mem.buffers, u),
+        unit_label
+    );
+    println!(
+        "{:>12} {} swap cache",
+        convert_kib(mem.cached, u),
+        unit_label
+    );
+    println!(
+        "{:>12} {} total swap",
+        convert_kib(mem.swap_total, u),
+        unit_label
+    );
+    println!(
+        "{:>12} {} used swap",
+        convert_kib(mem.swap_total.saturating_sub(mem.swap_free), u),
+        unit_label
+    );
+    println!(
+        "{:>12} {} free swap",
+        convert_kib(mem.swap_free, u),
+        unit_label
+    );
 
     // CPU and event counters.
     println!("{:>12} non-nice user cpu ticks", stat.cpu.user);
@@ -949,18 +1065,35 @@ fn run_disk(config: &Config) -> i32 {
     // Header.
     println!(
         "{:<10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
-        "disk", "reads", "r_merged", "r_sectors", "r_ms",
-        "writes", "w_merged", "w_sectors", "w_ms",
-        "cur_io", "io_ms", "wt_ms",
+        "disk",
+        "reads",
+        "r_merged",
+        "r_sectors",
+        "r_ms",
+        "writes",
+        "w_merged",
+        "w_sectors",
+        "w_ms",
+        "cur_io",
+        "io_ms",
+        "wt_ms",
     );
 
     for d in &disks {
         println!(
             "{:<10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
             d.name,
-            d.reads_completed, d.reads_merged, d.sectors_read, d.ms_reading,
-            d.writes_completed, d.writes_merged, d.sectors_written, d.ms_writing,
-            d.ios_in_progress, d.ms_io, d.weighted_ms_io,
+            d.reads_completed,
+            d.reads_merged,
+            d.sectors_read,
+            d.ms_reading,
+            d.writes_completed,
+            d.writes_merged,
+            d.sectors_written,
+            d.ms_writing,
+            d.ios_in_progress,
+            d.ms_io,
+            d.weighted_ms_io,
         );
     }
 
@@ -1247,7 +1380,10 @@ fn main() {
                     "m" => DisplayUnit::M1024,
                     "M" => DisplayUnit::M1000,
                     other => {
-                        eprintln!("vmstat: unknown unit '{other}' (use k, K, m, or M)");
+                        eprintln!(
+                            "vmstat: unknown unit {} (use k, K, m, or M)",
+                            quoteaf_os(other)
+                        );
                         process::exit(1);
                     }
                 };
@@ -1427,8 +1563,14 @@ pgmajfault 500
     #[test]
     fn test_cpu_total() {
         let c = CpuTimes {
-            user: 100, nice: 10, system: 30, idle: 800,
-            iowait: 20, irq: 5, softirq: 3, steal: 2,
+            user: 100,
+            nice: 10,
+            system: 30,
+            idle: 800,
+            iowait: 20,
+            irq: 5,
+            softirq: 3,
+            steal: 2,
         };
         assert_eq!(cpu_total(&c), 970);
     }
@@ -1436,12 +1578,24 @@ pgmajfault 500
     #[test]
     fn test_cpu_delta() {
         let prev = CpuTimes {
-            user: 100, nice: 10, system: 30, idle: 800,
-            iowait: 20, irq: 5, softirq: 3, steal: 2,
+            user: 100,
+            nice: 10,
+            system: 30,
+            idle: 800,
+            iowait: 20,
+            irq: 5,
+            softirq: 3,
+            steal: 2,
         };
         let cur = CpuTimes {
-            user: 200, nice: 15, system: 50, idle: 900,
-            iowait: 25, irq: 7, softirq: 4, steal: 3,
+            user: 200,
+            nice: 15,
+            system: 50,
+            idle: 900,
+            iowait: 25,
+            irq: 7,
+            softirq: 4,
+            steal: 3,
         };
         let d = cpu_delta(&cur, &prev);
         assert_eq!(d.user, 100);
@@ -1457,8 +1611,14 @@ pgmajfault 500
     #[test]
     fn test_cpu_percentages_typical() {
         let delta = CpuTimes {
-            user: 50, nice: 0, system: 10, idle: 930,
-            iowait: 5, irq: 2, softirq: 1, steal: 2,
+            user: 50,
+            nice: 0,
+            system: 10,
+            idle: 930,
+            iowait: 5,
+            irq: 2,
+            softirq: 1,
+            steal: 2,
         };
         let (us, sy, id, wa, st) = cpu_percentages(&delta);
         // us = (50+0)*100/1000 = 5
@@ -1476,8 +1636,14 @@ pgmajfault 500
     #[test]
     fn test_cpu_percentages_zero_total() {
         let delta = CpuTimes {
-            user: 0, nice: 0, system: 0, idle: 0,
-            iowait: 0, irq: 0, softirq: 0, steal: 0,
+            user: 0,
+            nice: 0,
+            system: 0,
+            idle: 0,
+            iowait: 0,
+            irq: 0,
+            softirq: 0,
+            steal: 0,
         };
         let (us, sy, id, wa, st) = cpu_percentages(&delta);
         assert_eq!(us, 0);
@@ -1490,8 +1656,14 @@ pgmajfault 500
     #[test]
     fn test_cpu_percentages_sum_to_100() {
         let delta = CpuTimes {
-            user: 333, nice: 0, system: 333, idle: 0,
-            iowait: 0, irq: 0, softirq: 0, steal: 334,
+            user: 333,
+            nice: 0,
+            system: 333,
+            idle: 0,
+            iowait: 0,
+            irq: 0,
+            softirq: 0,
+            steal: 334,
         };
         let (us, sy, id, wa, st) = cpu_percentages(&delta);
         assert_eq!(us + sy + id + wa + st, 100);
@@ -1538,11 +1710,23 @@ pgmajfault 500
         for line in content.lines() {
             if line.starts_with("cpu ") {
                 let fields: Vec<&str> = line.split_whitespace().collect();
-                assert_eq!(fields.get(1).and_then(|s| s.parse::<u64>().ok()), Some(10000));
+                assert_eq!(
+                    fields.get(1).and_then(|s| s.parse::<u64>().ok()),
+                    Some(10000)
+                );
                 assert_eq!(fields.get(2).and_then(|s| s.parse::<u64>().ok()), Some(500));
-                assert_eq!(fields.get(3).and_then(|s| s.parse::<u64>().ok()), Some(3000));
-                assert_eq!(fields.get(4).and_then(|s| s.parse::<u64>().ok()), Some(80000));
-                assert_eq!(fields.get(5).and_then(|s| s.parse::<u64>().ok()), Some(1000));
+                assert_eq!(
+                    fields.get(3).and_then(|s| s.parse::<u64>().ok()),
+                    Some(3000)
+                );
+                assert_eq!(
+                    fields.get(4).and_then(|s| s.parse::<u64>().ok()),
+                    Some(80000)
+                );
+                assert_eq!(
+                    fields.get(5).and_then(|s| s.parse::<u64>().ok()),
+                    Some(1000)
+                );
                 break;
             }
         }
@@ -1554,10 +1738,16 @@ pgmajfault 500
         for line in content.lines() {
             if line.starts_with("ctxt ") {
                 let fields: Vec<&str> = line.split_whitespace().collect();
-                assert_eq!(fields.get(1).and_then(|s| s.parse::<u64>().ok()), Some(1_200_000));
+                assert_eq!(
+                    fields.get(1).and_then(|s| s.parse::<u64>().ok()),
+                    Some(1_200_000)
+                );
             } else if line.starts_with("processes ") {
                 let fields: Vec<&str> = line.split_whitespace().collect();
-                assert_eq!(fields.get(1).and_then(|s| s.parse::<u64>().ok()), Some(5000));
+                assert_eq!(
+                    fields.get(1).and_then(|s| s.parse::<u64>().ok()),
+                    Some(5000)
+                );
             } else if line.starts_with("procs_running ") {
                 let fields: Vec<&str> = line.split_whitespace().collect();
                 assert_eq!(fields.get(1).and_then(|s| s.parse::<u64>().ok()), Some(3));
@@ -1573,9 +1763,18 @@ pgmajfault 500
         let fields: Vec<&str> = line.split_whitespace().collect();
         assert_eq!(fields.len(), 14);
         assert_eq!(fields.get(2), Some(&"sda"));
-        assert_eq!(fields.get(3).and_then(|s| s.parse::<u64>().ok()), Some(10000));
-        assert_eq!(fields.get(5).and_then(|s| s.parse::<u64>().ok()), Some(200000));
-        assert_eq!(fields.get(7).and_then(|s| s.parse::<u64>().ok()), Some(8000));
+        assert_eq!(
+            fields.get(3).and_then(|s| s.parse::<u64>().ok()),
+            Some(10000)
+        );
+        assert_eq!(
+            fields.get(5).and_then(|s| s.parse::<u64>().ok()),
+            Some(200000)
+        );
+        assert_eq!(
+            fields.get(7).and_then(|s| s.parse::<u64>().ok()),
+            Some(8000)
+        );
     }
 
     #[test]

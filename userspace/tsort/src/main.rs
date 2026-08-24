@@ -3,6 +3,7 @@
 //! Reads pairs of strings from input and produces a topological
 //! ordering. Reports cycles to stderr.
 
+use quoting::quoteaf_os;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
 use std::fs;
@@ -129,12 +130,12 @@ fn run(args: &[String]) -> i32 {
                 return 0;
             }
             _ if arg.starts_with('-') && arg.len() > 1 => {
-                eprintln!("tsort: unknown option '{}'", arg);
+                eprintln!("tsort: unknown option {}", quoteaf_os(arg));
                 return 1;
             }
             _ => {
                 if file.is_some() {
-                    eprintln!("tsort: extra operand '{}'", arg);
+                    eprintln!("tsort: extra operand {}", quoteaf_os(arg));
                     return 1;
                 }
                 file = Some(arg.clone());
@@ -251,12 +252,7 @@ mod tests {
 
     #[test]
     fn test_diamond() {
-        let (sorted, cycle) = sort_from_pairs(&[
-            ("a", "b"),
-            ("a", "c"),
-            ("b", "d"),
-            ("c", "d"),
-        ]);
+        let (sorted, cycle) = sort_from_pairs(&[("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")]);
         assert!(!cycle);
         let pa = position_of(&sorted, "a").unwrap();
         let pb = position_of(&sorted, "b").unwrap();
@@ -299,10 +295,7 @@ mod tests {
 
     #[test]
     fn test_multiple_roots() {
-        let (sorted, cycle) = sort_from_pairs(&[
-            ("a", "c"),
-            ("b", "c"),
-        ]);
+        let (sorted, cycle) = sort_from_pairs(&[("a", "c"), ("b", "c")]);
         assert!(!cycle);
         let pa = position_of(&sorted, "a").unwrap();
         let pb = position_of(&sorted, "b").unwrap();
@@ -313,12 +306,7 @@ mod tests {
 
     #[test]
     fn test_long_chain() {
-        let (sorted, cycle) = sort_from_pairs(&[
-            ("1", "2"),
-            ("2", "3"),
-            ("3", "4"),
-            ("4", "5"),
-        ]);
+        let (sorted, cycle) = sort_from_pairs(&[("1", "2"), ("2", "3"), ("3", "4"), ("4", "5")]);
         assert!(!cycle);
         for i in 0..4 {
             assert!(
@@ -331,12 +319,7 @@ mod tests {
     #[test]
     fn test_duplicate_edges() {
         // Duplicate edges should be handled gracefully
-        let (sorted, cycle) = sort_from_pairs(&[
-            ("a", "b"),
-            ("a", "b"),
-            ("b", "c"),
-            ("b", "c"),
-        ]);
+        let (sorted, cycle) = sort_from_pairs(&[("a", "b"), ("a", "b"), ("b", "c"), ("b", "c")]);
         assert!(!cycle);
         assert_eq!(sorted.len(), 3);
     }
@@ -420,10 +403,7 @@ mod tests {
     #[test]
     fn test_two_component_graph() {
         // Two disconnected components
-        let (sorted, cycle) = sort_from_pairs(&[
-            ("a", "b"),
-            ("c", "d"),
-        ]);
+        let (sorted, cycle) = sort_from_pairs(&[("a", "b"), ("c", "d")]);
         assert!(!cycle);
         assert_eq!(sorted.len(), 4);
         assert!(position_of(&sorted, "a").unwrap() < position_of(&sorted, "b").unwrap());
@@ -448,11 +428,7 @@ mod tests {
     #[test]
     fn test_reverse_input_order() {
         // Input in reverse order should still produce valid sort
-        let (sorted, cycle) = sort_from_pairs(&[
-            ("c", "d"),
-            ("b", "c"),
-            ("a", "b"),
-        ]);
+        let (sorted, cycle) = sort_from_pairs(&[("c", "d"), ("b", "c"), ("a", "b")]);
         assert!(!cycle);
         assert!(position_of(&sorted, "a").unwrap() < position_of(&sorted, "b").unwrap());
         assert!(position_of(&sorted, "b").unwrap() < position_of(&sorted, "c").unwrap());

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `trivy`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -48,15 +49,33 @@ fn run_trivy(args: Vec<String>) -> i32 {
             println!();
             println!("Total: 5 (CRITICAL: 1, HIGH: 2, MEDIUM: 1, LOW: 1)");
             println!();
-            println!("+------------------+----------+----------+-------------------+-------------------+");
-            println!("| Library          | Severity | Vuln ID  | Installed Version | Fixed Version     |");
-            println!("+------------------+----------+----------+-------------------+-------------------+");
-            println!("| openssl          | CRITICAL | CVE-2025 | 3.1.4             | 3.1.5             |");
-            println!("| curl             | HIGH     | CVE-2025 | 8.5.0             | 8.6.0             |");
-            println!("| zlib             | HIGH     | CVE-2025 | 1.3.0             | 1.3.1             |");
-            println!("| busybox          | MEDIUM   | CVE-2025 | 1.36.1            | 1.36.2            |");
-            println!("| musl             | LOW      | CVE-2025 | 1.2.4             | 1.2.5             |");
-            println!("+------------------+----------+----------+-------------------+-------------------+");
+            println!(
+                "+------------------+----------+----------+-------------------+-------------------+"
+            );
+            println!(
+                "| Library          | Severity | Vuln ID  | Installed Version | Fixed Version     |"
+            );
+            println!(
+                "+------------------+----------+----------+-------------------+-------------------+"
+            );
+            println!(
+                "| openssl          | CRITICAL | CVE-2025 | 3.1.4             | 3.1.5             |"
+            );
+            println!(
+                "| curl             | HIGH     | CVE-2025 | 8.5.0             | 8.6.0             |"
+            );
+            println!(
+                "| zlib             | HIGH     | CVE-2025 | 1.3.0             | 1.3.1             |"
+            );
+            println!(
+                "| busybox          | MEDIUM   | CVE-2025 | 1.36.1            | 1.36.2            |"
+            );
+            println!(
+                "| musl             | LOW      | CVE-2025 | 1.2.4             | 1.2.5             |"
+            );
+            println!(
+                "+------------------+----------+----------+-------------------+-------------------+"
+            );
         }
         "filesystem" | "fs" | "rootfs" => {
             let target = args.get(1).map(|s| s.as_str()).unwrap_or(".");
@@ -87,7 +106,7 @@ fn run_trivy(args: Vec<String>) -> i32 {
             println!("Trivy server listening on 0.0.0.0:4954");
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -103,7 +122,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_trivy};
+    use super::run_trivy;
 
     #[test]
     fn help_exits_zero() {

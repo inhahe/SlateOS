@@ -1086,7 +1086,7 @@ pub fn compile_regex(pat: &[u8]) -> Result<Regex, String> {
     };
     Regex::new(source).map_err(|e| {
         let shown = String::from_utf8_lossy(pat).into_owned();
-        let why = String::from_utf8_lossy(&e.0).into_owned();
+        let why = String::from_utf8_lossy(&e.detail).into_owned();
         format!("/{shown}/: {why}")
     })
 }

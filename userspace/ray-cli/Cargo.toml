@@ -2,3 +2,8 @@
 name = "ray-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# ray-cli names clusters, jobs and actors, identifiers created on the
+# cluster rather than by this tool.
+quoting = { path = "../quoting" }

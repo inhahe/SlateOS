@@ -4,6 +4,7 @@
 //!
 //! Single personality: `meson`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -48,9 +49,15 @@ fn run_meson(args: Vec<String>) -> i32 {
         }
         "compile" => {
             let builddir = args.get(1).map(|s| s.as_str()).unwrap_or("builddir");
-            let jobs = args.windows(2).find(|w| w[0] == "-j")
-                .map(|w| w[1].as_str()).unwrap_or("4");
-            println!("[{}/{}] Compiling C++ object src/main.cpp.o", builddir, jobs);
+            let jobs = args
+                .windows(2)
+                .find(|w| w[0] == "-j")
+                .map(|w| w[1].as_str())
+                .unwrap_or("4");
+            println!(
+                "[{}/{}] Compiling C++ object src/main.cpp.o",
+                builddir, jobs
+            );
             println!("[2/4] Compiling C++ object src/utils.cpp.o");
             println!("[3/4] Linking shared library lib/libmylib.so");
             println!("[4/4] Linking target bin/myapp");
@@ -80,17 +87,25 @@ fn run_meson(args: Vec<String>) -> i32 {
             match sub {
                 "--targets" => {
                     println!("[");
-                    println!("  {{\"name\": \"myapp\", \"type\": \"executable\", \"installed\": true}},");
-                    println!("  {{\"name\": \"mylib\", \"type\": \"shared library\", \"installed\": true}},");
-                    println!("  {{\"name\": \"tests\", \"type\": \"executable\", \"installed\": false}}");
+                    println!(
+                        "  {{\"name\": \"myapp\", \"type\": \"executable\", \"installed\": true}},"
+                    );
+                    println!(
+                        "  {{\"name\": \"mylib\", \"type\": \"shared library\", \"installed\": true}},"
+                    );
+                    println!(
+                        "  {{\"name\": \"tests\", \"type\": \"executable\", \"installed\": false}}"
+                    );
                     println!("]");
                 }
-                _ => { println!("Introspect: {}", sub); }
+                _ => {
+                    println!("Introspect: {}", sub);
+                }
             }
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -105,7 +120,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_meson};
+    use super::run_meson;
 
     #[test]
     fn help_exits_zero() {

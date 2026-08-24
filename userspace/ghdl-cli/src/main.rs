@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `ghdl`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -39,18 +40,21 @@ fn run_ghdl(args: &[String]) -> i32 {
         }
         "-a" | "--analyze" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("design.vhd");
-            println!("ghdl: analyzing '{}'", file);
+            println!("ghdl: analyzing {}", quoteaf_os(file));
             println!("Analysis completed successfully.");
         }
         "-e" | "--elaborate" => {
             let unit = args.get(1).map(|s| s.as_str()).unwrap_or("testbench");
-            println!("ghdl: elaborating '{}'", unit);
+            println!("ghdl: elaborating {}", quoteaf_os(unit));
             println!("Elaboration completed successfully.");
         }
         "-r" | "--run" => {
             let unit = args.get(1).map(|s| s.as_str()).unwrap_or("testbench");
-            let vcd = args.windows(2).find(|w| w[0] == "--vcd").map(|w| w[1].as_str());
-            println!("ghdl: running '{}'", unit);
+            let vcd = args
+                .windows(2)
+                .find(|w| w[0] == "--vcd")
+                .map(|w| w[1].as_str());
+            println!("ghdl: running {}", quoteaf_os(unit));
             if let Some(v) = vcd {
                 println!("VCD output: {}", v);
             }
@@ -58,19 +62,19 @@ fn run_ghdl(args: &[String]) -> i32 {
         }
         "-s" | "--syntax" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("design.vhd");
-            println!("ghdl: syntax check '{}'", file);
+            println!("ghdl: syntax check {}", quoteaf_os(file));
             println!("Syntax OK.");
         }
         "--synth" => {
             let unit = args.get(1).map(|s| s.as_str()).unwrap_or("top");
-            println!("ghdl: synthesizing '{}'", unit);
+            println!("ghdl: synthesizing {}", quoteaf_os(unit));
             println!("Synthesis completed. Output: synth.v");
         }
         "--clean" => {
             println!("ghdl: cleaning generated files...");
             println!("Done.");
         }
-        _ => println!("ghdl: '{}' completed", subcmd),
+        _ => println!("ghdl: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -84,7 +88,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ghdl};
+    use super::run_ghdl;
 
     #[test]
     fn help_exits_zero() {

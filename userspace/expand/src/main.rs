@@ -28,6 +28,7 @@
 //!       --version        Output version information and exit
 //! ```
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
@@ -149,10 +150,7 @@ fn next_tab_stop(col: usize, stops: &TabStops) -> Option<usize> {
 /// Detect mode from argv[0].
 fn detect_mode(argv0: &str) -> Mode {
     // Extract the base name, stripping any directory prefix and extension.
-    let base = argv0
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(argv0);
+    let base = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     let base_lower = base.to_ascii_lowercase();
     if base_lower.starts_with("unexpand") {
         Mode::Unexpand
@@ -222,7 +220,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 };
                 tab_stops_str = Some(val);
             } else {
-                eprintln!("{prog_name}: unrecognized option '{arg}'");
+                eprintln!("{prog_name}: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try '{prog_name} --help' for more information.");
                 process::exit(1);
             }
@@ -257,7 +255,10 @@ fn parse_args(args: &[String]) -> ParseResult {
                     break;
                 }
                 _ => {
-                    eprintln!("{prog_name}: invalid option -- '{ch}'");
+                    eprintln!(
+                        "{prog_name}: invalid option -- {}",
+                        quoteaf_os(ch.to_string())
+                    );
                     eprintln!("Try '{prog_name} --help' for more information.");
                     process::exit(1);
                 }
@@ -276,7 +277,10 @@ fn parse_args(args: &[String]) -> ParseResult {
         Some(s) => match parse_tab_stops(&s) {
             Some(ts) => ts,
             None => {
-                eprintln!("{prog_name}: invalid tab stop specification: '{s}'");
+                eprintln!(
+                    "{prog_name}: invalid tab stop specification: {}",
+                    quoteaf_os(&s)
+                );
                 process::exit(1);
             }
         },
@@ -358,7 +362,7 @@ fn run_expand(config: &Config) -> io::Result<i32> {
             match File::open(path) {
                 Ok(f) => Box::new(BufReader::new(f)),
                 Err(e) => {
-                    eprintln!("expand: {path}: {e}");
+                    eprintln!("expand: {}: {e}", quotef_os(path));
                     exit_code = 1;
                     continue;
                 }
@@ -373,7 +377,7 @@ fn run_expand(config: &Config) -> io::Result<i32> {
                     out.write_all(b"\n")?;
                 }
                 Err(e) => {
-                    eprintln!("expand: {path}: {e}");
+                    eprintln!("expand: {}: {e}", quotef_os(path));
                     exit_code = 1;
                     break;
                 }
@@ -468,7 +472,7 @@ fn run_unexpand(config: &Config) -> io::Result<i32> {
             match File::open(path) {
                 Ok(f) => Box::new(BufReader::new(f)),
                 Err(e) => {
-                    eprintln!("unexpand: {path}: {e}");
+                    eprintln!("unexpand: {}: {e}", quotef_os(path));
                     exit_code = 1;
                     continue;
                 }
@@ -478,13 +482,12 @@ fn run_unexpand(config: &Config) -> io::Result<i32> {
         for line_result in reader.lines() {
             match line_result {
                 Ok(line) => {
-                    let unexpanded =
-                        unexpand_line(&line, &config.tab_stops, config.initial_only);
+                    let unexpanded = unexpand_line(&line, &config.tab_stops, config.initial_only);
                     out.write_all(unexpanded.as_bytes())?;
                     out.write_all(b"\n")?;
                 }
                 Err(e) => {
-                    eprintln!("unexpand: {path}: {e}");
+                    eprintln!("unexpand: {}: {e}", quotef_os(path));
                     exit_code = 1;
                     break;
                 }

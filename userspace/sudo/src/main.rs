@@ -42,6 +42,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
@@ -2745,8 +2746,9 @@ fn run_sudo(args: &[String]) -> i32 {
         Some(spec) => spec,
         None => {
             eprintln!(
-                "sudo: {username} is not allowed to run '{}' as {} on {hostname}",
-                command_str, opts.target_user
+                "sudo: {username} is not allowed to run {} as {} on {hostname}",
+                quoteaf_os(&command_str),
+                quoteaf_os(&opts.target_user)
             );
             log_command(
                 &username,
@@ -2995,7 +2997,7 @@ fn run_sudoedit(files: &[String]) -> i32 {
                 exit_code = 1;
             }
             Err(e) => {
-                eprintln!("sudoedit: cannot run editor '{editor}': {e}");
+                eprintln!("sudoedit: cannot run editor {}: {e}", quoteaf_os(&editor));
                 exit_code = 1;
             }
         }
@@ -3105,7 +3107,7 @@ fn run_visudo(args: &[String]) -> i32 {
                 return 1;
             }
             Err(e) => {
-                eprintln!("visudo: cannot run editor '{editor}': {e}");
+                eprintln!("visudo: cannot run editor {}: {e}", quoteaf_os(&editor));
                 let _ = fs::remove_file(&temp_path);
                 release_lock(&lock_path);
                 return 1;

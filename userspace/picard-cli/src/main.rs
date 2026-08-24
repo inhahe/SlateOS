@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `picard`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -29,7 +30,11 @@ fn run_picard(args: &[String]) -> i32 {
     match subcmd {
         "--version" => println!("picard 3.1.1 (Slate OS)"),
         "MarkDuplicates" => {
-            let input = args.windows(2).find(|w| w[0] == "I=" || w[0] == "-I").map(|w| w[1].as_str()).unwrap_or("input.bam");
+            let input = args
+                .windows(2)
+                .find(|w| w[0] == "I=" || w[0] == "-I")
+                .map(|w| w[1].as_str())
+                .unwrap_or("input.bam");
             println!("picard MarkDuplicates");
             println!("  INPUT={}", input);
             println!("  Examined 1,234,567 read pairs");
@@ -72,7 +77,7 @@ fn run_picard(args: &[String]) -> i32 {
             println!("picard CreateSequenceDictionary");
             println!("  24 sequences written to dictionary.");
         }
-        _ => println!("picard: '{}' completed", subcmd),
+        _ => println!("picard: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -86,7 +91,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_picard};
+    use super::run_picard;
 
     #[test]
     fn help_exits_zero() {

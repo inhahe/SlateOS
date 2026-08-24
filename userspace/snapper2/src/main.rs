@@ -4,6 +4,7 @@
 //!
 //! Single personality: `snapper2` (avoiding conflict with existing `snapper` crate)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,15 +43,27 @@ fn run_snapper(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "list" | "ls" => {
-            println!("  # | Type   | Pre # | Date                     | User | Cleanup  | Description");
-            println!("----+--------+-------+--------------------------+------+----------+------------");
+            println!(
+                "  # | Type   | Pre # | Date                     | User | Cleanup  | Description"
+            );
+            println!(
+                "----+--------+-------+--------------------------+------+----------+------------"
+            );
             println!("  0 | single |       |                          | root |          | current");
-            println!("  1 | single |       | Thu May 22 09:00:00 2025 | root | timeline | timeline");
-            println!("  2 | pre    |       | Thu May 22 10:00:00 2025 | root | number   | apt install");
-            println!("  3 | post   |     2 | Thu May 22 10:01:00 2025 | root | number   | apt install");
+            println!(
+                "  1 | single |       | Thu May 22 09:00:00 2025 | root | timeline | timeline"
+            );
+            println!(
+                "  2 | pre    |       | Thu May 22 10:00:00 2025 | root | number   | apt install"
+            );
+            println!(
+                "  3 | post   |     2 | Thu May 22 10:01:00 2025 | root | number   | apt install"
+            );
         }
         "create" => {
-            let desc = args.iter().position(|a| a == "-d" || a == "--description")
+            let desc = args
+                .iter()
+                .position(|a| a == "-d" || a == "--description")
                 .and_then(|i| args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("");
@@ -91,11 +104,12 @@ fn run_snapper(args: Vec<String>) -> i32 {
             println!("root       | /");
             println!("home       | /home");
         }
-        "undochange" | "modify" | "create-config" | "delete-config" | "get-config" | "set-config" | "setup-quota" => {
+        "undochange" | "modify" | "create-config" | "delete-config" | "get-config"
+        | "set-config" | "setup-quota" => {
             println!("({} — simulated)", cmd);
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -111,7 +125,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_snapper};
+    use super::run_snapper;
 
     #[test]
     fn help_exits_zero() {

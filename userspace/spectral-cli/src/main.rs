@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `spectral`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_spectral(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -34,35 +39,53 @@ fn run_spectral(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("lint");
     if subcmd == "lint" {
         let spec = args.get(1).map(|s| s.as_str()).unwrap_or("openapi.yaml");
-        let format = args.windows(2).find(|w| w[0] == "-f" || w[0] == "--format")
-            .map(|w| w[1].as_str()).unwrap_or("stylish");
+        let format = args
+            .windows(2)
+            .find(|w| w[0] == "-f" || w[0] == "--format")
+            .map(|w| w[1].as_str())
+            .unwrap_or("stylish");
 
         match format {
             "json" => {
                 println!("[");
-                println!("  {{\"code\": \"operation-description\", \"path\": [\"/paths/~1users/get\"], \"message\": \"Operation must have a description.\", \"severity\": 1, \"range\": {{\"start\": {{\"line\": 10}}, \"end\": {{\"line\": 15}}}}}},");
-                println!("  {{\"code\": \"info-contact\", \"path\": [\"/info\"], \"message\": \"Info object must have a contact.\", \"severity\": 1, \"range\": {{\"start\": {{\"line\": 1}}, \"end\": {{\"line\": 5}}}}}}");
+                println!(
+                    "  {{\"code\": \"operation-description\", \"path\": [\"/paths/~1users/get\"], \"message\": \"Operation must have a description.\", \"severity\": 1, \"range\": {{\"start\": {{\"line\": 10}}, \"end\": {{\"line\": 15}}}}}},"
+                );
+                println!(
+                    "  {{\"code\": \"info-contact\", \"path\": [\"/info\"], \"message\": \"Info object must have a contact.\", \"severity\": 1, \"range\": {{\"start\": {{\"line\": 1}}, \"end\": {{\"line\": 5}}}}}}"
+                );
                 println!("]");
             }
             _ => {
                 println!("{}:", spec);
-                println!("  10:3  warning  operation-description  Operation must have a description.");
-                println!("  1:1   warning  info-contact           Info object must have a contact.");
-                println!("  22:5  hint     operation-tag           Operation should have at least one tag.");
-                println!("  35:3  error    oas3-schema             Schema is invalid: 'required' must be an array.");
+                println!(
+                    "  10:3  warning  operation-description  Operation must have a description."
+                );
+                println!(
+                    "  1:1   warning  info-contact           Info object must have a contact."
+                );
+                println!(
+                    "  22:5  hint     operation-tag           Operation should have at least one tag."
+                );
+                println!(
+                    "  35:3  error    oas3-schema             Schema is invalid: 'required' must be an array."
+                );
                 println!();
                 println!("4 problems (1 error, 2 warnings, 1 hint)");
             }
         }
     } else {
-        println!("spectral: '{}' completed", subcmd);
+        println!("spectral: {} completed", quoteaf_os(subcmd));
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "spectral".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "spectral".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_spectral(&rest);
     process::exit(code);
@@ -70,7 +93,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_spectral};
+    use super::{basename, run_spectral, strip_ext};
 
     #[test]
     fn basename_strips_path() {

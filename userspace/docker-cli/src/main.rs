@@ -4,6 +4,7 @@
 //!
 //! Single personality: `docker`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -60,12 +61,22 @@ fn run_docker(args: Vec<String>) -> i32 {
         }
         "ps" => {
             let all = args.iter().any(|a| a == "-a" || a == "--all");
-            println!("CONTAINER ID   IMAGE          COMMAND       CREATED       STATUS         PORTS                  NAMES");
-            println!("abc123def456   nginx:1.25     \"nginx -g…\"   2 hours ago   Up 2 hours     0.0.0.0:80->80/tcp     web");
-            println!("def456abc789   redis:7.2      \"redis-s…\"    3 hours ago   Up 3 hours     6379/tcp               cache");
-            println!("789abc123def   postgres:16    \"docker-…\"    3 hours ago   Up 3 hours     5432/tcp               db");
+            println!(
+                "CONTAINER ID   IMAGE          COMMAND       CREATED       STATUS         PORTS                  NAMES"
+            );
+            println!(
+                "abc123def456   nginx:1.25     \"nginx -g…\"   2 hours ago   Up 2 hours     0.0.0.0:80->80/tcp     web"
+            );
+            println!(
+                "def456abc789   redis:7.2      \"redis-s…\"    3 hours ago   Up 3 hours     6379/tcp               cache"
+            );
+            println!(
+                "789abc123def   postgres:16    \"docker-…\"    3 hours ago   Up 3 hours     5432/tcp               db"
+            );
             if all {
-                println!("012def456abc   ubuntu:22.04   \"bash\"        1 day ago     Exited (0)                            test");
+                println!(
+                    "012def456abc   ubuntu:22.04   \"bash\"        1 day ago     Exited (0)                            test"
+                );
             }
             0
         }
@@ -86,7 +97,8 @@ fn run_docker(args: Vec<String>) -> i32 {
             0
         }
         "build" => {
-            let tag = args.windows(2)
+            let tag = args
+                .windows(2)
                 .find(|w| w[0] == "-t" || w[0] == "--tag")
                 .map(|w| w[1].as_str())
                 .unwrap_or("myapp:latest");
@@ -113,10 +125,18 @@ fn run_docker(args: Vec<String>) -> i32 {
             0
         }
         "stats" => {
-            println!("CONTAINER ID   NAME   CPU %   MEM USAGE / LIMIT    MEM %   NET I/O         BLOCK I/O");
-            println!("abc123def456   web    0.15%   45.6MiB / 8GiB       0.56%   12.3MB / 890kB  4.5MB / 0B");
-            println!("def456abc789   cache  0.08%   12.3MiB / 8GiB       0.15%   5.6MB / 2.3MB   0B / 0B");
-            println!("789abc123def   db     1.23%   234MiB / 8GiB        2.86%   45MB / 23MB     890MB / 45MB");
+            println!(
+                "CONTAINER ID   NAME   CPU %   MEM USAGE / LIMIT    MEM %   NET I/O         BLOCK I/O"
+            );
+            println!(
+                "abc123def456   web    0.15%   45.6MiB / 8GiB       0.56%   12.3MB / 890kB  4.5MB / 0B"
+            );
+            println!(
+                "def456abc789   cache  0.08%   12.3MiB / 8GiB       0.15%   5.6MB / 2.3MB   0B / 0B"
+            );
+            println!(
+                "789abc123def   db     1.23%   234MiB / 8GiB        2.86%   45MB / 23MB     890MB / 45MB"
+            );
             0
         }
         "system" => {
@@ -182,7 +202,7 @@ fn run_docker(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: docker <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -198,7 +218,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_docker};
+    use super::run_docker;
 
     #[test]
     fn help_exits_zero() {

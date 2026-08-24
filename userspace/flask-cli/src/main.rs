@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `flask`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_flask(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -26,10 +31,16 @@ fn run_flask(args: &[String]) -> i32 {
     match subcmd {
         "--version" => println!("Python 3.12.4, Flask 3.0.3, Werkzeug 3.0.3"),
         "run" => {
-            let host = args.windows(2).find(|w| w[0] == "--host" || w[0] == "-h")
-                .map(|w| w[1].as_str()).unwrap_or("127.0.0.1");
-            let port = args.windows(2).find(|w| w[0] == "--port" || w[0] == "-p")
-                .map(|w| w[1].as_str()).unwrap_or("5000");
+            let host = args
+                .windows(2)
+                .find(|w| w[0] == "--host" || w[0] == "-h")
+                .map(|w| w[1].as_str())
+                .unwrap_or("127.0.0.1");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port" || w[0] == "-p")
+                .map(|w| w[1].as_str())
+                .unwrap_or("5000");
             let debug = args.iter().any(|a| a == "--debug");
             println!(" * Serving Flask app 'app'");
             if debug {
@@ -62,17 +73,20 @@ fn run_flask(args: &[String]) -> i32 {
                 }
                 "upgrade" => println!("Running upgrade: head"),
                 "downgrade" => println!("Running downgrade: -1"),
-                _ => println!("flask db: '{}' completed", sub),
+                _ => println!("flask db: {} completed", quoteaf_os(sub)),
             }
         }
-        _ => println!("flask: '{}' completed", subcmd),
+        _ => println!("flask: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "flask".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "flask".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_flask(&rest);
     process::exit(code);
@@ -80,7 +94,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_flask};
+    use super::{basename, run_flask, strip_ext};
 
     #[test]
     fn basename_strips_path() {

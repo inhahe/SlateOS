@@ -4,6 +4,7 @@
 //!
 //! Single personality: `cht`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -40,7 +41,8 @@ fn run_cht(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let query: Vec<&str> = args.iter()
+    let query: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -83,7 +85,7 @@ fn run_cht(args: Vec<String>) -> i32 {
         _ => {
             println!("# {} — Quick Reference", topic);
             println!();
-            println!("(cheat sheet for '{}' — simulated)", topic);
+            println!("(cheat sheet for {} — simulated)", quoteaf_os(&topic));
             println!();
             println!("  Example command:");
             println!("    {} --example", query[0]);
@@ -101,7 +103,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_cht};
+    use super::run_cht;
 
     #[test]
     fn help_exits_zero() {

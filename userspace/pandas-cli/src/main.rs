@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `pandas`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -41,7 +42,7 @@ fn run_pandas(args: &[String]) -> i32 {
             println!("test_reshape: 456 passed");
             println!("All 5936 tests passed.");
         }
-        _ => println!("pandas: command '{}' completed", subcmd),
+        _ => println!("pandas: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -55,7 +56,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_pandas};
+    use super::run_pandas;
 
     #[test]
     fn help_exits_zero() {

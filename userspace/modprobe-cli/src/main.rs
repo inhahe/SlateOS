@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `modprobe`, `insmod`, `rmmod`, `lsmod`, `modinfo`, `depmod`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -41,7 +42,8 @@ fn run_modprobe(args: &[String]) -> i32 {
     let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
     let show_depends = args.iter().any(|a| a == "--show-depends");
 
-    let module = args.iter()
+    let module = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("");
@@ -52,7 +54,10 @@ fn run_modprobe(args: &[String]) -> i32 {
     }
 
     if show_depends {
-        println!("insmod /lib/modules/1.0.0/kernel/drivers/deps/{}.ko", module);
+        println!(
+            "insmod /lib/modules/1.0.0/kernel/drivers/deps/{}.ko",
+            module
+        );
         return 0;
     }
 
@@ -60,12 +65,12 @@ fn run_modprobe(args: &[String]) -> i32 {
         if verbose {
             println!("rmmod {}", module);
         }
-        println!("modprobe: removed '{}'", module);
+        println!("modprobe: removed {}", quoteaf_os(module));
     } else {
         if verbose {
             println!("insmod /lib/modules/1.0.0/kernel/drivers/{}.ko", module);
         }
-        println!("modprobe: inserted '{}'", module);
+        println!("modprobe: inserted {}", quoteaf_os(module));
     }
     0
 }
@@ -76,7 +81,7 @@ fn run_insmod(args: &[String]) -> i32 {
         println!("Usage: insmod MODULE [PARAMS]");
         return if module == "--help" { 0 } else { 1 };
     }
-    println!("insmod: loading module '{}'", module);
+    println!("insmod: loading module {}", quoteaf_os(module));
     0
 }
 
@@ -86,7 +91,7 @@ fn run_rmmod(args: &[String]) -> i32 {
         println!("Usage: rmmod MODULE");
         return if module == "--help" { 0 } else { 1 };
     }
-    println!("rmmod: unloading module '{}'", module);
+    println!("rmmod: unloading module {}", quoteaf_os(module));
     0
 }
 
@@ -118,8 +123,15 @@ fn run_modinfo(args: &[String]) -> i32 {
         return 0;
     }
 
-    let module = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("nvidia");
-    println!("filename:       /lib/modules/1.0.0/kernel/drivers/{}.ko", module);
+    let module = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("nvidia");
+    println!(
+        "filename:       /lib/modules/1.0.0/kernel/drivers/{}.ko",
+        module
+    );
     println!("license:        GPL");
     println!("description:    {} kernel module", module);
     println!("author:         Slate OS");
@@ -152,7 +164,8 @@ fn run_depmod(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "modprobe".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -170,7 +183,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_modprobe};
+    use super::{basename, run_modprobe, strip_ext};
 
     #[test]
     fn basename_strips_path() {

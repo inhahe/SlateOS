@@ -2,3 +2,8 @@
 name = "tensorflow-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# tensorflow-cli names models, checkpoints and saved-model directories,
+# taken from the command line and from a downloaded model bundle.
+quoting = { path = "../quoting" }

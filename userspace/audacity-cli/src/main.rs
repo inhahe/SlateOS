@@ -4,6 +4,7 @@
 //!
 //! Single personality: `audacity-cli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -83,7 +84,9 @@ fn run_audacity(args: Vec<String>) -> i32 {
             0
         }
         "concat" => {
-            let files: Vec<&str> = args.iter().skip(1)
+            let files: Vec<&str> = args
+                .iter()
+                .skip(1)
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .collect();
@@ -92,7 +95,10 @@ fn run_audacity(args: Vec<String>) -> i32 {
             for (i, f) in files.iter().take(count).enumerate() {
                 println!("  {}: {}", i + 1, f);
             }
-            println!("  Output: {}", files.last().copied().unwrap_or("output.wav"));
+            println!(
+                "  Output: {}",
+                files.last().copied().unwrap_or("output.wav")
+            );
             println!("  Done.");
             0
         }
@@ -152,7 +158,7 @@ fn run_audacity(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Error: command required. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -168,7 +174,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_audacity};
+    use super::run_audacity;
 
     #[test]
     fn help_exits_zero() {

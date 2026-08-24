@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS update-alternatives utility"
 [dependencies]
+# It interpolates `other` into "update-alternatives: unknown command {}".
+# That value is an argv word, so it is whatever the user typed and not text
+# this program chose.
+quoting = { path = "../quoting" }
 
 [build-dependencies]
 embed-manifest = "1.5.0"

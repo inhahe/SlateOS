@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `ntpd`, `ntpq`, `ntpdate`, `chronyc`, `chronyd`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -97,14 +98,27 @@ fn run_ntpdate(args: &[String]) -> i32 {
         return 0;
     }
 
-    let server = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("pool.ntp.org");
+    let server = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("pool.ntp.org");
     let query = args.iter().any(|a| a == "-q");
 
-    println!("server {}, stratum 2, offset -0.001234, delay 0.005678", server);
+    println!(
+        "server {}, stratum 2, offset -0.001234, delay 0.005678",
+        server
+    );
     if query {
-        println!(" 1 Jan 12:00:00 ntpdate[1234]: adjust time server {} offset -0.001234 sec (query only)", server);
+        println!(
+            " 1 Jan 12:00:00 ntpdate[1234]: adjust time server {} offset -0.001234 sec (query only)",
+            server
+        );
     } else {
-        println!(" 1 Jan 12:00:00 ntpdate[1234]: adjust time server {} offset -0.001234 sec", server);
+        println!(
+            " 1 Jan 12:00:00 ntpdate[1234]: adjust time server {} offset -0.001234 sec",
+            server
+        );
     }
     0
 }
@@ -127,10 +141,18 @@ fn run_chronyc(args: &[String]) -> i32 {
     match subcmd {
         "sources" => {
             println!("MS Name/IP address         Stratum Poll Reach LastRx Last sample");
-            println!("===============================================================================");
-            println!("^* 0.pool.ntp.org                1   7   377    45   -456us[ -789us] +/-  5ms");
-            println!("^+ 1.pool.ntp.org                1   7   377    23   +123us[ +456us] +/- 12ms");
-            println!("^+ 2.pool.ntp.org                2   8   377   128   -234us[ -567us] +/- 25ms");
+            println!(
+                "==============================================================================="
+            );
+            println!(
+                "^* 0.pool.ntp.org                1   7   377    45   -456us[ -789us] +/-  5ms"
+            );
+            println!(
+                "^+ 1.pool.ntp.org                1   7   377    23   +123us[ +456us] +/- 12ms"
+            );
+            println!(
+                "^+ 2.pool.ntp.org                2   8   377   128   -234us[ -567us] +/- 25ms"
+            );
         }
         "tracking" => {
             println!("Reference ID    : AC1E0001 (0.pool.ntp.org)");
@@ -159,7 +181,7 @@ fn run_chronyc(args: &[String]) -> i32 {
             println!("200 OK");
         }
         _ => {
-            println!("chronyc: unknown command '{}'", subcmd);
+            println!("chronyc: unknown command {}", quoteaf_os(subcmd));
         }
     }
     0
@@ -183,7 +205,8 @@ fn run_chronyd(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "ntpd".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -200,7 +223,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ntpd};
+    use super::{basename, run_ntpd, strip_ext};
 
     #[test]
     fn basename_strips_path() {

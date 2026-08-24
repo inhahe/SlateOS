@@ -397,8 +397,8 @@ fn main() {
 #[cfg(unix)]
 mod imp {
     use super::{
-        CHMOD, Outcome, Request, Settings, Source, Verbosity, describe_change, help_text,
-        parse_args, surprise,
+        Outcome, Request, Settings, Source, Verbosity, describe_change, help_text, parse_args,
+        surprise,
     };
     use coreutils::errmsg::strerror;
     use coreutils::quote::{quoteaf_os, quotef_os};
@@ -551,10 +551,10 @@ mod imp {
                     quoteaf_os(path),
                     strerror(&e)
                 ));
-                if job.settings.verbosity == Verbosity::High {
-                    if let Some(line) = describe_change(path.as_os_str(), Outcome::NoStat, 0, 0) {
-                        job.say(&line);
-                    }
+                if job.settings.verbosity == Verbosity::High
+                    && let Some(line) = describe_change(path.as_os_str(), Outcome::NoStat, 0, 0)
+                {
+                    job.say(&line);
                 }
                 return;
             }
@@ -563,19 +563,20 @@ mod imp {
         // A link below the top level is left alone entirely — see the module
         // docs. `-v` still says so, as GNU does.
         if !top_level && meta.file_type().is_symlink() {
-            if job.settings.verbosity == Verbosity::High {
-                if let Some(line) = describe_change(path.as_os_str(), Outcome::NotApplied, 0, 0) {
-                    job.say(&line);
-                }
+            if job.settings.verbosity == Verbosity::High
+                && let Some(line) = describe_change(path.as_os_str(), Outcome::NotApplied, 0, 0)
+            {
+                job.say(&line);
             }
             return;
         }
 
-        if let Some((dev, ino)) = job.root_dev_ino {
-            if meta.dev() == dev && meta.ino() == ino {
-                warn_about_root(job, path);
-                return;
-            }
+        if let Some((dev, ino)) = job.root_dev_ino
+            && meta.dev() == dev
+            && meta.ino() == ino
+        {
+            warn_about_root(job, path);
+            return;
         }
 
         let old_mode = meta.permissions().mode();
@@ -620,12 +621,11 @@ mod imp {
             }
         }
 
-        if job.settings.verbosity == Verbosity::High
-            || (job.settings.verbosity == Verbosity::ChangesOnly && outcome == Outcome::Succeeded)
+        if (job.settings.verbosity == Verbosity::High
+            || (job.settings.verbosity == Verbosity::ChangesOnly && outcome == Outcome::Succeeded))
+            && let Some(line) = describe_change(path.as_os_str(), outcome, old_mode, new_mode)
         {
-            if let Some(line) = describe_change(path.as_os_str(), outcome, old_mode, new_mode) {
-                job.say(&line);
-            }
+            job.say(&line);
         }
 
         if !job.settings.recursive || !is_dir {

@@ -50388,7 +50388,20 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 31 of 49 modules converted.**
+**A procedural note about the workspace gate, learned the hard way on module
+36.** It is safe to *edit* source while `cargo test --workspace` is running,
+once its build phase has finished — every test binary is already on disk and
+nothing will be recompiled. It is **not** safe to *build*. Cargo holds the
+target-directory lock only during a build, and releases it while the test
+binaries execute, so a `cargo fmt` or `cargo test -p <crate>` fired during that
+window acquires the lock and rewrites artefacts the in-flight gate is still
+walking through. Nothing failed on the occasion this was discovered — the gate
+came back 67,835 passed, 0 failed — but that was luck about ordering, not a
+guarantee, and on Windows the failure mode would be a sharing violation in
+whichever of the two processes lost the race. Wait for `[run-timeout] child
+exited` before running any cargo command against the same target directory.
+
+**Part 2 progress. 39 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -52126,6 +52139,755 @@ thumbnail, or on any other content the palette does not own.
     than a pair of literals so it fails on a palette whose crust was made
     lighter than its base; and ink on a fill this module chose is computed,
     never named.
+- [x] `launcher.rs` — 14 constants over 15 colour sites, done 2026-08-23.
+  Thirty-seven tests in the module (eight new), harness defects Ax45–Fx47
+  (fifty-eight), all fifty-eight caught, none escaped.
+  - **The deleted-constants test rendered one of the module's three states, and
+    only the harness noticed.** The launcher draws three different trees: an
+    empty field (placeholder, no query), a typed one (query, rows), and a typed
+    one that matches nothing (query, "No results found", no rows). The test
+    swept the first only — so a Mocha constant frozen into the *query* branch
+    was a constant it could never reach. Defect Rx45 was caught by three tests
+    and missed by that one. This is the module-30 lesson in its sharpest form
+    yet: the test read as complete, the module had thirty-seven passing tests,
+    and the hole was found by writing a defect rather than by reading anything.
+    **A branch the fixture does not render is a branch the test does not
+    check** — the same shape as `default_apps`'s four fixture traps, but here it
+    was the *test's* choice of state rather than the data's.
+  - **The module where the accent and a category hue are the same pixel.** The
+    stock accent *is* `blue`, and `Category::Application` is also blue — so
+    before the conversion one constant `BLUE` served two unrelated meanings at
+    four sites (the caret, the selection bar, every App icon and every App
+    badge) and nothing in the module could tell "where you are" from "what this
+    is". That is not a hypothetical: an assertion written at the stock accent
+    cannot fail, because the two answers agree. Every accent claim here
+    therefore runs against an off-palette magenta accent, which is what makes
+    the caret follow it while an App badge holds still. Defect Ux45 — the caret
+    written as `p.blue` — is the exact edit the pre-conversion code could not
+    distinguish from correct, and it is caught only because the fixture moved
+    the accent off blue.
+  - **A permutation of a set is invisible to a set-membership check, again.**
+    The five category hues had a distinctness test and a test that each badge
+    matched `Category::color`. Both pass under a *rotation* of all five hues:
+    five distinct colours are still five distinct colours, and asking
+    `Category::color` what a badge should be is asking the code under test what
+    it meant. Only a table naming each category's role — App/blue, Sys/red,
+    Set/peach, File/green, Cmd/mauve — can fail. This is the module-29 lesson
+    arriving in a module that already had two tests over the same five values.
+  - **Two constants compared only against themselves.** `DIALOG_ALPHA` and
+    `BADGE_WASH_ALPHA` were each asserted as `drawn.a == THE_CONSTANT`, which is
+    a tautology the moment the constant moves. Both now carry a bound as well:
+    the wash must be `<= 64` (a tint, not a fill — at 200 the label is read
+    against its own hue rather than against the row) and the dialog `>= 224`
+    (translucent enough to float, solid enough that the wallpaper does not read
+    through the results). Defects Fx45 and DDx46 exist precisely to prove those
+    two bounds do something, and before they were added both escaped.
+  - **The sweep runs over the shipped app database as well as the fixture.**
+    The five-row fixture was built to reach every category, and a fixture built
+    to reach everything is exactly the thing that cannot notice a row shape only
+    the real data produces. Sweeping `builtin_app_database()` too costs one line
+    and is the only check here that sees production data.
+  - **One more shadow consolidated.** This was the third of the three popups
+    that each picked their own drop-shadow alpha (100 here, against 120 and 160
+    elsewhere); it now reads `p.shadow()`, and the test asserts the shadow is
+    black in *both* modes rather than equal to any role, because a shadow is an
+    absence of light and must not flip with the theme.
+  - Judgements, for the record: the accent marks where you are and never what a
+    thing is (exactly two accented marks on screen — the caret and the selected
+    row's bar); five categories are five distinct hues in either mode; a badge's
+    wash is its own hue at a lower alpha, derived rather than named, so adding a
+    category cannot leave a stale wash behind; and the dialog floats, which is
+    one byte of alpha nothing else in the module would have noticed.
+- [x] `resmon.rs` — 11 constants over 16 colour sites, done 2026-08-23.
+  Fifty-five tests in the module (nine new), harness defects Ax48–Ix49
+  (thirty-five), all thirty-five caught, none escaped, none under-caught.
+  - **The first module in the shell that draws no accent at all, and the claim
+    is a count of zero.** There is nothing here to select, nothing to invite
+    and nothing in force — only quantities that have to be told apart. That is
+    worth stating because it is *falsifiable*: the test asserts the accent
+    appears in exactly zero commands, in both modes and both display modes, and
+    four defects exist only to trip it. It is also worth stating because it is
+    worth **nothing at the shipped theme**: the stock accent *is* `blue`, and
+    `Cpu` is blue, so under a default install "this module draws no accent" and
+    "every CPU line is accented" produce identical pixels and the count reads 40
+    rather than 0 for a reason that has nothing to do with position. Without the
+    off-palette magenta fixture this test would assert the opposite of what it
+    says. Same trap as `launcher.rs`, reached from the other direction: there
+    the accent and a category hue collided, here the accent and a *measurement*
+    hue do.
+  - **A permutation, and the one module where nobody could ever see it.**
+    `test_resource_type_colors_distinct` already walked the six hues pairwise,
+    and six distinct hues rotated by one are still six distinct hues — so the
+    whole widget can be drawn in its neighbours' colours with every pre-existing
+    test green. Only a table naming each pair (CPU/blue, RAM/green, Disk/peach,
+    Net/mauve, GPU/lavender, Temp/red) can fail, and the proof confirms it:
+    defect Cx48 rotates the four graphed hues and is caught **by that table
+    alone**, 1 test out of 55. And note what "nobody could see it" means here —
+    `resmon` is declared in `lib.rs` but nothing constructs a `ResourceMonitor`
+    (`TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`), so there is no
+    screen to check against. Four distinct colours in the wrong order render as
+    a perfectly plausible graph; "it looked fine" would have certified it.
+  - **The pinning table is the only thing that covers what is never drawn.**
+    GPU and temperature are collected and given hues but not plotted, so the
+    membership sweep and the deleted-constant sweep — both of which read *drawn*
+    commands — are structurally blind to them. Defect Fx48 freezes the
+    temperature hue to Mocha red and is caught by one test. A sweep over render
+    output cannot check a value that never reaches render output, which is an
+    obvious sentence that took a defect to notice.
+  - **The compact strip's sparkline hues were untested, and writing a defect is
+    what found it.** The strip plots the same four metrics from a *different*
+    call site with its own hue lookup, and it carries no labels at all — so a
+    compact sparkline in the wrong metric's colour was unreachable by every
+    test in the module: membership passes (a wrong role is still a role), the
+    accent count passes, and the per-site table never looks at compact lines.
+    Fixed at the root before the run; defect Lx48 (every compact sparkline drawn
+    in the CPU hue) now proves it, caught by that test alone. The module-32
+    lesson again — a branch the fixture does not render is a branch the test
+    does not check — but here it was a whole *display mode*, not a state.
+  - **A pin wearing a relationship's docstring, found by four under-declared
+    catches.** `a_metric_is_one_colour_wherever_it_appears` says it asserts only
+    that a metric's label and its graph agree, never which colour they agree on;
+    it then ended `assert!(bars.all(|c| *c == p.blue))`, naming a role outright,
+    so every hue-map defect tripped it. **A test that quietly does two jobs
+    cannot be read as a coverage claim about either** — and this is the first
+    time the `[UNDECLARED:]` half of the harness output, rather than
+    `[MISSING:]`, is what found the problem. Over-catching is not harmless: it
+    is how a coverage report flatters itself. The pin belongs to
+    `each_measurement_is_pinned_to_the_role_it_names`, which caught all four
+    unaided.
+  - **`render_bar_graph` is a primitive this module never calls**, so judgement
+    4's original "label, sparkline and bars are one colour said three times"
+    overstated what the code does — the module draws two of those three. The
+    doc now says twice and says why: the primitive's hue is the caller's
+    business and not a claim this module gets to make. The bar claim survives
+    as its own test, restated honestly as "the primitive substitutes no default
+    for the colour it is handed", and is handed `p.accent` precisely because
+    nothing here draws the accent.
+  - Judgements, for the record: a hue names a *measurement*, never a state or a
+    position; six measurements are six distinct colours each pinned by name; the
+    grid is furniture, checked against all six metric hues rather than the four
+    currently plotted so that graphing GPU later cannot quietly make it
+    ambiguous; and a metric's label and sparkline are one colour said twice,
+    derived at each site rather than named beside it.
+- [x] `mouse_settings.rs` — 10 constants over 14 colour sites, done 2026-08-23.
+  Twenty-three tests in the module (nine new), harness defects Ax50–Kx51
+  (thirty-seven), all thirty-seven caught, none escaped, none under-caught,
+  none under-declared.
+  - **The first module in the conversion to come back clean on the first run**,
+    and the reason is that the last two modules' lessons were applied *before*
+    writing the tests rather than discovered by writing the defects. Module 32
+    taught that a branch the fixture does not render is a branch the test does
+    not check, so all three state-dependent sites here — the header background,
+    the heading ink and the toggle pill — are rendered both ways at every
+    section from the start. Module 33 taught that a test doing two jobs cannot
+    be read as a coverage claim about either, so each test here makes exactly
+    one claim and every *pin* lives in the pinning table. That is worth
+    recording because it is the first evidence the method is transferable
+    rather than a sequence of one-off saves.
+  - **Seventeen of the thirty-seven defects are invisible to both sweeps.**
+    Membership caught 20 and the deleted-constant list caught 20 — the same 20,
+    every one of them a leftover Mocha literal. Every *permutation* defect (a
+    legal role in the wrong place) passes both, and six of them are caught by
+    `every_site_draws_the_role_it_claims` **alone**: the panel drawn a rung up
+    on `surface0`, the title at a label's dimness, the label and value swapped,
+    the switch label at a value's brightness, and the pill with its branches
+    collapsed so every switch looks on. n source sites still need n assertions;
+    nothing else has ever caught these.
+  - **The one defect the shipped theme would hide, stated as its own defect.**
+    The open section's heading pinned to `p.blue` rather than the accent is
+    legal (blue is a role), survives both sweeps, and is caught by four tests —
+    *all four of which would pass under the stock palette*, because the stock
+    accent **is** blue. The off-palette magenta fixture is the only reason any
+    of them can see it. Third module in a row where the accent/role collision
+    is the load-bearing part of the fixture rather than a detail of it.
+  - **The thumb is asserted from both sides, and the second side is the
+    load-bearing one.** `emphasized(p.accent)` replaces a `LAVENDER` that sat
+    beside a `BLUE` fill with nothing connecting them — the same shape as
+    `launcher.rs`'s two self-comparing alphas. The test asserts both that the
+    handle *is* the derivation and that it equals **no role at all**, across
+    three different accents. The first half alone would pass a future edit that
+    pinned the thumb to whichever role happened to match under one accent; the
+    second half is also what makes the membership sweep's `derived` list honest,
+    since a derived colour that turned out to be a role would be waved through
+    by `Palette::roles()` without the declaration doing any work. Defect
+    "thumb is `emphasized(p.blue)`" is caught by the sweep for exactly that
+    reason: (107, 139, 194) is in neither palette and is not what was declared.
+  - **A count is what makes "the accent means one thing" falsifiable.** The
+    pinning table names fourteen sites and by construction cannot notice a
+    fifteenth, and "the accent is used tastefully" is not a property a command
+    list carries. So judgement 1 is a table of exact counts per (section,
+    switches) — one heading plus one fill per slider on show — written out by
+    hand rather than derived from the same `if` the renderer uses, which would
+    have made the test agree with any answer. It catches eleven defects,
+    including every one that *adds* an accent: the banner, a switched-on pill,
+    the track along its whole length, the thumb, and the panel background.
+  - **The retheme test is narrow, and that is why it could be declared
+    precisely.** `only_what_is_in_force_moves_when_the_accent_moves` renders the
+    whole panel under two different accents and asks which commands differ —
+    the question a user asks by changing their accent and glancing at the
+    screen. It caught seven defects and, correctly, said nothing about the ten
+    that swap one fixed role for another: those render identically under both
+    accents. A whole-list test that fired on everything would have been an
+    under-declared mess; this one fires only on sites that gain or lose their
+    dependence on the accent.
+  - **The low-contrast knob is left alone on purpose.** `text` on a `green`
+    pill is two light values —
+    `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`, being fixed across the
+    shell in one pass so every switch reaches the same answer. What *is*
+    asserted here is the separable half: the knob is the same ink on both
+    pills, because it marks a position and a position does not change meaning
+    when the state does. The docstring names the debt so the next reader does
+    not mistake a deferred fix for an unnoticed one.
+  - Judgements, for the record: the accent says what is in force and says
+    nothing else; a state is not a position, so the on-pill and the unsaved
+    banner keep named hues that survive a retheme; the thumb is derived from
+    its fill rather than named beside it; and three sites choose by state, so
+    every test renders both branches.
+- [x] `hotkeys.rs` — 10 constants over 12 colour sites, done 2026-08-23.
+  Sixty-eight tests in the module (seven new), harness defects Ax52–Tx53
+  (forty-six): 44 caught on the first run, the other two never actually
+  introduced — see the last bullet — and caught once the harness was fixed.
+  - **The first module where a constant turned out to be a *setting*.** The
+    panel background was `Color::rgba(30, 30, 46, 240)` — Mocha `base` with an
+    alpha soldered onto it. That is not a colour someone forgot to convert; it
+    is the transparency setting, frozen. It was wrong in both directions at
+    once: a user who had turned transparency **off** still saw the wallpaper
+    through their hotkey list, and one who had turned it up to Full got a panel
+    noticeably more solid than every neighbouring popup on the same screen.
+    `panel_bg()` is `base` at the palette's own `panel_alpha`, and the test
+    renders at three of them and reads the alpha back.
+    - The same test asserts the shadow does **not** move, and that half is the
+      load-bearing one. A fix that made *everything* follow `panel_alpha` would
+      be as wrong as the constant was — a shadow is an absence of light and does
+      not thin out when the thing casting it does. Without that clause, "the
+      panel follows the setting" is satisfied by a renderer that dissolves the
+      whole panel including its shadow.
+    - **Two defects exist only because of this judgement, and each is caught by
+      exactly one test.** `panel_bg()` reverting to plain `p.base` is invisible
+      to the membership sweep (base *is* a role), invisible to the deleted-
+      constant list, and invisible to the pinning table — because at
+      `Palette::for_mode`, `panel_alpha` is 255 and `p.base == p.panel_bg()`.
+      Only the transparency test, which sets the field to 200 and 160, can see
+      it. Likewise the alpha-refreezing defect
+      (`Color::rgba(p.base.r, p.base.g, p.base.b, 240)`) reads the *right* role
+      and still reintroduces the whole bug. A conversion audited only by "is
+      every colour a role?" would have shipped both.
+  - **Nothing on this panel is accented, and that had to be asserted as a
+    count.** A hotkey card is *read*, not operated: the selected row marks where
+    the user is looking, not what is in force. So the selection moves a rung
+    (`surface0` over the panel, ink from `subtext1` up to `text`) rather than
+    changing hue — which also matches `launcher.rs`, the shell's other
+    keyboard-driven list, where the surface fills the row and the accent is
+    spent on a separate marker bar. "Nothing is accented" is not something a
+    pinning table can check, because a table names *n* sites and by construction
+    cannot notice the *n+1*th; only a count over the whole render can. Ten
+    defects paint the accent onto a site that should not have it, and the count
+    is what sees them — and it only means anything because the fixture's accent
+    is off-palette. Under the shipped theme the accent **is** `blue`, so every
+    one of those ten would have been indistinguishable from a legal role.
+  - **The selection is said twice, and a test that checked one saying would
+    certify the other.** A fill appears *and* the label brightens; either alone
+    is a one-bit signal that a low-contrast display or poor colour
+    discrimination can lose. Six defects collapse, invert or misplace one of the
+    two sayings, and the one that moves the highlight a row below its own label
+    is caught by **that test alone** — the pinning table reads colours, not
+    coordinates, so an off-by-one between the highlight's `y` and the label's is
+    exactly the failure a colour-only conversion audit cannot see.
+  - **Judgement 4 is stated as relations rather than literals, because the
+    literals are what the conversion is deleting.** "The badge is `#181825`" is
+    true in Mocha and false in Latte, so it is not the claim worth testing. What
+    holds in both modes is that a badge is *visibly a badge*: a different colour
+    from the card it sits on, outlined in something different again, and
+    lettered more quietly than the heading. "Quieter" had to be defined as
+    *distance from the panel* rather than absolute darkness — in Latte the
+    dimmer ink is the **lighter** one, so a luma comparison written the obvious
+    way passes in Mocha and inverts in Latte. That test fires on fourteen of the
+    forty-six defects, including a badge painted the same colour as the card and
+    a badge lettered as loudly as the heading.
+  - **Every catcher list was predicted exactly** — of the 44 defects the run
+    actually introduced, not one was caught by a test that had not declared it
+    and not one escaped a test that had, including the badge-contrast
+    predictions, which needed the Latte luma of every role worked out by hand
+    first. The lessons applied before writing a line of test code: render every
+    branch the renderer selects a colour in (four here: selection on/off crossed
+    with the empty and default registries); make each test one claim so its
+    catcher list is a coverage statement; use an off-palette accent so an accent
+    assertion is falsifiable; and index anything positional by index rather than
+    counting it.
+  - **But two defects escaped, and the fault was the harness's, not the
+    suite's** — which is the more useful finding of the two. `reintro-palette.py`
+    applies each edit with `str.replace(old, new, 1)`, which takes the *first*
+    match. Both escapes were role *swaps* written as two edits, and in both the
+    first edit manufactured a fresh copy of the string the second edit was
+    looking for, at a lower file offset. The second edit landed on that copy and
+    undid the first. The pair was a no-op; the file was byte-identical to the
+    original; the suite was run against unmodified source and — correctly —
+    passed.
+    - The harness reported that as `*** NO TEST FAILED ***`, which is not
+      merely unhelpful but the **exact opposite** of the truth. It reads as "the
+      suite has a hole here", when what happened is "the suite was never asked
+      anything". A tool whose entire purpose is to stop a test being trusted on
+      faith must not itself convert an unasked question into an unanswered one,
+      because that verdict costs a full re-run of the suite to disbelieve.
+    - Fixed in three places rather than by re-anchoring the two defects and
+      moving on. `--check` now compares the patched text against the snapshot
+      and reports `NO-OP`, so an authoring mistake of this shape surfaces in the
+      seconds-long preflight instead of after the twenty-five-minute run it
+      invalidates. The run itself refuses to write a file it did not change and
+      names the failure `*** PATCH IS A NO-OP ***`. And the summary line counts
+      these in their own column — `n never introduced` — because folding them
+      into `caught` would inflate the sweep with defects that never existed,
+      and folding them into `escaped` blames the tests for the harness's error.
+    - The general lesson, which applies to every remaining module: **a
+      multi-edit defect can undo itself, and the way to prevent it is to anchor
+      each edit on a neighbouring line the other edit cannot forge.** Both were
+      re-anchored that way (on `font_size: KEY_FONT_SIZE,` and on
+      `corner_radii: CornerRadii::all(KEY_BADGE_RADIUS),`), after which both are
+      caught by the tests that declared them.
+- [x] `screen_capture.rs` — 10 constants over 22 colour sites in two public
+  renderers, done 2026-08-23. Fifty-eight tests in the module (eight new),
+  harness defects Ax54–Vx55 (forty-eight). Forty-four caught on the first run
+  with **zero under-caught and zero under-declared** — every catcher list
+  predicted exactly, for the second module running — and the other four never
+  compiled, which was a bug in the defect generator rather than in the suite;
+  see lesson 19 below and the 48/48 line at the end of this entry.
+  - **The catcher census**, which is the part worth keeping: the ordered pin
+    table `every_site_draws_the_role_it_claims` caught 42 of 48 and was the
+    sole catcher of 14; `nothing_in_the_recorder_is_accented`,
+    `none_of_the_ten_deleted_constants_is_still_drawn` and the two-mode sweep
+    `every_colour_both_renderers_draw_comes_from_their_palette` caught 9 each
+    and were sole catcher of none; `the_recording_dot_says_the_state_and_only_
+    the_state`, `the_indicator_pill_is_as_transparent_as_the_user_asked` and
+    `a_transport_button_is_lettered_for_its_own_fill` caught 5 each, with the
+    transparency test alone on 2. The pre-existing `test_indicator_idle_empty`
+    caught 1, which is the only evidence in this sweep that the module had any
+    colour coverage before the conversion.
+  - **The only module so far whose conversion fixes a bug a user could already
+    see.** The Record, Pause and Resume buttons were lettered `MOCHA_BASE` — a
+    near-black — which is legible on Mocha's *pale* red, yellow and green and
+    illegible on the light theme's, where all three of those fills are dark.
+    The lumas are 78, 104 and 91 against `readable_on`'s threshold of 140, so
+    in Latte all three want near-**white** ink and were getting near-black on
+    dark. Naming the ink beside the fill is what allowed the two to disagree;
+    `readable_on(fill)` cannot.
+    - The test pins the endpoints **by hand** — near-black in dark mode,
+      near-white in light — rather than calling `readable_on`. A test that
+      called the same function the renderer calls would agree with it however
+      wrong both were, which is the tautology lesson from module 32 applied
+      before writing the test instead of after.
+    - It also asserts the two modes' inks *differ*. That is the claim a pinned
+      constant provably cannot satisfy, and it is what distinguishes "the ink
+      is computed" from "the ink happens to be right in the mode I tested".
+  - **The frozen-transparency finding from `hotkeys.rs` recurred verbatim**, in
+    a module written by a different hand: the indicator pill was
+    `Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, 220)`. Two
+    occurrences in two consecutive modules is enough to expect it in the
+    remaining thirteen, so it is now a thing to look for rather than a thing to
+    discover — grep for `rgba(` in a module's constant block before converting
+    it.
+    - Two of the forty-eight defects are single-catcher because of this, and
+      both are invisible to the membership sweep, the deleted-constant list
+      **and** the pin table at once: the pill reverting to plain `p.base`, and
+      the recording dot fading with `panel_alpha`. `Palette::for_mode` always
+      sets `panel_alpha` to 255, so at the default palette
+      `p.base == p.panel_bg()` and every table-shaped test agrees with the bug.
+      Only a test that *varies* the setting sees it.
+    - The third of the three, re-freezing an alpha onto the *right* role, was
+      caught by the pin table too — and the distinction is worth keeping,
+      because it is the line between what a table can and cannot do. A table
+      compares `Color`s including alpha, so it sees a value that is wrong at
+      the default setting; what it cannot see is a value that is *right* at
+      the default setting and wrong at every other. Dropping the setting is
+      exactly that, which is why it needs a test that changes the setting and
+      why predicting it as single-catcher was right for one defect out of the
+      two I expected.
+    - The dot clause is the load-bearing half. A fix that made everything
+      follow `panel_alpha` would satisfy "the pill answers the setting" and
+      still be wrong — a recording indicator that fades until it cannot be seen
+      has failed at the one thing it is for.
+  - **The transport colours are a code, not a theme, and the count is what
+    proves it.** Red records, yellow pauses, green resumes, grey means neither;
+    a user reads those the way they read a traffic light, so they keep named
+    roles across a retheme rather than following the accent. Ten defects paint
+    the accent onto a site, and the count over the whole render is what sees
+    them — a pin table names *n* sites and by construction cannot notice the
+    *n+1*th. As always it only means anything because the fixture's accent is
+    off-palette; under the shipped theme the accent **is** `blue`.
+  - **The pin table compares the ordered vector, not the set.** Eight defects
+    are two sites trading roles, which leaves the multiset of colours drawn
+    byte-identical — the module-29 lesson, and the reason the expected value is
+    a `Vec<Color>` in draw order per state per mode rather than a membership
+    table.
+  - **Six states, and four of them draw no indicator at all**, while three
+    reach only the controls panel's fallback arm. Every colour test therefore
+    iterates the states explicitly; a test that rendered "the recorder" would
+    have been exercising two states out of six and reporting on all of them.
+    That is module 32's unrendered-branch lesson and module 33's whole-display-
+    mode lesson, applied before the tests were written rather than after a
+    proof run found the hole.
+  - **Lesson 19: `--check` proves an anchor is *findable*, not that the patched
+    file is Rust.** The preflight compares patterns against the unmodified
+    snapshot and reports `PATTERN NOT FOUND` / `AMBIGUOUS` / `NO-OP`. All
+    forty-eight passed it — `1171 defects, 0 stale, 0 ambiguous, 0 no-op` — and
+    four of them then failed to compile.
+    - The cause was in the generator, not the harness. Its substitution helper
+      assumed the `color:` line is the *last* line of an anchor, because in
+      twenty-three of the twenty-four anchors it is. The controls bar's anchor
+      put it first and used `corner_radii: CornerRadii::all(8.0),` as the
+      disambiguating tail, so the helper rewrote the `corner_radii` line and
+      the struct literal ended up with two `color:` fields —
+      `error[E0062]: field 'color' specified more than once`. All four affected
+      defects were the four built on that one anchor.
+    - Fixed by re-anchoring on the two comment lines *above* the colour instead
+      of the `corner_radii` line below it, restoring the colour-last shape the
+      generator assumes. That is the general rule now: **an anchor's last line
+      is the line being replaced**, and any disambiguation goes above it.
+    - The reporting was wrong too, and in the same way the no-op reporting was
+      wrong before module 35 fixed it: `DID NOT COMPILE` was tallied under
+      `escaped`. A patch that fails to build never reaches a test binary, so no
+      test had the opportunity to fail — calling that an escape blames the
+      suite for the harness's own authoring error. It now sits with
+      `PATCH IS A NO-OP` and `PATTERN NOT FOUND` in a column renamed from
+      `never introduced` to `never asked`, which is the property the three
+      actually share.
+    - The pattern across lessons 18 and 19 is one thing said twice: **the
+      preflight can only check the property it models.** It models "does this
+      pattern occur exactly once in the original file", which catches a stale
+      anchor and, since module 35, a self-cancelling edit pair — but says
+      nothing about whether the *result* parses. A defect that does not compile
+      is caught within minutes by the run itself, so the preflight is a way to
+      avoid wasting an hour, not a correctness gate; treating it as the latter
+      is what made four failures a surprise.
+    - Re-run after the fix: **4 caught, 0 escaped, 0 never asked, 0
+      under-caught, 0 under-declared**, and each of the four was caught by
+      exactly the tests it declared — so module 36 closes at **48/48**. The
+      catcher census above is unchanged by it: the four add three more to the
+      pin table, one each to the two-mode sweep, the deleted-constant list, the
+      accent count and the transparency test.
+- [x] `snap.rs` — 10 constants over 16 colour sites in three public renderers,
+  done 2026-08-23. Thirty-six tests in the module (eight new), harness defects
+  Ax56–Yx57 (fifty-one).
+  - **This module is where the palette's own numbers came from, which makes it
+    the one module that could be converted by accident.** `mod theme` here held
+    `ZONE_FILL` at alpha 50, `ZONE_HIGHLIGHT` at 90 and `ZONE_BORDER` at 160,
+    and `appearance::wash` ships `FILL = 50`, `HIGHLIGHT = 90`, `EDGE = 150` —
+    `Palette::selection_border`'s doc comment names snap zones as its caller.
+    So three of the ten constants were *already* the palette rung, written out
+    by hand, and one (160 against 150) was the copy having drifted ten units
+    from the original. The conversion closes that drift rather than preserving
+    it: a copy that agrees is still a copy, and this one had already begun to
+    disagree.
+  - **Five judgements, recorded in the module's own `# Colour` doc section**,
+    because each is a place where "read it from the palette" does not by itself
+    say *which* role:
+    1. **A snap zone follows the accent.** It is a selection — the thing the
+       drop will land in — so it moves with the user's accent, and the three
+       rungs become `selection_fill`, `selection_border` and `highlight_fill`.
+       This is the **opposite** answer from `screen_capture`'s transport
+       buttons one module earlier, and deliberately so: red-records is a code a
+       user decodes, a highlighted drop target is a selection a user points at.
+       The distinction is "does the colour *mean* something specific" versus
+       "does this colour mean *this one is chosen*".
+    2. **The zone labels are lettered for the scrim, not for the mode.** They
+       sit on `p.scrim()`, which is black in both modes on purpose (§525
+       decision 3), so `readable_on(p.scrim())` is the correct ink and `p.text`
+       is the plausible wrong one — it would put dark grey on near-black under
+       the light theme. The test pins the near-white endpoint by hand and
+       asserts `ink != p.text`, which is module 32's tautology lesson and
+       module 36's endpoint-pinning practice applied together.
+    3. **The picker is a panel and obeys the transparency setting.** Its
+       background was frozen at `rgba(30, 30, 46, 230)` and its hover at
+       `rgba(69, 71, 90, 200)` — the frozen-transparency finding for the
+       **third** consecutive module, after `hotkeys.rs` and `screen_capture.rs`.
+       Both become `panel_bg()` / `panel_hover()`.
+    4. **The scrim was tinted and should not have been.** `OVERLAY_SCRIM` was
+       `rgba(30, 30, 46, 140)` — Mocha `base` at the scrim alpha — so in light
+       mode the backdrop behind the zone grid would have *lightened* the
+       desktop instead of pushing it back. `p.scrim()` is `rgba(0, 0, 0, 140)`
+       and does the job in both modes. This is the same class of bug as module
+       36's near-black lettering: a value that is right in the palette it was
+       written in and wrong in the other one, invisible until the other one
+       exists.
+    5. **A hue against a rung, never a hue against a hue.** The picker's active
+       preset is `p.accent` and its inactive presets are `p.overlay0` — a grey
+       rung, not `p.lavender`. `AccentColor` offers Lavender, so an inactive
+       marker in lavender would be *identical* to an active one for any user
+       who picked that accent. The test iterates all fourteen named accents in
+       both modes and asserts the two are present and distinct; a fixture with
+       a single off-palette accent would pass while the shipped Lavender broke.
+  - The picker's drop shadow stays `rgba(0, 0, 0, 100)` rather than
+    `p.shadow()`'s 120, and that is a deliberate keep: the picker is a small
+    popup, not a window, and the lighter shadow is a size judgement rather than
+    a copy of the palette. It is declared in the module docs so the next reader
+    does not "fix" it.
+  - **The transparency test pins what must *not* follow the setting**, not only
+    what must. Sweeping `panel_alpha` across 255 / 200 / 160 and asserting the
+    background and hover track it is half the claim; the other half is that the
+    shadow (`rgba(0,0,0,100)`) and the scrim (`rgba(0,0,0,140)`) do **not**.
+    Module 36's dot clause is the same shape — a fix that made everything
+    follow the setting would satisfy the first half and be wrong.
+  - **Lesson 19 is now closed in the harness rather than in a habit.**
+    `scripts/reintro-palette.py` grew a third mode, `--compile [names…]`, which
+    applies each selected defect, runs `cargo check -p <pkg> --all-targets`,
+    restores, and reports `builds` / `DOES NOT COMPILE` / `NOT APPLIED`. That
+    is precisely the question `--check` cannot answer — module 36's four broken
+    defects passed `--check` and were found an hour into the run they had
+    already invalidated. Minutes instead of an hour, and it is a preflight for
+    every future module rather than a rule someone has to remember.
+    - `--all-targets` and not a bare `cargo check`: several defects reinstate a
+      constant whose only remaining reader is the test module, so checking the
+      lib alone would miss exactly the errors these defects cause.
+    - Applying a defect is now one function, `apply_to`, shared by all three
+      modes — so what a preflight vets is literally what the run runs, rather
+      than a second implementation that can drift from it. It returns the
+      *reason* a defect could not be introduced, which keeps `PATTERN NOT
+      FOUND` and `PATCH IS A NO-OP` reported apart: a missing pattern is source
+      that moved under the defect, a no-op is the defect arguing with itself.
+    - `--compile` restores after **each** defect rather than at the end, and
+      still runs under the same SHA-256-verified whole-snapshot rewrite in a
+      `finally`. An interrupted preflight therefore leaves at most one file
+      patched, and that one gets put back too.
+    - It is a preflight, not a gate. The real run still detects a broken defect
+      (`DID NOT COMPILE`); what this buys is learning it before the run whose
+      result it would spoil has been started.
+    - First use, on this module's fifty-one: **51 build, 0 do not, 0 not
+      applied**, tree restored byte-clean, in a fraction of the sweep's time.
+  - **The catcher census.** The ordered pin table
+    `every_site_draws_the_role_it_claims` caught 48 of 51 and was sole catcher
+    of 13; `the_picker_is_as_transparent_as_the_user_asked` 15 and sole on 2;
+    the two-mode sweep
+    `every_colour_all_three_renderers_draw_comes_from_their_palette` 13;
+    `none_of_the_ten_deleted_constants_is_still_drawn` 12;
+    `the_zone_under_the_cursor_out_reads_the_zones_at_rest` and
+    `a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode` 6 each;
+    `the_scrim_is_black_in_both_modes` 5;
+    `an_inactive_preset_is_never_the_accent_the_user_chose` 4 — the last five
+    sole catcher of nothing. **No pre-existing test in the module caught a
+    single defect**, which is the plainest statement available that a module
+    with thirty-six tests can have no colour coverage whatever.
+  - **Lesson 20: an off-palette accent is the right fixture for "did this
+    follow the accent" and the wrong one for anything that is a *function of*
+    the accent.** One defect escaped all fifty-one — the hovered zone's label
+    lettered `readable_on(p.accent)` instead of `readable_on(p.scrim())` — and
+    the reason is arithmetic, not oversight. `readable_on` is a step function
+    with its threshold at luma 140; the fixture accent `#FF00FF` has luma 105,
+    so it falls on the *same* side as the black scrim and the wrong expression
+    returns the right answer. Every colour test in the module used that one
+    accent, so all of them agreed with the bug.
+    - It is a real bug and not a hypothetical: Yellow, Peach, Rosewater and
+      Flamingo are all above the threshold, so a user on any of those four
+      would get near-black labels on a black scrim — invisible.
+    - The rule that follows is sharper than "vary the fixture". A fixture
+      value is a *sample*, and one sample characterises a function only if the
+      function is constant. `readable_on` is a step, judgement 5's hue-vs-hue
+      collision is an equality — both have exactly one interesting input among
+      the fourteen, and a spot check finds it with probability 1/14 and 4/14
+      respectively. Where the property under test is a function of the accent,
+      **walk the fourteen**; where it is "is this site accented at all", the
+      single off-palette magenta remains correct and cheaper.
+    - Fixed by walking `OFFERED` in the label test as
+      `an_inactive_preset_is_never_the_accent_the_user_chose` already did, and
+      by lifting the fourteen-accent table and a `wearing(light, accent)`
+      helper to the top of the test module so the next test that needs a
+      sweep does not re-derive one.
+    - Note which test the fix belongs in. The pin table cannot be made to
+      catch this: it compares a vector of colours against expectations built
+      from the same palette, so it would have to walk the fourteen accents
+      *and* recompute the expected ink per accent — which is the tautology of
+      module 32. The claim "the ink is the scrim's, whatever the accent" is a
+      different claim from "each site draws the role it claims", and it needs
+      its own test.
+  - **Five declarations were wrong in two directions**, after two consecutive
+    modules of predicting every catcher exactly. Two were under-caught: a
+    fully-opaque `MOCHA_BLUE` at a *border* slot does not trip the
+    hovered-out-reads-resting test, because that test compares alphas and 255
+    beats 150; and two inks trading places is invisible to the membership
+    sweep, because both inks are members. Three were under-declared: the
+    transparency test pins both rungs the picker's background and hover traded,
+    the scrim test pins the scrim's alpha so a setting-driven one trips it, and
+    climbing to the active marker's rung is precisely what the inactive-preset
+    test forbids. All five are now reconciled in the harness — the declarations
+    are the only record of what each test proves, and a wrong one is a
+    misleading record rather than a harmless one.
+    - Two modules of perfect prediction did not mean the method had stopped
+      needing the run. What it meant is that modules 35 and 36 were shaped like
+      the ones before them; this one has three renderers, a threshold function
+      and a scrim, and the predictions went wrong in both directions the first
+      time the shape changed.
+  - **Re-run of the six after the fix and the reconciliation: 6 caught, 0
+    escaped, 0 under-caught, 0 under-declared**, and the escaped defect is now
+    caught by exactly one test — the accent-walking label test, which is the
+    only test that can see it. Module 37 closes at **51/51**. The census above
+    gains one to that test, taking it to 7 catches and its first sole catch.
+
+- [x] `display_settings.rs` — 9 constants over 23 colour sites, done
+  2026-08-23. Sixty-one tests in the module (eight new), harness defects
+  Ax58–Zx59 (fifty-two).
+  - **This is the first module where "read the colour from the palette" is the
+    wrong instruction for part of the file.** Three things here are
+    *instruments*, not decoration, and a settings page that themes its own
+    measuring equipment is lying to the user about what their display does:
+    1. **The five test patterns.** A sixteen-step grey ramp, eight SMPTE bars,
+       a twenty-four-step hue sweep, a black-and-white checkerboard and
+       `rgb(128, 128, 128)`. Their entire purpose is being *exact* and the same
+       on every machine in every theme. `TestPattern::render` therefore takes
+       no `&Palette` at all — the protection is in the signature, so the
+       mistake cannot be made by a future edit rather than merely not having
+       been made by this one.
+    2. **The night-light preview swatch**, which shows what the screen will
+       physically look like at the chosen colour temperature. It follows
+       `ColorTemperature::preview_color`, not the theme.
+    3. **The Red, Green and Blue gamma rows.** These are coloured because they
+       *are* the red, green and blue channels; the colour is a label, not a
+       style. They take `p.red` / `p.green` / `p.blue`, which shift between
+       modes for legibility but never follow the accent — the same answer as
+       `screen_capture`'s transport buttons two modules earlier, and for the
+       same reason: a colour that a user *decodes* is not a colour that says
+       "this one is chosen".
+  - **The deleted `MOCHA_BLUE` was two different things, and the shipped theme
+    is what hid that.** It coloured the active tab's label, the filled part of
+    a slider and the selected pattern chip — all of which mean "chosen" and
+    become `p.accent` — *and* the Blue Gamma row, which means "the blue
+    channel" and becomes `p.blue`. The stock accent **is** blue, so the two
+    were the same pixels and the file had no way to say which it meant. This
+    is the sharpest instance yet of the defect the whole task is about: a
+    single copied constant does not merely duplicate a value, it **merges two
+    concepts**, and the merge is invisible for exactly as long as nobody
+    changes the accent.
+  - **The selected chip's lettering was near-black and had to stop being.**
+    `MOCHA_MANTLE` on Mocha's pale blue is legible; on Latte's `#1D62EC`
+    (luma 93) it is not. The ink is `p.on_accent()`, computed from the fill
+    rather than named beside it — module 36's finding, now the standing
+    practice.
+  - **Two of the new tests locate their subject structurally rather than by
+    index, and the first draft proves why.** The swatch was `cols[4]` and the
+    chip fill was `chip[7]`; run against the real command stream, the first
+    pointed at the active tab's label and the second at the "Test Patterns"
+    heading. An index into a render is a claim about *layout*, and this module
+    is not about layout — so the swatch is now found as **the only colour on
+    the page that belongs to no palette** (which is also precisely the property
+    being asserted), and a chip as **the 32-pixel fill plus the `Text`
+    immediately after it**, which additionally checks all five chips instead of
+    the one at a fixed offset.
+  - **Lesson 21: an off-palette fixture must be off the *instruments* too, not
+    only off the palette.** The obvious accent for a module full of colour is
+    magenta, and it is the one this module must not use: the SMPTE bars *are*
+    magenta, so counting "how many accents does this tab draw" counted a
+    calibration target as chrome and reported three where one was correct.
+    The fixture is now `#C828A0`, chosen by a property rather than by taste —
+    no channel at 0 or 255 and not a grey, which is exactly what puts it
+    outside every pattern, since the bars are combinations of 0 and 255, the
+    ramp and the board are greys, and the hue sweep is fully saturated at every
+    step. `accented()` asserts both non-collisions, so the reasoning is in the
+    code and not only here.
+    - The general form: **a test fixture must be disjoint from everything the
+      module draws that the fixture is not**, and "everything the module draws"
+      now includes things the module is forbidden to theme. Twenty modules of
+      "pick something not in the palette" was a sufficient rule only because no
+      earlier module drew anything outside the palette on purpose.
+  - **Preflight then sweep: 52 build / 0 do not / 0 not applied, then 52
+    caught, 0 escaped, 0 never asked, 0 under-caught, 0 under-declared.** The
+    first perfect prediction since module 36, and worth saying *why* it came
+    back after module 37 broke the streak: the one under-declaration in this
+    module's set was found by reading the declarations against the assertions
+    before the run rather than by the run — defect H (every tab label accented)
+    also trips the gamma-row test, because that test pins the Calibration tab
+    at exactly one accent and four accented labels is four. Module 37's lesson
+    was that predictions go wrong when a module's shape changes; the response
+    is not to predict better but to *check the prediction against the test
+    source*, which costs minutes against a sweep that costs half an hour.
+  - **The catcher census**, from the fifty-two:
+    `every_site_draws_the_role_it_claims` 33 and sole on 6;
+    `none_of_the_nine_deleted_constants_is_still_drawn` 26, sole on none;
+    `every_colour_the_panel_draws_comes_from_its_palette` 25, sole on none;
+    `the_gamma_rows_are_the_channels_and_never_the_accent` 12, sole on none;
+    `an_unchosen_chip_and_an_unchosen_tab_are_never_the_accent` 9 and sole on 1;
+    `a_selected_pattern_chip_is_lettered_for_its_own_fill` 7 and sole on 3;
+    `the_test_patterns_are_the_same_in_both_modes` 5 and **sole on 4**;
+    `the_night_light_swatch_shows_the_temperature_not_the_theme` 2 and **sole on
+    both**. **No pre-existing test caught anything**, for the fourth
+    consecutive module.
+    - The shape of that census is the module's argument in one line. The two
+      broadest tests — the membership sweep and the deleted-constant table —
+      caught 51 defects between them and were sole catcher of **none**, while
+      the two narrowest caught 7 and were sole catcher of 6. A sweep that only
+      had the broad tests would have reported 47 of 52 and looked excellent.
+      What it would have missed is every defect that themes an instrument,
+      which is the only class of defect this module has that the others do not:
+      the instrument colours are *declared to the sweep as derived*, so the
+      sweep is structurally blind to them and the pinning tests are the entire
+      coverage. A membership test cannot check a value it was told to accept.
+
+- [x] `accessibility_settings.rs` — 9 constants over 14 colour sites, done
+  2026-08-23. Thirty-seven tests in the module (nine new), harness defects
+  Ax60–Zx61 (fifty-two).
+  - **The near-black-on-accent bug, found for the third time, on the
+    accessibility page.** The selected tab was lettered `CRUST` (`#11111B`) on
+    `BLUE`, which measures 8.91:1 in Mocha and is excellent. The same pair in
+    Latte is near-black on `#1D62EC` and measures **3.58:1** — below the 4.5:1
+    floor, on the one page in the shell whose subject is people who cannot read
+    low-contrast text. The ink is now `p.on_accent()`, computed from the fill.
+    That this recurs module after module is the point: a constant named for a
+    colour cannot record that it was chosen *for* another colour, so every copy
+    of it silently re-asserts a contrast measurement that was only ever taken
+    once, in one theme.
+  - **The deleted `GREEN` and `BLUE` are the state/selection split again, and
+    here getting it wrong would have broken the widget's meaning outright.**
+    `GREEN` appeared at two sites — the "*n* features active" line and the
+    toggle switch's on-pill — and both encode **state**, a code the user
+    decodes, so both stay `p.green` and do not follow the accent. `BLUE` on the
+    tab pill encoded **selection**, which is what the accent is for, so it
+    becomes `p.accent`. Rewriting both the same way would have given a user
+    with a green accent a settings page on which *every switch reads "on"*.
+    Two sites, one deleted constant, two different answers.
+  - **Lesson 22: a locator derived from the renderer's own list cannot see a
+    permutation of that list.** The one wrong declaration in the set was defect
+    `Z`, which reorders `A11yTab::ALL`. Four tests read the tab bar; only two
+    caught it. The two that missed walk `A11yTab::ALL.iter().enumerate()` and
+    index the render by the same `i`, so permuting the list permutes the
+    expectation identically and the defect is invisible to them by
+    construction.
+    - This is a blind spot *inside* the structural-locator discipline, not a
+      lapse from it. That rule says an index into a render is a claim about
+      layout, so locate by the property being asserted — and these two tests
+      obey it, by deriving the index from the renderer's list rather than
+      writing `[3]`. The refinement is that a locator taken from the code under
+      test moves *with* the code under test. Only an expectation written out
+      independently can see an ordering defect: here the ordered-vector pin
+      (lesson 9) and the green/accent test, which reads `tabs(&cmds)[0]`
+      outright. Coverage was never in question — the defect was caught twice,
+      deterministically — but the declaration is the only record of what each
+      test proves, and a wrong one is a misleading record.
+  - **Preflight then sweep: 52 build / 0 do not / 0 not applied, then 52
+    caught, 0 escaped, 0 never asked, 1 under-caught, 0 under-declared**;
+    reconciled and re-run, `Z` now caught by exactly the two tests that can see
+    it. The pre-sweep declaration review — module 38's institutionalised
+    lesson — again earned its keep in the other direction, catching one
+    *under*-declaration by reading: the same `Z` also trips the green/accent
+    test, because that test reads `tabs(&cmds)[0]` after choosing Visual, and
+    with the order permuted index 0 is the unchosen Input tab.
+  - **The catcher census**, from the fifty-two:
+    `every_site_draws_the_role_it_claims` 46 and **sole on 8**;
+    `green_means_on_and_the_accent_means_chosen` 17, sole on none;
+    `none_of_the_nine_deleted_constants_is_still_drawn` 16, sole on none;
+    `every_site_changes_when_the_mode_does` 15, sole on none;
+    `every_colour_the_panel_draws_comes_from_its_palette` 14, sole on none;
+    `exactly_one_tab_is_accented_and_it_is_the_chosen_one` 12, sole on none;
+    `the_selected_tab_is_lettered_for_its_own_fill` 11, sole on none;
+    `the_active_feature_line_is_green_and_only_drawn_when_there_is_one` 7 and
+    sole on 1; `the_section_headings_keep_their_hue_in_both_modes` 7 and **sole
+    on 4**. **No pre-existing test caught anything**, for the fifth
+    consecutive module.
+    - The ordered-vector pin caught 46 of 52 and was sole catcher of 8, which
+      is the highest share any single test has reached across all thirty-nine
+      modules. That is a property of the *module*, not of the test: fourteen
+      colour sites in five tab bodies, almost all of them plain role reads with
+      no derived value and no instrument, is precisely the shape an ordered pin
+      covers completely. The reading to resist is "the ordered pin is the only
+      test worth writing" — it was sole on 8 here and on 6 in module 38, but in
+      module 38 the four narrowest tests were sole on 8 between them, and here
+      the two narrowest are sole on 5. The broad test finds that *something*
+      moved; only the narrow one says the switch stopped meaning "on".
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -61677,7 +62439,7 @@ a pure function returning a `Request` rather than left as statements inside
 
 ---
 
-## TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY (lane B, 2026-08-22) — OPEN
+## TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY (lane B, 2026-08-22) — GATED 2026-08-23, backlog CLEARED 2026-08-23 (1798 → 0)
 
 **In short:** We have a test that reads our own source code looking for error
 messages that print a file's name without quoting it. Unquoted names are a real
@@ -61759,6 +62521,217 @@ point where one test's failure output is actionable. Two better shapes:
 
 Doing (1) without (2) is still a clear win — it is the difference between a
 backlog and a growing backlog.
+
+### Fix (1) landed, 2026-08-23 — the backlog can no longer grow
+
+`scripts/quote-names.py` replaces `quote-names-scope.py` (the pricing tool is
+subsumed by its default report; keeping two copies of the same two detectors
+was an invitation for them to drift apart). It adds `--check`,
+`--write-baseline` and `--selftest`, and is wired into `scripts/hooks/pre-push`
+as **gate 8**, bypass `ALLOW_UNQUOTED_NAMES=1`.
+
+```
+$ python scripts/quote-names.py --check
+ok -- 1798 known sites in 777 files (0 improved)
+```
+
+Three differences from the scope tool's 1796, all deliberate:
+
+| change | effect |
+|---|---|
+| scans `services/`, `init/` and `posix/` as well as `userspace/` | +4 — all in `init/servicebus/src/main.rs`, all hand-written `'{name}'` around a **bus name**, which is supplied by whoever connects |
+| the test's own fixture strings are in an `IGNORE` table, not the baseline | −4 |
+| `posix/`, `services/` otherwise clean | ±0 — worth knowing, and now guarded |
+
+`apps/` and `gui/` are outside the scan on purpose: they are lane C's, and a
+gate that fails another lane's push for another lane's code is a gate that lane
+switches off. If lane C wants the same guarantee it can add its roots to
+`ROOTS`, which is a one-line change.
+
+**The baseline is keyed on file + *count*, not on the line number.** The three
+candidate keys and why this one:
+
+* `path:line` — exact, and stale on the next commit that inserts a line above
+  the site. A baseline that goes red for unrelated edits gets bypassed.
+* `path:<source text>` — stable under line movement, but not under `rustfmt`,
+  which rewraps argument lists routinely. Same failure, different trigger.
+* `path:<count>` — immune to both, and catches the case that actually happens:
+  a *new* site added to a file that already has some.
+
+The residual gap is a 1-for-1 swap inside one file (fix one, add another, same
+commit, same file) — the count is unchanged and the gate stays green. That is
+rare enough to be worth the two cry-wolf failure modes it avoids, and
+`coreutils/src/bin` is still covered exactly by the Rust test, which is where
+most of the traffic is.
+
+The `--selftest` is not decoration. This detector's signal lives *inside* a
+string literal, so the natural way to make it "more correct" — reach for a Rust
+lexer, as the sibling checkers do — would blank out precisely the text it
+searches and report the whole tree clean. Gate 8 therefore runs `--selftest`
+before `--check` and refuses the push if the checker cannot pass its own cases
+(23 at first; 42 as of the correction below), exactly as gate 6 does for the
+same reason.
+
+**Part (2) — the burn-down — remains open.** Progress and the current ranking
+are in the next two sections.
+
+### Amendment 2026-08-23 — the ratchet was silenceable by `cargo fmt`
+
+**In short:** Both detectors — the Python checker and the Rust test it was
+ported from — matched a *physical line*. `rustfmt` routinely breaks a long
+`eprintln!` so that the file name lands on a line with no macro name on it, and
+when it does, the site becomes invisible to both. Running a formatter, which
+nobody would think of as a security-relevant act, silently removed sites from
+the count. **71 of them — 4% of the backlog — were hidden this way.**
+
+It was found by arithmetic, not by suspicion. Converting `flatpak` should have
+dropped the baseline by 34; it dropped by 37. Checking out the pre-conversion
+`userspace/` and re-surveying showed the extra three were `loginctl` 17→16,
+`snapper` 18→17 and `timeout` 19→18 — three crates I had not touched, whose
+only change was the rustfmt-only commit landed just before. A checker a
+formatter can silence reports a clean tree for a dirty one.
+
+Both sides now join a wrapped call before matching:
+
+* `scripts/quote-names.py` — `_delta()` (net bracket depth, skipping string and
+  char literals) plus `join_wrapped_calls()`, which groups physical lines into
+  logical ones and reports the *first* line so a report still points where a
+  reader would go.
+* `userspace/coreutils/tests/diagnostics_quote_names.rs` — `bracket_delta()`
+  and `logical_lines()`, the same algorithm, with
+  `the_detector_sees_a_call_rustfmt_wrapped` pinning it.
+
+Literals must be skipped rather than counted: a format string is full of `{`
+and `}` and often holds a paren of its own (`purged {n} job(s)`), so counting
+those leaves every such call permanently unbalanced and it is never joined. The
+join is bounded at 40 physical lines, because the scanner does not model every
+Rust literal form — a raw string defeats it — and an unbounded join would then
+swallow the rest of the file, turning one unrecognised line into a silent hole
+over everything below it. Both regressions are pinned by tests.
+
+**This is the one legitimate reason a baseline number may go up**, and the
+generated baseline header now says so: it is a commit that changes
+`quote-names.py` and no `.rs` file under the scanned roots. It has happened
+once, here: 1641 → 1712.
+
+### The bug the correction immediately found: `tar` could be made to forge a line of its own stderr
+
+`userspace/coreutils/src/bin/tar.rs:605` had been wrapped by rustfmt and so was
+invisible to the test *for as long as the test had existed*:
+
+```rust
+eprintln!(
+    "tar: {}: unsupported entry type '{}'; skipped",
+    quotef_os(&name),
+    char::from(other)
+);
+```
+
+`other` is the type-flag byte out of the archive's own header — exactly as
+attacker-chosen as the name beside it, which is already quoted. `char::from`
+printed it raw, so an archive crafted with `\n` in that byte writes a second
+line into `tar`'s error stream that `tar` never wrote. Fixed in `05559d621` by
+`quoteaf(&[other])`, which renders that byte as `''\n'`. Negative-verified:
+reverting the fix makes `no_diagnostic_hand_writes_quotes_around_a_name` fail,
+naming the line.
+
+### Burn-down progress (part 2)
+
+| crate | sites | commit |
+|---|---|---|
+| `btrfs` | 46 | `4271941fb` |
+| `pulseaudio` | 38 | `892010376` |
+| `cups` | 36 | `b8c50660b` |
+| `flatpak` | 34 | `579d761cd` |
+| `tar` (hand-written quotes) | 1 | `05559d621` |
+
+`scripts/quote-names.py` gained a **`--fix PATH...`** mode, which is what makes
+the rest of this tractable. It lives inside the checker rather than beside it
+on purpose: a separate fixer would re-derive "what is a site" and would
+silently skip lines the checker still counts. It was verified rather than
+asserted — run against the `git show`-extracted pre-fix sources it reproduced
+83 of the 84 already-hand-converted sites identically, and declined the 84th
+for the right reason.
+
+Current head of the ranking, post-correction:
+`timeout` 20, `snapper` 18, `loginctl` 17, `stat` 17, `apparmor` 16,
+`podman` 16, `selinux` 16, `pkg` 14, `mkfs` 13, `useradm` 13.
+Total **1711 sites in 780 files**.
+
+### Burn-down complete, 2026-08-23 — 1798 → 0, and the gate changes meaning
+
+**In short:** every error and status message in lane B's tree that prints a
+name the user supplied now puts quotes around it in a way the name itself
+cannot escape. The backlog this entry was opened for is empty. Because the
+gate compares against a recorded list, and the list is now empty, it stops
+being a "do not make this worse" rule and becomes "do not do this at all":
+the next such message that lands anywhere under `userspace/`, `posix/`,
+`services/` or `init/` fails the push that carries it.
+
+```
+$ python scripts/quote-names.py --check
+ok -- 0 known sites in 0 files (0 improved)
+```
+
+The last 444 crates went in five chunks of ~90, each taken through the same
+five stages before it was committed: `quote-names.py --fix` (textual),
+`quote-names-why.py --batch` (derive the rationale), `quote-names-wire.py
+--batch` (manifest + `use`), `cargo clippy --fix`, then `cargo fmt`, `cargo
+clippy -- -D warnings` and `cargo test`. All 444 test binaries pass.
+
+**Two tools were added under the fixer, and the second is the load-bearing
+one.** `quote-names-wire.py` writes the `quoting` dependency and the `use`
+into a crate, and records *why* that crate needs it as a comment in its
+`Cargo.toml`. Writing 444 of those sentences by recall would have produced
+444 plausible sentences, some of them false — the provenance genuinely
+differs from crate to crate, and a comment that says "this comes from argv"
+about a value that comes from a config file is worse than no comment.
+`quote-names-why.py` therefore *derives* the sentence from the crate's own
+source: it finds the quoting call, walks the interpolated value back through
+`let`/`for`/assignment/`push`/match-arm/parameter bindings — parameters
+resolved **by position** against each call site, and scoped per function, so
+a local named `governor` in one function is not evidence about another's —
+and emits the sentence only if the value reaches argv. 430 of the 444 were
+derived this way. The other 14 it **refused**, and every refusal was right:
+`doas`'s caller name comes from the password database, `readelf`'s operand
+arrives through a struct field, `sysctl`'s through an enum variant,
+`tput`'s through a tuple pushed onto a vector (and, under `-S`, from stdin
+rather than argv at all), `powertop`'s from the program's own table. Those 14
+sentences were written by hand, having been checked.
+
+The refusals were also the tool's own test suite: each one that turned out to
+be a *tracer* gap rather than a real difference produced a named selftest
+case and a fix. The last of those, `c79de5b47`, taught it that the value of
+`if c { a } else { b }` is `a` or `b` and never `c` — before it, `rake-cli`'s
+`let run_tasks = if tasks.is_empty() { vec!["default"] } else { tasks };`
+ended the trail one step short of the argv branch it actually takes. The
+inverse case is pinned too, because it is the reason the decomposition is
+worth having: a block that *tests* argv and returns a constant must not
+resolve.
+
+**Five classes of real defect surfaced underneath the mechanical rewrite,**
+all of which the type checker or the eye caught only because the rewrite
+moved the line:
+
+| class | example | why it matters |
+|---|---|---|
+| quotes around one of several argv values | `doas: {} is not allowed to run '{}' as {}` | quoting one of three quotes none of them; here it was a *security* decision's tail |
+| a line meant to be pasted into a shell | `xh`'s `curl -X {} '{}'` | the quotes were the only thing between a URL containing `'` and a second command |
+| the same value printed twice, quoted once | `tigervnc`'s `New '{}' desktop at {}` | the bare copy is the forgeable one |
+| `byte as char` | four crates | a Latin-1 widening that reports 0xE9 as an `é` nobody typed |
+| a genuine `char` off `.chars()` | `getopt`, `ldd` | fine, but needs `to_string`; `quoteaf_os` takes `AsRef<OsStr>` |
+
+Commits: `8a48fd5cc`, `643e41d82`, `b10cff206`, `3639cb6b4`, `97e23c24b`
+(the last also empties the baseline), over tooling in `ad754709e` and
+`c79de5b47`.
+
+**What is still not covered**, so that this is not read as a stronger claim
+than it is: `apps/` and `gui/` remain outside `ROOTS` (lane C's tree — see
+above); the detector only sees interpolation into a *format string*, so a
+name concatenated into a `String` and then printed is invisible to it; and
+the count-keyed baseline still cannot see a 1-for-1 swap inside one file,
+though with the count at zero for every file that gap now requires adding
+and removing a site in the same file in the same commit.
 
 ### Interaction with B-Q7
 
@@ -65596,6 +66569,268 @@ That is on purpose — a kernel that has just proved one of its own invariants
 wrong has no business carrying the user's data forward into whatever runs
 next. Every non-panicking exit, including an early `?`, does restore.
 
+## `find` is a complete port of findutils 4.9.0, verified against the real binary — and five things it deliberately does differently (lane B, 2026-08-23)
+
+### In short
+
+`find` used to be a small stub. It is now a 6200-line reimplementation of
+the whole findutils 4.9.0 interface — every primary, every action, every
+operator, the expression tree and the walk — and there is a harness,
+`scripts/find-diff.sh`, that runs 448 command lines through *our* `find` and
+through *GNU's* `find` inside WSL and compares stdout, stderr and the exit
+status byte for byte. It currently reports **443 passed, 0 differed, 5
+differ on purpose**. This entry records what those five are, why each is
+deliberate rather than unfinished, and what debt is left behind.
+
+### The harness, and why the control run matters
+
+    MSYS2_ARG_CONV_EXCL='*' wsl -e env FIND_DIFF_INNER=1 LC_ALL=C.UTF-8 TZ=UTC \
+        bash ./scripts/find-diff.sh
+
+It runs inside WSL because half of `find`'s vocabulary asks questions only a
+real inode can answer — `-inum`, `-links`, `-samefile`, `-perm`, `-user`,
+`-type l`, `-xtype`, `-fstype`, `%i`, `%n`, `%b` — and the fixture tree is
+built in WSL's own `/tmp` rather than under `/mnt/d`, because on 9p a
+directory's link count is synthesised, hard links do not share an inode, and
+`st_blocks` is invented. A harness on 9p would be comparing two
+implementations against fiction.
+
+`OURS=/usr/bin/find sh scripts/find-diff.sh` is the control: GNU against
+itself. It reports 443 passed, 0 differed, 4 unexpectedly agreed — the four
+being exactly the cases we mark deliberate, which of course agree when both
+sides are GNU. That run is what makes the 443 passes mean something: without
+it, a case that agrees because it exercises nothing would look identical to
+one that agrees because both implementations got it right.
+
+### The five deliberate differences
+
+| Case | Why |
+|---|---|
+| `find --version` | Answers "which program is this". Copying GNU's banner is a false attribution. |
+| `find --help` | Its bug-report block sends reports to us, not to `bug-findutils@gnu.org`. |
+| `find t -name f -printf '%Z\n'` | SELinux context. We render it empty; GNU asks a kernel that has no policy loaded. |
+| `find t -mtime nan` | GNU reaches `assert (! isnan (...))` in `get_comp_type` and dumps core; we diagnose the argument. Unusable as a straight comparison anyway — the shell prints the crashed child's *pid*, so the two sides could not agree even against themselves. |
+| `find t -regex '.*'` | Byte-based regex versus glibc's multibyte matcher; see below. |
+
+The first two are the interesting ones, because the harness surfaced them
+only *incidentally*: they showed up as cases that **agreed**, which is to
+say our binary was claiming to be GNU findutils by GNU's authors and
+directing its bug reports at GNU's tracker. A differential harness normally
+finds bugs by disagreement; these two were bugs *of* agreement, and they are
+the reason the harness counts "unexpectedly agreed" as a distinct outcome
+rather than folding it into "passed".
+
+### The regex difference is a consequence of a decision already taken
+
+The fixture tree contains a file called `t/n\377ame`, whose name is not
+valid UTF-8. GNU compiles `.*` with glibc's multibyte matcher, which cannot
+decode `\377` in a UTF-8 locale and therefore declines to match the name at
+all — `find -regex '.*'` silently skips the file. Ours is byte-based and
+matches it.
+
+Ours is the deliberate answer, per `design-decisions.md` §322: a path on
+this system is a byte string with no encoding attached, so a pattern meaning
+"any sequence of characters" has to mean "any sequence of bytes" or it stops
+being able to name some of the files that exist. Every *other* `-regex` case
+in the harness agrees exactly, because every other one is over a name that
+decodes — the difference is confined to the one input where the two models
+of "character" cannot both be right.
+
+### What the harness found in the shared `ere` crate, not in `find`
+
+Driving the last few cases to zero turned up a defect that was never
+`find`'s: the ERE parser had been written from the grammar rather than from
+a measurement, and rejected a dozen patterns glibc accepts — an empty
+pattern, a stacked quantifier (`a**`, `a{1}{2}`), an unopened `)`, `{,3}`,
+an empty alternation branch, `a{0}`. Eight binaries share that crate, so
+every one of them refused patterns GNU runs. Fixed in `8aca183de`, with
+`parse_brace` rewritten as a transcription of glibc's `parse_dup_op` rather
+than its own reading, because the interval errors divide on a line no
+grammar suggests — whether a `}` ever turned up, not whether the content was
+sane.
+
+That is the argument for pointing a differential harness at a *port* even
+when the port looks finished: the bug was two layers below the thing under
+test, and no amount of reading `find.rs` would have found it.
+
+### TD-B-FIND-DIAGNOSTICS-STILL-GO-THROUGH-FROM-UTF8-LOSSY -- FIXED (2026-08-23)
+
+**Where:** `userspace/coreutils/src/bin/find.rs`, `userspace/coreutils/src/bin/grep.rs`.
+
+Fixed as described below, and pinned by six new harness cases. `grep -n
+'from_utf8_lossy\| as char'` over both files now returns exactly one hit, in
+`#[cfg(test)]` code, where the input is a literal the test wrote itself.
+
+**What the sweep actually changed.** Twenty-six sites in `find.rs` moved from
+`String::from_utf8_lossy` to `quote::escape_unprintable`, and both sites in
+`grep.rs`'s `compile_patterns` did the same. Three sites did something other
+than a substitution, because a substitution would have been wrong:
+
+- `qmark` now uses `std::str::from_utf8`, not the lossy form. The question it
+  asks is only *whether* the bytes decode; the lossy form answers that by
+  building the corrupted string first and then reporting that it had to.
+- The `-ok`/`-okdir` confirmation prompt writes bytes directly to a locked
+  `io::Stderr` with `write_all`, exactly as upstream's `fprintf (stderr, "< %s
+  ... %s > ?", ...)` does. This is the one diagnostic in the file whose sink is
+  a byte stream with no `String` in the way, and it is also the one where being
+  wrong is worst: a prompt showing a *different* path from the one about to be
+  handed to the command asks the user to confirm the wrong thing.
+- `chr` renders a NUL as nothing (which is what C's `%c` does once the message
+  reaches a terminal) and every other byte through `escape_unprintable`.
+
+**A second corruption class the sweep uncovered, which this entry did not
+originally know about.** Three sites did not use `from_utf8_lossy` at all —
+they wrote `c as char`. That is not a decode; Rust's `u8 as char` reinterprets
+the byte as the Unicode scalar with the same number, i.e. as Latin-1, so byte
+`0xFF` becomes U+00FF and is then *encoded back out* as the two bytes `0xC3
+0xBF`. The differential harness caught it the moment a non-UTF-8 argument was
+passed: GNU printed `M-^?` (one byte), we printed `M-CM-?` (two). The sites
+were `parse_type_letters`' "Unknown argument to -type" and "Duplicate file
+type", and `parse_size`' "invalid -size type"; all three now call `chr`.
+`grep -rn ' as char'` over `find.rs` returns nothing.
+
+**How it is pinned.** `scripts/find-diff.sh` gained six cases that pass a
+`\377` byte as an option argument, a format directive and a predicate name:
+`-type`, `-perm`, `-used`, `-size`, `-printf %\377` and `-\377`. Five of them
+are marked as deliberate differences — we escape, GNU writes the byte raw —
+and the sixth, `-perm`, is deliberately *not* marked and must keep passing: its
+diagnostic does not echo the argument, so it is the control showing the marking
+is about rendering and not about the parse. The harness now reports
+
+    454 case(s): 444 passed, 0 differed, 10 differ on purpose, 0 unexpectedly agreed
+
+and the GNU-against-itself control run (`OURS=/usr/bin/find`) reports nine of
+the ten deliberate cases as `XPASS`, which is the shape that makes the marking
+meaningful.
+
+**What remains, and it is a real refactor rather than a leftover.** We escape
+where GNU writes the byte raw. Being byte-identical means making `find`'s
+`Fatal`/`errmsg` plumbing byte-typed, which means diagnostics can no longer be
+built with `format!` and the change reaches the forty-odd other binaries that
+share `errmsg`. That tradeoff — raw versus escaped, and why lossy is never
+acceptable either way — is written up in `design-decisions.md` §369, and the
+five marked harness cases are the exact list that should flip back to plain
+passes if the plumbing is ever converted.
+
+### TD-B-GREP-PRINTS-POSIX-EXTENDED-DIAGNOSTICS-FOR-EGREP-SYNTAX -- FIXED (2026-08-23)
+
+**Where:** `userspace/ere/src/engine.rs` (`Syntax`, `Regex::new_syntax`),
+`userspace/coreutils/src/bin/grep.rs`.
+
+**The original report was right about the problem and half right about the
+cause.** `grep -E` is indeed not the syntax `find -regextype posix-extended`
+gets; it is glibc's `RE_SYNTAX_EGREP`. But the entry guessed at which flags
+differ from the header rather than measuring, and the guess was off — so the
+fix started by running both real binaries over the same patterns:
+
+| pattern | `find -regextype posix-extended` | `grep -E` |
+|---|---|---|
+| `*a` | `REG_BADRPT` | matches `a` |
+| `{b}a` | `REG_BADRPT` | matches `a` |
+| `{}a` / `{1,2,3}a` | `REG_BADRPT` | exit 1, **no diagnostic** |
+| `a{b}` | invalid interval | matches `a{b}` |
+| `a{}` / `a{1,2,3}` / `a{1,0}` / `a{99999999}` | error | **error** |
+| `a^*b` | `REG_BADRPT` | matches `ab` |
+
+Two consequences the header alone would not have told you. First, the
+difference reduces to exactly **two** bits — `RE_CONTEXT_INDEP_OPS` without
+`RE_CONTEXT_INVALID_OPS` (a quantifier with nothing to quantify repeats the
+*empty* expression instead of erroring) and `RE_INVALID_INTERVAL_ORD` (a `{`
+that does not open a well-formed interval is a literal brace) — so `Syntax`
+is a two-field struct with two constants, and the parser is parameterised
+rather than forked. Second, only the "this is not a count" forms roll back;
+a *well-formed-looking but wrong* interval stays an error in both dialects,
+which is why `repeat()` folds `{0,0}` to `Node::Empty` but `parse_brace`
+rolls back only on `BraceNum::Invalid`.
+
+**The posix-extended side needed no change at all.** The original entry
+implied our `find` answer might also be wrong for malformed braces; measured,
+every *leading* quantifier form — `{b}a`, `{}a`, `{a`, `{1,2,3}a` included —
+is `REG_BADRPT` "Invalid preceding regular expression", never a brace error,
+and that is already what this parser did. (A first measurement said otherwise
+because the pattern was passed as `"\./$p"`, which put a `/` in front of the
+"leading" quantifier. Worth remembering: `find`'s regex is whole-path
+anchored, so a probe pattern must be used verbatim.)
+
+**The two `grep -E` cases that exit 1 with no diagnostic are GNU being two
+engines**, not a syntax bit: glibc `regcomp` decides accept/reject and
+`dfa.c` decides what matches, and at the start of an expression glibc skips
+the offending token while dfa.c makes it a literal. We do not reproduce the
+silent-nonmatch behaviour — we accept those patterns and match the empty
+expression, which is what `dfa.c` alone would do. Nothing in the tree depends
+on the difference and reproducing it would mean shipping two disagreeing
+parsers, which is the thing this crate exists to stop.
+
+**`-G` was the follow-up question, and it is now measured too.** `bre::compile`
+translates to extended and hands it to the same engine, so it inherits
+`POSIX_EXTENDED`; GNU asks for `RE_SYNTAX_GREP`, which has its own bits. Rather
+than read that header — the mistake this entry started with — `scripts/grep-diff.sh`
+now runs 40 BRE patterns through both binaries, including every form the two
+`-E` bits are about (`*a`, `a{b}`, `a{`, `{b}`, `a\{2,1\}`, `\(a`, `a\)`,
+`a[`). All agree. So BRE needs no dialect parameter: in BRE a bare `{` is
+already a literal and a leading `*` is already an ordinary character, which is
+what makes both bits moot there.
+
+Covered by 59 `ere` tests including `the_dialects_differ_in_exactly_two_places`,
+and by `scripts/grep-diff.sh` — 155 passed, 0 differed, 11 deliberate, with the
+`OURS=/usr/bin/grep` control turning all 11 into XPASS, which is the shape that
+makes the markings mean something.
+
+### B-GREP-DIFF-FOUND-THREE-BUGS-AND-A-MISSING-PAIR-OF-FLAGS -- FIXED (2026-08-23)
+
+**Where:** `userspace/coreutils/src/bin/grep.rs`, `scripts/grep-diff.sh`.
+
+**In short:** a differential harness was added for `grep` to settle one
+question about `-E` syntax. It settled that question in three lines of output
+and then found four *other* things wrong, none of which any unit test had
+noticed, because every unit test asserted the behaviour the program had.
+
+| what | GNU | us, before | why nobody noticed |
+|---|---|---|---|
+| `grep -o 'o*'` on `foo bar` | one line, `oo` | `oo` surrounded by six blank lines | the `-o` tests all used patterns that cannot match empty |
+| `grep -m 0 foo f` | nothing, exit 1 — and *no* `-c` count line | every match, exit 0 | `-m` was tested at 1, 2 and 5 |
+| `grep -Z`, `grep -z` | NUL-delimited names and records | `unknown option` | a whole feature cannot be missed by a test of the features present |
+| a fixture named `nul` | an ordinary file | the Windows null device | the harness's own bug — see below |
+
+**`-m 0` is the interesting one.** It is not "no limit" and it is not "stop
+after the first": GNU prints nothing, reports the file as not matching, *and
+suppresses the `-c` count line entirely* rather than printing `0`. The only way
+to get that is to answer before reading a line, since the count line is
+otherwise printed unconditionally.
+
+**`-Z`/`-z` are not decoration on this system.** A path here may hold any byte
+but `/` and NUL — newline included — so `grep -rl … | xargs` is ambiguous *by
+construction*, and `grep -rlZ … | xargs -0` is the only spelling that is not.
+`-z` is the other half: `find -print0 | xargs -0 grep -z` only works if grep
+agrees about what a record is. Measured details that are easy to get wrong and
+are now asserted: `-Z` changes the byte after a *file name* only — the one after
+a line number stays `:`, or `-nZ` would be unparseable — and `-z` does not reach
+the `-c` count line, which ends with a newline even under `-z` because a count
+is not a record.
+
+**Two things the harness had to learn about itself**, both worth remembering
+for the next `*-diff.sh`:
+
+* **A case that names no file reads stdin, and stdin was the case list.** The
+  first such case (`grep a`) swallowed every remaining line; the harness
+  reported "12 passed" for a file with 180 cases in it and looked entirely
+  healthy doing so. Fixed by feeding the list on fd 3 and giving every case
+  `</dev/null` unless it says otherwise.
+* **A command substitution discards NUL bytes.** Without the `tr` that
+  `find-diff.sh` already had, every `-Z`/`-z` case would have captured
+  identically to the same case without the flag — the flags would have "passed"
+  by being invisible.
+
+**The eleven deliberate differences**, all XPASS under the
+`OURS=/usr/bin/grep` control: three `\<`/`\>`/`\b` refusals (`bre.rs` explains
+why — the engine has no word-boundary matcher and there is no spelling that
+would quietly do the wrong thing), two binary-file cases (we never replace a
+line with `Binary file X matches`), and six recursion cases where the *Windows*
+build joins child paths with `\`. That last group is a harness artefact, not a
+grep bug: `Path::join` uses the host separator and the target's is `/`. `grep
+foo sub` — recursion's sibling that names no child path — is left unmarked as
+the control that proves the difference is the separator and nothing else.
+
 ## TD-A-SELFTESTS-REACH-OUTSIDE-THEIR-OWN-MODULE — `with_pristine` restores one module, and a suite is not confined to one module
 
 **In short:** the fix for the destructive self-tests swaps a module's state
@@ -66633,3 +67868,123 @@ prints nothing rather than failing anything. No test asserts either field.
 field whose *value* is the thing under test, and for `if !x { print skip;
 return Ok }`. The pattern to look for is an assertion whose truth follows
 from the code compiling rather than from the code working.
+
+---
+
+### TD-B-ID-AND-STAT-STILL-CLAIM-ACCOUNT-NAME-LOOKUP-IS-UNBUILT -- HALF FIXED (`id` done, `stat` OPEN), user-visible (lane B, 2026-08-23)
+
+**What.** `id -n` and `stat`'s `%U`/`%G` print numbers where every other system
+prints names, and each says in a comment that the lookup is not available yet:
+
+    userspace/coreutils/src/bin/id.rs:7    -n  print name instead of number (not yet supported -- prints number)
+    userspace/coreutils/src/bin/stat.rs:319 %U/%G are the *names*, which need /etc/users.yaml (§353). Until ...
+
+**Why it is wrong.** The lookup has existed for some time. `userspace/pwdb`
+reads `/etc/passwd` and `/etc/group`, is already a declared dependency of the
+coreutils crate, and `ls -l` has been resolving both the owner and the group
+column through it. The comments are describing a world that stopped being true
+and were never revisited, so the capability is present and simply not called.
+
+**Found by.** Converting `chown` off `Vec<String>` argv. `chown` carried the
+same stale claim -- "name lookup not yet supported (see design-decisions.md
+§353 on /etc/users.yaml)" -- and returned `invalid user: 'alice'` on a system
+that knew alice, which is to say it rejected the spelling that essentially
+every script and every manual page uses. Fixed there in the same commit, via
+gnulib's `parse_user_spec`. Two bins were left holding the same belief.
+
+**Why it matters more than it looks.** `id -un` is the ordinary way a script
+asks who it is running as, and a numeric answer is not merely uglier -- it
+compares unequal against the name the script is testing for. Same for a `stat
+-c %U` in a permission check.
+
+**Proper fix.** Call `pwdb::Db` the way `ls` and now `chown` do: one `Db::load()`
+per run, `user_by_uid` / `group_by_gid`, and fall back to the digits when the
+database does not know the id (that fallback is what `chown-core.c`'s
+`uid_to_name` does, and it is why a `-v` line always has something to print).
+Delete the comments rather than editing them; there is nothing left to qualify.
+
+**When.** Both bins are already in the `scripts/argv-utf8.py` backlog
+(`id.rs:65`, `stat.rs:657`), so both will be opened for the argv conversion
+anyway. Fix it then -- the conversions keep turning up exactly this shape of
+defect, and that is the argument for doing them rather than the cost of them.
+
+**Update 2026-08-23 -- the `id` half is fixed; `stat` is still open.** `id` was
+rewritten as a port of GNU's `src/id.c` + `src/group-list.c` + gnulib's
+`lib/mgetgroups.c` during its argv conversion, and `-n` now resolves through
+`pwdb::Db` exactly as this entry prescribed. Opening the file turned up three
+further defects beyond the one recorded here, all user-visible, and all now
+fixed in the same rewrite:
+
+* **A USER operand was silently discarded.** `parse_args` inspected only
+  arguments beginning with `-`, so `id alice` printed the *caller's* ids and
+  exited 0. A wrong answer with a success status is worse than a failure.
+* **The default line had its fields in the wrong order** -- `uid= euid= gid=
+  egid=` where every other `id` emits `uid= gid= euid= egid=`. Two unit tests
+  asserted the wrong order, which is how it survived.
+* **There was no `groups=` field at all**, which is most of what the default
+  line is for. It now comes from a new `pwdb::Db::group_list` (glibc's
+  `getgrouplist`, measured against glibc 2.39 and unit-tested against that
+  transcript).
+
+One honest limitation ships with it, documented in the module docs rather than
+papered over: `id` with **no operand** prints only the effective gid in
+`groups=`, because that list is the kernel's (`getgroups(2)`), and
+`posix/src/unistd.rs`'s `getgroups` still returns 0 supplementary groups.
+`id $USER` reads `/etc/group` and prints everything. Making the no-operand case
+read the file too would have `id` vouch for privileges the kernel has not
+granted; gnulib takes the same view, synthesising a list only when `getgroups`
+fails with `ENOSYS`. The real fix is in `getgroups`, not in `id`.
+
+`stat`'s `%U`/`%G` are untouched and this entry stays open for them.
+
+### B-WHOAMI-AND-LOGNAME-TRUST-THE-ENVIRONMENT -- OPEN, security-relevant (lane B, 2026-08-23)
+
+**What.** `whoami` and `logname` both answer from environment variables:
+
+    userspace/coreutils/src/bin/whoami.rs:31   env::var("USER") then env::var("LOGNAME")
+    userspace/coreutils/src/bin/logname.rs:11  env::var("LOGNAME") then env::var("USER")
+
+Neither GNU utility consults the environment at all. Measured against GNU
+coreutils 9.4:
+
+    $ USER=root LOGNAME=root whoami        inhahe          (status 0)
+    $ LOGNAME=root USER=root logname       logname: no login name  (status 1)
+
+`whoami` is `geteuid()` + `getpwuid()`; `logname` is `getlogin()`, the utmp
+login name, and POSIX explicitly specifies it that way rather than as `$LOGNAME`
+precisely so that it cannot be set by the caller.
+
+**Why it matters.** `whoami` is a *privilege check* in idiomatic shell:
+
+    [ "$(whoami)" = root ] || { echo "must be root"; exit 1; }
+
+Ours returns whatever the caller put in `$USER`, so any unprivileged process can
+walk through that gate by exporting one variable. The environment is attacker-
+controlled data on every system; an identity utility is the one place it must
+not be consulted. This is the same class of defect as `id` printing the wrong
+account (`TD-B-ID-AND-STAT-STILL-CLAIM-ACCOUNT-NAME-LOOKUP-IS-UNBUILT`), but
+worse, because `id`'s failure was a wrong answer and this one is a wrong answer
+the caller chooses.
+
+**Found by.** Rewriting `id` against GNU's `src/id.c`. `id` now resolves names
+through `pwdb::Db`; reading its two closest siblings showed both still guessing.
+
+**Also wrong in both, found at the same time.** Neither accepts or rejects
+operands: GNU reports `whoami: extra operand 'x'` with a `Try 'whoami --help'`
+referral and exits 1, ours ignores the operand and prints a name. Neither has
+`--help` or `--version`.
+
+**Proper fix.** `whoami`: `geteuid()`, then `pwdb::Db::load().user_by_uid()`,
+and GNU's exact failure when the database has no entry --
+`whoami: cannot find name for user ID %ju`, status 1. Note this is *not*
+`uid_to_name`'s digits fallback: `whoami` fails rather than printing a number,
+because a number is not a name and a script comparing against one would be
+misled a second time. `logname`: `getlogin()` -- which needs a utmp equivalent,
+so check whether `posix` provides one before assuming; if it does not, the
+honest port fails with `logname: no login name` unconditionally, which is what
+GNU does on this machine anyway. Both need the getopt conversion for
+`--help`/`--version`/`extra operand`.
+
+**Not in the argv-utf8 backlog** -- both take no arguments today, so neither
+will be opened by that sweep. This entry is the only thing that will surface
+them.

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `networkctl`, `resolvectl`, `systemd-resolve`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_networkctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -62,7 +67,7 @@ fn run_networkctl(args: &[String]) -> i32 {
             println!("LINK  CHASSIS ID        SYSTEM NAME  PORT ID   PORT DESCRIPTION  CAPS");
             println!("eth0  aa:bb:cc:dd:ee:ff Switch-1     Gi0/1     GigabitEthernet   BR");
         }
-        _ => println!("Unknown command '{}'", subcmd),
+        _ => println!("Unknown command {}", quoteaf_os(subcmd)),
     }
     0
 }
@@ -88,7 +93,9 @@ fn run_resolvectl(args: &[String]) -> i32 {
             println!("{}: 93.184.216.34", host);
             println!();
             println!("-- Information acquired via protocol DNS in 12.3ms.");
-            println!("-- Data is authenticated: no; Data was acquired via local or encrypted transport: no");
+            println!(
+                "-- Data is authenticated: no; Data was acquired via local or encrypted transport: no"
+            );
         }
         "status" => {
             println!("Global");
@@ -100,7 +107,9 @@ fn run_resolvectl(args: &[String]) -> i32 {
             println!();
             println!("Link 2 (eth0)");
             println!("    Current Scopes: DNS LLMNR/IPv4 LLMNR/IPv6");
-            println!("         Protocols: +DefaultRoute +LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported");
+            println!(
+                "         Protocols: +DefaultRoute +LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported"
+            );
             println!("Current DNS Server: 192.168.1.1");
             println!("       DNS Servers: 192.168.1.1");
         }
@@ -125,14 +134,17 @@ fn run_resolvectl(args: &[String]) -> i32 {
             println!("Global: 8.8.8.8 8.8.4.4");
             println!("Link 2 (eth0): 192.168.1.1");
         }
-        _ => println!("resolvectl: command '{}' completed", subcmd),
+        _ => println!("resolvectl: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "networkctl".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "networkctl".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "resolvectl" | "systemd-resolve" => run_resolvectl(&rest),
@@ -143,7 +155,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_networkctl};
+    use super::{basename, run_networkctl, strip_ext};
 
     #[test]
     fn basename_strips_path() {

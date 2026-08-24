@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `lua`, `luac`, `luarocks`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -25,14 +26,19 @@ fn run_lua(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let exec_str = args.iter().position(|a| a == "-e")
+    let exec_str = args
+        .iter()
+        .position(|a| a == "-e")
         .and_then(|i| args.get(i + 1));
     if let Some(code) = exec_str {
         println!("(executing: {})", code);
         return 0;
     }
 
-    let script = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let script = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
     if let Some(file) = script {
         println!("(running {})", file);
     } else {
@@ -56,7 +62,11 @@ fn run_luac(args: Vec<String>) -> i32 {
         println!("Lua 5.4.7 (Slate OS)");
         return 0;
     }
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     for f in &files {
         println!("Compiling {}...", f);
     }
@@ -92,7 +102,7 @@ fn run_luarocks(args: Vec<String>) -> i32 {
         }
         "search" => {
             let query = args.get(1).map(|s| s.as_str()).unwrap_or("");
-            println!("Search results for '{}': (simulated)", query);
+            println!("Search results for {}: (simulated)", quoteaf_os(query));
         }
         "path" => {
             println!("export LUA_PATH='./?.lua;./?/init.lua;/usr/local/share/lua/5.4/?.lua'");
@@ -100,7 +110,7 @@ fn run_luarocks(args: Vec<String>) -> i32 {
         }
         "install" | "remove" | "show" | "make" => println!("({} — simulated)", cmd),
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -114,7 +124,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -130,7 +142,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_lua};
+    use super::run_lua;
 
     #[test]
     fn help_exits_zero() {

@@ -42,6 +42,7 @@
 //!   deliberately passwordless account at the machine's own keyboard is a
 //!   long-standing Unix choice; escalating from one is not.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -1030,9 +1031,17 @@ fn main() {
             process::exit(1);
         }
         MatchResult::NoMatch => {
+            // Three names, none of them this program's: the caller comes from
+            // the password database, and both the command and the target user
+            // come from argv. The hand-written quotes wrapped only the middle
+            // one, and so quoted nothing -- a command named `x' as root #`
+            // put the tail of a *security* decision under the caller's
+            // control, which is the one line here that must not be forgeable.
             eprintln!(
-                "doas: {} is not allowed to run '{}' as {}",
-                caller_name, command, args.target_user
+                "doas: {} is not allowed to run {} as {}",
+                quoteaf_os(&caller_name),
+                quoteaf_os(&command),
+                quoteaf_os(&args.target_user)
             );
             process::exit(1);
         }

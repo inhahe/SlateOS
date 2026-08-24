@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `tensorflow`, `tf`, `saved_model_cli`, `tflite`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_tensorflow(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -68,7 +73,7 @@ fn run_tensorflow(args: &[String]) -> i32 {
             println!("test_lite: 567 passed");
             println!("All 9714 tests passed.");
         }
-        _ => println!("tensorflow: command '{}' completed", subcmd),
+        _ => println!("tensorflow: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -108,7 +113,7 @@ fn run_saved_model_cli(args: &[String]) -> i32 {
             println!("Optimization: DEFAULT");
             println!("Wrote: model.tflite (4.2 MB)");
         }
-        _ => println!("saved_model_cli: command '{}' completed", subcmd),
+        _ => println!("saved_model_cli: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -157,14 +162,17 @@ fn run_tflite(args: &[String]) -> i32 {
             println!("  Delegates: GPU, NNAPI, XNNPACK");
             println!("  Validation: PASSED");
         }
-        _ => println!("tflite: command '{}' completed", subcmd),
+        _ => println!("tflite: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "tensorflow".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "tensorflow".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "saved_model_cli" => run_saved_model_cli(&rest),
@@ -176,7 +184,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_tensorflow};
+    use super::{basename, run_tensorflow, strip_ext};
 
     #[test]
     fn basename_strips_path() {

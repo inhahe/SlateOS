@@ -3,3 +3,6 @@ name = "meson"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# meson names build targets, source files and the build directory, drawn
+# from the command line and from meson.build in the source tree.
+quoting = { path = "../quoting" }

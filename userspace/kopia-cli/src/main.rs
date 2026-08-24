@@ -4,6 +4,7 @@
 //!
 //! Single personality: `kopia`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -36,8 +37,11 @@ fn run_kopia(args: Vec<String>) -> i32 {
             match sub {
                 "create" => {
                     let backend = args.get(2).map(|s| s.as_str()).unwrap_or("filesystem");
-                    let path = args.windows(2).find(|w| w[0] == "--path")
-                        .map(|w| w[1].as_str()).unwrap_or("/backup/kopia");
+                    let path = args
+                        .windows(2)
+                        .find(|w| w[0] == "--path")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("/backup/kopia");
                     println!("Initializing repository with {} backend...", backend);
                     println!("  Path: {}", path);
                     println!("  Encryption: AES-256-GCM");
@@ -57,7 +61,9 @@ fn run_kopia(args: Vec<String>) -> i32 {
                     println!("Unique ID:        abc123def456ghi789");
                     println!("Format version:   3");
                 }
-                _ => { println!("Repository operation: {}", sub); }
+                _ => {
+                    println!("Repository operation: {}", sub);
+                }
             }
             0
         }
@@ -67,8 +73,13 @@ fn run_kopia(args: Vec<String>) -> i32 {
                 "create" => {
                     let path = args.get(2).map(|s| s.as_str()).unwrap_or("/home/user");
                     println!("Snapshotting {}...", path);
-                    println!("  * 0 hashing, 10234 hashed (2.3 GB), 8901 cached (1.9 GB), uploaded 234 MB");
-                    println!("  Created snapshot with root kabc123def456 and target {}", path);
+                    println!(
+                        "  * 0 hashing, 10234 hashed (2.3 GB), 8901 cached (1.9 GB), uploaded 234 MB"
+                    );
+                    println!(
+                        "  Created snapshot with root kabc123def456 and target {}",
+                        path
+                    );
                     println!("  Files: 10234");
                     println!("  Dirs:  1023");
                     println!("  Size: 2.35 GB");
@@ -76,15 +87,23 @@ fn run_kopia(args: Vec<String>) -> i32 {
                 }
                 "list" => {
                     println!("  user@myhost:/home/user");
-                    println!("    2024-01-15 14:00:00 UTC kabc123def456  2.35 GB  drwxr-xr-x files:10234");
-                    println!("    2024-01-14 14:00:00 UTC kdef456ghi789  2.31 GB  drwxr-xr-x files:10230");
-                    println!("    2024-01-13 14:00:00 UTC kghi789jkl012  2.28 GB  drwxr-xr-x files:10225");
+                    println!(
+                        "    2024-01-15 14:00:00 UTC kabc123def456  2.35 GB  drwxr-xr-x files:10234"
+                    );
+                    println!(
+                        "    2024-01-14 14:00:00 UTC kdef456ghi789  2.31 GB  drwxr-xr-x files:10230"
+                    );
+                    println!(
+                        "    2024-01-13 14:00:00 UTC kghi789jkl012  2.28 GB  drwxr-xr-x files:10225"
+                    );
                 }
                 "delete" => {
                     let id = args.get(2).map(|s| s.as_str()).unwrap_or("kghi789jkl012");
                     println!("Deleted snapshot {}", id);
                 }
-                _ => { println!("Snapshot operation: {}", sub); }
+                _ => {
+                    println!("Snapshot operation: {}", sub);
+                }
             }
             0
         }
@@ -110,7 +129,9 @@ fn run_kopia(args: Vec<String>) -> i32 {
                     println!("  Compression:     zstd");
                     println!("  Scheduling:      every 1 hour");
                 }
-                _ => { println!("Policy operation: {}", sub); }
+                _ => {
+                    println!("Policy operation: {}", sub);
+                }
             }
             0
         }
@@ -118,13 +139,18 @@ fn run_kopia(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("start");
             match sub {
                 "start" => {
-                    let addr = args.windows(2).find(|w| w[0] == "--address")
-                        .map(|w| w[1].as_str()).unwrap_or("0.0.0.0:51515");
+                    let addr = args
+                        .windows(2)
+                        .find(|w| w[0] == "--address")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("0.0.0.0:51515");
                     println!("Starting Kopia server at https://{}...", addr);
                     println!("  TLS enabled with auto-generated certificate");
                     println!("  Server ready.");
                 }
-                _ => { println!("Server operation: {}", sub); }
+                _ => {
+                    println!("Server operation: {}", sub);
+                }
             }
             0
         }
@@ -140,7 +166,9 @@ fn run_kopia(args: Vec<String>) -> i32 {
                 "clear" => {
                     println!("Cache cleared (246 MB freed)");
                 }
-                _ => { println!("Cache operation: {}", sub); }
+                _ => {
+                    println!("Cache operation: {}", sub);
+                }
             }
             0
         }
@@ -148,7 +176,7 @@ fn run_kopia(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: kopia <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -164,7 +192,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_kopia};
+    use super::run_kopia;
 
     #[test]
     fn help_exits_zero() {

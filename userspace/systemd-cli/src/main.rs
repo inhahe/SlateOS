@@ -5,6 +5,7 @@
 //! Multi-personality: `systemctl`, `journalctl`, `hostnamectl`, `timedatectl`,
 //! `loginctl`, `localectl`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -46,10 +47,16 @@ fn run_systemctl(args: &[String]) -> i32 {
         "restart" => println!("Restarted {}", unit),
         "reload" => println!("Reloaded {}", unit),
         "enable" => {
-            println!("Created symlink /etc/systemd/system/multi-user.target.wants/{} -> /lib/systemd/system/{}", unit, unit);
+            println!(
+                "Created symlink /etc/systemd/system/multi-user.target.wants/{} -> /lib/systemd/system/{}",
+                unit, unit
+            );
         }
         "disable" => {
-            println!("Removed /etc/systemd/system/multi-user.target.wants/{}", unit);
+            println!(
+                "Removed /etc/systemd/system/multi-user.target.wants/{}",
+                unit
+            );
         }
         "status" => {
             if unit.is_empty() {
@@ -61,9 +68,15 @@ fn run_systemctl(args: &[String]) -> i32 {
                 println!("      CPU: 4.567s");
             } else {
                 println!("● {} - {}", unit, unit);
-                println!("     Loaded: loaded (/lib/systemd/system/{}; enabled)", unit);
+                println!(
+                    "     Loaded: loaded (/lib/systemd/system/{}; enabled)",
+                    unit
+                );
                 println!("     Active: active (running) since Thu 2025-01-01 00:00:00 UTC");
-                println!("   Main PID: 1234 ({})", unit.split('.').next().unwrap_or(unit));
+                println!(
+                    "   Main PID: 1234 ({})",
+                    unit.split('.').next().unwrap_or(unit)
+                );
                 println!("      Tasks: 4 (limit: 4096)");
                 println!("     Memory: 24.5M");
                 println!("        CPU: 123ms");
@@ -74,13 +87,17 @@ fn run_systemctl(args: &[String]) -> i32 {
         "daemon-reload" => { /* silent success */ }
         _ => {
             println!("UNIT                        LOAD   ACTIVE SUB     DESCRIPTION");
-            println!("init.service                loaded active running System and Service Manager");
+            println!(
+                "init.service                loaded active running System and Service Manager"
+            );
             println!("dbus.service                loaded active running D-Bus System Message Bus");
             println!("networking.service          loaded active running Network Configuration");
             println!("sshd.service                loaded active running OpenSSH server daemon");
             println!("cron.service                loaded active running Regular background tasks");
             println!("rsyslog.service             loaded active running System Logging Service");
-            println!("udev.service                loaded active running udev Kernel Device Manager");
+            println!(
+                "udev.service                loaded active running udev Kernel Device Manager"
+            );
             println!();
             println!("LOAD   = Reflects whether the unit definition was properly loaded.");
             println!("ACTIVE = The high-level unit activation state, i.e. generalization of SUB.");
@@ -119,7 +136,9 @@ fn run_journalctl(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("-- Journal begins at Thu 2025-01-01 00:00:00 UTC, ends at Thu 2025-01-01 12:00:00 UTC. --");
+    println!(
+        "-- Journal begins at Thu 2025-01-01 00:00:00 UTC, ends at Thu 2025-01-01 12:00:00 UTC. --"
+    );
     println!("Jan 01 00:00:00 slateos kernel: Slate OS version 1.0.0 booting");
     println!("Jan 01 00:00:01 slateos systemd[1]: Starting system initialization...");
     println!("Jan 01 00:00:02 slateos systemd[1]: Started udev Kernel Device Manager.");
@@ -138,7 +157,7 @@ fn run_hostnamectl(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("status");
     match subcmd {
-        "hostname" if args.len() > 1 => println!("Hostname set to '{}'", args[1]),
+        "hostname" if args.len() > 1 => println!("Hostname set to {}", quoteaf_os(&args[1])),
         _ => {
             println!("   Static hostname: slateos");
             println!("         Icon name: computer-desktop");
@@ -220,7 +239,8 @@ fn run_localectl(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "systemctl".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -238,7 +258,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_systemctl};
+    use super::{basename, run_systemctl, strip_ext};
 
     #[test]
     fn basename_strips_path() {

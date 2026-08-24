@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `speech-dispatcher`, `spd-say`, `spd-conf`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_dispatcher(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,7 +27,10 @@ fn run_dispatcher(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("speech-dispatcher v0.11 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("speech-dispatcher v0.11 (Slate OS)");
+        return 0;
+    }
     println!("speech-dispatcher: TTS daemon started");
     println!("  Modules: espeak-ng, pico, festival, flite");
     println!("  Default voice: espeak-ng en-us");
@@ -45,9 +53,18 @@ fn run_say(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("spd-say v0.11 (Slate OS)"); return 0; }
-    let text: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
-    println!("spd-say: speaking '{}'", text.join(" "));
+    if args.iter().any(|a| a == "--version") {
+        println!("spd-say v0.11 (Slate OS)");
+        return 0;
+    }
+    let text: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
+    // Every non-option argv word, joined: the caller's text verbatim, and
+    // the hand-written quotes around it stopped at the caller's first `'`.
+    println!("spd-say: speaking {}", quoteaf_os(text.join(" ")));
     0
 }
 
@@ -57,14 +74,20 @@ fn run_conf(args: &[String], _prog: &str) -> i32 {
         println!("spd-conf v0.11 (Slate OS) — Speech Dispatcher configuration");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("spd-conf v0.11 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("spd-conf v0.11 (Slate OS)");
+        return 0;
+    }
     println!("spd-conf: configuration wizard started");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "speech-dispatcher".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "speech-dispatcher".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "spd-say" => run_say(&rest, &prog),
@@ -76,7 +99,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_dispatcher};
+    use super::{basename, run_dispatcher, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -2,3 +2,8 @@
 name = "abduco-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# abduco-cli names terminal sessions, and a session name is whatever the
+# user typed when they created it.
+quoting = { path = "../quoting" }

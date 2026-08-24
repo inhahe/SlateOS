@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `cml`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_cml(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -34,12 +39,12 @@ fn run_cml(args: &[String]) -> i32 {
                 println!("Comment posted successfully.");
                 println!("URL: https://github.com/myorg/myrepo/pull/42#issuecomment-123");
             } else {
-                println!("cml comment: '{}' completed", sub);
+                println!("cml comment: {} completed", quoteaf_os(sub));
             }
         }
         "publish" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("metrics.png");
-            println!("Publishing '{}'...", file);
+            println!("Publishing {}...", quoteaf_os(file));
             println!("https://asset.cml.dev/abc123.png");
         }
         "runner" => {
@@ -49,8 +54,11 @@ fn run_cml(args: &[String]) -> i32 {
             println!("  Runner started and waiting for jobs.");
         }
         "tensorboard" => {
-            let logdir = args.windows(2).find(|w| w[0] == "--logdir")
-                .map(|w| w[1].as_str()).unwrap_or("logs");
+            let logdir = args
+                .windows(2)
+                .find(|w| w[0] == "--logdir")
+                .map(|w| w[1].as_str())
+                .unwrap_or("logs");
             println!("Starting TensorBoard...");
             println!("  Log directory: {}", logdir);
             println!("  URL: https://tb.cml.dev/abc123");
@@ -59,14 +67,17 @@ fn run_cml(args: &[String]) -> i32 {
             println!("Creating pull request...");
             println!("  PR created: https://github.com/myorg/myrepo/pull/43");
         }
-        _ => println!("cml: '{}' completed", subcmd),
+        _ => println!("cml: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "cml".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "cml".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_cml(&rest);
     process::exit(code);
@@ -74,7 +85,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_cml};
+    use super::{basename, run_cml, strip_ext};
 
     #[test]
     fn basename_strips_path() {

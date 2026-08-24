@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `tailscale`, `tailscaled`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_tailscale(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -44,15 +49,21 @@ fn run_tailscale(args: &[String]) -> i32 {
             println!("#     - not connected to home DERP region");
             println!();
             println!("100.64.0.1   slateos-desktop  user@  linux   idle; offers exit node");
-            println!("100.64.0.2   slateos-laptop   user@  linux   active; direct 192.168.1.50:41641");
+            println!(
+                "100.64.0.2   slateos-laptop   user@  linux   active; direct 192.168.1.50:41641"
+            );
             println!("100.64.0.3   slateos-server   user@  linux   idle; relay \"nyc\"");
             println!("100.64.0.4   phone          user@  android active; direct 10.0.0.5:41641");
         }
         "ip" => {
             let v4 = !args.iter().any(|a| a == "-6");
             let v6 = !args.iter().any(|a| a == "-4");
-            if v4 { println!("100.64.0.1"); }
-            if v6 { println!("fd7a:115c:a1e0::1"); }
+            if v4 {
+                println!("100.64.0.1");
+            }
+            if v6 {
+                println!("fd7a:115c:a1e0::1");
+            }
         }
         "up" => {
             println!("To authenticate, visit:");
@@ -64,9 +75,18 @@ fn run_tailscale(args: &[String]) -> i32 {
         "down" => println!("Tailscale stopped."),
         "ping" => {
             let peer = args.get(1).map(|s| s.as_str()).unwrap_or("slateos-laptop");
-            println!("pong from {} (100.64.0.2) via 192.168.1.50:41641 in 2ms", peer);
-            println!("pong from {} (100.64.0.2) via 192.168.1.50:41641 in 1ms", peer);
-            println!("pong from {} (100.64.0.2) via 192.168.1.50:41641 in 1ms", peer);
+            println!(
+                "pong from {} (100.64.0.2) via 192.168.1.50:41641 in 2ms",
+                peer
+            );
+            println!(
+                "pong from {} (100.64.0.2) via 192.168.1.50:41641 in 1ms",
+                peer
+            );
+            println!(
+                "pong from {} (100.64.0.2) via 192.168.1.50:41641 in 1ms",
+                peer
+            );
         }
         "netcheck" => {
             println!("Report:");
@@ -85,7 +105,10 @@ fn run_tailscale(args: &[String]) -> i32 {
             println!("\t\t- sin: 210.4ms (Singapore)");
         }
         "cert" => {
-            let domain = args.get(1).map(|s| s.as_str()).unwrap_or("slateos-desktop.example.ts.net");
+            let domain = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("slateos-desktop.example.ts.net");
             println!("Wrote public cert to {}.crt", domain);
             println!("Wrote private key to {}.key", domain);
         }
@@ -101,7 +124,7 @@ fn run_tailscale(args: &[String]) -> i32 {
             println!("https://slateos-desktop.example.ts.net/");
             println!("|-- proxy http://127.0.0.1:3000");
         }
-        _ => println!("tailscale: command '{}' completed", subcmd),
+        _ => println!("tailscale: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -128,7 +151,10 @@ fn run_tailscaled(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "tailscale".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "tailscale".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "tailscaled" => run_tailscaled(&rest),
@@ -139,7 +165,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_tailscale};
+    use super::{basename, run_tailscale, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `hatch`, `hatchling`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_hatch(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -104,18 +109,18 @@ fn run_hatch(args: &[String]) -> i32 {
                     let env = args.get(2).map(|s| s.as_str()).unwrap_or("default");
                     println!("Creating environment: {}", env);
                     println!("Installing dependencies...");
-                    println!("Environment '{}' created.", env);
+                    println!("Environment {} created.", quoteaf_os(env));
                 }
                 "remove" => {
                     let env = args.get(2).map(|s| s.as_str()).unwrap_or("default");
                     println!("Removing environment: {}", env);
                 }
-                _ => println!("hatch env: '{}' completed", sub),
+                _ => println!("hatch env: {} completed", quoteaf_os(sub)),
             }
         }
         "run" => {
             let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("python");
-            println!("hatch: running '{}' in default environment", cmd);
+            println!("hatch: running {} in default environment", quoteaf_os(cmd));
         }
         "test" => {
             println!("Running tests in default environment...");
@@ -142,7 +147,7 @@ fn run_hatch(args: &[String]) -> i32 {
             println!("Python: 3.12.4");
             println!("Build backend: hatchling");
         }
-        _ => println!("hatch: '{}' completed", subcmd),
+        _ => println!("hatch: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -171,14 +176,17 @@ fn run_hatchling(args: &[String]) -> i32 {
             println!("Requires-Python: >=3.8");
         }
         "version" => println!("0.1.0"),
-        _ => println!("hatchling: '{}' completed", subcmd),
+        _ => println!("hatchling: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "hatch".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "hatch".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "hatchling" => run_hatchling(&rest),
@@ -189,7 +197,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_hatch};
+    use super::{basename, run_hatch, strip_ext};
 
     #[test]
     fn basename_strips_path() {

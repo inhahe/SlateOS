@@ -4,6 +4,7 @@
 //!
 //! Single personality: `screen`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -38,28 +39,36 @@ fn run_screen(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "-r") {
-        let name = args.windows(2).find(|w| w[0] == "-r")
-            .map(|w| w[1].as_str()).unwrap_or("12345.dev");
+        let name = args
+            .windows(2)
+            .find(|w| w[0] == "-r")
+            .map(|w| w[1].as_str())
+            .unwrap_or("12345.dev");
         println!("[Reattaching to {}]", name);
         return 0;
     }
 
     if args.iter().any(|a| a == "-d") {
-        let name = args.windows(2).find(|w| w[0] == "-d")
-            .map(|w| w[1].as_str()).unwrap_or("12345.dev");
+        let name = args
+            .windows(2)
+            .find(|w| w[0] == "-d")
+            .map(|w| w[1].as_str())
+            .unwrap_or("12345.dev");
         println!("[{} detached.]", name);
         return 0;
     }
 
-    let session_name = args.windows(2).find(|w| w[0] == "-S")
+    let session_name = args
+        .windows(2)
+        .find(|w| w[0] == "-S")
         .map(|w| w[1].as_str());
     let detached = args.iter().any(|a| a == "-dm");
 
     if let Some(name) = session_name {
         if detached {
-            println!("[Screen session '{}' started (detached)]", name);
+            println!("[Screen session {} started (detached)]", quoteaf_os(name));
         } else {
-            println!("[Screen session '{}' started]", name);
+            println!("[Screen session {} started]", quoteaf_os(name));
         }
     } else {
         println!("[Screen session started]");
@@ -76,7 +85,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_screen};
+    use super::run_screen;
 
     #[test]
     fn help_exits_zero() {

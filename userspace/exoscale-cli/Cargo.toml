@@ -2,3 +2,8 @@
 name = "exoscale-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# exoscale-cli names instances, templates and security groups, identifiers
+# the user chose or the API returned.
+quoting = { path = "../quoting" }

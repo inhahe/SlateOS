@@ -4,6 +4,7 @@
 //!
 //! Single personality: `gnuplot`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -27,21 +28,25 @@ fn run_gnuplot(args: Vec<String>) -> i32 {
     }
 
     let has_command = args.windows(2).any(|w| w[0] == "-e");
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
 
     if has_command {
-        let cmd = args.windows(2).find(|w| w[0] == "-e")
-            .map(|w| w[1].as_str()).unwrap_or("");
+        let cmd = args
+            .windows(2)
+            .find(|w| w[0] == "-e")
+            .map(|w| w[1].as_str())
+            .unwrap_or("");
         println!("gnuplot> {}", cmd);
         if cmd.contains("plot") {
             println!("  [Plot generated]");
         }
     } else if !files.is_empty() {
         for f in &files {
-            println!("gnuplot: loading script '{}'", f);
+            println!("gnuplot: loading script {}", quoteaf_os(f));
         }
         println!("  [Plot(s) generated]");
     } else {
@@ -63,7 +68,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_gnuplot};
+    use super::run_gnuplot;
 
     #[test]
     fn help_exits_zero() {

@@ -4,11 +4,15 @@
 //!
 //! Single personality: `openssl`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
 fn run_openssl(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "help" || a == "--help" || a == "-h") {
+    if args
+        .iter()
+        .any(|a| a == "help" || a == "--help" || a == "-h")
+    {
         println!("Usage: openssl <COMMAND> [OPTIONS]");
         println!();
         println!("OpenSSL command-line tool.");
@@ -47,12 +51,16 @@ fn run_openssl(args: Vec<String>) -> i32 {
             0
         }
         "genrsa" => {
-            let bits = args.iter()
+            let bits = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(2048);
-            println!("Generating RSA private key, {} bit long modulus (2 primes)", bits);
+            println!(
+                "Generating RSA private key, {} bit long modulus (2 primes)",
+                bits
+            );
             println!("...+++++++++++++++++++");
             println!("...+++++++++++++++++++");
             println!("e is 65537 (0x010001)");
@@ -96,14 +104,20 @@ fn run_openssl(args: Vec<String>) -> i32 {
             0
         }
         "s_client" => {
-            let host = args.windows(2)
+            let host = args
+                .windows(2)
                 .find(|w| w[0] == "-connect")
                 .map(|w| w[1].as_str())
                 .unwrap_or("example.com:443");
             println!("CONNECTED(00000003)");
             println!("depth=2 C=US, O=DigiCert Inc, CN=DigiCert Global Root G2");
-            println!("depth=1 C=US, O=DigiCert Inc, CN=DigiCert SHA2 Extended Validation Server CA");
-            println!("depth=0 CN={}", host.split(':').next().unwrap_or("example.com"));
+            println!(
+                "depth=1 C=US, O=DigiCert Inc, CN=DigiCert SHA2 Extended Validation Server CA"
+            );
+            println!(
+                "depth=0 CN={}",
+                host.split(':').next().unwrap_or("example.com")
+            );
             println!("---");
             println!("SSL handshake has read 3456 bytes and written 789 bytes");
             println!("---");
@@ -112,20 +126,26 @@ fn run_openssl(args: Vec<String>) -> i32 {
             0
         }
         "dgst" => {
-            let algo = args.iter()
+            let algo = args
+                .iter()
                 .find(|a| a.starts_with("-sha") || a.starts_with("-md5"))
                 .map(|s| &s[1..])
                 .unwrap_or("sha256");
-            let file = args.iter()
+            let file = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .map(|s| s.as_str())
                 .unwrap_or("input.dat");
-            println!("{}({})= abc123def456789012345678901234567890123456789012345678901234", algo, file);
+            println!(
+                "{}({})= abc123def456789012345678901234567890123456789012345678901234",
+                algo, file
+            );
             0
         }
         "rand" => {
-            let nbytes: u32 = args.iter()
+            let nbytes: u32 = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .and_then(|s| s.parse().ok())
@@ -152,7 +172,7 @@ fn run_openssl(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: openssl <command>. See help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See help.", cmd);
+                eprintln!("Error: unknown command {}. See help.", quoteaf_os(cmd));
             }
             1
         }
@@ -168,7 +188,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_openssl};
+    use super::run_openssl;
 
     #[test]
     fn help_exits_zero() {

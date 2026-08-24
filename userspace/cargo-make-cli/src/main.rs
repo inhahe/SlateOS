@@ -4,6 +4,7 @@
 //!
 //! Single personality: `makers` (also `cargo-make`)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -41,8 +42,11 @@ fn run_makers(args: Vec<String>) -> i32 {
     }
 
     let task = args.first().map(|s| s.as_str()).unwrap_or("default");
-    let profile = args.windows(2).find(|w| w[0] == "--profile")
-        .map(|w| w[1].as_str()).unwrap_or("development");
+    let profile = args
+        .windows(2)
+        .find(|w| w[0] == "--profile")
+        .map(|w| w[1].as_str())
+        .unwrap_or("development");
 
     println!("[cargo-make] INFO - cargo-make 0.37.8");
     println!("[cargo-make] INFO - Build File: Makefile.toml");
@@ -68,7 +72,7 @@ fn run_makers(args: Vec<String>) -> i32 {
             println!("[cargo-make] INFO - Running Task: build");
         }
         _ => {
-            println!("[cargo-make] INFO - Task '{}' completed", task);
+            println!("[cargo-make] INFO - Task {} completed", quoteaf_os(task));
         }
     }
 
@@ -85,7 +89,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_makers};
+    use super::run_makers;
 
     #[test]
     fn help_exits_zero() {

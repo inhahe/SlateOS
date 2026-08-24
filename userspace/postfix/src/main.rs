@@ -5,6 +5,7 @@
 //! Multi-personality: `postfix` (control), `postconf` (config), `postqueue` (queue),
 //!   `postsuper` (queue admin), `sendmail` (compatibility)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -43,7 +44,10 @@ fn run_postfix(args: Vec<String>) -> i32 {
             println!("postfix/postfix-script: flushing the mail queue");
             0
         }
-        other => { eprintln!("postfix: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("postfix: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -58,7 +62,11 @@ fn run_postconf(args: Vec<String>) -> i32 {
     let show_defaults = args.iter().any(|a| a == "-d");
     let show_nondefault = args.iter().any(|a| a == "-n");
 
-    let params: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let params: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     if !params.is_empty() {
         for p in params {
             match p {
@@ -66,7 +74,9 @@ fn run_postconf(args: Vec<String>) -> i32 {
                 "mydomain" => println!("mydomain = example.com"),
                 "myorigin" => println!("myorigin = $mydomain"),
                 "inet_interfaces" => println!("inet_interfaces = all"),
-                "mydestination" => println!("mydestination = $myhostname, localhost.$mydomain, localhost"),
+                "mydestination" => {
+                    println!("mydestination = $myhostname, localhost.$mydomain, localhost")
+                }
                 _ => println!("{} = (parameter not found)", p),
             }
         }
@@ -131,7 +141,9 @@ fn run_postsuper(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-d") {
-        let target = args.iter().position(|a| a == "-d")
+        let target = args
+            .iter()
+            .position(|a| a == "-d")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("ALL");
@@ -167,7 +179,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -185,7 +199,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_postfix};
+    use super::run_postfix;
 
     #[test]
     fn help_exits_zero() {

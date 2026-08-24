@@ -4,11 +4,15 @@
 //!
 //! Single personality: `aws`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
 fn run_aws(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "help")
+    {
         println!("Usage: aws [OPTIONS] <SERVICE> <COMMAND> [PARAMETERS]");
         println!();
         println!("The AWS Command Line Interface (Slate OS).");
@@ -55,7 +59,9 @@ fn run_aws(args: Vec<String>) -> i32 {
                     println!("   profile                <not set>             None    None");
                     println!("access_key     ****************ABCD shared-credentials-file");
                     println!("secret_key     ****************1234 shared-credentials-file");
-                    println!("    region                us-east-1      config-file    ~/.aws/config");
+                    println!(
+                        "    region                us-east-1      config-file    ~/.aws/config"
+                    );
                 }
                 _ => {
                     println!("AWS Access Key ID [****************ABCD]: ");
@@ -113,7 +119,9 @@ fn run_aws(args: Vec<String>) -> i32 {
                     println!("      \"State\": {{\"Name\": \"running\"}},");
                     println!("      \"PublicIpAddress\": \"54.123.45.67\",");
                     println!("      \"PrivateIpAddress\": \"10.0.1.100\",");
-                    println!("      \"Tags\": [{{\"Key\": \"Name\", \"Value\": \"web-server-1\"}}]");
+                    println!(
+                        "      \"Tags\": [{{\"Key\": \"Name\", \"Value\": \"web-server-1\"}}]"
+                    );
                     println!("    }}]");
                     println!("  }}]");
                     println!("}}");
@@ -128,14 +136,26 @@ fn run_aws(args: Vec<String>) -> i32 {
                     println!("}}");
                 }
                 "stop-instances" | "start-instances" | "terminate-instances" => {
-                    let id = args.get(2).map(|s| s.as_str()).unwrap_or("i-0abc123def456789");
-                    let state = if command == "stop-instances" { "stopping" }
-                        else if command == "start-instances" { "pending" }
-                        else { "shutting-down" };
-                    println!("{{\"StoppingInstances\": [{{\"InstanceId\": \"{}\", \"CurrentState\": {{\"Name\": \"{}\"}}}}]}}", id, state);
+                    let id = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("i-0abc123def456789");
+                    let state = if command == "stop-instances" {
+                        "stopping"
+                    } else if command == "start-instances" {
+                        "pending"
+                    } else {
+                        "shutting-down"
+                    };
+                    println!(
+                        "{{\"StoppingInstances\": [{{\"InstanceId\": \"{}\", \"CurrentState\": {{\"Name\": \"{}\"}}}}]}}",
+                        id, state
+                    );
                 }
                 _ => {
-                    eprintln!("Usage: aws ec2 <describe-instances|run-instances|stop-instances|...>. See --help.");
+                    eprintln!(
+                        "Usage: aws ec2 <describe-instances|run-instances|stop-instances|...>. See --help."
+                    );
                     return 1;
                 }
             }
@@ -145,12 +165,18 @@ fn run_aws(args: Vec<String>) -> i32 {
             match command {
                 "list-users" => {
                     println!("{{\"Users\": [");
-                    println!("  {{\"UserName\": \"admin\", \"UserId\": \"AIDA12345EXAMPLE\", \"CreateDate\": \"2024-01-01T00:00:00Z\"}},");
-                    println!("  {{\"UserName\": \"deploy\", \"UserId\": \"AIDA67890EXAMPLE\", \"CreateDate\": \"2024-01-05T00:00:00Z\"}}");
+                    println!(
+                        "  {{\"UserName\": \"admin\", \"UserId\": \"AIDA12345EXAMPLE\", \"CreateDate\": \"2024-01-01T00:00:00Z\"}},"
+                    );
+                    println!(
+                        "  {{\"UserName\": \"deploy\", \"UserId\": \"AIDA67890EXAMPLE\", \"CreateDate\": \"2024-01-05T00:00:00Z\"}}"
+                    );
                     println!("]}}");
                 }
                 "get-user" => {
-                    println!("{{\"User\": {{\"UserName\": \"admin\", \"UserId\": \"AIDA12345EXAMPLE\", \"Arn\": \"arn:aws:iam::123456789012:user/admin\"}}}}");
+                    println!(
+                        "{{\"User\": {{\"UserName\": \"admin\", \"UserId\": \"AIDA12345EXAMPLE\", \"Arn\": \"arn:aws:iam::123456789012:user/admin\"}}}}"
+                    );
                 }
                 _ => {
                     eprintln!("Usage: aws iam <list-users|get-user|create-user|...>. See --help.");
@@ -163,17 +189,25 @@ fn run_aws(args: Vec<String>) -> i32 {
             match command {
                 "list-functions" => {
                     println!("{{\"Functions\": [");
-                    println!("  {{\"FunctionName\": \"my-handler\", \"Runtime\": \"python3.12\", \"MemorySize\": 256, \"Timeout\": 30}},");
-                    println!("  {{\"FunctionName\": \"api-proxy\", \"Runtime\": \"nodejs20.x\", \"MemorySize\": 128, \"Timeout\": 15}}");
+                    println!(
+                        "  {{\"FunctionName\": \"my-handler\", \"Runtime\": \"python3.12\", \"MemorySize\": 256, \"Timeout\": 30}},"
+                    );
+                    println!(
+                        "  {{\"FunctionName\": \"api-proxy\", \"Runtime\": \"nodejs20.x\", \"MemorySize\": 128, \"Timeout\": 15}}"
+                    );
                     println!("]}}");
                 }
                 "invoke" => {
                     let func = args.get(2).map(|s| s.as_str()).unwrap_or("my-handler");
-                    println!("{{\"StatusCode\": 200, \"FunctionError\": null, \"ExecutedVersion\": \"$LATEST\"}}");
+                    println!(
+                        "{{\"StatusCode\": 200, \"FunctionError\": null, \"ExecutedVersion\": \"$LATEST\"}}"
+                    );
                     println!("(invoked {})", func);
                 }
                 _ => {
-                    eprintln!("Usage: aws lambda <list-functions|invoke|create-function|...>. See --help.");
+                    eprintln!(
+                        "Usage: aws lambda <list-functions|invoke|create-function|...>. See --help."
+                    );
                     return 1;
                 }
             }
@@ -199,12 +233,19 @@ fn run_aws(args: Vec<String>) -> i32 {
             match command {
                 "describe-log-groups" => {
                     println!("{{\"logGroups\": [");
-                    println!("  {{\"logGroupName\": \"/aws/lambda/my-handler\", \"storedBytes\": 1048576}},");
-                    println!("  {{\"logGroupName\": \"/aws/ecs/my-service\", \"storedBytes\": 5242880}}");
+                    println!(
+                        "  {{\"logGroupName\": \"/aws/lambda/my-handler\", \"storedBytes\": 1048576}},"
+                    );
+                    println!(
+                        "  {{\"logGroupName\": \"/aws/ecs/my-service\", \"storedBytes\": 5242880}}"
+                    );
                     println!("]}}");
                 }
                 "tail" => {
-                    let group = args.get(2).map(|s| s.as_str()).unwrap_or("/aws/lambda/my-handler");
+                    let group = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("/aws/lambda/my-handler");
                     println!("2024-01-15T14:00:00 START RequestId: abc-123");
                     println!("2024-01-15T14:00:00 Processing event...");
                     println!("2024-01-15T14:00:01 END RequestId: abc-123");
@@ -212,7 +253,9 @@ fn run_aws(args: Vec<String>) -> i32 {
                     println!("(from log group {})", group);
                 }
                 _ => {
-                    eprintln!("Usage: aws logs <describe-log-groups|tail|filter-log-events|...>. See --help.");
+                    eprintln!(
+                        "Usage: aws logs <describe-log-groups|tail|filter-log-events|...>. See --help."
+                    );
                     return 1;
                 }
             }
@@ -222,7 +265,10 @@ fn run_aws(args: Vec<String>) -> i32 {
             if service.is_empty() {
                 eprintln!("Usage: aws <service> <command>. See --help.");
             } else {
-                eprintln!("Error: unknown service '{}'. See --help.", service);
+                eprintln!(
+                    "Error: unknown service {}. See --help.",
+                    quoteaf_os(service)
+                );
             }
             1
         }
@@ -238,7 +284,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_aws};
+    use super::run_aws;
 
     #[test]
     fn help_exits_zero() {

@@ -4,11 +4,15 @@
 //!
 //! Single personality: `bazel`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
 fn run_bazel(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "help")
+    {
         println!("Usage: bazel <COMMAND> [OPTIONS] [TARGETS...]");
         println!();
         println!("Bazel build system (Slate OS).");
@@ -33,7 +37,10 @@ fn run_bazel(args: Vec<String>) -> i32 {
     match cmd {
         "build" => {
             let target = args.get(1).map(|s| s.as_str()).unwrap_or("//...");
-            println!("INFO: Analyzed target {} (12 packages loaded, 234 targets configured).", target);
+            println!(
+                "INFO: Analyzed target {} (12 packages loaded, 234 targets configured).",
+                target
+            );
             println!("INFO: Found 5 targets...");
             println!("[3 / 8] Compiling src/main.cc");
             println!("[5 / 8] Compiling src/utils.cc");
@@ -63,7 +70,10 @@ fn run_bazel(args: Vec<String>) -> i32 {
             0
         }
         "query" => {
-            let expr = args.get(1).map(|s| s.as_str()).unwrap_or("deps(//src:myapp)");
+            let expr = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("deps(//src:myapp)");
             println!("Query: {}", expr);
             println!("//src:myapp");
             println!("//src:mylib");
@@ -84,9 +94,15 @@ fn run_bazel(args: Vec<String>) -> i32 {
             0
         }
         "info" => {
-            println!("bazel-bin: /home/user/.cache/bazel/execroot/myproject/bazel-out/k8-fastbuild/bin");
-            println!("bazel-genfiles: /home/user/.cache/bazel/execroot/myproject/bazel-out/k8-fastbuild/genfiles");
-            println!("bazel-testlogs: /home/user/.cache/bazel/execroot/myproject/bazel-out/k8-fastbuild/testlogs");
+            println!(
+                "bazel-bin: /home/user/.cache/bazel/execroot/myproject/bazel-out/k8-fastbuild/bin"
+            );
+            println!(
+                "bazel-genfiles: /home/user/.cache/bazel/execroot/myproject/bazel-out/k8-fastbuild/genfiles"
+            );
+            println!(
+                "bazel-testlogs: /home/user/.cache/bazel/execroot/myproject/bazel-out/k8-fastbuild/testlogs"
+            );
             println!("output_base: /home/user/.cache/bazel");
             println!("workspace: /home/user/project");
             println!("server_pid: 12345");
@@ -96,7 +112,7 @@ fn run_bazel(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: bazel <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -112,7 +128,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_bazel};
+    use super::run_bazel;
 
     #[test]
     fn help_exits_zero() {

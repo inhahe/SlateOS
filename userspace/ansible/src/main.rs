@@ -12,6 +12,7 @@
 //! - `ansible-config` — show configuration
 //! - `ansible-doc` — documentation viewer
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,15 +43,21 @@ fn run_ansible(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let module = args.iter().position(|a| a == "-m")
+    let module = args
+        .iter()
+        .position(|a| a == "-m")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("command");
-    let module_args = args.iter().position(|a| a == "-a")
+    let module_args = args
+        .iter()
+        .position(|a| a == "-a")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("uptime");
-    let pattern = args.iter().find(|a| !a.starts_with('-') && *a != module && *a != module_args)
+    let pattern = args
+        .iter()
+        .find(|a| !a.starts_with('-') && *a != module && *a != module_args)
         .map(|s| s.as_str())
         .unwrap_or("all");
 
@@ -76,7 +83,9 @@ fn run_playbook(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let playbook = args.iter().find(|a| a.ends_with(".yml") || a.ends_with(".yaml"))
+    let playbook = args
+        .iter()
+        .find(|a| a.ends_with(".yml") || a.ends_with(".yaml"))
         .map(|s| s.as_str())
         .unwrap_or("site.yml");
     let check_mode = args.iter().any(|a| a == "-C" || a == "--check");
@@ -104,9 +113,15 @@ fn run_playbook(args: Vec<String>) -> i32 {
     println!("ok: [db01]");
     println!();
     println!("PLAY RECAP *************************************************************");
-    println!("web01                      : ok=3    changed=1    unreachable=0    failed=0    skipped=0");
-    println!("web02                      : ok=3    changed=1    unreachable=0    failed=0    skipped=0");
-    println!("db01                       : ok=3    changed=0    unreachable=0    failed=0    skipped=0");
+    println!(
+        "web01                      : ok=3    changed=1    unreachable=0    failed=0    skipped=0"
+    );
+    println!(
+        "web02                      : ok=3    changed=1    unreachable=0    failed=0    skipped=0"
+    );
+    println!(
+        "db01                       : ok=3    changed=0    unreachable=0    failed=0    skipped=0"
+    );
     println!();
     println!("(playbook: {} — simulated)", playbook);
     0
@@ -139,8 +154,11 @@ fn run_galaxy(args: Vec<String>) -> i32 {
                 }
                 "install" => {
                     let name = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("role");
-                    println!("- downloading role '{}' ...", name);
-                    println!("- extracting {} to /home/user/.ansible/roles/{}", name, name);
+                    println!("- downloading role {} ...", quoteaf_os(name));
+                    println!(
+                        "- extracting {} to /home/user/.ansible/roles/{}",
+                        name, name
+                    );
                     println!("- {} was installed successfully", name);
                 }
                 "list" => {
@@ -152,7 +170,10 @@ fn run_galaxy(args: Vec<String>) -> i32 {
             }
             0
         }
-        other => { eprintln!("ansible-galaxy: unknown type '{}'", other); 1 }
+        other => {
+            eprintln!("ansible-galaxy: unknown type {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -173,14 +194,38 @@ fn run_vault(args: Vec<String>) -> i32 {
             println!("  view       View an encrypted file");
             0
         }
-        "encrypt" => { println!("Encryption successful (simulated)"); 0 }
-        "decrypt" => { println!("Decryption successful (simulated)"); 0 }
-        "view" => { println!("(viewing encrypted file — simulated)"); 0 }
-        "create" => { println!("(creating encrypted file — simulated)"); 0 }
-        "edit" => { println!("(editing encrypted file — simulated)"); 0 }
-        "rekey" => { println!("Rekey successful (simulated)"); 0 }
-        "encrypt_string" => { println!("!vault |\n  $ANSIBLE_VAULT;1.1;AES256\n  (encrypted data — simulated)"); 0 }
-        other => { eprintln!("ansible-vault: unknown command '{}'", other); 1 }
+        "encrypt" => {
+            println!("Encryption successful (simulated)");
+            0
+        }
+        "decrypt" => {
+            println!("Decryption successful (simulated)");
+            0
+        }
+        "view" => {
+            println!("(viewing encrypted file — simulated)");
+            0
+        }
+        "create" => {
+            println!("(creating encrypted file — simulated)");
+            0
+        }
+        "edit" => {
+            println!("(editing encrypted file — simulated)");
+            0
+        }
+        "rekey" => {
+            println!("Rekey successful (simulated)");
+            0
+        }
+        "encrypt_string" => {
+            println!("!vault |\n  $ANSIBLE_VAULT;1.1;AES256\n  (encrypted data — simulated)");
+            0
+        }
+        other => {
+            eprintln!("ansible-vault: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -220,7 +265,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -234,8 +281,14 @@ fn main() {
         "ansible-galaxy" => run_galaxy(rest),
         "ansible-vault" => run_vault(rest),
         "ansible-inventory" => run_inventory(rest),
-        "ansible-config" => { println!("(ansible-config — simulated)"); 0 }
-        "ansible-doc" => { println!("(ansible-doc — simulated)"); 0 }
+        "ansible-config" => {
+            println!("(ansible-config — simulated)");
+            0
+        }
+        "ansible-doc" => {
+            println!("(ansible-doc — simulated)");
+            0
+        }
         _ => run_ansible(rest),
     };
 
@@ -246,7 +299,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ansible};
+    use super::run_ansible;
 
     #[test]
     fn help_exits_zero() {

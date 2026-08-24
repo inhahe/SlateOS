@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `django-admin`, `manage.py`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_django(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -35,7 +40,7 @@ fn run_django(args: &[String]) -> i32 {
         "--version" => println!("5.0.7"),
         "startproject" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("myproject");
-            println!("Creating project '{}'...", name);
+            println!("Creating project {}...", quoteaf_os(name));
             println!("  {}/", name);
             println!("    manage.py");
             println!("    {}/", name);
@@ -47,7 +52,7 @@ fn run_django(args: &[String]) -> i32 {
         }
         "startapp" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("myapp");
-            println!("Creating app '{}'...", name);
+            println!("Creating app {}...", quoteaf_os(name));
         }
         "runserver" => {
             let addr = args.get(1).map(|s| s.as_str()).unwrap_or("127.0.0.1:8000");
@@ -69,7 +74,7 @@ fn run_django(args: &[String]) -> i32 {
         "makemigrations" => {
             let app = args.get(1).map(|s| s.as_str());
             if let Some(a) = app {
-                println!("Migrations for '{}':", a);
+                println!("Migrations for {}:", quoteaf_os(a));
             }
             println!("  0002_auto_20240615_1200.py");
             println!("    - Add field avatar to user");
@@ -100,14 +105,17 @@ fn run_django(args: &[String]) -> i32 {
         }
         "shell" => println!("Python 3.12.4 (Django shell)"),
         "createsuperuser" => println!("Superuser created successfully."),
-        _ => println!("django-admin: '{}' completed", subcmd),
+        _ => println!("django-admin: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "django-admin".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "django-admin".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_django(&rest);
     process::exit(code);
@@ -115,7 +123,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_django};
+    use super::{basename, run_django, strip_ext};
 
     #[test]
     fn basename_strips_path() {

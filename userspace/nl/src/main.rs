@@ -30,6 +30,7 @@
 //!       --version                   Output version information and exit
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
@@ -76,7 +77,10 @@ fn parse_style(s: &str, flag_name: &str) -> NumberingStyle {
         "n" => NumberingStyle::None,
         _ if s.starts_with('p') => NumberingStyle::Regex(s[1..].to_string()),
         _ => {
-            eprintln!("nl: invalid numbering style '{s}' for {flag_name}");
+            eprintln!(
+                "nl: invalid numbering style {} for {flag_name}",
+                quoteaf_os(s)
+            );
             process::exit(1);
         }
     }
@@ -107,7 +111,7 @@ fn parse_number_format(s: &str) -> NumberFormat {
         "rn" => NumberFormat::RightNoZero,
         "rz" => NumberFormat::RightZero,
         _ => {
-            eprintln!("nl: invalid line numbering format '{s}'");
+            eprintln!("nl: invalid line numbering format {}", quoteaf_os(s));
             eprintln!("Valid formats are: ln, rn, rz");
             process::exit(1);
         }
@@ -224,8 +228,7 @@ fn parse_args(args: &[String]) -> ParseResult {
             } else if arg == "--number-separator" || arg.starts_with("--number-separator=") {
                 let val = long_opt_value(arg, "--number-separator", args, &mut i);
                 separator = val;
-            } else if arg == "--starting-line-number"
-                || arg.starts_with("--starting-line-number=")
+            } else if arg == "--starting-line-number" || arg.starts_with("--starting-line-number=")
             {
                 let val = long_opt_value(arg, "--starting-line-number", args, &mut i);
                 start = parse_i64_arg("--starting-line-number", &val);
@@ -237,7 +240,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     process::exit(1);
                 }
             } else {
-                eprintln!("nl: unrecognized option '{arg}'");
+                eprintln!("nl: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'nl --help' for more information.");
                 process::exit(1);
             }
@@ -314,7 +317,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     continue;
                 }
                 _ => {
-                    eprintln!("nl: invalid option -- '{ch}'");
+                    eprintln!("nl: invalid option -- {}", quoteaf_os(ch.to_string()));
                     eprintln!("Try 'nl --help' for more information.");
                     process::exit(1);
                 }
@@ -350,7 +353,7 @@ fn long_opt_value(arg: &str, prefix: &str, args: &[String], i: &mut usize) -> St
     } else {
         *i += 1;
         if *i >= args.len() {
-            eprintln!("nl: option '{prefix}' requires an argument");
+            eprintln!("nl: option {} requires an argument", quoteaf_os(prefix));
             process::exit(1);
         }
         args[*i].clone()
@@ -372,7 +375,10 @@ fn short_opt_value(
     } else {
         *arg_idx += 1;
         if *arg_idx >= args.len() {
-            eprintln!("nl: option requires an argument -- '{opt_char}'");
+            eprintln!(
+                "nl: option requires an argument -- {}",
+                quoteaf_os(opt_char.to_string())
+            );
             process::exit(1);
         }
         args[*arg_idx].clone()
@@ -383,7 +389,7 @@ fn parse_i64_arg(flag: &str, val: &str) -> i64 {
     match val.parse::<i64>() {
         Ok(n) => n,
         Err(_) => {
-            eprintln!("nl: invalid number for {flag}: '{val}'");
+            eprintln!("nl: invalid number for {flag}: {}", quoteaf_os(val));
             process::exit(1);
         }
     }
@@ -393,7 +399,7 @@ fn parse_usize_arg(flag: &str, val: &str) -> usize {
     match val.parse::<usize>() {
         Ok(n) => n,
         Err(_) => {
-            eprintln!("nl: invalid number for {flag}: '{val}'");
+            eprintln!("nl: invalid number for {flag}: {}", quoteaf_os(val));
             process::exit(1);
         }
     }
@@ -523,9 +529,10 @@ fn regex_match_here(pattern: &str, text: &str) -> bool {
             let rest_pat = &pattern[atom_len + 1..]; // skip the `?`
             // Try matching the atom (one occurrence), then try zero.
             if let Some(consumed) = match_atom(atom_pat, text)
-                && regex_match_here(rest_pat, &text[consumed..]) {
-                    return true;
-                }
+                && regex_match_here(rest_pat, &text[consumed..])
+            {
+                return true;
+            }
             regex_match_here(rest_pat, text)
         }
     }
@@ -846,11 +853,7 @@ fn process_lines<R: BufRead>(
 }
 
 /// Write output lines in text format.
-fn write_text<W: Write>(
-    out: &mut W,
-    lines: &[OutputLine],
-    config: &Config,
-) -> io::Result<()> {
+fn write_text<W: Write>(out: &mut W, lines: &[OutputLine], config: &Config) -> io::Result<()> {
     let blank = blank_prefix(config.width, &config.separator);
 
     for ol in lines {
@@ -871,10 +874,7 @@ fn write_text<W: Write>(
 }
 
 /// Write output lines in JSON format.
-fn write_json<W: Write>(
-    out: &mut W,
-    lines: &[OutputLine],
-) -> io::Result<()> {
+fn write_json<W: Write>(out: &mut W, lines: &[OutputLine]) -> io::Result<()> {
     writeln!(out, "[")?;
     let total = lines.len();
     for (idx, ol) in lines.iter().enumerate() {
@@ -912,9 +912,8 @@ fn process_source(
         let mut reader = BufReader::new(stdin.lock());
         process_lines(&mut reader, config, line_number)
     } else {
-        let file = File::open(path).map_err(|e| {
-            io::Error::new(e.kind(), format!("{path}: {e}"))
-        })?;
+        let file =
+            File::open(path).map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))?;
         let mut reader = BufReader::new(file);
         process_lines(&mut reader, config, line_number)
     }
@@ -952,16 +951,18 @@ fn run(config: &Config) -> i32 {
     };
 
     if let Err(e) = write_result
-        && e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("nl: write error: {e}");
-            return 1;
-        }
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("nl: write error: {e}");
+        return 1;
+    }
 
     if let Err(e) = out.flush()
-        && e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("nl: write error: {e}");
-            return 1;
-        }
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("nl: write error: {e}");
+        return 1;
+    }
 
     if had_error { 1 } else { 0 }
 }

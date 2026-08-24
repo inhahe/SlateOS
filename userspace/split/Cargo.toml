@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS file-splitting utility"
 [dependencies]
+# split names its input file and each output file it creates, the latter
+# built from a user-supplied prefix.
+quoting = { path = "../quoting" }

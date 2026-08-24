@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `openocd`, `st-flash`, `st-info`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -34,7 +35,10 @@ fn run_openocd(args: &[String]) -> i32 {
         return 0;
     }
 
-    let config = args.windows(2).find(|w| w[0] == "-f").map(|w| w[1].as_str());
+    let config = args
+        .windows(2)
+        .find(|w| w[0] == "-f")
+        .map(|w| w[1].as_str());
     println!("Open On-Chip Debugger 0.12.0");
     println!("Licensed under GNU GPL v2");
     if let Some(cfg) = config {
@@ -88,7 +92,7 @@ fn run_st_flash(args: &[String]) -> i32 {
         "reset" => {
             println!("Resetting device...");
         }
-        _ => println!("st-flash: unknown command '{}'", cmd),
+        _ => println!("st-flash: unknown command {}", quoteaf_os(cmd)),
     }
     0
 }
@@ -110,18 +114,29 @@ fn run_st_info(args: &[String]) -> i32 {
         println!(" chipid: 0x0413");
         println!(" descr: F4xx");
     } else {
-        if args.iter().any(|a| a == "--flash") { println!("524288"); }
-        if args.iter().any(|a| a == "--sram") { println!("131072"); }
-        if args.iter().any(|a| a == "--chipid") { println!("0x0413"); }
-        if args.iter().any(|a| a == "--descr") { println!("F4xx"); }
-        if args.iter().any(|a| a == "--serial") { println!("303030303030303030303031"); }
+        if args.iter().any(|a| a == "--flash") {
+            println!("524288");
+        }
+        if args.iter().any(|a| a == "--sram") {
+            println!("131072");
+        }
+        if args.iter().any(|a| a == "--chipid") {
+            println!("0x0413");
+        }
+        if args.iter().any(|a| a == "--descr") {
+            println!("F4xx");
+        }
+        if args.iter().any(|a| a == "--serial") {
+            println!("303030303030303030303031");
+        }
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "openocd".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -136,7 +151,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_openocd};
+    use super::{basename, run_openocd, strip_ext};
 
     #[test]
     fn basename_strips_path() {

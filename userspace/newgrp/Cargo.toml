@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS newgrp utility"
 [dependencies]
+# newgrp names the group it is switching to. It runs setuid, so a word an
+# unprivileged caller chooses is reaching a privileged program's output.
+quoting = { path = "../quoting" }

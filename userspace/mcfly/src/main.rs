@@ -4,6 +4,7 @@
 //!
 //! Single personality: `mcfly`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -66,7 +67,7 @@ fn run_mcfly(args: Vec<String>) -> i32 {
                 println!("    cargo clippy --all-targets");
                 println!("    git log --oneline -10");
             } else {
-                println!("  Results for '{}':", query);
+                println!("  Results for {}:", quoteaf_os(&query));
                 println!("  > {} --release", query);
                 println!("    {} --verbose", query);
                 println!("    {} --help", query);
@@ -86,7 +87,7 @@ fn run_mcfly(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -101,7 +102,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mcfly};
+    use super::run_mcfly;
 
     #[test]
     fn help_exits_zero() {

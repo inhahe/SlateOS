@@ -4,6 +4,7 @@
 //!
 //! Single personality: `restic`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -21,18 +22,24 @@ struct Snapshot {
 fn sample_snapshots() -> Vec<Snapshot> {
     vec![
         Snapshot {
-            id: "a1b2c3d4".to_string(), time: "2025-05-20 02:00:05".to_string(),
-            host: "slateos-desktop".to_string(), paths: vec!["/home/user".to_string()],
+            id: "a1b2c3d4".to_string(),
+            time: "2025-05-20 02:00:05".to_string(),
+            host: "slateos-desktop".to_string(),
+            paths: vec!["/home/user".to_string()],
             _tags: vec!["daily".to_string()],
         },
         Snapshot {
-            id: "e5f6a7b8".to_string(), time: "2025-05-21 02:00:03".to_string(),
-            host: "slateos-desktop".to_string(), paths: vec!["/home/user".to_string()],
+            id: "e5f6a7b8".to_string(),
+            time: "2025-05-21 02:00:03".to_string(),
+            host: "slateos-desktop".to_string(),
+            paths: vec!["/home/user".to_string()],
             _tags: vec!["daily".to_string()],
         },
         Snapshot {
-            id: "c9d0e1f2".to_string(), time: "2025-05-22 02:00:04".to_string(),
-            host: "slateos-desktop".to_string(), paths: vec!["/home/user".to_string()],
+            id: "c9d0e1f2".to_string(),
+            time: "2025-05-22 02:00:04".to_string(),
+            host: "slateos-desktop".to_string(),
+            paths: vec!["/home/user".to_string()],
             _tags: vec!["daily".to_string()],
         },
     ]
@@ -67,14 +74,21 @@ fn run_restic(args: Vec<String>) -> i32 {
             println!("  --version     Show version");
             0
         }
-        "--version" | "version" => { println!("restic 0.1.0 (Slate OS) compiled with rustc"); 0 }
+        "--version" | "version" => {
+            println!("restic 0.1.0 (Slate OS) compiled with rustc");
+            0
+        }
         "init" => {
-            let repo = cmd_args.iter().position(|a| a == "-r" || a == "--repo")
+            let repo = cmd_args
+                .iter()
+                .position(|a| a == "-r" || a == "--repo")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("/backup/restic-repo");
             println!("created restic repository a1b2c3d4 at {}", repo);
-            println!("Please note that knowledge of your password is required to access the repository.");
+            println!(
+                "Please note that knowledge of your password is required to access the repository."
+            );
             0
         }
         "backup" => {
@@ -98,25 +112,38 @@ fn run_restic(args: Vec<String>) -> i32 {
             println!("ID        Time                 Host            Tags        Paths");
             println!("-----------------------------------------------------------------------");
             for s in &snaps {
-                println!("{:<9} {:<20} {:<15} {:<11} {}",
-                    s.id, s.time, s.host,
-                    s._tags.join(","), s.paths.join(", "));
+                println!(
+                    "{:<9} {:<20} {:<15} {:<11} {}",
+                    s.id,
+                    s.time,
+                    s.host,
+                    s._tags.join(","),
+                    s.paths.join(", ")
+                );
             }
             println!("-----------------------------------------------------------------------");
             println!("{} snapshots", snaps.len());
             0
         }
         "forget" => {
-            let keep_last = cmd_args.iter().position(|a| a == "--keep-last")
+            let keep_last = cmd_args
+                .iter()
+                .position(|a| a == "--keep-last")
                 .and_then(|i| cmd_args.get(i + 1))
                 .and_then(|s| s.parse::<u32>().ok());
-            let keep_daily = cmd_args.iter().position(|a| a == "--keep-daily")
+            let keep_daily = cmd_args
+                .iter()
+                .position(|a| a == "--keep-daily")
                 .and_then(|i| cmd_args.get(i + 1))
                 .and_then(|s| s.parse::<u32>().ok());
 
             println!("Applying retention policy:");
-            if let Some(n) = keep_last { println!("  keep-last: {}", n); }
-            if let Some(n) = keep_daily { println!("  keep-daily: {}", n); }
+            if let Some(n) = keep_last {
+                println!("  keep-last: {}", n);
+            }
+            if let Some(n) = keep_daily {
+                println!("  keep-daily: {}", n);
+            }
             println!("remove 1 snapshot (simulated)");
             println!("keep 2 snapshots (simulated)");
             0
@@ -146,10 +173,25 @@ fn run_restic(args: Vec<String>) -> i32 {
             println!("  Total Size:         48.93 GiB");
             0
         }
-        "restore" => { println!("restoring snapshot to target directory (simulated)"); 0 }
-        "diff" => { println!("comparing snapshots (simulated)"); println!("+    /home/user/new_file.txt"); println!("-    /home/user/old_file.txt"); 0 }
-        "find" => { println!("Found matching entries (simulated):"); println!("  snapshot a1b2c3d4: /home/user/Documents/report.pdf"); 0 }
-        other => { eprintln!("restic: unknown command '{}'", other); 1 }
+        "restore" => {
+            println!("restoring snapshot to target directory (simulated)");
+            0
+        }
+        "diff" => {
+            println!("comparing snapshots (simulated)");
+            println!("+    /home/user/new_file.txt");
+            println!("-    /home/user/old_file.txt");
+            0
+        }
+        "find" => {
+            println!("Found matching entries (simulated):");
+            println!("  snapshot a1b2c3d4: /home/user/Documents/report.pdf");
+            0
+        }
+        other => {
+            eprintln!("restic: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 

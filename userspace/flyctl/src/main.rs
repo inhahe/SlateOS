@@ -4,6 +4,7 @@
 //!
 //! Single personality: `fly` (or `flyctl`)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -79,12 +80,18 @@ fn run_fly(args: Vec<String>) -> i32 {
                     println!("New app created: {}", name);
                     println!("  Hostname = {}.fly.dev", name);
                 }
-                _ => { println!("Apps operation: {}", sub); }
+                _ => {
+                    println!("Apps operation: {}", sub);
+                }
             }
             0
         }
         "status" => {
-            let app = args.windows(2).find(|w| w[0] == "-a" || w[0] == "--app").map(|w| w[1].as_str()).unwrap_or("my-web-app");
+            let app = args
+                .windows(2)
+                .find(|w| w[0] == "-a" || w[0] == "--app")
+                .map(|w| w[1].as_str())
+                .unwrap_or("my-web-app");
             println!("App");
             println!("  Name     = {}", app);
             println!("  Owner    = personal");
@@ -93,12 +100,20 @@ fn run_fly(args: Vec<String>) -> i32 {
             println!();
             println!("Machines");
             println!("PROCESS  ID              VERSION  REGION  STATE    CHECKS  LAST UPDATED");
-            println!("app      178140abc123    5        iad     started  1/1     2024-01-15T14:00:00Z");
-            println!("app      278140def456    5        ord     started  1/1     2024-01-15T14:00:00Z");
+            println!(
+                "app      178140abc123    5        iad     started  1/1     2024-01-15T14:00:00Z"
+            );
+            println!(
+                "app      278140def456    5        ord     started  1/1     2024-01-15T14:00:00Z"
+            );
             0
         }
         "deploy" => {
-            let app = args.windows(2).find(|w| w[0] == "-a" || w[0] == "--app").map(|w| w[1].as_str()).unwrap_or("my-web-app");
+            let app = args
+                .windows(2)
+                .find(|w| w[0] == "-a" || w[0] == "--app")
+                .map(|w| w[1].as_str())
+                .unwrap_or("my-web-app");
             println!("==> Verifying app config");
             println!("--> Verified app config");
             println!("==> Building image");
@@ -114,8 +129,14 @@ fn run_fly(args: Vec<String>) -> i32 {
             0
         }
         "logs" => {
-            let app = args.windows(2).find(|w| w[0] == "-a" || w[0] == "--app").map(|w| w[1].as_str()).unwrap_or("my-web-app");
-            println!("2024-01-15T14:00:00Z app[178140abc123] iad [info]  Listening on 0.0.0.0:8080");
+            let app = args
+                .windows(2)
+                .find(|w| w[0] == "-a" || w[0] == "--app")
+                .map(|w| w[1].as_str())
+                .unwrap_or("my-web-app");
+            println!(
+                "2024-01-15T14:00:00Z app[178140abc123] iad [info]  Listening on 0.0.0.0:8080"
+            );
             println!("2024-01-15T14:00:01Z app[178140abc123] iad [info]  GET / 200 12ms");
             println!("2024-01-15T14:00:02Z app[278140def456] ord [info]  GET /api/health 200 2ms");
             println!("(from {})", app);
@@ -133,7 +154,9 @@ fn run_fly(args: Vec<String>) -> i32 {
                     println!("Secrets are staged for the first deployment.");
                     println!("Release v6 created.");
                 }
-                _ => { println!("Secrets operation: {}", sub); }
+                _ => {
+                    println!("Secrets operation: {}", sub);
+                }
             }
             0
         }
@@ -156,7 +179,9 @@ fn run_fly(args: Vec<String>) -> i32 {
                     let size = args.get(2).map(|s| s.as_str()).unwrap_or("shared-cpu-1x");
                     println!("Scaled VM size to {}.", size);
                 }
-                _ => { println!("Scale operation: {}", sub); }
+                _ => {
+                    println!("Scale operation: {}", sub);
+                }
             }
             0
         }
@@ -190,7 +215,7 @@ fn run_fly(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: fly <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -206,7 +231,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_fly};
+    use super::run_fly;
 
     #[test]
     fn help_exits_zero() {

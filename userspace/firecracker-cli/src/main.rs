@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `firecracker`, `jailer`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -37,18 +38,20 @@ fn run_firecracker(args: &[String]) -> i32 {
         return 0;
     }
 
-    let api_sock = args.windows(2)
+    let api_sock = args
+        .windows(2)
         .find(|w| w[0] == "--api-sock")
         .map(|w| w[1].as_str())
         .unwrap_or("/tmp/firecracker.socket");
 
-    let config = args.windows(2)
+    let config = args
+        .windows(2)
         .find(|w| w[0] == "--config-file")
         .map(|w| w[1].as_str());
 
     if let Some(cfg) = config {
         println!("Firecracker v1.7.0");
-        println!("  Loading config from '{}'...", cfg);
+        println!("  Loading config from {}...", quoteaf_os(cfg));
         println!("  Boot source: vmlinux");
         println!("  Root drive: rootfs.ext4");
         println!("  Memory: 128 MiB");
@@ -56,7 +59,7 @@ fn run_firecracker(args: &[String]) -> i32 {
         println!("  MicroVM started successfully.");
     } else {
         println!("Firecracker v1.7.0");
-        println!("  API server listening on '{}'", api_sock);
+        println!("  API server listening on {}", quoteaf_os(api_sock));
         println!("  Waiting for configuration via API...");
     }
     0
@@ -84,8 +87,12 @@ fn run_jailer(args: &[String]) -> i32 {
         return 0;
     }
 
-    let id = args.windows(2).find(|w| w[0] == "--id").map(|w| w[1].as_str()).unwrap_or("vm1");
-    println!("jailer: setting up jail for '{}'", id);
+    let id = args
+        .windows(2)
+        .find(|w| w[0] == "--id")
+        .map(|w| w[1].as_str())
+        .unwrap_or("vm1");
+    println!("jailer: setting up jail for {}", quoteaf_os(id));
     println!("  Chroot: /srv/jailer/firecracker/{}/root", id);
     println!("  Starting firecracker in jail...");
     0
@@ -93,7 +100,8 @@ fn run_jailer(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "firecracker".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -107,7 +115,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_firecracker};
+    use super::{basename, run_firecracker, strip_ext};
 
     #[test]
     fn basename_strips_path() {

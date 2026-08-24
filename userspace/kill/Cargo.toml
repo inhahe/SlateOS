@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS process termination utility"
 [dependencies]
+# Both messages name a process the user asked for by name, and a process
+# name comes from the target's own argv -- so it is not even this user's
+# text.
+quoting = { path = "../quoting" }

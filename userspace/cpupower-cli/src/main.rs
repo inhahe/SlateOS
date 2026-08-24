@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `cpupower`, `cpufreq-info`, `cpufreq-set`, `turbostat`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,12 +43,18 @@ fn run_cpupower(args: &[String]) -> i32 {
             println!("  hardware limits: 800 MHz - 5.80 GHz");
             println!("  available cpufreq governors: performance powersave");
             println!("  current policy: frequency should be within 800 MHz and 5.80 GHz.");
-            println!("                  The governor \"performance\" may decide which speed to use");
+            println!(
+                "                  The governor \"performance\" may decide which speed to use"
+            );
             println!("  current CPU frequency: 3.00 GHz (asserted by call to hardware)");
         }
         "frequency-set" => {
             println!("Setting cpu: 0");
-            let gov = args.windows(2).find(|w| w[0] == "-g").map(|w| w[1].as_str()).unwrap_or("performance");
+            let gov = args
+                .windows(2)
+                .find(|w| w[0] == "-g")
+                .map(|w| w[1].as_str())
+                .unwrap_or("performance");
             println!("  governor set to: {}", gov);
         }
         "idle-info" => {
@@ -65,7 +72,7 @@ fn run_cpupower(args: &[String]) -> i32 {
             println!("  EPB: performance");
         }
         _ => {
-            eprintln!("cpupower: unknown command '{}'", subcmd);
+            eprintln!("cpupower: unknown command {}", quoteaf_os(subcmd));
             return 1;
         }
     }
@@ -94,14 +101,21 @@ fn run_turbostat(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "cpupower".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
     let code = match prog.as_str() {
-        "cpufreq-info" => { run_cpupower(&["frequency-info".to_string()]); 0 }
-        "cpufreq-set" => { run_cpupower(&["frequency-set".to_string()]); 0 }
+        "cpufreq-info" => {
+            run_cpupower(&["frequency-info".to_string()]);
+            0
+        }
+        "cpufreq-set" => {
+            run_cpupower(&["frequency-set".to_string()]);
+            0
+        }
         "turbostat" => run_turbostat(&rest),
         _ => run_cpupower(&rest),
     };
@@ -110,7 +124,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_cpupower};
+    use super::{basename, run_cpupower, strip_ext};
 
     #[test]
     fn basename_strips_path() {

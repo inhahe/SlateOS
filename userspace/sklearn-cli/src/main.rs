@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `sklearn`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -50,7 +51,7 @@ fn run_sklearn(args: &[String]) -> i32 {
             println!("  GradientBoosting fit (10k, 20 feat): 340 ms");
             println!("  LogisticRegression fit (50k, 10 feat): 23 ms");
         }
-        _ => println!("sklearn: command '{}' completed", subcmd),
+        _ => println!("sklearn: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -64,7 +65,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_sklearn};
+    use super::run_sklearn;
 
     #[test]
     fn help_exits_zero() {

@@ -2,3 +2,7 @@
 name = "rq-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The queue name is an argv word, and the rq subcommand is another.
+quoting = { path = "../quoting" }

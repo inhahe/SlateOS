@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `seldon`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_seldon(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -36,15 +41,15 @@ fn run_seldon(args: &[String]) -> i32 {
                 }
                 "load" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("iris-model");
-                    println!("Loading model '{}'...", name);
+                    println!("Loading model {}...", quoteaf_os(name));
                     println!("Model loaded successfully.");
                 }
                 "infer" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("iris-model");
-                    println!("Inferring with '{}'...", name);
+                    println!("Inferring with {}...", quoteaf_os(name));
                     println!("{{\"predictions\": [0, 1, 2]}}");
                 }
-                _ => println!("seldon model: '{}' completed", sub),
+                _ => println!("seldon model: {} completed", quoteaf_os(sub)),
             }
         }
         "pipeline" => {
@@ -54,7 +59,7 @@ fn run_seldon(args: &[String]) -> i32 {
                 println!("nlp-pipeline      3         Ready");
                 println!("cv-pipeline       2         Ready");
             } else {
-                println!("seldon pipeline: '{}' completed", sub);
+                println!("seldon pipeline: {} completed", quoteaf_os(sub));
             }
         }
         "status" => {
@@ -64,14 +69,17 @@ fn run_seldon(args: &[String]) -> i32 {
             println!("  Experiments: 1 running");
             println!("  Requests:    12,345 (last 24h)");
         }
-        _ => println!("seldon: '{}' completed", subcmd),
+        _ => println!("seldon: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "seldon".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "seldon".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_seldon(&rest);
     process::exit(code);
@@ -79,7 +87,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_seldon};
+    use super::{basename, run_seldon, strip_ext};
 
     #[test]
     fn basename_strips_path() {

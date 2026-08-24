@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `grass`, `grass_cmd`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_grass(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -31,12 +36,19 @@ fn run_grass(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--exec") {
-        let cmd = args.windows(2).find(|w| w[0] == "--exec").map(|w| w[1].as_str()).unwrap_or("g.version");
+        let cmd = args
+            .windows(2)
+            .find(|w| w[0] == "--exec")
+            .map(|w| w[1].as_str())
+            .unwrap_or("g.version");
         println!("GRASS GIS 8.3.2 — executing: {}", cmd);
         println!("[command completed]");
         return 0;
     }
-    let mapset = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let mapset = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
     if let Some(m) = mapset {
         println!("Starting GRASS GIS 8.3.2...");
         println!("Location: {}", m);
@@ -87,14 +99,17 @@ fn run_grass_cmd(args: &[String]) -> i32 {
             println!("nsres: 10");
             println!("ewres: 10");
         }
-        _ => println!("grass: module '{}' completed", module),
+        _ => println!("grass: module {} completed", quoteaf_os(module)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "grass".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "grass".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "grass_cmd" => run_grass_cmd(&rest),
@@ -105,7 +120,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_grass};
+    use super::{basename, run_grass, strip_ext};
 
     #[test]
     fn basename_strips_path() {

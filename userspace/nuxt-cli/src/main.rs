@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `nuxi`, `nuxt`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_nuxi(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -40,8 +45,11 @@ fn run_nuxi(args: &[String]) -> i32 {
             println!("  Created package.json");
         }
         "dev" => {
-            let port = args.windows(2).find(|w| w[0] == "--port")
-                .map(|w| w[1].as_str()).unwrap_or("3000");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("3000");
             println!("Nuxi 3.12.2");
             println!("Nuxt 3.12.2 with Nitro 2.9.6");
             println!("  > Local:    http://localhost:{}", port);
@@ -67,7 +75,7 @@ fn run_nuxi(args: &[String]) -> i32 {
         "add" => {
             let what = args.get(1).map(|s| s.as_str()).unwrap_or("component");
             let name = args.get(2).map(|s| s.as_str()).unwrap_or("MyComponent");
-            println!("Created {} '{}'", what, name);
+            println!("Created {} {}", what, quoteaf_os(name));
         }
         "info" => {
             println!("Nuxt: 3.12.2");
@@ -84,14 +92,17 @@ fn run_nuxi(args: &[String]) -> i32 {
             println!("Cleaning .nuxt/ and .output/...");
             println!("Done.");
         }
-        _ => println!("nuxi: '{}' completed", subcmd),
+        _ => println!("nuxi: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "nuxi".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "nuxi".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_nuxi(&rest);
     process::exit(code);
@@ -99,7 +110,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_nuxi};
+    use super::{basename, run_nuxi, strip_ext};
 
     #[test]
     fn basename_strips_path() {

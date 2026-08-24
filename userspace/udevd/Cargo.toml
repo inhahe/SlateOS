@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS udevd - device manager daemon (udevd/udevadm)"
 [dependencies]
+# udevd names devices, subsystems and rule files -- strings that come out of
+# the kernel's device attributes and out of the rules directory, so a device
+# that reports its own name gets to choose the word udevd prints.
+quoting = { path = "../quoting" }

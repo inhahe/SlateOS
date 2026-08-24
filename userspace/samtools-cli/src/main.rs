@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `samtools`, `htsfile`, `tabix`, `bgzip`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_samtools(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -85,7 +90,7 @@ fn run_samtools(args: &[String]) -> i32 {
             println!("samtools merge: merging files...");
             println!("Merged output written.");
         }
-        _ => println!("samtools: '{}' completed", subcmd),
+        _ => println!("samtools: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -104,7 +109,11 @@ fn run_tabix(args: &[String]) -> i32 {
         println!("tabix (htslib) 1.19");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("data.vcf.gz");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("data.vcf.gz");
     println!("tabix: indexing {}", file);
     println!("Index written: {}.tbi", file);
     0
@@ -125,7 +134,11 @@ fn run_bgzip(args: &[String]) -> i32 {
         return 0;
     }
     let decompress = args.iter().any(|a| a == "-d");
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("data.vcf");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("data.vcf");
     if decompress {
         println!("bgzip: decompressing {}", file);
     } else {
@@ -146,7 +159,11 @@ fn run_htsfile(args: &[String]) -> i32 {
         println!("htsfile (htslib) 1.19");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("data.bam");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("data.bam");
     if file.ends_with(".bam") {
         println!("{}: BAM version 1 compressed sequence data", file);
     } else if file.ends_with(".cram") {
@@ -161,7 +178,10 @@ fn run_htsfile(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "samtools".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "samtools".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "tabix" => run_tabix(&rest),
@@ -174,7 +194,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_samtools};
+    use super::{basename, run_samtools, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `stunnel`, `socat`, `ncat`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_stunnel(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -31,8 +36,12 @@ fn run_stunnel(args: &[String]) -> i32 {
         return 0;
     }
 
-    let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("/etc/stunnel/stunnel.conf");
-    println!("stunnel: reading configuration from '{}'", config);
+    let config = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("/etc/stunnel/stunnel.conf");
+    println!("stunnel: reading configuration from {}", quoteaf_os(config));
     println!("stunnel: Configuration successful");
     println!("stunnel: Starting service [https-proxy]");
     println!("stunnel: Listening on 0.0.0.0:8443");
@@ -75,7 +84,10 @@ fn run_socat(args: &[String]) -> i32 {
     }
 
     let addr1 = args.first().map(|s| s.as_str()).unwrap_or("STDIO");
-    let addr2 = args.get(1).map(|s| s.as_str()).unwrap_or("TCP:localhost:80");
+    let addr2 = args
+        .get(1)
+        .map(|s| s.as_str())
+        .unwrap_or("TCP:localhost:80");
     println!("socat: {} <-> {}", addr1, addr2);
     println!("socat: relay established");
     0
@@ -104,14 +116,20 @@ fn run_ncat(args: &[String]) -> i32 {
     }
 
     if args.iter().any(|a| a == "-l" || a == "--listen") {
-        let port = args.iter().position(|a| a == "-p" || a == "--source-port")
+        let port = args
+            .iter()
+            .position(|a| a == "-p" || a == "--source-port")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("4444");
         println!("Ncat: Listening on 0.0.0.0:{}", port);
         println!("Ncat: Connection from 192.168.1.50:54321.");
     } else {
-        let host = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("localhost");
+        let host = args
+            .iter()
+            .find(|a| !a.starts_with('-'))
+            .map(|s| s.as_str())
+            .unwrap_or("localhost");
         println!("Ncat: Connected to {}.", host);
     }
     0
@@ -119,7 +137,10 @@ fn run_ncat(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "stunnel".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "stunnel".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "socat" => run_socat(&rest),
@@ -131,7 +152,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_stunnel};
+    use super::{basename, run_stunnel, strip_ext};
 
     #[test]
     fn basename_strips_path() {

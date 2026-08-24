@@ -4,6 +4,7 @@
 //!
 //! Single personality: `slack`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -43,7 +44,9 @@ fn run_slack(args: Vec<String>) -> i32 {
                     println!("Team              User             Token Status");
                     println!("My Workspace      user@example.com active");
                 }
-                _ => { println!("Auth operation: {}", sub); }
+                _ => {
+                    println!("Auth operation: {}", sub);
+                }
             }
             0
         }
@@ -71,7 +74,9 @@ fn run_slack(args: Vec<String>) -> i32 {
                     println!("  Purpose:  Company-wide announcements");
                     println!("  Topic:    Welcome to the team!");
                 }
-                _ => { println!("Channel operation: {}", sub); }
+                _ => {
+                    println!("Channel operation: {}", sub);
+                }
             }
             0
         }
@@ -79,13 +84,23 @@ fn run_slack(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("send");
             match sub {
                 "send" => {
-                    let channel = args.windows(2).find(|w| w[0] == "-c" || w[0] == "--channel").map(|w| w[1].as_str()).unwrap_or("#general");
-                    let msg = args.windows(2).find(|w| w[0] == "-m" || w[0] == "--message").map(|w| w[1].as_str()).unwrap_or("Hello!");
+                    let channel = args
+                        .windows(2)
+                        .find(|w| w[0] == "-c" || w[0] == "--channel")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("#general");
+                    let msg = args
+                        .windows(2)
+                        .find(|w| w[0] == "-m" || w[0] == "--message")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("Hello!");
                     println!("✔ Message sent to {}", channel);
                     println!("  Text: {}", msg);
                     println!("  Timestamp: 1705320000.123456");
                 }
-                _ => { println!("Chat operation: {}", sub); }
+                _ => {
+                    println!("Chat operation: {}", sub);
+                }
             }
             0
         }
@@ -106,7 +121,9 @@ fn run_slack(args: Vec<String>) -> i32 {
                     println!("  Status: Working from home");
                     println!("  TZ:     America/New_York");
                 }
-                _ => { println!("Users operation: {}", sub); }
+                _ => {
+                    println!("Users operation: {}", sub);
+                }
             }
             0
         }
@@ -122,13 +139,15 @@ fn run_slack(args: Vec<String>) -> i32 {
                     let file = args.get(2).map(|s| s.as_str()).unwrap_or("file.txt");
                     println!("✔ Uploaded {} to #general", file);
                 }
-                _ => { println!("Files operation: {}", sub); }
+                _ => {
+                    println!("Files operation: {}", sub);
+                }
             }
             0
         }
         "search" => {
             let query = args.get(1).map(|s| s.as_str()).unwrap_or("deploy");
-            println!("Search results for '{}':", query);
+            println!("Search results for {}:", quoteaf_os(query));
             println!();
             println!("  #deployments - Bob: Deploy v2.3.1 completed successfully");
             println!("  #engineering - Alice: We need to deploy the fix by EOD");
@@ -139,8 +158,16 @@ fn run_slack(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("get");
             match sub {
                 "set" => {
-                    let emoji = args.windows(2).find(|w| w[0] == "--emoji").map(|w| w[1].as_str()).unwrap_or(":house:");
-                    let text = args.windows(2).find(|w| w[0] == "--text").map(|w| w[1].as_str()).unwrap_or("Working from home");
+                    let emoji = args
+                        .windows(2)
+                        .find(|w| w[0] == "--emoji")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or(":house:");
+                    let text = args
+                        .windows(2)
+                        .find(|w| w[0] == "--text")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("Working from home");
                     println!("✔ Status set: {} {}", emoji, text);
                 }
                 "clear" => {
@@ -164,7 +191,7 @@ fn run_slack(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: slack <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -180,7 +207,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_slack};
+    use super::run_slack;
 
     #[test]
     fn help_exits_zero() {

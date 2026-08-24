@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! storyblok-cli — Slate OS personality CLI for Storyblok, the visual-editing headless CMS.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -207,17 +208,47 @@ fn run_storyblok(args: &[String], prog: &str) -> i32 {
         return 0;
     };
     match sub.as_str() {
-        "help" | "-h" | "--help" => { print_help(prog); 0 }
-        "version" | "-V" | "--version" => { print_version(); 0 }
-        "about" => { cmd_about(); 0 }
-        "visual" => { cmd_visual(); 0 }
-        "blocks" => { cmd_blocks(); 0 }
-        "api" => { cmd_api(); 0 }
-        "funding" => { cmd_funding(); 0 }
-        "customers" => { cmd_customers(); 0 }
-        "plans" => { cmd_plans(); 0 }
+        "help" | "-h" | "--help" => {
+            print_help(prog);
+            0
+        }
+        "version" | "-V" | "--version" => {
+            print_version();
+            0
+        }
+        "about" => {
+            cmd_about();
+            0
+        }
+        "visual" => {
+            cmd_visual();
+            0
+        }
+        "blocks" => {
+            cmd_blocks();
+            0
+        }
+        "api" => {
+            cmd_api();
+            0
+        }
+        "funding" => {
+            cmd_funding();
+            0
+        }
+        "customers" => {
+            cmd_customers();
+            0
+        }
+        "plans" => {
+            cmd_plans();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'. Try '{prog} help'.");
+            eprintln!(
+                "{prog}: unknown subcommand {}. Try '{prog} help'.",
+                quoteaf_os(other)
+            );
             2
         }
     }

@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS sequence number printer (seq/yes/expr)"
 [dependencies]
+# seq names the format string and separator it was given, both taken from
+# the command line.
+quoting = { path = "../quoting" }

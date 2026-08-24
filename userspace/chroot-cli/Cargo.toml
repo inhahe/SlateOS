@@ -2,3 +2,8 @@
 name = "chroot-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# chroot-cli names the root directory and the command it execs, both from
+# the command line, across a privilege boundary.
+quoting = { path = "../quoting" }

@@ -2,3 +2,8 @@
 name = "perf-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# perf-cli names events, symbols and the perf.data file it reads; a symbol
+# name comes out of a binary this tool did not build.
+quoting = { path = "../quoting" }

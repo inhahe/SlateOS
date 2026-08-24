@@ -10,6 +10,7 @@
 //! `--tag`, `--quiet`, `--status`, `--warn`, `--strict`, `--help`,
 //! `--version`.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
@@ -180,7 +181,11 @@ fn parse_args(algo: Algorithm) -> Options {
                             't' => opts.binary = false,
                             'w' => opts.warn = true,
                             _ => {
-                                eprintln!("{}: invalid option -- '{ch}'", algo.command());
+                                eprintln!(
+                                    "{}: invalid option -- {}",
+                                    algo.command(),
+                                    quoteaf_os(ch.to_string())
+                                );
                                 eprintln!("Try '{} --help' for more information.", algo.command());
                                 valid = false;
                                 break;
@@ -191,7 +196,11 @@ fn parse_args(algo: Algorithm) -> Options {
                         process::exit(1);
                     }
                 } else {
-                    eprintln!("{}: unrecognized option '{other}'", algo.command());
+                    eprintln!(
+                        "{}: unrecognized option {}",
+                        algo.command(),
+                        quoteaf_os(other)
+                    );
                     eprintln!("Try '{} --help' for more information.", algo.command());
                     process::exit(1);
                 }

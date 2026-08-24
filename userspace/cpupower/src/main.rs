@@ -10,6 +10,7 @@
 //! - `cpufreq-set` — set CPU frequency parameters
 //! - `turbostat` — show CPU C-state and turbo frequency statistics
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -304,7 +305,7 @@ fn cmd_frequency_set(args: &[String]) {
         .unwrap_or_else(|| "all CPUs".to_string());
 
     if let Some(g) = &governor {
-        println!("Setting governor '{}' on {}", g, cpu_str);
+        println!("Setting governor {} on {}", quoteaf_os(g), cpu_str);
     }
     if let Some(f) = min_freq {
         println!(

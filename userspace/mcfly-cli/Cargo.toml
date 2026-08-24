@@ -2,3 +2,8 @@
 name = "mcfly-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# mcfly-cli names shell history entries, which are literally whatever the
+# user previously typed -- arbitrary text by construction.
+quoting = { path = "../quoting" }

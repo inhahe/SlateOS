@@ -7,6 +7,7 @@
 //! - `ninja` (default) — build tool
 //! - `samu` — samurai (ninja-compatible build tool)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -81,15 +82,21 @@ fn run_ninja(args: Vec<String>) -> i32 {
         match args[i].as_str() {
             "-j" => {
                 i += 1;
-                if i < args.len() { jobs = args[i].parse().unwrap_or(4); }
+                if i < args.len() {
+                    jobs = args[i].parse().unwrap_or(4);
+                }
             }
             "-C" => {
                 i += 1;
-                if i < args.len() { build_dir = Some(args[i].clone()); }
+                if i < args.len() {
+                    build_dir = Some(args[i].clone());
+                }
             }
             "-t" => {
                 i += 1;
-                if i < args.len() { tool = Some(args[i].clone()); }
+                if i < args.len() {
+                    tool = Some(args[i].clone());
+                }
             }
             "-n" => dry_run = true,
             "-v" => verbose = true,
@@ -106,18 +113,22 @@ fn run_ninja(args: Vec<String>) -> i32 {
 
     // Build mode
     if let Some(ref d) = build_dir {
-        println!("ninja: Entering directory '{}'", d);
+        println!("ninja: Entering directory {}", quoteaf_os(d));
     }
 
     let edges = _sample_edges();
-    if jobs == 0 { jobs = 4; }
+    if jobs == 0 {
+        jobs = 4;
+    }
 
     if dry_run {
         for edge in &edges {
-            println!("[dry-run] {} {} -> {}",
+            println!(
+                "[dry-run] {} {} -> {}",
                 edge.rule,
                 edge.inputs.join(" "),
-                edge.outputs.join(" "));
+                edge.outputs.join(" ")
+            );
         }
         return 0;
     }
@@ -127,28 +138,31 @@ fn run_ninja(args: Vec<String>) -> i32 {
         let progress = format!("[{}/{}]", idx + 1, total);
         if verbose {
             match edge.rule.as_str() {
-                "cc" => println!("{} cc -c {} -o {}",
+                "cc" => println!(
+                    "{} cc -c {} -o {}",
                     progress,
                     edge.inputs.join(" "),
-                    edge.outputs.join(" ")),
-                "link" => println!("{} cc {} -o {}",
+                    edge.outputs.join(" ")
+                ),
+                "link" => println!(
+                    "{} cc {} -o {}",
                     progress,
                     edge.inputs.join(" "),
-                    edge.outputs.join(" ")),
-                _ => println!("{} {} {} -> {}",
+                    edge.outputs.join(" ")
+                ),
+                _ => println!(
+                    "{} {} {} -> {}",
                     progress,
                     edge.rule,
                     edge.inputs.join(" "),
-                    edge.outputs.join(" ")),
+                    edge.outputs.join(" ")
+                ),
             }
         } else {
             match edge.rule.as_str() {
-                "cc" => println!("{} Building C object {}",
-                    progress, edge.outputs.join(" ")),
-                "link" => println!("{} Linking {}",
-                    progress, edge.outputs.join(" ")),
-                _ => println!("{} {} {}",
-                    progress, edge.rule, edge.outputs.join(" ")),
+                "cc" => println!("{} Building C object {}", progress, edge.outputs.join(" ")),
+                "link" => println!("{} Linking {}", progress, edge.outputs.join(" ")),
+                _ => println!("{} {} {}", progress, edge.rule, edge.outputs.join(" ")),
             }
         }
     }
@@ -237,8 +251,14 @@ fn run_tool(tool: &str, _args: &[String]) -> i32 {
             println!("link");
             0
         }
-        "recompact" => { println!("Recompacted .ninja_deps and .ninja_log"); 0 }
-        other => { eprintln!("ninja: unknown tool '{}'", other); 1 }
+        "recompact" => {
+            println!("Recompacted .ninja_deps and .ninja_log");
+            0
+        }
+        other => {
+            eprintln!("ninja: unknown tool {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -252,7 +272,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);

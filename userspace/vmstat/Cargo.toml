@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS virtual memory statistics utility"
 [dependencies]
+# It interpolates `other` into "vmstat: unknown unit {} (use k, K, m, or
+# M)". That value is the argv word following `-S`, reached through the
+# `match` that rejected it, so it is whatever the user typed and not text
+# this program chose.
+quoting = { path = "../quoting" }

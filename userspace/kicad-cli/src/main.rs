@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `kicad`, `kicad-cli`, `pcbnew`, `eeschema`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_kicad(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -20,7 +25,10 @@ fn run_kicad(args: &[String]) -> i32 {
         println!("KiCad 8.0.1 (Slate OS)");
         return 0;
     }
-    let project = args.iter().find(|a| a.ends_with(".kicad_pro")).map(|s| s.as_str());
+    let project = args
+        .iter()
+        .find(|a| a.ends_with(".kicad_pro"))
+        .map(|s| s.as_str());
     if let Some(p) = project {
         println!("KiCad 8.0.1 — Opening project: {}", p);
     } else {
@@ -50,7 +58,8 @@ fn run_kicad_cli(args: &[String]) -> i32 {
         println!("  version               Show version");
         return 0;
     }
-    if args.first().map(|s| s.as_str()) == Some("version") || args.iter().any(|a| a == "--version") {
+    if args.first().map(|s| s.as_str()) == Some("version") || args.iter().any(|a| a == "--version")
+    {
         println!("kicad-cli 8.0.1 (Slate OS)");
         return 0;
     }
@@ -58,7 +67,9 @@ fn run_kicad_cli(args: &[String]) -> i32 {
     match cmd.as_str() {
         "pcb export gerbers" => {
             println!("Exporting Gerber files...");
-            println!("  F.Cu, B.Cu, F.Mask, B.Mask, F.Paste, B.Paste, Edge.Cuts, F.Silkscreen, B.Silkscreen");
+            println!(
+                "  F.Cu, B.Cu, F.Mask, B.Mask, F.Paste, B.Paste, Edge.Cuts, F.Silkscreen, B.Silkscreen"
+            );
             println!("  9 files written to ./gerbers/");
         }
         "pcb export drill" => {
@@ -79,7 +90,7 @@ fn run_kicad_cli(args: &[String]) -> i32 {
             println!("  Warnings: 2");
             println!("  ERC completed.");
         }
-        _ => println!("kicad-cli: '{}' completed", cmd),
+        _ => println!("kicad-cli: {} completed", quoteaf_os(&cmd)),
     }
     0
 }
@@ -94,7 +105,10 @@ fn run_pcbnew(args: &[String]) -> i32 {
         println!("pcbnew 8.0.1 (KiCad, Slate OS)");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".kicad_pcb")).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".kicad_pcb"))
+        .map(|s| s.as_str());
     if let Some(f) = file {
         println!("pcbnew: opening {}", f);
     } else {
@@ -114,7 +128,10 @@ fn run_eeschema(args: &[String]) -> i32 {
         println!("eeschema 8.0.1 (KiCad, Slate OS)");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".kicad_sch")).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".kicad_sch"))
+        .map(|s| s.as_str());
     if let Some(f) = file {
         println!("eeschema: opening {}", f);
     } else {
@@ -126,7 +143,10 @@ fn run_eeschema(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "kicad".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "kicad".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "kicad-cli" => run_kicad_cli(&rest),
@@ -139,7 +159,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_kicad};
+    use super::{basename, run_kicad, strip_ext};
 
     #[test]
     fn basename_strips_path() {

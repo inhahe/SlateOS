@@ -26,6 +26,7 @@
 //! useradm groups <username>        Show group memberships
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -73,7 +74,7 @@ fn require_user<'a>(db: &'a UserDb, username: &str) -> &'a Record {
     match db.find(username) {
         Some(r) => r,
         None => {
-            eprintln!("error: user '{username}' not found");
+            eprintln!("error: user {} not found", quoteaf_os(username));
             process::exit(1);
         }
     }
@@ -82,7 +83,7 @@ fn require_user<'a>(db: &'a UserDb, username: &str) -> &'a Record {
 /// The mutable record for `username`, or exit with the standard message.
 fn require_user_mut<'a>(db: &'a mut UserDb, username: &str) -> &'a mut Record {
     if db.find(username).is_none() {
-        eprintln!("error: user '{username}' not found");
+        eprintln!("error: user {} not found", quoteaf_os(username));
         process::exit(1);
     }
     match db.find_mut(username) {
@@ -154,7 +155,7 @@ fn cmd_add(username: &str, args: &[String]) {
     let mut db = load_db();
 
     if db.find(username).is_some() {
-        eprintln!("error: user '{username}' already exists");
+        eprintln!("error: user {} already exists", quoteaf_os(username));
         process::exit(1);
     }
 
@@ -220,7 +221,7 @@ fn cmd_add(username: &str, args: &[String]) {
                 match v.parse::<u32>() {
                     Ok(uid) => record.set_uid(uid),
                     Err(_) => {
-                        eprintln!("error: --uid expects a number, got '{v}'");
+                        eprintln!("error: --uid expects a number, got {}", quoteaf_os(v));
                         process::exit(1);
                     }
                 }
@@ -238,8 +239,8 @@ fn cmd_add(username: &str, args: &[String]) {
         && let Some(existing) = db.find_uid(uid)
     {
         eprintln!(
-            "error: uid {uid} is already used by '{}'",
-            existing.username().unwrap_or_default()
+            "error: uid {uid} is already used by {}",
+            quoteaf_os(existing.username().unwrap_or_default())
         );
         process::exit(1);
     }
@@ -256,7 +257,10 @@ fn cmd_add(username: &str, args: &[String]) {
         eprintln!("warning: could not create home directory {home}: {e}");
     }
 
-    println!("Created user '{username}' (uid={uid}, home={home})");
+    println!(
+        "Created user {} (uid={uid}, home={home})",
+        quoteaf_os(username)
+    );
 }
 
 /// Split a comma-separated `--groups` value.
@@ -292,7 +296,7 @@ fn cmd_del(username: &str) {
     let home = require_user(&db, username).home();
 
     if !db.remove(username) {
-        eprintln!("error: user '{username}' not found");
+        eprintln!("error: user {} not found", quoteaf_os(username));
         process::exit(1);
     }
     save_db(&db);
@@ -313,7 +317,7 @@ fn cmd_del(username: &str) {
         }
     }
 
-    println!("Deleted user '{username}'");
+    println!("Deleted user {}", quoteaf_os(username));
 }
 
 fn cmd_passwd(username: &str) {
@@ -321,7 +325,7 @@ fn cmd_passwd(username: &str) {
     let record = require_user_mut(&mut db, username);
     set_new_password(record, username);
     save_db(&db);
-    println!("Password updated for '{username}'");
+    println!("Password updated for {}", quoteaf_os(username));
 }
 
 fn cmd_list() {
@@ -403,14 +407,14 @@ fn cmd_lock(username: &str) {
     let mut db = load_db();
     require_user_mut(&mut db, username).set_locked(true);
     save_db(&db);
-    println!("Locked account '{username}'");
+    println!("Locked account {}", quoteaf_os(username));
 }
 
 fn cmd_unlock(username: &str) {
     let mut db = load_db();
     require_user_mut(&mut db, username).set_locked(false);
     save_db(&db);
-    println!("Unlocked account '{username}'");
+    println!("Unlocked account {}", quoteaf_os(username));
 }
 
 fn cmd_groups(username: &str) {
@@ -459,7 +463,7 @@ fn cmd_mod(username: &str, args: &[String]) {
     }
 
     save_db(&db);
-    println!("Modified user '{username}'");
+    println!("Modified user {}", quoteaf_os(username));
 }
 
 // ============================================================================
@@ -499,7 +503,7 @@ fn require_username<'a>(args: &'a [String], command: &str) -> &'a str {
     match args.get(2) {
         Some(name) => name.as_str(),
         None => {
-            eprintln!("error: '{command}' requires a username");
+            eprintln!("error: {} requires a username", quoteaf_os(command));
             process::exit(1);
         }
     }

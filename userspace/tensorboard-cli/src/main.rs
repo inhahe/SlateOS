@@ -4,6 +4,7 @@
 //!
 //! Single personality: `tensorboard`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -28,18 +29,43 @@ fn run_tensorboard(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("serve");
     match cmd {
         "serve" => {
-            let logdir = args.windows(2).find(|w| w[0] == "--logdir").map(|w| w[1].as_str()).unwrap_or("./logs");
-            let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("6006");
-            let host = args.windows(2).find(|w| w[0] == "--host").map(|w| w[1].as_str()).unwrap_or("localhost");
-            println!("TensorBoard 2.16.0 at http://{}:{} (Press CTRL+C to quit)", host, port);
+            let logdir = args
+                .windows(2)
+                .find(|w| w[0] == "--logdir")
+                .map(|w| w[1].as_str())
+                .unwrap_or("./logs");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("6006");
+            let host = args
+                .windows(2)
+                .find(|w| w[0] == "--host")
+                .map(|w| w[1].as_str())
+                .unwrap_or("localhost");
+            println!(
+                "TensorBoard 2.16.0 at http://{}:{} (Press CTRL+C to quit)",
+                host, port
+            );
             println!("  Serving data from: {}", logdir);
-            println!("  Plugins loaded: scalars, images, histograms, graphs, projector, text, audio, hparams");
+            println!(
+                "  Plugins loaded: scalars, images, histograms, graphs, projector, text, audio, hparams"
+            );
             println!("  Data reload every 5 seconds");
             0
         }
         "dev" => {
-            let logdir = args.windows(2).find(|w| w[0] == "--logdir").map(|w| w[1].as_str()).unwrap_or("./logs");
-            let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("6006");
+            let logdir = args
+                .windows(2)
+                .find(|w| w[0] == "--logdir")
+                .map(|w| w[1].as_str())
+                .unwrap_or("./logs");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("6006");
             println!("TensorBoard dev mode at http://localhost:{}", port);
             println!("  Serving data from: {}", logdir);
             println!("  Hot reloading enabled");
@@ -67,9 +93,17 @@ fn run_tensorboard(args: Vec<String>) -> i32 {
         }
         "export" => {
             let logdir = args.get(1).map(|s| s.as_str()).unwrap_or("./logs");
-            let output = args.windows(2).find(|w| w[0] == "--output" || w[0] == "-o").map(|w| w[1].as_str()).unwrap_or("export.csv");
-            let tag = args.windows(2).find(|w| w[0] == "--tag").map(|w| w[1].as_str()).unwrap_or("train/loss");
-            println!("Exporting tag '{}' from {}...", tag, logdir);
+            let output = args
+                .windows(2)
+                .find(|w| w[0] == "--output" || w[0] == "-o")
+                .map(|w| w[1].as_str())
+                .unwrap_or("export.csv");
+            let tag = args
+                .windows(2)
+                .find(|w| w[0] == "--tag")
+                .map(|w| w[1].as_str())
+                .unwrap_or("train/loss");
+            println!("Exporting tag {} from {}...", quoteaf_os(tag), logdir);
             println!("  Found 1500 data points");
             println!("  Written to {}", output);
             println!("  Format: wall_time,step,value");
@@ -79,7 +113,7 @@ fn run_tensorboard(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: tensorboard <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -95,7 +129,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_tensorboard};
+    use super::run_tensorboard;
 
     #[test]
     fn help_exits_zero() {

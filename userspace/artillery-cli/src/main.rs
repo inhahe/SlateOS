@@ -4,6 +4,7 @@
 //!
 //! Single personality: `artillery`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -56,9 +57,20 @@ fn run_artillery(args: Vec<String>) -> i32 {
             0
         }
         "quick" => {
-            let url = args.get(1).map(|s| s.as_str()).unwrap_or("http://localhost:3000");
-            let count = args.windows(2).find(|w| w[0] == "-c" || w[0] == "--count").map(|w| w[1].as_str()).unwrap_or("100");
-            let rate = args.windows(2).find(|w| w[0] == "-r" || w[0] == "--rate").map(|w| w[1].as_str()).unwrap_or("10");
+            let url = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("http://localhost:3000");
+            let count = args
+                .windows(2)
+                .find(|w| w[0] == "-c" || w[0] == "--count")
+                .map(|w| w[1].as_str())
+                .unwrap_or("100");
+            let rate = args
+                .windows(2)
+                .find(|w| w[0] == "-r" || w[0] == "--rate")
+                .map(|w| w[1].as_str())
+                .unwrap_or("10");
             println!("Quick test: {} ({} requests at {}/s)", url, count, rate);
             println!();
             println!("  Requests completed: {}", count);
@@ -69,7 +81,11 @@ fn run_artillery(args: Vec<String>) -> i32 {
         }
         "report" => {
             let input = args.get(1).map(|s| s.as_str()).unwrap_or("results.json");
-            let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--output").map(|w| w[1].as_str()).unwrap_or("report.html");
+            let output = args
+                .windows(2)
+                .find(|w| w[0] == "-o" || w[0] == "--output")
+                .map(|w| w[1].as_str())
+                .unwrap_or("report.html");
             println!("Generating report from {} → {}", input, output);
             println!("  ✔ Report saved to {}", output);
             0
@@ -91,7 +107,7 @@ fn run_artillery(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: artillery <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -107,7 +123,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_artillery};
+    use super::run_artillery;
 
     #[test]
     fn help_exits_zero() {

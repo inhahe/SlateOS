@@ -32,7 +32,7 @@
 //! archive that could not be written, or extracting a member that could not
 //! be created, exits 2 (GNU's fatal-error status), not 0.
 
-use coreutils::quote::quotef_os;
+use coreutils::quote::{quoteaf, quotef_os};
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -602,10 +602,15 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
                 // extensions all land here. Skipping them keeps the stream in
                 // sync, but the extracted tree is then not the archive, so say
                 // so rather than pretending it worked.
+                // The type flag is one byte of the archive's own header, so it
+                // is exactly as attacker-chosen as the name beside it, which
+                // is already quoted. `char::from(b'\n')` printed a raw
+                // newline, so a crafted archive could forge a line of `tar`'s
+                // stderr; `quoteaf` renders that byte as `''$'\n'`.
                 eprintln!(
-                    "tar: {}: unsupported entry type '{}'; skipped",
+                    "tar: {}: unsupported entry type {}; skipped",
                     quotef_os(&name),
-                    char::from(other)
+                    quoteaf(&[other])
                 );
                 status = EXIT_FATAL;
                 if !skip_data(input.as_mut(), size) {

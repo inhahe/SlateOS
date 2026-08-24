@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `pkg`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -34,7 +35,9 @@ fn run_pkg(args: &[String]) -> i32 {
     match subcmd {
         "version" | "--version" => println!("pkg 1.21.0"),
         "install" => {
-            let pkgs: Vec<&str> = args.iter().skip(1)
+            let pkgs: Vec<&str> = args
+                .iter()
+                .skip(1)
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .collect();
@@ -97,10 +100,13 @@ fn run_pkg(args: &[String]) -> i32 {
             println!("  Disk space occupied: 1.5 GiB");
         }
         "which" => {
-            let file = args.get(1).map(|s| s.as_str()).unwrap_or("/usr/local/bin/vim");
+            let file = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("/usr/local/bin/vim");
             println!("{} was installed by package vim-9.1.0", file);
         }
-        _ => println!("pkg: '{}' completed", subcmd),
+        _ => println!("pkg: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -114,7 +120,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_pkg};
+    use super::run_pkg;
 
     #[test]
     fn help_exits_zero() {

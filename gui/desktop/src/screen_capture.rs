@@ -12,27 +12,53 @@
 //! - Countdown timer before recording starts
 //! - Hotkey integration (start/stop/pause)
 //! - Recording indicator overlay
+//!
+//! # Colour
+//!
+//! Both renderers here read every colour from the [`Palette`] the caller
+//! supplies; this module holds none of its own. Four judgements decide which
+//! role goes where, and each is a test rather than a comment.
+//!
+//! 1. **The indicator pill is as transparent as the user asked.** It used to
+//!    be `Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, 220)` — the
+//!    base colour with an alpha soldered onto it, which is not a colour
+//!    someone forgot to theme but the *transparency setting*, frozen. A user
+//!    who had turned transparency off still saw their desktop through the
+//!    recording badge; one who turned it up to Full got a badge more solid
+//!    than every other floating surface on the screen.
+//!    [`Palette::panel_bg`] is `base` at the palette's own `panel_alpha`, so
+//!    the pill now answers the setting.
+//! 2. **A button's lettering is computed from its own fill, and this is the
+//!    one conversion here that fixes a visible bug rather than a latent
+//!    one.** Record, Pause and Resume were lettered with the near-black
+//!    `MOCHA_BASE`, which is legible on Mocha's pale red, yellow and green —
+//!    and illegible on the light theme's, where all three fills are *dark*
+//!    (lumas 78, 104 and 91 against [`readable_on`](appearance::readable_on)'s
+//!    threshold of 140). Naming the ink beside the fill is what allowed the
+//!    two to disagree; [`readable_on`](appearance::readable_on) of the fill
+//!    cannot. The tests pin the endpoint each mode must produce, computed by
+//!    hand rather than by calling the same function the renderer calls.
+//! 3. **The transport colours are a code, not decoration, so nothing here is
+//!    accented.** Red records, yellow pauses, green resumes, and grey means
+//!    neither — a user reads those hues as meaning, the way they read a
+//!    traffic light, so they keep their named roles across a retheme instead
+//!    of following the accent. The accent says what is *in force*; on this
+//!    panel the state already says that, in a colour the user has learned.
+//!    The count of accent-coloured commands is asserted at zero so that an
+//!    accent appearing here later has to be a decision rather than a slip.
+//! 4. **The indicator is silent unless something is happening**, which is a
+//!    fact about coverage as much as about rendering. Four of the six
+//!    [`RecordingState`]s draw no indicator at all, and three of them reach
+//!    only the controls panel's fallback arm. A colour test that rendered
+//!    "the recorder" without naming its state would therefore be testing two
+//!    states out of six and reporting on all of them, so every test below
+//!    iterates the states explicitly.
 
-use guitk::color::Color;
+use appearance::{Palette, readable_on};
 use guitk::idseq::IdSeq;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
-
-// ============================================================================
-// Catppuccin Mocha palette
-// ============================================================================
-
-const MOCHA_BASE: Color = Color::from_hex(0x1E1E2E);
-const MOCHA_MANTLE: Color = Color::from_hex(0x181825);
-const MOCHA_SURFACE1: Color = Color::from_hex(0x45475A);
-const MOCHA_TEXT: Color = Color::from_hex(0xCDD6F4);
-const MOCHA_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const MOCHA_GREEN: Color = Color::from_hex(0xA6E3A1);
-const MOCHA_RED: Color = Color::from_hex(0xF38BA8);
-const MOCHA_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const MOCHA_PEACH: Color = Color::from_hex(0xFAB387);
-const MOCHA_OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
 // Capture mode
@@ -635,7 +661,19 @@ impl Default for ScreenRecorder {
 // ============================================================================
 
 /// Render the small recording indicator overlay (shown while recording).
-pub fn render_recording_indicator(recorder: &ScreenRecorder, x: f32, y: f32) -> Vec<RenderCommand> {
+///
+/// `p` supplies every colour drawn; see this module's `# Colour` section for
+/// the judgements behind the choices.
+///
+/// Returns no commands at all unless the recorder is active or processing —
+/// judgement 4, and the reason a caller must not treat an empty vector as an
+/// error.
+pub fn render_recording_indicator(
+    recorder: &ScreenRecorder,
+    p: &Palette,
+    x: f32,
+    y: f32,
+) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
 
     if !recorder.state.is_active() && !matches!(recorder.state, RecordingState::Processing) {
@@ -651,15 +689,19 @@ pub fn render_recording_indicator(recorder: &ScreenRecorder, x: f32, y: f32) -> 
         y,
         width: w,
         height: h,
-        color: Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, 220),
+        // Judgement 1: the transparency setting, not a baked-in alpha.
+        color: p.panel_bg(),
         corner_radii: CornerRadii::all(16.0),
     });
 
     // Recording dot (pulsing red when recording, yellow when paused).
+    //
+    // Judgement 3: these three are a code the user reads, not a theme — so
+    // they keep their named roles rather than following the accent.
     let dot_color = match recorder.state {
-        RecordingState::Recording => MOCHA_RED,
-        RecordingState::Paused => MOCHA_YELLOW,
-        _ => MOCHA_OVERLAY0,
+        RecordingState::Recording => p.red,
+        RecordingState::Paused => p.yellow,
+        _ => p.overlay0,
     };
     cmds.push(RenderCommand::FillRect {
         x: x + 10.0,
@@ -676,7 +718,7 @@ pub fn render_recording_indicator(recorder: &ScreenRecorder, x: f32, y: f32) -> 
         y: y + 8.0,
         text: recorder.stats.elapsed_display(),
         font_size: 13.0,
-        color: MOCHA_TEXT,
+        color: p.text,
         font_weight: FontWeightHint::Bold,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -689,7 +731,9 @@ pub fn render_recording_indicator(recorder: &ScreenRecorder, x: f32, y: f32) -> 
         y: y + 10.0,
         text: state_label.to_string(),
         font_size: 10.0,
-        color: MOCHA_SUBTEXT0,
+        // Quieter than the timer beside it: the clock is the reading, the
+        // word is a label on it.
+        color: p.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -699,8 +743,11 @@ pub fn render_recording_indicator(recorder: &ScreenRecorder, x: f32, y: f32) -> 
 }
 
 /// Render the recording toolbar/control panel.
+///
+/// `p` supplies every colour drawn; see this module's `# Colour` section.
 pub fn render_recording_controls(
     recorder: &ScreenRecorder,
+    p: &Palette,
     x: f32,
     y: f32,
     w: f32,
@@ -714,7 +761,9 @@ pub fn render_recording_controls(
         y,
         width: w,
         height: h,
-        color: MOCHA_MANTLE,
+        // A rung *below* the base this panel sits on, so it reads as a bar
+        // laid on the desktop rather than a sheet of it.
+        color: p.mantle,
         corner_radii: CornerRadii::all(8.0),
     });
 
@@ -724,7 +773,7 @@ pub fn render_recording_controls(
         y: y + 6.0,
         text: "Screen Recorder".to_string(),
         font_size: 13.0,
-        color: MOCHA_TEXT,
+        color: p.text,
         font_weight: FontWeightHint::Bold,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -741,7 +790,7 @@ pub fn render_recording_controls(
                 y: btn_y,
                 width: 80.0,
                 height: btn_h,
-                color: MOCHA_RED,
+                color: p.red,
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
@@ -749,7 +798,9 @@ pub fn render_recording_controls(
                 y: btn_y + 5.0,
                 text: "Record".to_string(),
                 font_size: 12.0,
-                color: MOCHA_BASE,
+                // Judgement 2: read off the fill. Naming a near-black here is
+                // what made this button unreadable on a light theme.
+                color: readable_on(p.red),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -762,7 +813,7 @@ pub fn render_recording_controls(
                 y: btn_y,
                 width: 70.0,
                 height: btn_h,
-                color: MOCHA_YELLOW,
+                color: p.yellow,
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
@@ -770,7 +821,8 @@ pub fn render_recording_controls(
                 y: btn_y + 5.0,
                 text: "Pause".to_string(),
                 font_size: 12.0,
-                color: MOCHA_BASE,
+                // Judgement 2.
+                color: readable_on(p.yellow),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -782,7 +834,10 @@ pub fn render_recording_controls(
                 y: btn_y,
                 width: 60.0,
                 height: btn_h,
-                color: MOCHA_SURFACE1,
+                // Not part of the colour code: Stop is available in both
+                // running states and means the same thing in each, so it is
+                // a plain surface rung rather than a fourth hue.
+                color: p.surface1,
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
@@ -790,7 +845,9 @@ pub fn render_recording_controls(
                 y: btn_y + 5.0,
                 text: "Stop".to_string(),
                 font_size: 12.0,
-                color: MOCHA_TEXT,
+                // A surface rung takes ordinary body ink; only the three
+                // strong-hue buttons need judgement 2's computation.
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -803,7 +860,7 @@ pub fn render_recording_controls(
                 y: btn_y,
                 width: 80.0,
                 height: btn_h,
-                color: MOCHA_GREEN,
+                color: p.green,
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
@@ -811,7 +868,8 @@ pub fn render_recording_controls(
                 y: btn_y + 5.0,
                 text: "Resume".to_string(),
                 font_size: 12.0,
-                color: MOCHA_BASE,
+                // Judgement 2.
+                color: readable_on(p.green),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -823,7 +881,8 @@ pub fn render_recording_controls(
                 y: btn_y,
                 width: 60.0,
                 height: btn_h,
-                color: MOCHA_SURFACE1,
+                // As in the Recording arm: the same button, the same rung.
+                color: p.surface1,
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
@@ -831,7 +890,7 @@ pub fn render_recording_controls(
                 y: btn_y + 5.0,
                 text: "Stop".to_string(),
                 font_size: 12.0,
-                color: MOCHA_TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -843,7 +902,11 @@ pub fn render_recording_controls(
                 y: btn_y + 4.0,
                 text: recorder.state.label().to_string(),
                 font_size: 12.0,
-                color: MOCHA_PEACH,
+                // The three transient states — counting down, choosing a
+                // region, encoding — offer no button, so the word replaces
+                // one. Peach because it is the shell's "working on it" hue
+                // and none of red/yellow/green is free to mean it here.
+                color: p.peach,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -863,7 +926,8 @@ pub fn render_recording_controls(
                 recorder.stats.average_fps(),
             ),
             font_size: 10.0,
-            color: MOCHA_SUBTEXT0,
+            // Telemetry, quieter than the title it sits beside.
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -877,7 +941,7 @@ pub fn render_recording_controls(
                 recorder.stats.drop_rate_pct(),
             ),
             font_size: 10.0,
-            color: MOCHA_SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -887,7 +951,7 @@ pub fn render_recording_controls(
             y: y + 36.0,
             text: format!("Time: {}", recorder.stats.elapsed_display()),
             font_size: 10.0,
-            color: MOCHA_SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -919,6 +983,8 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
+    use guitk::color::Color;
 
     // --- CaptureRegion ---
     #[test]
@@ -1302,7 +1368,7 @@ mod tests {
     #[test]
     fn test_indicator_idle_empty() {
         let r = ScreenRecorder::new();
-        let cmds = render_recording_indicator(&r, 0.0, 0.0);
+        let cmds = render_recording_indicator(&r, &accented(false), 0.0, 0.0);
         assert!(cmds.is_empty()); // No indicator when idle
     }
 
@@ -1311,14 +1377,14 @@ mod tests {
         let mut r = ScreenRecorder::new();
         r.config.countdown_secs = 0;
         r.start();
-        let cmds = render_recording_indicator(&r, 10.0, 10.0);
+        let cmds = render_recording_indicator(&r, &accented(false), 10.0, 10.0);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_controls_idle() {
         let r = ScreenRecorder::new();
-        let cmds = render_recording_controls(&r, 0.0, 0.0, 400.0);
+        let cmds = render_recording_controls(&r, &accented(false), 0.0, 0.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1327,7 +1393,7 @@ mod tests {
         let mut r = ScreenRecorder::new();
         r.config.countdown_secs = 0;
         r.start();
-        let cmds = render_recording_controls(&r, 0.0, 0.0, 400.0);
+        let cmds = render_recording_controls(&r, &accented(false), 0.0, 0.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1337,8 +1403,427 @@ mod tests {
         r.config.countdown_secs = 0;
         r.start();
         r.pause();
-        let cmds = render_recording_controls(&r, 0.0, 0.0, 400.0);
+        let cmds = render_recording_controls(&r, &accented(false), 0.0, 0.0, 400.0);
         assert!(!cmds.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Colour
+    //
+    // Part 2 of TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-
+    // PALETTE. Ten constants were deleted from this module; these tests are
+    // what makes their deletion checkable rather than merely plausible.
+    // ------------------------------------------------------------------
+
+    /// A palette whose accent is in neither theme's role list.
+    ///
+    /// The shipped accent *is* `blue`, so an "is anything accented?" count run
+    /// against a stock palette cannot distinguish an accent-coloured command
+    /// from a legitimately blue one, and would pass whatever the renderer did.
+    /// Magenta is off both palettes, which is asserted here rather than
+    /// assumed — a future palette that adopted it would silently turn
+    /// `nothing_in_the_recorder_is_accented` into a tautology.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0xFF00FF);
+        for (name, role) in p.roles() {
+            if name == "accent" {
+                continue;
+            }
+            assert!(
+                !(role.r == p.accent.r && role.g == p.accent.g && role.b == p.accent.b),
+                "the fixture accent collides with role `{name}`, so an accent \
+                 assertion in this module proves nothing"
+            );
+        }
+        p
+    }
+
+    /// Every state the recorder can be in, with a name for failure messages.
+    ///
+    /// Judgement 4: four of these six draw no indicator and three reach only
+    /// the controls panel's fallback arm, so a test that rendered "the
+    /// recorder" without naming a state would be exercising two of six and
+    /// reporting on all of them.
+    fn all_states() -> [(RecordingState, &'static str); 6] {
+        [
+            (RecordingState::Idle, "Idle"),
+            (RecordingState::Countdown { remaining_secs: 2 }, "Countdown"),
+            (RecordingState::SelectingRegion, "SelectingRegion"),
+            (RecordingState::Recording, "Recording"),
+            (RecordingState::Paused, "Paused"),
+            (RecordingState::Processing, "Processing"),
+        ]
+    }
+
+    /// A recorder parked in `state`, with stats a rendering can format.
+    fn recorder_in(state: RecordingState) -> ScreenRecorder {
+        let mut r = ScreenRecorder::new();
+        r.state = state;
+        r.stats.frames_captured = 120;
+        r.stats.elapsed_ms = 4_000;
+        r.stats.bytes_written = 1_048_576;
+        r
+    }
+
+    /// The colour a command puts on the screen, if it puts one there.
+    fn color_of(cmd: &RenderCommand) -> Option<Color> {
+        match cmd {
+            RenderCommand::FillRect { color, .. }
+            | RenderCommand::StrokeRect { color, .. }
+            | RenderCommand::Text { color, .. }
+            | RenderCommand::Line { color, .. }
+            | RenderCommand::BoxShadow { color, .. } => Some(*color),
+            _ => None,
+        }
+    }
+
+    /// Every colour in `cmds`, in draw order.
+    fn colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter().filter_map(color_of).collect()
+    }
+
+    /// The colour of the one text command reading `s`.
+    fn text_color(cmds: &[RenderCommand], s: &str) -> Color {
+        let hits: Vec<Color> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. } if text == s => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hits.len(), 1, "expected exactly one command reading {s:?}");
+        hits[0]
+    }
+
+    #[test]
+    fn every_colour_both_renderers_draw_comes_from_their_palette() {
+        let mut drawn = 0;
+        for light in [false, true] {
+            let p = accented(light);
+            for (state, name) in all_states() {
+                let r = recorder_in(state);
+                for (cmds, which) in [
+                    (
+                        render_recording_indicator(&r, &p, 4.0, 4.0),
+                        "recording indicator",
+                    ),
+                    (
+                        render_recording_controls(&r, &p, 0.0, 0.0, 400.0),
+                        "recording controls",
+                    ),
+                ] {
+                    drawn += cmds.len();
+                    // `derived` is empty on purpose: this module computes no
+                    // colour that is not either a role or a `readable_on`
+                    // endpoint, and the endpoints are already allowed by the
+                    // sweep. A module that needed an exception here would be
+                    // claiming one, which is the point of the parameter.
+                    assert_drawn_from(&p, &cmds, &[], &format!("{which} in {name}"));
+                }
+            }
+        }
+        // Non-vacuity. `assert_drawn_from` passes trivially on an empty
+        // command list, and four of the six states legitimately produce one
+        // from the indicator — so without this the whole sweep could be
+        // green because nothing was ever drawn.
+        assert!(drawn > 60, "the sweep only saw {drawn} commands");
+    }
+
+    #[test]
+    fn none_of_the_ten_deleted_constants_is_still_drawn() {
+        // Every constant this conversion deleted, by the name it had. The
+        // light palette contains none of these values, so a leftover names
+        // itself instead of merely failing.
+        const DELETED: [(&str, u32); 10] = [
+            ("MOCHA_BASE", 0x001E_1E2E),
+            ("MOCHA_MANTLE", 0x0018_1825),
+            ("MOCHA_SURFACE1", 0x0045_475A),
+            ("MOCHA_TEXT", 0x00CD_D6F4),
+            ("MOCHA_SUBTEXT0", 0x00A6_ADC8),
+            ("MOCHA_GREEN", 0x00A6_E3A1),
+            ("MOCHA_RED", 0x00F3_8BA8),
+            ("MOCHA_YELLOW", 0x00F9_E2AF),
+            ("MOCHA_PEACH", 0x00FA_B387),
+            ("MOCHA_OVERLAY0", 0x006C_7086),
+        ];
+        let p = accented(true);
+        for (state, name) in all_states() {
+            let r = recorder_in(state);
+            let mut cmds = render_recording_indicator(&r, &p, 4.0, 4.0);
+            cmds.extend(render_recording_controls(&r, &p, 0.0, 0.0, 400.0));
+            for c in colors(&cmds) {
+                let rgb = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+                for (cname, hex) in DELETED {
+                    assert_ne!(
+                        rgb, hex,
+                        "the light render in {name} still draws {cname} (#{hex:06X}), \
+                         so that constant survived the conversion"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+            let mode = if light { "light" } else { "dark" };
+            for (state, name) in all_states() {
+                let r = recorder_in(state);
+
+                // The whole command list, in draw order. Comparing the
+                // sequence rather than the set is what catches a *permutation*
+                // — two sites swapping roles leaves the set identical.
+                let want_indicator: Vec<Color> = match state {
+                    RecordingState::Recording => vec![p.panel_bg(), p.red, p.text, p.subtext0],
+                    RecordingState::Paused => vec![p.panel_bg(), p.yellow, p.text, p.subtext0],
+                    RecordingState::Processing => {
+                        vec![p.panel_bg(), p.overlay0, p.text, p.subtext0]
+                    }
+                    _ => vec![],
+                };
+                assert_eq!(
+                    colors(&render_recording_indicator(&r, &p, 4.0, 4.0)),
+                    want_indicator,
+                    "indicator in {name}, {mode} mode"
+                );
+
+                let stats = [p.subtext0, p.subtext0, p.subtext0];
+                // `readable_on` here pins *which* rule the ink follows, and is
+                // knowingly the same call the renderer makes. What the ink
+                // actually comes out as, per mode, is pinned by hand in
+                // `a_transport_button_is_lettered_for_its_own_fill` — without
+                // that companion this line would be comparing the code to
+                // itself.
+                let want_controls: Vec<Color> = match state {
+                    RecordingState::Idle => vec![p.mantle, p.text, p.red, readable_on(p.red)],
+                    RecordingState::Recording => [
+                        vec![
+                            p.mantle,
+                            p.text,
+                            p.yellow,
+                            readable_on(p.yellow),
+                            p.surface1,
+                            p.text,
+                        ],
+                        stats.to_vec(),
+                    ]
+                    .concat(),
+                    RecordingState::Paused => [
+                        vec![
+                            p.mantle,
+                            p.text,
+                            p.green,
+                            readable_on(p.green),
+                            p.surface1,
+                            p.text,
+                        ],
+                        stats.to_vec(),
+                    ]
+                    .concat(),
+                    RecordingState::Processing => {
+                        [vec![p.mantle, p.text, p.peach], stats.to_vec()].concat()
+                    }
+                    _ => vec![p.mantle, p.text, p.peach],
+                };
+                assert_eq!(
+                    colors(&render_recording_controls(&r, &p, 0.0, 0.0, 400.0)),
+                    want_controls,
+                    "controls in {name}, {mode} mode"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_in_the_recorder_is_accented() {
+        // Judgement 3. This cannot be checked by the pin table above: a table
+        // names n sites and by construction cannot notice the n+1th, whereas a
+        // count over the whole render can. It only means anything because
+        // `accented()` puts the accent off both palettes.
+        for light in [false, true] {
+            let p = accented(light);
+            for (state, name) in all_states() {
+                let r = recorder_in(state);
+                let mut cmds = render_recording_indicator(&r, &p, 4.0, 4.0);
+                cmds.extend(render_recording_controls(&r, &p, 0.0, 0.0, 400.0));
+                let n = colors(&cmds)
+                    .into_iter()
+                    .filter(|c| c.r == p.accent.r && c.g == p.accent.g && c.b == p.accent.b)
+                    .count();
+                assert_eq!(
+                    n, 0,
+                    "{n} accent-coloured commands in {name}; the transport \
+                     colours are a code the user reads, not a theme"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_indicator_pill_is_as_transparent_as_the_user_asked() {
+        // Judgement 1. The bug this replaces is invisible to every other test
+        // here: `base` at a soldered alpha is still `base`, so the membership
+        // sweep, the deleted-constant list and the pin table all pass it. Only
+        // varying `panel_alpha` can see it — and `Palette::for_mode` always
+        // sets 255, which is why the field is written directly.
+        let r = recorder_in(RecordingState::Recording);
+        let mut seen = Vec::new();
+        for alpha in [255_u8, 200, 160] {
+            let mut p = accented(false);
+            p.panel_alpha = alpha;
+            let cmds = render_recording_indicator(&r, &p, 0.0, 0.0);
+            let cols = colors(&cmds);
+            let pill = cols[0];
+            assert_eq!(
+                (pill.r, pill.g, pill.b),
+                (p.base.r, p.base.g, p.base.b),
+                "the pill stopped being `base`"
+            );
+            assert_eq!(pill.a, alpha, "the pill ignored panel_alpha = {alpha}");
+            // And the dot does *not* thin out with it. A fix that made
+            // everything follow the setting would be as wrong as the frozen
+            // constant was: a recording indicator that fades until it cannot
+            // be seen has failed at the one thing it is for.
+            assert_eq!(cols[1].a, 255, "the recording dot faded with the panel");
+            seen.push(pill.a);
+        }
+        assert_eq!(
+            seen,
+            vec![255, 200, 160],
+            "the pill's alpha did not track the setting"
+        );
+    }
+
+    #[test]
+    fn a_transport_button_is_lettered_for_its_own_fill() {
+        // Judgement 2, and the only conversion in this module that fixes a
+        // bug a user could already see. The endpoints are written out rather
+        // than obtained from `readable_on`, because a test that called the
+        // same function the renderer calls would agree with it however wrong
+        // both were.
+        const NEAR_BLACK: u32 = 0x0011_111B;
+        const NEAR_WHITE: u32 = 0x00EF_F1F5;
+        let rgb = |c: Color| (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+
+        for (state, label) in [
+            (RecordingState::Idle, "Record"),
+            (RecordingState::Recording, "Pause"),
+            (RecordingState::Paused, "Resume"),
+        ] {
+            let r = recorder_in(state);
+            let dark = accented(false);
+            let light = accented(true);
+            let ink_dark = text_color(
+                &render_recording_controls(&r, &dark, 0.0, 0.0, 400.0),
+                label,
+            );
+            let ink_light = text_color(
+                &render_recording_controls(&r, &light, 0.0, 0.0, 400.0),
+                label,
+            );
+
+            // Mocha's red, yellow and green are all pale — luma 173, 227 and
+            // 201 against the threshold of 140 — so all three want dark ink.
+            assert_eq!(
+                rgb(ink_dark),
+                NEAR_BLACK,
+                "{label} in dark mode should be lettered near-black"
+            );
+            // The light theme's are all *dark* — luma 78, 104 and 91 — so all
+            // three want the opposite. This is exactly what the deleted
+            // `MOCHA_BASE` ink could not do, and why it was a legibility bug
+            // rather than merely an unconverted constant.
+            assert_eq!(
+                rgb(ink_light),
+                NEAR_WHITE,
+                "{label} in light mode should be lettered near-white"
+            );
+            assert_ne!(
+                rgb(ink_dark),
+                rgb(ink_light),
+                "{label}'s ink did not move between the modes, so it is pinned \
+                 rather than computed"
+            );
+        }
+    }
+
+    #[test]
+    fn the_recording_dot_says_the_state_and_only_the_state() {
+        // Judgement 3 at the one site where the colour *is* the information.
+        for light in [false, true] {
+            let p = accented(light);
+            let dot = |state| {
+                colors(&render_recording_indicator(
+                    &recorder_in(state),
+                    &p,
+                    0.0,
+                    0.0,
+                ))[1]
+            };
+            let rec = dot(RecordingState::Recording);
+            let pause = dot(RecordingState::Paused);
+            let proc = dot(RecordingState::Processing);
+            assert_eq!((rec.r, rec.g, rec.b), (p.red.r, p.red.g, p.red.b));
+            assert_eq!(
+                (pause.r, pause.g, pause.b),
+                (p.yellow.r, p.yellow.g, p.yellow.b)
+            );
+            assert_eq!(
+                (proc.r, proc.g, proc.b),
+                (p.overlay0.r, p.overlay0.g, p.overlay0.b)
+            );
+            // Three states, three colours: a code with a collision in it is
+            // not a code.
+            assert_ne!((rec.r, rec.g, rec.b), (pause.r, pause.g, pause.b));
+            assert_ne!((rec.r, rec.g, rec.b), (proc.r, proc.g, proc.b));
+            assert_ne!((pause.r, pause.g, pause.b), (proc.r, proc.g, proc.b));
+
+            // And the accent does not reach it. `nothing_is_accented` proves
+            // the accent is absent; this proves the dot would not follow it
+            // even if the accent changed, which is the claim about *meaning*
+            // rather than about the current palette.
+            let mut q = p;
+            q.accent = Color::from_hex(0x00FF00);
+            let moved = colors(&render_recording_indicator(
+                &recorder_in(RecordingState::Recording),
+                &q,
+                0.0,
+                0.0,
+            ))[1];
+            assert_eq!(
+                (moved.r, moved.g, moved.b),
+                (rec.r, rec.g, rec.b),
+                "the recording dot followed the accent"
+            );
+        }
+    }
+
+    #[test]
+    fn the_indicator_is_silent_unless_something_is_happening() {
+        // Judgement 4 stated as a test, so that the four empty states above
+        // are a checked fact rather than an assumption the colour tests were
+        // quietly relying on.
+        for light in [false, true] {
+            let p = accented(light);
+            for (state, name) in all_states() {
+                let r = recorder_in(state);
+                let drawn = !render_recording_indicator(&r, &p, 0.0, 0.0).is_empty();
+                let expected = matches!(
+                    state,
+                    RecordingState::Recording | RecordingState::Paused | RecordingState::Processing
+                );
+                assert_eq!(drawn, expected, "indicator visibility in {name}");
+                // The controls panel, by contrast, always draws: it is the
+                // thing the user reaches for to leave the state they are in.
+                assert!(
+                    !render_recording_controls(&r, &p, 0.0, 0.0, 400.0).is_empty(),
+                    "the controls panel vanished in {name}"
+                );
+            }
+        }
     }
 
     // --- Format helpers ---

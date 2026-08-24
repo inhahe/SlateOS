@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `grafana-server` (default), `grafana-cli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -46,9 +47,15 @@ fn run_grafana_cli(args: Vec<String>) -> i32 {
             println!("  --version  Show version");
             0
         }
-        "--version" => { println!("Grafana CLI version 10.4.0 (Slate OS)"); 0 }
+        "--version" => {
+            println!("Grafana CLI version 10.4.0 (Slate OS)");
+            0
+        }
         "plugins" => {
-            let sub = cmd_args.first().map(|s| s.as_str()).unwrap_or("list-remote");
+            let sub = cmd_args
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("list-remote");
             match sub {
                 "install" => {
                     let plugin = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("plugin");
@@ -82,7 +89,10 @@ fn run_grafana_cli(args: Vec<String>) -> i32 {
             }
             0
         }
-        other => { eprintln!("grafana-cli: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("grafana-cli: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -93,7 +103,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -108,7 +120,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_grafana_server};
+    use super::run_grafana_server;
 
     #[test]
     fn help_exits_zero() {

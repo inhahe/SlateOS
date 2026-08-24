@@ -2,3 +2,8 @@
 name = "unity-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# unity-cli names projects, scenes and build targets, taken from the command
+# line and from the project directory.
+quoting = { path = "../quoting" }

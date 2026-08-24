@@ -4,6 +4,7 @@
 //!
 //! Single personality: `zkCli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -31,12 +32,17 @@ fn run_zkcli(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let server = args.windows(2).find(|w| w[0] == "--server" || w[0] == "-s")
-        .map(|w| w[1].as_str()).unwrap_or("localhost:2181");
+    let server = args
+        .windows(2)
+        .find(|w| w[0] == "--server" || w[0] == "-s")
+        .map(|w| w[1].as_str())
+        .unwrap_or("localhost:2181");
 
-    let cmd = args.iter()
+    let cmd = args
+        .iter()
         .find(|a| !a.starts_with('-') && *a != server)
-        .map(|s| s.as_str()).unwrap_or("");
+        .map(|s| s.as_str())
+        .unwrap_or("");
 
     match cmd {
         "ls" => {
@@ -63,7 +69,10 @@ fn run_zkcli(args: Vec<String>) -> i32 {
             0
         }
         "create" => {
-            let path = args.get(1).map(|s| s.as_str()).unwrap_or("/services/app-01");
+            let path = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("/services/app-01");
             let data = args.get(2).map(|s| s.as_str()).unwrap_or("");
             let ephemeral = args.iter().any(|a| a == "-e");
             let sequential = args.iter().any(|a| a == "-s");
@@ -124,11 +133,19 @@ fn run_zkcli(args: Vec<String>) -> i32 {
                 "status" => {
                     println!("ZooKeeper cluster status:");
                     println!("  Node              Mode       Connections  Outstanding  Zxid");
-                    println!("  localhost:2181     leader     45           0            0x100000046");
-                    println!("  localhost:2182     follower   32           0            0x100000046");
-                    println!("  localhost:2183     follower   28           0            0x100000046");
+                    println!(
+                        "  localhost:2181     leader     45           0            0x100000046"
+                    );
+                    println!(
+                        "  localhost:2182     follower   32           0            0x100000046"
+                    );
+                    println!(
+                        "  localhost:2183     follower   28           0            0x100000046"
+                    );
                 }
-                _ => { println!("Server operation: {}", sub); }
+                _ => {
+                    println!("Server operation: {}", sub);
+                }
             }
             0
         }
@@ -136,7 +153,7 @@ fn run_zkcli(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: zkCli <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -152,7 +169,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_zkcli};
+    use super::run_zkcli;
 
     #[test]
     fn help_exits_zero() {

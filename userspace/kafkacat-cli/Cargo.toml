@@ -2,3 +2,7 @@
 name = "kafkacat-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The topic name is an argv word, echoed by both the -P and the -C banner.
+quoting = { path = "../quoting" }

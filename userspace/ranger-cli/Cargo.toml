@@ -2,3 +2,8 @@
 name = "ranger-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# ranger-cli names the files and directories it browses, so the words are
+# the filesystem's.
+quoting = { path = "../quoting" }

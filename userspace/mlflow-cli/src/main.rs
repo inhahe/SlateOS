@@ -4,6 +4,7 @@
 //!
 //! Single personality: `mlflow`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -27,7 +28,11 @@ fn run_mlflow(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "server" | "ui" => {
-            let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("5000");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("5000");
             println!("[MLflow] Starting {} at http://localhost:{}", cmd, port);
             println!("[MLflow] Serving on http://0.0.0.0:{}", port);
             0
@@ -36,7 +41,9 @@ fn run_mlflow(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    println!("  Experiment ID  Name                  Artifact Location    Lifecycle");
+                    println!(
+                        "  Experiment ID  Name                  Artifact Location    Lifecycle"
+                    );
                     println!("  0              Default               mlruns/0             active");
                     println!("  1              text-classification   mlruns/1             active");
                     println!("  2              image-segmentation    mlruns/2             active");
@@ -44,9 +51,11 @@ fn run_mlflow(args: Vec<String>) -> i32 {
                 }
                 "create" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("my-experiment");
-                    println!("Created experiment '{}' with ID 4", name);
+                    println!("Created experiment {} with ID 4", quoteaf_os(name));
                 }
-                _ => { println!("Experiment operation: {}", sub); }
+                _ => {
+                    println!("Experiment operation: {}", sub);
+                }
             }
             0
         }
@@ -54,12 +63,22 @@ fn run_mlflow(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    println!("  Run ID                              Status     Start Time           Metrics");
-                    println!("  abc123def456ghi789jkl012mno345pqr   FINISHED   2024-01-15 14:00:00  accuracy=0.95, loss=0.12");
-                    println!("  stu678vwx901yza234bcd567efg890hij   FINISHED   2024-01-15 12:00:00  accuracy=0.92, loss=0.18");
-                    println!("  klm123nop456qrs789tuv012wxy345zab   RUNNING    2024-01-15 15:00:00  -");
+                    println!(
+                        "  Run ID                              Status     Start Time           Metrics"
+                    );
+                    println!(
+                        "  abc123def456ghi789jkl012mno345pqr   FINISHED   2024-01-15 14:00:00  accuracy=0.95, loss=0.12"
+                    );
+                    println!(
+                        "  stu678vwx901yza234bcd567efg890hij   FINISHED   2024-01-15 12:00:00  accuracy=0.92, loss=0.18"
+                    );
+                    println!(
+                        "  klm123nop456qrs789tuv012wxy345zab   RUNNING    2024-01-15 15:00:00  -"
+                    );
                 }
-                _ => { println!("Run operation: {}", sub); }
+                _ => {
+                    println!("Run operation: {}", sub);
+                }
             }
             0
         }
@@ -74,10 +93,19 @@ fn run_mlflow(args: Vec<String>) -> i32 {
                 }
                 "serve" => {
                     let model = args.get(2).map(|s| s.as_str()).unwrap_or("text-classifier");
-                    let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("5001");
-                    println!("Serving model '{}' at http://localhost:{}/invocations", model, port);
+                    let port = args
+                        .windows(2)
+                        .find(|w| w[0] == "--port")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("5001");
+                    println!(
+                        "Serving model {} at http://localhost:{port}/invocations",
+                        quoteaf_os(model)
+                    );
                 }
-                _ => { println!("Model operation: {}", sub); }
+                _ => {
+                    println!("Model operation: {}", sub);
+                }
             }
             0
         }
@@ -92,7 +120,9 @@ fn run_mlflow(args: Vec<String>) -> i32 {
                     println!("  metrics.json       256 B");
                     println!("  confusion_matrix.png  89 KB");
                 }
-                _ => { println!("Artifact operation: {}", sub); }
+                _ => {
+                    println!("Artifact operation: {}", sub);
+                }
             }
             0
         }
@@ -100,7 +130,7 @@ fn run_mlflow(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: mlflow <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -116,7 +146,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mlflow};
+    use super::run_mlflow;
 
     #[test]
     fn help_exits_zero() {

@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `locale`, `localedef`, `locale-gen`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -91,8 +92,12 @@ fn run_localedef(args: &[String]) -> i32 {
         return 0;
     }
 
-    let output = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("output");
-    println!("localedef: compiling locale '{}'...", output);
+    let output = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("output");
+    println!("localedef: compiling locale {}...", quoteaf_os(output));
     println!("localedef: done.");
     0
 }
@@ -105,7 +110,11 @@ fn run_locale_gen(args: &[String]) -> i32 {
         return 0;
     }
 
-    let locales: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let locales: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     if locales.is_empty() {
         println!("Generating locales from /etc/locale.gen...");
         println!("  en_US.UTF-8... done");
@@ -121,7 +130,8 @@ fn run_locale_gen(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "locale".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -136,7 +146,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_locale};
+    use super::{basename, run_locale, strip_ext};
 
     #[test]
     fn basename_strips_path() {

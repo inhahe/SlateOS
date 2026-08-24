@@ -2,3 +2,8 @@
 name = "proton-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The Windows program it runs and the rejected verb are argv words -- the
+# first is a path.
+quoting = { path = "../quoting" }

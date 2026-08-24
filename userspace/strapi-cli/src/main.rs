@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! strapi-cli — Slate OS personality CLI for Strapi, the open-source Node.js headless CMS.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -200,17 +201,47 @@ fn run_strapi(args: &[String], prog: &str) -> i32 {
         return 0;
     };
     match sub.as_str() {
-        "help" | "-h" | "--help" => { print_help(prog); 0 }
-        "version" | "-V" | "--version" => { print_version(); 0 }
-        "about" => { cmd_about(); 0 }
-        "v5" => { cmd_v5(); 0 }
-        "api" => { cmd_api(); 0 }
-        "cloud" => { cmd_cloud(); 0 }
-        "funding" => { cmd_funding(); 0 }
-        "license" => { cmd_license(); 0 }
-        "customers" => { cmd_customers(); 0 }
+        "help" | "-h" | "--help" => {
+            print_help(prog);
+            0
+        }
+        "version" | "-V" | "--version" => {
+            print_version();
+            0
+        }
+        "about" => {
+            cmd_about();
+            0
+        }
+        "v5" => {
+            cmd_v5();
+            0
+        }
+        "api" => {
+            cmd_api();
+            0
+        }
+        "cloud" => {
+            cmd_cloud();
+            0
+        }
+        "funding" => {
+            cmd_funding();
+            0
+        }
+        "license" => {
+            cmd_license();
+            0
+        }
+        "customers" => {
+            cmd_customers();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'. Try '{prog} help'.");
+            eprintln!(
+                "{prog}: unknown subcommand {}. Try '{prog} help'.",
+                quoteaf_os(other)
+            );
             2
         }
     }

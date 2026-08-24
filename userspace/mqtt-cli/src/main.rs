@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `mosquitto_pub`, `mosquitto_sub`, `mosquitto`, `mqtt`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mosquitto_pub(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -24,9 +29,21 @@ fn run_mosquitto_pub(args: &[String]) -> i32 {
         println!("  --cafile FILE TLS CA file");
         return 0;
     }
-    let host = args.windows(2).find(|w| w[0] == "-h").map(|w| w[1].as_str()).unwrap_or("localhost");
-    let topic = args.windows(2).find(|w| w[0] == "-t").map(|w| w[1].as_str()).unwrap_or("test/topic");
-    let msg = args.windows(2).find(|w| w[0] == "-m").map(|w| w[1].as_str()).unwrap_or("hello");
+    let host = args
+        .windows(2)
+        .find(|w| w[0] == "-h")
+        .map(|w| w[1].as_str())
+        .unwrap_or("localhost");
+    let topic = args
+        .windows(2)
+        .find(|w| w[0] == "-t")
+        .map(|w| w[1].as_str())
+        .unwrap_or("test/topic");
+    let msg = args
+        .windows(2)
+        .find(|w| w[0] == "-m")
+        .map(|w| w[1].as_str())
+        .unwrap_or("hello");
     println!("Publishing to {}:{}", host, 1883);
     println!("  Topic: {}", topic);
     println!("  Message: {}", msg);
@@ -45,8 +62,16 @@ fn run_mosquitto_sub(args: &[String]) -> i32 {
         println!("  -C COUNT      Disconnect after COUNT messages");
         return 0;
     }
-    let host = args.windows(2).find(|w| w[0] == "-h").map(|w| w[1].as_str()).unwrap_or("localhost");
-    let topic = args.windows(2).find(|w| w[0] == "-t").map(|w| w[1].as_str()).unwrap_or("#");
+    let host = args
+        .windows(2)
+        .find(|w| w[0] == "-h")
+        .map(|w| w[1].as_str())
+        .unwrap_or("localhost");
+    let topic = args
+        .windows(2)
+        .find(|w| w[0] == "-t")
+        .map(|w| w[1].as_str())
+        .unwrap_or("#");
     println!("Subscribing to {}:{}", host, 1883);
     println!("  Topic: {}", topic);
     println!("  Waiting for messages...");
@@ -65,11 +90,18 @@ fn run_mosquitto(args: &[String]) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version" || a == "-v" && args.len() == 1) {
+    if args
+        .iter()
+        .any(|a| a == "--version" || a == "-v" && args.len() == 1)
+    {
         println!("mosquitto version 2.0.18 (Slate OS)");
         return 0;
     }
-    let port = args.windows(2).find(|w| w[0] == "-p").map(|w| w[1].as_str()).unwrap_or("1883");
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "-p")
+        .map(|w| w[1].as_str())
+        .unwrap_or("1883");
     println!("mosquitto 2.0.18 starting");
     println!("  Config: /etc/mosquitto/mosquitto.conf");
     println!("  Listening on port {}", port);
@@ -90,7 +122,11 @@ fn run_mqtt(args: &[String]) -> i32 {
     match subcmd {
         "version" | "--version" => println!("MQTT CLI 4.21.0 (Slate OS)"),
         "test" => {
-            let host = args.windows(2).find(|w| w[0] == "-h").map(|w| w[1].as_str()).unwrap_or("localhost");
+            let host = args
+                .windows(2)
+                .find(|w| w[0] == "-h")
+                .map(|w| w[1].as_str())
+                .unwrap_or("localhost");
             println!("Testing connection to {}:1883...", host);
             println!("  Connected successfully.");
             println!("  Protocol: MQTT 5.0");
@@ -98,14 +134,17 @@ fn run_mqtt(args: &[String]) -> i32 {
         }
         "pub" => println!("mqtt pub: message published."),
         "sub" => println!("mqtt sub: subscribed, waiting for messages..."),
-        _ => println!("mqtt: '{}' completed", subcmd),
+        _ => println!("mqtt: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mqtt".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mqtt".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "mosquitto_pub" => run_mosquitto_pub(&rest),
@@ -118,7 +157,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mosquitto_pub};
+    use super::{basename, run_mosquitto_pub, strip_ext};
 
     #[test]
     fn basename_strips_path() {

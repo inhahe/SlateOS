@@ -30,6 +30,7 @@
 //!       --version                Output version information and exit
 //! ```
 
+use quoting::{quoteaf, quoteaf_os, quotef_os};
 use std::cmp::Ordering;
 use std::env;
 use std::fs::File;
@@ -150,9 +151,10 @@ fn parse_keydef(spec: &str, global_mods: &SortModifiers) -> Result<KeyDef, Strin
         return Err("field number must be positive".to_string());
     }
     if let Some(ef) = end_field
-        && ef == 0 {
-            return Err("field number must be positive".to_string());
-        }
+        && ef == 0
+    {
+        return Err("field number must be positive".to_string());
+    }
 
     Ok(KeyDef {
         start_field,
@@ -174,13 +176,34 @@ fn parse_field_spec(s: &str) -> Result<(usize, usize, SortModifiers), String> {
     let mut num_end = bytes.len();
     while num_end > 0 {
         match bytes[num_end - 1] {
-            b'n' => { mods.numeric = true; has_any_mod = true; }
-            b'r' => { mods.reverse = true; has_any_mod = true; }
-            b'f' => { mods.ignore_case = true; has_any_mod = true; }
-            b'b' => { mods.ignore_leading_blanks = true; has_any_mod = true; }
-            b'h' => { mods.human_numeric = true; has_any_mod = true; }
-            b'd' => { mods.dictionary_order = true; has_any_mod = true; }
-            b'V' => { mods.version_sort = true; has_any_mod = true; }
+            b'n' => {
+                mods.numeric = true;
+                has_any_mod = true;
+            }
+            b'r' => {
+                mods.reverse = true;
+                has_any_mod = true;
+            }
+            b'f' => {
+                mods.ignore_case = true;
+                has_any_mod = true;
+            }
+            b'b' => {
+                mods.ignore_leading_blanks = true;
+                has_any_mod = true;
+            }
+            b'h' => {
+                mods.human_numeric = true;
+                has_any_mod = true;
+            }
+            b'd' => {
+                mods.dictionary_order = true;
+                has_any_mod = true;
+            }
+            b'V' => {
+                mods.version_sort = true;
+                has_any_mod = true;
+            }
             _ => break,
         }
         num_end -= 1;
@@ -313,7 +336,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 match parse_keydef(&spec, &global_mods) {
                     Ok(kd) => keys.push(kd),
                     Err(e) => {
-                        eprintln!("sort: invalid key definition '{spec}': {e}");
+                        eprintln!("sort: invalid key definition {}: {e}", quoteaf_os(&spec));
                         process::exit(2);
                     }
                 }
@@ -349,7 +372,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 };
                 output_file = Some(val);
             } else {
-                eprintln!("sort: unrecognized option '{arg}'");
+                eprintln!("sort: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'sort --help' for more information.");
                 process::exit(2);
             }
@@ -390,7 +413,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     match parse_keydef(&spec, &global_mods) {
                         Ok(kd) => keys.push(kd),
                         Err(e) => {
-                            eprintln!("sort: invalid key definition '{spec}': {e}");
+                            eprintln!("sort: invalid key definition {}: {e}", quoteaf_os(&spec));
                             process::exit(2);
                         }
                     }
@@ -438,8 +461,11 @@ fn parse_args(args: &[String]) -> ParseResult {
                     continue;
                 }
                 _ => {
-                    let ch = arg_bytes[j] as char;
-                    eprintln!("sort: invalid option -- '{ch}'");
+                    // The byte, not `as char`: `u8 as char` is a Latin-1
+                    // widening, so an option byte of 0xE9 would be reported as
+                    // 'é' -- a character the user never typed. `quoteaf` of the
+                    // single byte shows what actually arrived.
+                    eprintln!("sort: invalid option -- {}", quoteaf(&[arg_bytes[j]]));
                     eprintln!("Try 'sort --help' for more information.");
                     process::exit(2);
                 }
@@ -482,7 +508,7 @@ fn read_all_lines(paths: &[String]) -> Vec<String> {
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("sort: {path}: {e}");
+                    eprintln!("sort: {}: {e}", quotef_os(path));
                     continue;
                 }
             }
@@ -493,7 +519,7 @@ fn read_all_lines(paths: &[String]) -> Vec<String> {
             match line_result {
                 Ok(l) => lines.push(l),
                 Err(e) => {
-                    eprintln!("sort: {path}: read error: {e}");
+                    eprintln!("sort: {}: read error: {e}", quotef_os(path));
                     break;
                 }
             }
@@ -565,8 +591,7 @@ fn extract_key<'a>(line: &'a str, key: &KeyDef, sep: Option<char>) -> &'a str {
     // so pointer arithmetic gives valid byte offsets.
     let line_start = line.as_ptr() as usize;
     let field_start_offset = start_field_str.as_ptr() as usize - line_start;
-    let field_end_offset =
-        end_field_str.as_ptr() as usize - line_start + end_field_str.len();
+    let field_end_offset = end_field_str.as_ptr() as usize - line_start + end_field_str.len();
 
     // Apply character positions within start/end fields.
     let start_byte = if key.start_char > 0 {
@@ -876,11 +901,7 @@ fn compare_lines(
     // Last-resort comparison: raw byte comparison of the whole line, unless
     // stable sort is requested (which suppresses last-resort to preserve
     // original order of equal elements).
-    if stable {
-        Ordering::Equal
-    } else {
-        a.cmp(b)
-    }
+    if stable { Ordering::Equal } else { a.cmp(b) }
 }
 
 // ============================================================================
@@ -941,7 +962,7 @@ fn merge_files(
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("sort: {path}: {e}");
+                    eprintln!("sort: {}: {e}", quotef_os(path));
                     continue;
                 }
             }
@@ -967,14 +988,8 @@ fn merge_files(
                     None => min_idx = Some(idx),
                     Some(current_min) => {
                         if let Some(current_line) = &heads[current_min] {
-                            let cmp = compare_lines(
-                                line,
-                                current_line,
-                                keys,
-                                global_mods,
-                                sep,
-                                stable,
-                            );
+                            let cmp =
+                                compare_lines(line, current_line, keys, global_mods, sep, stable);
                             if cmp == Ordering::Less {
                                 min_idx = Some(idx);
                             }
@@ -1036,9 +1051,10 @@ fn write_output(
     for line in lines {
         if unique
             && let Some(p) = prev
-                && compare_lines(p, line, keys, global_mods, sep, stable) == Ordering::Equal {
-                    continue;
-                }
+            && compare_lines(p, line, keys, global_mods, sep, stable) == Ordering::Equal
+        {
+            continue;
+        }
         writeln!(out, "{line}")?;
         prev = Some(line);
     }
@@ -1062,13 +1078,9 @@ fn print_help() {
     println!("ORDERING OPTIONS:");
     println!("  -r, --reverse               Reverse the result of comparisons");
     println!("  -n, --numeric-sort           Compare according to string numeric value");
-    println!(
-        "  -h, --human-numeric-sort     Compare human-readable numbers (e.g., 2K, 1G)"
-    );
+    println!("  -h, --human-numeric-sort     Compare human-readable numbers (e.g., 2K, 1G)");
     println!("  -f, --ignore-case            Fold lower case to upper case characters");
-    println!(
-        "  -d, --dictionary-order       Consider only blanks and alphanumeric characters"
-    );
+    println!("  -d, --dictionary-order       Consider only blanks and alphanumeric characters");
     println!("  -b, --ignore-leading-blanks  Ignore leading blanks in sort keys");
     println!("  -V, --version-sort           Natural sort of (version) numbers within text");
     println!();
@@ -1077,16 +1089,12 @@ fn print_help() {
     println!("  -t, --field-separator=SEP    Use SEP instead of non-blank to blank transition");
     println!();
     println!("OUTPUT OPTIONS:");
-    println!(
-        "  -u, --unique                 Output only the first of an equal run"
-    );
+    println!("  -u, --unique                 Output only the first of an equal run");
     println!("  -o, --output=FILE            Write result to FILE instead of standard output");
     println!("  -s, --stable                 Stabilize sort by disabling last-resort comparison");
     println!();
     println!("OTHER OPTIONS:");
-    println!(
-        "  -c, --check                  Check for sorted input; do not sort"
-    );
+    println!("  -c, --check                  Check for sorted input; do not sort");
     println!("  -m, --merge                  Merge already sorted files; do not sort");
     println!("      --help                   Display this help and exit");
     println!("      --version                Output version information and exit");
@@ -1134,7 +1142,7 @@ fn run(config: &Config) -> i32 {
         Some(path) => match File::create(path) {
             Ok(f) => Box::new(io::BufWriter::new(f)),
             Err(e) => {
-                eprintln!("sort: {path}: {e}");
+                eprintln!("sort: {}: {e}", quotef_os(path));
                 return 2;
             }
         },
@@ -1153,11 +1161,11 @@ fn run(config: &Config) -> i32 {
             config.stable,
             config.unique,
             &mut *out,
-        )
-            && e.kind() != io::ErrorKind::BrokenPipe {
-                eprintln!("sort: write error: {e}");
-                return 2;
-            }
+        ) && e.kind() != io::ErrorKind::BrokenPipe
+        {
+            eprintln!("sort: write error: {e}");
+            return 2;
+        }
         return 0;
     }
 
@@ -1194,18 +1202,19 @@ fn run(config: &Config) -> i32 {
         sep,
         stable,
         &mut *out,
-    )
-        && e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("sort: write error: {e}");
-            return 2;
-        }
+    ) && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("sort: write error: {e}");
+        return 2;
+    }
 
     // Flush output.
     if let Err(e) = out.flush()
-        && e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("sort: write error: {e}");
-            return 2;
-        }
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("sort: write error: {e}");
+        return 2;
+    }
 
     0
 }

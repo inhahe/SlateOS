@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `readelf`, `elfedit`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -39,12 +40,24 @@ fn run_readelf(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("a.out");
-    let file_header = args.iter().any(|a| a == "-h" || a == "--file-header" || a == "-a" || a == "-e");
-    let sections = args.iter().any(|a| a == "-S" || a == "--section-headers" || a == "-a" || a == "-e");
-    let program_headers = args.iter().any(|a| a == "-l" || a == "--program-headers" || a == "-a" || a == "-e");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("a.out");
+    let file_header = args
+        .iter()
+        .any(|a| a == "-h" || a == "--file-header" || a == "-a" || a == "-e");
+    let sections = args
+        .iter()
+        .any(|a| a == "-S" || a == "--section-headers" || a == "-a" || a == "-e");
+    let program_headers = args
+        .iter()
+        .any(|a| a == "-l" || a == "--program-headers" || a == "-a" || a == "-e");
     let symbols = args.iter().any(|a| a == "-s" || a == "--syms" || a == "-a");
-    let dynamic = args.iter().any(|a| a == "-d" || a == "--dynamic" || a == "-a");
+    let dynamic = args
+        .iter()
+        .any(|a| a == "-d" || a == "--dynamic" || a == "-a");
 
     if file_header {
         println!("ELF Header:");
@@ -133,14 +146,19 @@ fn run_elfedit(args: &[String]) -> i32 {
         println!("Options: --output-type TYPE, --output-osabi OSABI, --output-abiversion VER");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("a.out");
-    println!("elfedit: updated ELF header of '{}'", file);
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("a.out");
+    println!("elfedit: updated ELF header of {}", quoteaf_os(file));
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "readelf".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -154,7 +172,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_readelf};
+    use super::{basename, run_readelf, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS sysctl — view and modify kernel parameters"
 [dependencies]
+# It interpolates `pattern` into "sysctl: no parameters matching {}". That
+# value is the argument to `--search`/`--pattern`, carried to
+# `search_params` through the parsed `Command::Search` variant, so it is
+# whatever the user typed and not text this program chose.
+quoting = { path = "../quoting" }

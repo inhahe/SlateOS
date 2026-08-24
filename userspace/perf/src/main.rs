@@ -16,6 +16,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File};
@@ -94,21 +95,91 @@ struct EventDesc {
 /// Complete list of supported events.
 const EVENTS: &[EventDesc] = &[
     // -- hardware --
-    EventDesc { name: "cycles",              kind: EventKind::Hardware, sys_path: "hw/cycles",              proc_key: "cycles" },
-    EventDesc { name: "instructions",        kind: EventKind::Hardware, sys_path: "hw/instructions",        proc_key: "instructions" },
-    EventDesc { name: "cache-references",    kind: EventKind::Hardware, sys_path: "hw/cache_references",    proc_key: "cache_references" },
-    EventDesc { name: "cache-misses",        kind: EventKind::Hardware, sys_path: "hw/cache_misses",        proc_key: "cache_misses" },
-    EventDesc { name: "branch-instructions", kind: EventKind::Hardware, sys_path: "hw/branch_instructions", proc_key: "branch_instructions" },
-    EventDesc { name: "branch-misses",       kind: EventKind::Hardware, sys_path: "hw/branch_misses",       proc_key: "branch_misses" },
-    EventDesc { name: "bus-cycles",          kind: EventKind::Hardware, sys_path: "hw/bus_cycles",          proc_key: "bus_cycles" },
-    EventDesc { name: "ref-cycles",          kind: EventKind::Hardware, sys_path: "hw/ref_cycles",          proc_key: "ref_cycles" },
+    EventDesc {
+        name: "cycles",
+        kind: EventKind::Hardware,
+        sys_path: "hw/cycles",
+        proc_key: "cycles",
+    },
+    EventDesc {
+        name: "instructions",
+        kind: EventKind::Hardware,
+        sys_path: "hw/instructions",
+        proc_key: "instructions",
+    },
+    EventDesc {
+        name: "cache-references",
+        kind: EventKind::Hardware,
+        sys_path: "hw/cache_references",
+        proc_key: "cache_references",
+    },
+    EventDesc {
+        name: "cache-misses",
+        kind: EventKind::Hardware,
+        sys_path: "hw/cache_misses",
+        proc_key: "cache_misses",
+    },
+    EventDesc {
+        name: "branch-instructions",
+        kind: EventKind::Hardware,
+        sys_path: "hw/branch_instructions",
+        proc_key: "branch_instructions",
+    },
+    EventDesc {
+        name: "branch-misses",
+        kind: EventKind::Hardware,
+        sys_path: "hw/branch_misses",
+        proc_key: "branch_misses",
+    },
+    EventDesc {
+        name: "bus-cycles",
+        kind: EventKind::Hardware,
+        sys_path: "hw/bus_cycles",
+        proc_key: "bus_cycles",
+    },
+    EventDesc {
+        name: "ref-cycles",
+        kind: EventKind::Hardware,
+        sys_path: "hw/ref_cycles",
+        proc_key: "ref_cycles",
+    },
     // -- software --
-    EventDesc { name: "task-clock",          kind: EventKind::Software, sys_path: "sw/task_clock",          proc_key: "task_clock" },
-    EventDesc { name: "context-switches",    kind: EventKind::Software, sys_path: "sw/context_switches",    proc_key: "context_switches" },
-    EventDesc { name: "cpu-migrations",      kind: EventKind::Software, sys_path: "sw/cpu_migrations",      proc_key: "cpu_migrations" },
-    EventDesc { name: "page-faults",         kind: EventKind::Software, sys_path: "sw/page_faults",         proc_key: "page_faults" },
-    EventDesc { name: "minor-faults",        kind: EventKind::Software, sys_path: "sw/minor_faults",        proc_key: "minor_faults" },
-    EventDesc { name: "major-faults",        kind: EventKind::Software, sys_path: "sw/major_faults",        proc_key: "major_faults" },
+    EventDesc {
+        name: "task-clock",
+        kind: EventKind::Software,
+        sys_path: "sw/task_clock",
+        proc_key: "task_clock",
+    },
+    EventDesc {
+        name: "context-switches",
+        kind: EventKind::Software,
+        sys_path: "sw/context_switches",
+        proc_key: "context_switches",
+    },
+    EventDesc {
+        name: "cpu-migrations",
+        kind: EventKind::Software,
+        sys_path: "sw/cpu_migrations",
+        proc_key: "cpu_migrations",
+    },
+    EventDesc {
+        name: "page-faults",
+        kind: EventKind::Software,
+        sys_path: "sw/page_faults",
+        proc_key: "page_faults",
+    },
+    EventDesc {
+        name: "minor-faults",
+        kind: EventKind::Software,
+        sys_path: "sw/minor_faults",
+        proc_key: "minor_faults",
+    },
+    EventDesc {
+        name: "major-faults",
+        kind: EventKind::Software,
+        sys_path: "sw/major_faults",
+        proc_key: "major_faults",
+    },
 ];
 
 /// Find an event by user-supplied name (case-insensitive).
@@ -233,7 +304,10 @@ impl PerfFileHeader {
         let mut magic = [0u8; 8];
         r.read_exact(&mut magic)?;
         if &magic != PERF_MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "not a perf.data file"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "not a perf.data file",
+            ));
         }
         let mut buf4 = [0u8; 4];
         r.read_exact(&mut buf4)?;
@@ -331,7 +405,14 @@ impl PerfSample {
         }
         let mut _pad = [0u8; 4];
         r.read_exact(&mut _pad)?;
-        Ok(Self { timestamp_ns, pid, tid, ip, callchain_len, callchain })
+        Ok(Self {
+            timestamp_ns,
+            pid,
+            tid,
+            ip,
+            callchain_len,
+            callchain,
+        })
     }
 
     fn new() -> Self {
@@ -376,14 +457,15 @@ fn read_symbols(pid: u32) -> Vec<SymbolEntry> {
                 && let (Ok(start), Ok(end)) = (
                     u64::from_str_radix(parts[0], 16),
                     u64::from_str_radix(parts[1], 16),
-                ) {
-                    syms.push(SymbolEntry {
-                        start,
-                        end,
-                        name: parts[2].to_string(),
-                        dso: parts[3].to_string(),
-                    });
-                }
+                )
+            {
+                syms.push(SymbolEntry {
+                    start,
+                    end,
+                    name: parts[2].to_string(),
+                    dso: parts[3].to_string(),
+                });
+            }
         }
     }
     syms
@@ -522,7 +604,9 @@ fn parse_stat_args(args: &[String]) -> Result<StatOpts, String> {
                     return Err("-p requires a PID".to_string());
                 }
                 pid = Some(
-                    args[i].parse::<u32>().map_err(|_| format!("invalid PID: {}", args[i]))?,
+                    args[i]
+                        .parse::<u32>()
+                        .map_err(|_| format!("invalid PID: {}", args[i]))?,
                 );
             }
             "-r" => {
@@ -566,7 +650,13 @@ fn parse_stat_args(args: &[String]) -> Result<StatOpts, String> {
         return Err("specify a command, -p PID, or -a for system-wide".to_string());
     }
 
-    Ok(StatOpts { events, system_wide, pid, repeat, command })
+    Ok(StatOpts {
+        events,
+        system_wide,
+        pid,
+        repeat,
+        command,
+    })
 }
 
 fn print_stat_help() {
@@ -591,9 +681,7 @@ Supported events:
 
 /// Run one iteration of stat collection.  Returns counter values keyed by
 /// event name.
-fn stat_collect_once(
-    opts: &StatOpts,
-) -> HashMap<String, u64> {
+fn stat_collect_once(opts: &StatOpts) -> HashMap<String, u64> {
     let target_pid = if opts.system_wide { None } else { opts.pid };
     let mut values = HashMap::new();
     for ev in &opts.events {
@@ -604,10 +692,7 @@ fn stat_collect_once(
 }
 
 /// Print stat results.  If there are multiple repeats, also show stddev.
-fn stat_print_results(
-    all_runs: &[HashMap<String, u64>],
-    events: &[&'static EventDesc],
-) {
+fn stat_print_results(all_runs: &[HashMap<String, u64>], events: &[&'static EventDesc]) {
     println!();
     println!(" Performance counter stats:\n");
 
@@ -624,7 +709,11 @@ fn stat_print_results(
                 "  {:>18}  {:<24}  ( +/- {:>6.2}% )",
                 format_number(mean_u64),
                 ev.name,
-                if mean > 0.0 { stddev / mean * 100.0 } else { 0.0 },
+                if mean > 0.0 {
+                    stddev / mean * 100.0
+                } else {
+                    0.0
+                },
             );
         } else {
             println!("  {:>18}  {:<24}", format_number(mean_u64), ev.name);
@@ -738,7 +827,9 @@ fn parse_record_args(args: &[String]) -> Result<RecordOpts, String> {
                     return Err("-p requires a PID".to_string());
                 }
                 pid = Some(
-                    args[i].parse::<u32>().map_err(|_| format!("invalid PID: {}", args[i]))?,
+                    args[i]
+                        .parse::<u32>()
+                        .map_err(|_| format!("invalid PID: {}", args[i]))?,
                 );
             }
             "-a" => system_wide = true,
@@ -1000,7 +1091,13 @@ fn parse_report_args(args: &[String]) -> Result<ReportOpts, String> {
         sort_keys.push("symbol".to_string());
     }
 
-    Ok(ReportOpts { input, stdio, sort_keys, no_children, percent_limit })
+    Ok(ReportOpts {
+        input,
+        stdio,
+        sort_keys,
+        no_children,
+        percent_limit,
+    })
 }
 
 fn print_report_help() {
@@ -1062,8 +1159,7 @@ fn run_report(args: &[String]) {
     let mut comm_by_pid: HashMap<u32, String> = HashMap::new();
     for &pid in &pid_set {
         let comm_path = format!("/proc/{pid}/comm");
-        let comm = fs::read_to_string(&comm_path)
-            .unwrap_or_else(|_| format!("[pid:{pid}]"));
+        let comm = fs::read_to_string(&comm_path).unwrap_or_else(|_| format!("[pid:{pid}]"));
         comm_by_pid.insert(pid, comm.trim().to_string());
     }
 
@@ -1096,14 +1192,14 @@ fn run_report(args: &[String]) {
             }
         }
 
-        let entry = overhead_map.entry(sort_key.clone()).or_insert_with(|| {
-            OverheadEntry {
+        let entry = overhead_map
+            .entry(sort_key.clone())
+            .or_insert_with(|| OverheadEntry {
                 symbol: sym_name.clone(),
                 dso: dso_name.clone(),
                 comm: comm.clone(),
                 count: 0,
-            }
-        });
+            });
         entry.count += 1;
 
         // If not --no-children, also attribute to callchain parents.
@@ -1129,13 +1225,11 @@ fn run_report(args: &[String]) {
                 }
                 // Only add to children overhead if it's a different symbol.
                 if ckey != sort_key {
-                    let centry = overhead_map.entry(ckey).or_insert_with(|| {
-                        OverheadEntry {
-                            symbol: csym,
-                            dso: cdso,
-                            comm: comm.clone(),
-                            count: 0,
-                        }
+                    let centry = overhead_map.entry(ckey).or_insert_with(|| OverheadEntry {
+                        symbol: csym,
+                        dso: cdso,
+                        comm: comm.clone(),
+                        count: 0,
                     });
                     centry.count += 1;
                 }
@@ -1148,10 +1242,7 @@ fn run_report(args: &[String]) {
     entries.sort_by_key(|b| std::cmp::Reverse(b.count));
 
     // Print.
-    println!(
-        "# Event: {}, {} samples",
-        header.event_name, total_samples,
-    );
+    println!("# Event: {}, {} samples", header.event_name, total_samples,);
     println!("#");
 
     // Header line.
@@ -1235,7 +1326,9 @@ fn parse_top_args(args: &[String]) -> Result<TopOpts, String> {
                     return Err("-p requires a PID".to_string());
                 }
                 pid = Some(
-                    args[i].parse::<u32>().map_err(|_| format!("invalid PID: {}", args[i]))?,
+                    args[i]
+                        .parse::<u32>()
+                        .map_err(|_| format!("invalid PID: {}", args[i]))?,
                 );
             }
             "-n" | "--count" => {
@@ -1330,13 +1423,16 @@ fn run_top(args: &[String]) {
     };
 
     let mut entries = read_top_entries(opts.pid);
-    entries.sort_by(|a, b| b.overhead_pct.partial_cmp(&a.overhead_pct).unwrap_or(std::cmp::Ordering::Equal));
+    entries.sort_by(|a, b| {
+        b.overhead_pct
+            .partial_cmp(&a.overhead_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     entries.truncate(opts.count as usize);
 
     println!(
         "PerfTop — event: {}, showing top {} functions",
-        opts.event,
-        opts.count,
+        opts.event, opts.count,
     );
     println!();
     println!(
@@ -1411,7 +1507,7 @@ fn main() {
                 "version" | "--version" => cmd_version(),
                 "-h" | "--help" | "help" => print_main_help(),
                 other => {
-                    eprintln!("perf: unknown command '{other}'");
+                    eprintln!("perf: unknown command {}", quoteaf_os(other));
                     eprintln!("Run 'perf --help' for available commands.");
                     process::exit(1);
                 }
@@ -1465,7 +1561,10 @@ mod tests {
 
     #[test]
     fn personality_with_path_windows() {
-        assert_eq!(detect_personality("C:\\bin\\perf-record.exe"), Personality::Record);
+        assert_eq!(
+            detect_personality("C:\\bin\\perf-record.exe"),
+            Personality::Record
+        );
     }
 
     #[test]
@@ -1485,7 +1584,10 @@ mod tests {
 
     #[test]
     fn personality_nested_path() {
-        assert_eq!(detect_personality("/a/b/c/perf-report"), Personality::Report);
+        assert_eq!(
+            detect_personality("/a/b/c/perf-report"),
+            Personality::Report
+        );
     }
 
     #[test]
@@ -1595,13 +1697,19 @@ mod tests {
 
     #[test]
     fn event_catalogue_has_8_hardware() {
-        let hw_count = EVENTS.iter().filter(|e| e.kind == EventKind::Hardware).count();
+        let hw_count = EVENTS
+            .iter()
+            .filter(|e| e.kind == EventKind::Hardware)
+            .count();
         assert_eq!(hw_count, 8);
     }
 
     #[test]
     fn event_catalogue_has_6_software() {
-        let sw_count = EVENTS.iter().filter(|e| e.kind == EventKind::Software).count();
+        let sw_count = EVENTS
+            .iter()
+            .filter(|e| e.kind == EventKind::Software)
+            .count();
         assert_eq!(sw_count, 6);
     }
 
@@ -1967,8 +2075,18 @@ mod tests {
     #[test]
     fn resolve_symbol_found() {
         let syms = vec![
-            SymbolEntry { start: 0x1000, end: 0x2000, name: "foo".to_string(), dso: "libc.so".to_string() },
-            SymbolEntry { start: 0x2000, end: 0x3000, name: "bar".to_string(), dso: "libm.so".to_string() },
+            SymbolEntry {
+                start: 0x1000,
+                end: 0x2000,
+                name: "foo".to_string(),
+                dso: "libc.so".to_string(),
+            },
+            SymbolEntry {
+                start: 0x2000,
+                end: 0x3000,
+                name: "bar".to_string(),
+                dso: "libm.so".to_string(),
+            },
         ];
         let (name, dso) = resolve_symbol(0x1500, &syms);
         assert_eq!(name, "foo");
@@ -1978,8 +2096,18 @@ mod tests {
     #[test]
     fn resolve_symbol_second_entry() {
         let syms = vec![
-            SymbolEntry { start: 0x1000, end: 0x2000, name: "foo".to_string(), dso: "a.so".to_string() },
-            SymbolEntry { start: 0x2000, end: 0x3000, name: "bar".to_string(), dso: "b.so".to_string() },
+            SymbolEntry {
+                start: 0x1000,
+                end: 0x2000,
+                name: "foo".to_string(),
+                dso: "a.so".to_string(),
+            },
+            SymbolEntry {
+                start: 0x2000,
+                end: 0x3000,
+                name: "bar".to_string(),
+                dso: "b.so".to_string(),
+            },
         ];
         let (name, dso) = resolve_symbol(0x2500, &syms);
         assert_eq!(name, "bar");
@@ -1988,9 +2116,12 @@ mod tests {
 
     #[test]
     fn resolve_symbol_not_found() {
-        let syms = vec![
-            SymbolEntry { start: 0x1000, end: 0x2000, name: "foo".to_string(), dso: "a.so".to_string() },
-        ];
+        let syms = vec![SymbolEntry {
+            start: 0x1000,
+            end: 0x2000,
+            name: "foo".to_string(),
+            dso: "a.so".to_string(),
+        }];
         let (name, dso) = resolve_symbol(0x9999, &syms);
         assert_eq!(name, "[unknown]");
         assert_eq!(dso, "[unknown]");
@@ -2005,36 +2136,48 @@ mod tests {
 
     #[test]
     fn resolve_symbol_exact_start() {
-        let syms = vec![
-            SymbolEntry { start: 0x1000, end: 0x2000, name: "exact".to_string(), dso: "x".to_string() },
-        ];
+        let syms = vec![SymbolEntry {
+            start: 0x1000,
+            end: 0x2000,
+            name: "exact".to_string(),
+            dso: "x".to_string(),
+        }];
         let (name, _) = resolve_symbol(0x1000, &syms);
         assert_eq!(name, "exact");
     }
 
     #[test]
     fn resolve_symbol_one_before_end() {
-        let syms = vec![
-            SymbolEntry { start: 0x1000, end: 0x2000, name: "last".to_string(), dso: "x".to_string() },
-        ];
+        let syms = vec![SymbolEntry {
+            start: 0x1000,
+            end: 0x2000,
+            name: "last".to_string(),
+            dso: "x".to_string(),
+        }];
         let (name, _) = resolve_symbol(0x1FFF, &syms);
         assert_eq!(name, "last");
     }
 
     #[test]
     fn resolve_symbol_at_end_is_miss() {
-        let syms = vec![
-            SymbolEntry { start: 0x1000, end: 0x2000, name: "miss".to_string(), dso: "x".to_string() },
-        ];
+        let syms = vec![SymbolEntry {
+            start: 0x1000,
+            end: 0x2000,
+            name: "miss".to_string(),
+            dso: "x".to_string(),
+        }];
         let (name, _) = resolve_symbol(0x2000, &syms);
         assert_eq!(name, "[unknown]");
     }
 
     #[test]
     fn resolve_symbol_owned_returns_owned_strings() {
-        let syms = vec![
-            SymbolEntry { start: 0x1000, end: 0x2000, name: "own".to_string(), dso: "d.so".to_string() },
-        ];
+        let syms = vec![SymbolEntry {
+            start: 0x1000,
+            end: 0x2000,
+            name: "own".to_string(),
+            dso: "d.so".to_string(),
+        }];
         let (name, dso) = resolve_symbol_owned(0x1500, &syms);
         assert_eq!(name, "own");
         assert_eq!(dso, "d.so");
@@ -2075,10 +2218,7 @@ mod tests {
 
     #[test]
     fn stat_parse_single_event() {
-        let args: Vec<String> = vec![
-            "-e".to_string(), "cycles".to_string(),
-            "-a".to_string(),
-        ];
+        let args: Vec<String> = vec!["-e".to_string(), "cycles".to_string(), "-a".to_string()];
         let opts = parse_stat_args(&args).unwrap();
         assert_eq!(opts.events.len(), 1);
         assert_eq!(opts.events[0].name, "cycles");
@@ -2087,7 +2227,8 @@ mod tests {
     #[test]
     fn stat_parse_multiple_events() {
         let args: Vec<String> = vec![
-            "-e".to_string(), "cycles,instructions,cache-misses".to_string(),
+            "-e".to_string(),
+            "cycles,instructions,cache-misses".to_string(),
             "-a".to_string(),
         ];
         let opts = parse_stat_args(&args).unwrap();
@@ -2103,9 +2244,7 @@ mod tests {
 
     #[test]
     fn stat_parse_command_after_double_dash() {
-        let args: Vec<String> = vec![
-            "-a".to_string(), "--".to_string(), "ls".to_string(),
-        ];
+        let args: Vec<String> = vec!["-a".to_string(), "--".to_string(), "ls".to_string()];
         let opts = parse_stat_args(&args).unwrap();
         assert_eq!(opts.command, vec!["ls"]);
     }
@@ -2193,7 +2332,8 @@ mod tests {
     #[test]
     fn record_parse_event() {
         let args: Vec<String> = vec![
-            "-e".to_string(), "instructions".to_string(),
+            "-e".to_string(),
+            "instructions".to_string(),
             "-a".to_string(),
         ];
         let opts = parse_record_args(&args).unwrap();
@@ -2202,10 +2342,7 @@ mod tests {
 
     #[test]
     fn record_parse_frequency() {
-        let args: Vec<String> = vec![
-            "-F".to_string(), "999".to_string(),
-            "-a".to_string(),
-        ];
+        let args: Vec<String> = vec!["-F".to_string(), "999".to_string(), "-a".to_string()];
         let opts = parse_record_args(&args).unwrap();
         assert_eq!(opts.frequency, 999);
     }
@@ -2221,7 +2358,8 @@ mod tests {
     #[test]
     fn record_parse_callgraph_dwarf() {
         let args: Vec<String> = vec![
-            "--call-graph".to_string(), "dwarf".to_string(),
+            "--call-graph".to_string(),
+            "dwarf".to_string(),
             "-a".to_string(),
         ];
         let opts = parse_record_args(&args).unwrap();
@@ -2232,7 +2370,8 @@ mod tests {
     #[test]
     fn record_parse_callgraph_lbr() {
         let args: Vec<String> = vec![
-            "--call-graph".to_string(), "lbr".to_string(),
+            "--call-graph".to_string(),
+            "lbr".to_string(),
             "-a".to_string(),
         ];
         let opts = parse_record_args(&args).unwrap();
@@ -2241,10 +2380,7 @@ mod tests {
 
     #[test]
     fn record_parse_output_file() {
-        let args: Vec<String> = vec![
-            "-o".to_string(), "my.data".to_string(),
-            "-a".to_string(),
-        ];
+        let args: Vec<String> = vec!["-o".to_string(), "my.data".to_string(), "-a".to_string()];
         let opts = parse_record_args(&args).unwrap();
         assert_eq!(opts.output, "my.data");
     }
@@ -2279,7 +2415,8 @@ mod tests {
     #[test]
     fn record_parse_bad_callgraph_mode() {
         let args: Vec<String> = vec![
-            "--call-graph".to_string(), "none".to_string(),
+            "--call-graph".to_string(),
+            "none".to_string(),
             "-a".to_string(),
         ];
         assert!(parse_record_args(&args).is_err());
@@ -2892,7 +3029,8 @@ mod tests {
     #[test]
     fn record_callgraph_fp_mode() {
         let args: Vec<String> = vec![
-            "--call-graph".to_string(), "fp".to_string(),
+            "--call-graph".to_string(),
+            "fp".to_string(),
             "-a".to_string(),
         ];
         let opts = parse_record_args(&args).unwrap();
@@ -2906,7 +3044,8 @@ mod tests {
     #[test]
     fn stat_parse_long_event_flag() {
         let args: Vec<String> = vec![
-            "--event".to_string(), "page-faults".to_string(),
+            "--event".to_string(),
+            "page-faults".to_string(),
             "-a".to_string(),
         ];
         let opts = parse_stat_args(&args).unwrap();
@@ -2921,7 +3060,8 @@ mod tests {
     #[test]
     fn record_parse_long_output_flag() {
         let args: Vec<String> = vec![
-            "--output".to_string(), "out.data".to_string(),
+            "--output".to_string(),
+            "out.data".to_string(),
             "-a".to_string(),
         ];
         let opts = parse_record_args(&args).unwrap();
@@ -2934,10 +3074,7 @@ mod tests {
 
     #[test]
     fn record_parse_long_freq_flag() {
-        let args: Vec<String> = vec![
-            "--freq".to_string(), "2000".to_string(),
-            "-a".to_string(),
-        ];
+        let args: Vec<String> = vec!["--freq".to_string(), "2000".to_string(), "-a".to_string()];
         let opts = parse_record_args(&args).unwrap();
         assert_eq!(opts.frequency, 2000);
     }
@@ -2948,9 +3085,7 @@ mod tests {
 
     #[test]
     fn report_parse_long_input_flag() {
-        let args: Vec<String> = vec![
-            "--input".to_string(), "alt.data".to_string(),
-        ];
+        let args: Vec<String> = vec!["--input".to_string(), "alt.data".to_string()];
         let opts = parse_report_args(&args).unwrap();
         assert_eq!(opts.input, "alt.data");
     }
@@ -2961,9 +3096,7 @@ mod tests {
 
     #[test]
     fn top_parse_long_event_flag() {
-        let args: Vec<String> = vec![
-            "--event".to_string(), "cache-misses".to_string(),
-        ];
+        let args: Vec<String> = vec!["--event".to_string(), "cache-misses".to_string()];
         let opts = parse_top_args(&args).unwrap();
         assert_eq!(opts.event, "cache-misses");
     }
@@ -2974,9 +3107,7 @@ mod tests {
 
     #[test]
     fn top_parse_long_count_flag() {
-        let args: Vec<String> = vec![
-            "--count".to_string(), "10".to_string(),
-        ];
+        let args: Vec<String> = vec!["--count".to_string(), "10".to_string()];
         let opts = parse_top_args(&args).unwrap();
         assert_eq!(opts.count, 10);
     }

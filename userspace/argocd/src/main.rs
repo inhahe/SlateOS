@@ -4,6 +4,7 @@
 //!
 //! Single personality: `argocd`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -40,9 +41,15 @@ fn run_argocd(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    println!("NAME       CLUSTER                 NAMESPACE  PROJECT  STATUS  HEALTH   SYNCPOLICY");
-                    println!("myapp      https://kubernetes.local default    default  Synced  Healthy  Auto-Prune");
-                    println!("nginx      https://kubernetes.local ingress    default  Synced  Healthy  Manual");
+                    println!(
+                        "NAME       CLUSTER                 NAMESPACE  PROJECT  STATUS  HEALTH   SYNCPOLICY"
+                    );
+                    println!(
+                        "myapp      https://kubernetes.local default    default  Synced  Healthy  Auto-Prune"
+                    );
+                    println!(
+                        "nginx      https://kubernetes.local ingress    default  Synced  Healthy  Manual"
+                    );
                 }
                 "get" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("myapp");
@@ -58,8 +65,13 @@ fn run_argocd(args: Vec<String>) -> i32 {
                 }
                 "sync" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("myapp");
-                    println!("TIMESTAMP                  GROUP  KIND         NAMESPACE  NAME   STATUS  HEALTH   HOOK  MESSAGE");
-                    println!("2025-05-22T10:00:00+00:00         Deployment   default    {}   Synced  Healthy        deployment configured", name);
+                    println!(
+                        "TIMESTAMP                  GROUP  KIND         NAMESPACE  NAME   STATUS  HEALTH   HOOK  MESSAGE"
+                    );
+                    println!(
+                        "2025-05-22T10:00:00+00:00         Deployment   default    {}   Synced  Healthy        deployment configured",
+                        name
+                    );
                 }
                 "diff" => println!("(no diff — application is in sync)"),
                 "history" => {
@@ -67,7 +79,9 @@ fn run_argocd(args: Vec<String>) -> i32 {
                     println!("1   2025-05-22 10:00:00 +0000 UTC  abc123");
                     println!("2   2025-05-22 09:00:00 +0000 UTC  def456");
                 }
-                _ => println!("Subcommands: list, get, sync, diff, history, create, delete, set, wait, rollback"),
+                _ => println!(
+                    "Subcommands: list, get, sync, diff, history, create, delete, set, wait, rollback"
+                ),
             }
         }
         "cluster" => {
@@ -86,7 +100,7 @@ fn run_argocd(args: Vec<String>) -> i32 {
             println!("({} — simulated)", cmd);
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -102,7 +116,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_argocd};
+    use super::run_argocd;
 
     #[test]
     fn help_exits_zero() {

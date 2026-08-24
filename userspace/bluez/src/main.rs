@@ -11,6 +11,7 @@
 //! - `btmon` — Bluetooth monitor/sniffer
 //! - `rfcomm` — RFCOMM channel management
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -137,24 +138,22 @@ impl std::fmt::Display for _AgentCapability {
 // ── Simulated data ────────────────────────────────────────────────────
 
 fn read_hci_devices() -> Vec<HciDevice> {
-    vec![
-        HciDevice {
-            _id: 0,
-            name: "hci0".to_string(),
-            address: "00:1A:7D:DA:71:13".to_string(),
-            _dev_type: HciType::Primary,
-            state: HciState::Up,
-            _bus: "USB".to_string(),
-            features: vec![
-                "LE".to_string(),
-                "BR/EDR".to_string(),
-                "SCO".to_string(),
-                "eSCO".to_string(),
-                "Extended Inquiry".to_string(),
-                "Secure Simple Pairing".to_string(),
-            ],
-        },
-    ]
+    vec![HciDevice {
+        _id: 0,
+        name: "hci0".to_string(),
+        address: "00:1A:7D:DA:71:13".to_string(),
+        _dev_type: HciType::Primary,
+        state: HciState::Up,
+        _bus: "USB".to_string(),
+        features: vec![
+            "LE".to_string(),
+            "BR/EDR".to_string(),
+            "SCO".to_string(),
+            "eSCO".to_string(),
+            "Extended Inquiry".to_string(),
+            "Secure Simple Pairing".to_string(),
+        ],
+    }]
 }
 
 fn read_bt_devices() -> Vec<BtDevice> {
@@ -262,7 +261,10 @@ fn run_bluetoothctl(args: Vec<String>) -> i32 {
         "discoverable" => bt_discoverable(&cmd_args),
         "pairable" => bt_pairable(&cmd_args),
         "agent" => {
-            let cap = cmd_args.first().map(|s| s.as_str()).unwrap_or("DisplayYesNo");
+            let cap = cmd_args
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("DisplayYesNo");
             println!("Agent registered: {}", cap);
             0
         }
@@ -271,7 +273,7 @@ fn run_bluetoothctl(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("bluetoothctl: unknown command '{}'", other);
+            eprintln!("bluetoothctl: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -344,7 +346,10 @@ fn bt_scan(args: &[String]) -> i32 {
 fn bt_pair(args: &[String]) -> i32 {
     let addr = match args.first() {
         Some(a) => a.as_str(),
-        None => { eprintln!("bluetoothctl: pair requires device address"); return 1; }
+        None => {
+            eprintln!("bluetoothctl: pair requires device address");
+            return 1;
+        }
     };
     println!("Attempting to pair with {}", addr);
     println!("[CHG] Device {} Paired: yes", addr);
@@ -355,7 +360,10 @@ fn bt_pair(args: &[String]) -> i32 {
 fn bt_remove(args: &[String]) -> i32 {
     let addr = match args.first() {
         Some(a) => a.as_str(),
-        None => { eprintln!("bluetoothctl: remove requires device address"); return 1; }
+        None => {
+            eprintln!("bluetoothctl: remove requires device address");
+            return 1;
+        }
     };
     println!("[DEL] Device {} removed", addr);
     println!("Device has been removed");
@@ -365,17 +373,31 @@ fn bt_remove(args: &[String]) -> i32 {
 fn bt_trust(args: &[String], trust: bool) -> i32 {
     let addr = match args.first() {
         Some(a) => a.as_str(),
-        None => { eprintln!("bluetoothctl: requires device address"); return 1; }
+        None => {
+            eprintln!("bluetoothctl: requires device address");
+            return 1;
+        }
     };
-    println!("[CHG] Device {} Trusted: {}", addr, if trust { "yes" } else { "no" });
-    println!("Changing {} {} trust succeeded", addr, if trust { "trust" } else { "untrust" });
+    println!(
+        "[CHG] Device {} Trusted: {}",
+        addr,
+        if trust { "yes" } else { "no" }
+    );
+    println!(
+        "Changing {} {} trust succeeded",
+        addr,
+        if trust { "trust" } else { "untrust" }
+    );
     0
 }
 
 fn bt_connect(args: &[String]) -> i32 {
     let addr = match args.first() {
         Some(a) => a.as_str(),
-        None => { eprintln!("bluetoothctl: connect requires device address"); return 1; }
+        None => {
+            eprintln!("bluetoothctl: connect requires device address");
+            return 1;
+        }
     };
     println!("Attempting to connect to {}", addr);
     println!("[CHG] Device {} Connected: yes", addr);
@@ -386,7 +408,10 @@ fn bt_connect(args: &[String]) -> i32 {
 fn bt_disconnect(args: &[String]) -> i32 {
     let addr = match args.first() {
         Some(a) => a.as_str(),
-        None => { eprintln!("bluetoothctl: disconnect requires device address"); return 1; }
+        None => {
+            eprintln!("bluetoothctl: disconnect requires device address");
+            return 1;
+        }
     };
     println!("[CHG] Device {} Connected: no", addr);
     println!("Successful disconnected");
@@ -396,7 +421,10 @@ fn bt_disconnect(args: &[String]) -> i32 {
 fn bt_info(args: &[String]) -> i32 {
     let addr = match args.first() {
         Some(a) => a.as_str(),
-        None => { eprintln!("bluetoothctl: info requires device address"); return 1; }
+        None => {
+            eprintln!("bluetoothctl: info requires device address");
+            return 1;
+        }
     };
 
     let devices = read_bt_devices();
@@ -428,21 +456,30 @@ fn bt_info(args: &[String]) -> i32 {
 
 fn bt_power(args: &[String]) -> i32 {
     let mode = args.first().map(|s| s.as_str()).unwrap_or("on");
-    println!("[CHG] Controller 00:1A:7D:DA:71:13 Powered: {}", mode == "on");
+    println!(
+        "[CHG] Controller 00:1A:7D:DA:71:13 Powered: {}",
+        mode == "on"
+    );
     println!("Changing power {} succeeded", mode);
     0
 }
 
 fn bt_discoverable(args: &[String]) -> i32 {
     let mode = args.first().map(|s| s.as_str()).unwrap_or("on");
-    println!("[CHG] Controller 00:1A:7D:DA:71:13 Discoverable: {}", mode == "on");
+    println!(
+        "[CHG] Controller 00:1A:7D:DA:71:13 Discoverable: {}",
+        mode == "on"
+    );
     println!("Changing discoverable {} succeeded", mode);
     0
 }
 
 fn bt_pairable(args: &[String]) -> i32 {
     let mode = args.first().map(|s| s.as_str()).unwrap_or("on");
-    println!("[CHG] Controller 00:1A:7D:DA:71:13 Pairable: {}", mode == "on");
+    println!(
+        "[CHG] Controller 00:1A:7D:DA:71:13 Pairable: {}",
+        mode == "on"
+    );
     println!("Changing pairable {} succeeded", mode);
     0
 }
@@ -493,7 +530,10 @@ fn hci_list() -> i32 {
     let devices = read_hci_devices();
     for hci in &devices {
         println!("{}:\tType: {} Bus: {}", hci.name, hci._dev_type, hci._bus);
-        println!("\tBD Address: {} ACL MTU: 1021:8 SCO MTU: 64:1", hci.address);
+        println!(
+            "\tBD Address: {} ACL MTU: 1021:8 SCO MTU: 64:1",
+            hci.address
+        );
         println!("\t{}", hci.state);
         println!("\tRX bytes:12345 acl:0 sco:0 events:678 errors:0");
         println!("\tTX bytes:9012 acl:0 sco:0 commands:345 errors:0");
@@ -505,11 +545,26 @@ fn hci_list() -> i32 {
 
 fn hci_device_cmd(dev: &str, cmd: &str) -> i32 {
     match cmd {
-        "up" => { println!("{}: UP", dev); 0 }
-        "down" => { println!("{}: DOWN", dev); 0 }
-        "reset" => { println!("{}: Reset", dev); 0 }
-        "name" => { println!("{}: Name: 'SlateOS-Desktop'", dev); 0 }
-        "class" => { println!("{}: Class: 0x000000", dev); 0 }
+        "up" => {
+            println!("{}: UP", dev);
+            0
+        }
+        "down" => {
+            println!("{}: DOWN", dev);
+            0
+        }
+        "reset" => {
+            println!("{}: Reset", dev);
+            0
+        }
+        "name" => {
+            println!("{}: Name: 'SlateOS-Desktop'", dev);
+            0
+        }
+        "class" => {
+            println!("{}: Class: 0x000000", dev);
+            0
+        }
         "features" => {
             let hcis = read_hci_devices();
             if let Some(hci) = hcis.iter().find(|h| h.name == dev) {
@@ -520,9 +575,7 @@ fn hci_device_cmd(dev: &str, cmd: &str) -> i32 {
             }
             0
         }
-        _ => {
-            hci_list()
-        }
+        _ => hci_list(),
     }
 }
 
@@ -572,8 +625,14 @@ fn run_hcitool(args: Vec<String>) -> i32 {
             let addr = cmd_args.first().map(|s| s.as_str()).unwrap_or("unknown");
             let devices = read_bt_devices();
             match devices.iter().find(|d| d.address == addr) {
-                Some(dev) => { println!("{}", dev.name); 0 }
-                None => { eprintln!("hcitool: device {} not found", addr); 1 }
+                Some(dev) => {
+                    println!("{}", dev.name);
+                    0
+                }
+                None => {
+                    eprintln!("hcitool: device {} not found", addr);
+                    1
+                }
             }
         }
         "con" => {
@@ -601,11 +660,14 @@ fn run_hcitool(args: Vec<String>) -> i32 {
                     println!("RSSI return value: {}", dev.rssi.unwrap_or(0));
                     0
                 }
-                None => { eprintln!("hcitool: device {} not found", addr); 1 }
+                None => {
+                    eprintln!("hcitool: device {} not found", addr);
+                    1
+                }
             }
         }
         other => {
-            eprintln!("hcitool: unknown command '{}'", other);
+            eprintln!("hcitool: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -614,7 +676,10 @@ fn run_hcitool(args: Vec<String>) -> i32 {
 // ── btmon personality ─────────────────────────────────────────────────
 
 fn run_btmon(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "monitor".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "monitor".to_string());
 
     match cmd.as_str() {
         "--help" | "help" | "-h" => {
@@ -690,7 +755,7 @@ fn run_rfcomm(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("rfcomm: unknown command '{}'", other);
+            eprintln!("rfcomm: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -787,15 +852,21 @@ mod tests {
 
     #[test]
     fn test_agent_capability_display() {
-        assert_eq!(format!("{}", _AgentCapability::DisplayYesNo), "DisplayYesNo");
-        assert_eq!(format!("{}", _AgentCapability::_KeyboardOnly), "KeyboardOnly");
+        assert_eq!(
+            format!("{}", _AgentCapability::DisplayYesNo),
+            "DisplayYesNo"
+        );
+        assert_eq!(
+            format!("{}", _AgentCapability::_KeyboardOnly),
+            "KeyboardOnly"
+        );
     }
 
     #[test]
     fn test_rssi_values() {
         let devs = read_bt_devices();
         let sony = devs.iter().find(|d| d.name.contains("Sony")).unwrap();
-        assert!(sony.rssi.unwrap() < 0);  // RSSI is negative (dBm)
+        assert!(sony.rssi.unwrap() < 0); // RSSI is negative (dBm)
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `pastel`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -79,7 +80,8 @@ fn run_pastel(args: Vec<String>) -> i32 {
             0
         }
         "distinct" => {
-            let n = args.get(1)
+            let n = args
+                .get(1)
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(5);
             let colors = [
@@ -145,12 +147,16 @@ fn run_pastel(args: Vec<String>) -> i32 {
         "paint" => {
             let color = args.get(1).map(|s| s.as_str()).unwrap_or("green");
             let text: String = args.iter().skip(2).cloned().collect::<Vec<_>>().join(" ");
-            let text = if text.is_empty() { "Hello, World!".to_string() } else { text };
+            let text = if text.is_empty() {
+                "Hello, World!".to_string()
+            } else {
+                text
+            };
             println!("[{}]{}", color, text);
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -165,7 +171,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_pastel};
+    use super::run_pastel;
 
     #[test]
     fn help_exits_zero() {

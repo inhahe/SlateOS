@@ -2,3 +2,8 @@
 name = "buildkite-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# buildkite-cli names pipelines, builds and agents, identifiers created on
+# the server side.
+quoting = { path = "../quoting" }

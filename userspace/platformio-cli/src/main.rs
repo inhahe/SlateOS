@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `pio`, `platformio`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_pio(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -32,7 +37,11 @@ fn run_pio(args: &[String]) -> i32 {
     match subcmd {
         "--version" => println!("PlatformIO Core 6.1.13 (Slate OS)"),
         "init" => {
-            let board = args.windows(2).find(|w| w[0] == "--board" || w[0] == "-b").map(|w| w[1].as_str()).unwrap_or("esp32dev");
+            let board = args
+                .windows(2)
+                .find(|w| w[0] == "--board" || w[0] == "-b")
+                .map(|w| w[1].as_str())
+                .unwrap_or("esp32dev");
             println!("Initializing project for board: {}", board);
             println!("  Created: platformio.ini");
             println!("  Created: src/main.cpp");
@@ -41,7 +50,11 @@ fn run_pio(args: &[String]) -> i32 {
             println!("  Project initialized.");
         }
         "run" => {
-            let env = args.windows(2).find(|w| w[0] == "-e").map(|w| w[1].as_str()).unwrap_or("esp32dev");
+            let env = args
+                .windows(2)
+                .find(|w| w[0] == "-e")
+                .map(|w| w[1].as_str())
+                .unwrap_or("esp32dev");
             println!("Processing {} ...", env);
             println!("  Platform: espressif32 @ 6.5.0");
             println!("  Framework: arduino");
@@ -61,7 +74,11 @@ fn run_pio(args: &[String]) -> i32 {
             println!("  Upload complete.");
         }
         "monitor" => {
-            let baud = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].as_str()).unwrap_or("115200");
+            let baud = args
+                .windows(2)
+                .find(|w| w[0] == "-b")
+                .map(|w| w[1].as_str())
+                .unwrap_or("115200");
             println!("--- Serial Monitor ---");
             println!("--- Port: /dev/ttyUSB0  Baud: {}", baud);
             println!("--- Press Ctrl+C to exit");
@@ -71,7 +88,7 @@ fn run_pio(args: &[String]) -> i32 {
             println!("Platform   ID             MCU          Frequency  Flash   RAM");
             println!("-------    --             ---          ---------  -----   ---");
             if let Some(f) = filter {
-                println!("(showing boards matching '{}')", f);
+                println!("(showing boards matching {})", quoteaf_os(f));
             }
             println!("espressif  esp32dev       ESP32        240MHz     4MB     320KB");
             println!("espressif  esp32-s3       ESP32-S3     240MHz     8MB     512KB");
@@ -93,14 +110,17 @@ fn run_pio(args: &[String]) -> i32 {
             println!("  test_sensor: PASSED");
             println!("  2 tests passed, 0 failed.");
         }
-        _ => println!("pio: '{}' completed", subcmd),
+        _ => println!("pio: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "pio".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "pio".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_pio(&rest);
     process::exit(code);
@@ -108,7 +128,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_pio};
+    use super::{basename, run_pio, strip_ext};
 
     #[test]
     fn basename_strips_path() {

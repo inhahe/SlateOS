@@ -5,24 +5,35 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_eb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: eventbridge [OPTIONS]");
-        println!("AWS EventBridge (Slate OS) — serverless event bus (formerly CloudWatch Events, 2019)");
+        println!(
+            "AWS EventBridge (Slate OS) — serverless event bus (formerly CloudWatch Events, 2019)"
+        );
         println!();
         println!("Options:");
         println!("  --bus                  Custom event bus or default bus");
         println!("  --rule                 Event pattern matching rule");
         println!("  --schedule             Scheduled events (cron + rate expressions)");
-        println!("  --pipes                EventBridge Pipes (point-to-point with filter + transform)");
+        println!(
+            "  --pipes                EventBridge Pipes (point-to-point with filter + transform)"
+        );
         println!("  --schemas              Schema Registry (event schema discovery)");
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("AWS EventBridge 2024 (Slate OS) — eventbridge CLI (aws-cli v2)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("AWS EventBridge 2024 (Slate OS) — eventbridge CLI (aws-cli v2)");
+        return 0;
+    }
     println!("AWS EventBridge 2024 (Slate OS) — Serverless Event Bus + Routing + Schedule + Pipes");
     println!("  Vendor: Amazon Web Services (Seattle, WA — NASDAQ: AMZN)");
     println!("  History (the CloudWatch Events evolution):");
@@ -36,14 +47,26 @@ fn run_eb(args: &[String], _prog: &str) -> i32 {
     println!("    - EventBridge Scheduler added Nov 2022 (better cron service)");
     println!("    - 'AWS's answer to event-driven serverless architectures'");
     println!("  Strategic position: 'the serverless event router for AWS event-driven systems':");
-    println!("                    pitch: 'route events from anywhere to anywhere with pattern matching'");
-    println!("                    target: event-driven serverless architectures, SaaS integrations, scheduled tasks");
-    println!("                    primary competitor: GCP Eventarc, Azure Event Grid, Zapier (lo-code)");
+    println!(
+        "                    pitch: 'route events from anywhere to anywhere with pattern matching'"
+    );
+    println!(
+        "                    target: event-driven serverless architectures, SaaS integrations, scheduled tasks"
+    );
+    println!(
+        "                    primary competitor: GCP Eventarc, Azure Event Grid, Zapier (lo-code)"
+    );
     println!("                    secondary: Apache Kafka (with Connect), Workato, Tray.io");
-    println!("                    EventBridge wedge: pattern matching + 200+ AWS service event sources + SaaS partners");
-    println!("                    'one service for routing, scheduling, point-to-point, and outbound webhooks'");
+    println!(
+        "                    EventBridge wedge: pattern matching + 200+ AWS service event sources + SaaS partners"
+    );
+    println!(
+        "                    'one service for routing, scheduling, point-to-point, and outbound webhooks'"
+    );
     println!("                    pay-per-event pricing (no servers)");
-    println!("                    Lambda + Step Functions + EventBridge = the canonical AWS event-driven trio");
+    println!(
+        "                    Lambda + Step Functions + EventBridge = the canonical AWS event-driven trio"
+    );
     println!("  Pricing (per-event, multi-component):");
     println!("    Custom events: $1.00 per million events");
     println!("    AWS service events: free");
@@ -51,7 +74,9 @@ fn run_eb(args: &[String], _prog: &str) -> i32 {
     println!("    Cross-account/cross-region: $1.00 per million");
     println!("    Schema Registry discovery: $0.10 per million events processed");
     println!("    EventBridge Pipes: $0.40 per million invocations");
-    println!("    Scheduler: $1.00 per million invocations (better than legacy CW Events Schedule)");
+    println!(
+        "    Scheduler: $1.00 per million invocations (better than legacy CW Events Schedule)"
+    );
     println!("    Archive: storage charges + replay charges");
     println!("    notably cheap per-event; cost adds up at high volume");
     println!("  Architecture (event-driven serverless):");
@@ -60,8 +85,12 @@ fn run_eb(args: &[String], _prog: &str) -> i32 {
     println!("    - Custom buses: for app events");
     println!("    - Partner buses: for SaaS integrations (per partner)");
     println!("    - Rules: event pattern + targets (up to 5 targets per rule)");
-    println!("    - Targets: Lambda, Step Functions, SNS, SQS, Kinesis, ECS, API Destinations, etc.");
-    println!("    - Pattern matching: JSON-based, supports prefix, suffix, anything-but, numeric ranges");
+    println!(
+        "    - Targets: Lambda, Step Functions, SNS, SQS, Kinesis, ECS, API Destinations, etc."
+    );
+    println!(
+        "    - Pattern matching: JSON-based, supports prefix, suffix, anything-but, numeric ranges"
+    );
     println!("    - Schema Registry: auto-discover schemas from events");
     println!("    - DLQ for failed deliveries");
     println!("  Product portfolio:");
@@ -118,7 +147,9 @@ fn run_eb(args: &[String], _prog: &str) -> i32 {
     println!("       - For active-active multi-region apps");
     println!("  The EventBridge vs SNS distinction:");
     println!("    - SNS: pub/sub fanout — one publish, N subscribers, no routing logic");
-    println!("    - EventBridge: event router with pattern matching — one publish, route to multiple based on content");
+    println!(
+        "    - EventBridge: event router with pattern matching — one publish, route to multiple based on content"
+    );
     println!("    - SNS: cheap per-message ($0.50/M), simple");
     println!("    - EventBridge: 2x cost ($1.00/M), but smart routing + AWS service integration");
     println!("    - Common pattern: EventBridge → SNS → SQS (when you need both)");
@@ -141,14 +172,22 @@ fn run_eb(args: &[String], _prog: &str) -> i32 {
     println!("  AWS CLI usage:");
     println!("    aws events list-event-buses");
     println!("    aws events create-event-bus --name my-bus");
-    println!("    aws events put-rule --name s3-create-rule --event-pattern '{{\"source\":[\"aws.s3\"],\"detail-type\":[\"Object Created\"]}}'");
+    println!(
+        "    aws events put-rule --name s3-create-rule --event-pattern '{{\"source\":[\"aws.s3\"],\"detail-type\":[\"Object Created\"]}}'"
+    );
     println!("    aws events put-targets --rule s3-create-rule --targets 'Id=1,Arn=<lambda-arn>'");
-    println!("    aws events put-events --entries 'Source=my.app,DetailType=order.placed,Detail=\"{{\\\"orderId\\\":\\\"123\\\"}}\"'");
+    println!(
+        "    aws events put-events --entries 'Source=my.app,DetailType=order.placed,Detail=\"{{\\\"orderId\\\":\\\"123\\\"}}\"'"
+    );
     println!("    aws events list-rules --event-bus-name my-bus");
     println!("    # EventBridge Pipes:");
-    println!("    aws pipes create-pipe --name my-pipe --source <sqs-arn> --target <lambda-arn> --role-arn <iam-role>");
+    println!(
+        "    aws pipes create-pipe --name my-pipe --source <sqs-arn> --target <lambda-arn> --role-arn <iam-role>"
+    );
     println!("    # EventBridge Scheduler:");
-    println!("    aws scheduler create-schedule --name daily-job --schedule-expression 'cron(0 12 * * ? *)' --target '{{\"Arn\":\"<lambda-arn>\",\"RoleArn\":\"<role>\"}}' --flexible-time-window '{{\"Mode\":\"OFF\"}}'");
+    println!(
+        "    aws scheduler create-schedule --name daily-job --schedule-expression 'cron(0 12 * * ? *)' --target '{{\"Arn\":\"<lambda-arn>\",\"RoleArn\":\"<role>\"}}' --flexible-time-window '{{\"Mode\":\"OFF\"}}'"
+    );
     println!("    # Schema Registry:");
     println!("    aws schemas list-discoverers");
     println!("    aws schemas start-discoverer --discoverer-id <id>");
@@ -168,13 +207,18 @@ fn run_eb(args: &[String], _prog: &str) -> i32 {
     println!("           Scheduler replaces CW Events Schedules — migration friction");
     println!("           cross-region event delivery costs +1x events");
     println!("           AWS lock-in — equivalent on Azure (Event Grid) + GCP (Eventarc) differ");
-    println!("  Differentiator: AWS serverless event bus + routing service (formerly CloudWatch Events 2016, rebranded EventBridge Jul 2019) + Event Buses (default + custom + partner) + Rules with JSON pattern matching (prefix/suffix/numeric/anything-but) + 200+ AWS service event sources (auto-published, no setup) + ~40 SaaS partner sources (Zendesk, PagerDuty, Datadog, Stripe, Shopify, Auth0, MongoDB Atlas) + API Destinations (outbound webhooks with OAuth + API key + Basic auth) + EventBridge Pipes (point-to-point with filter + enrich + target, replaces Lambda glue, Dec 2022+) + EventBridge Scheduler (1M+ schedules per account, replaces CW Events Scheduled, Nov 2022+) + Schema Registry (auto-discovery + code bindings) + Archive + Replay (compress + reprocess) + global endpoints (multi-region failover) + Input transformer (reshape events) + Dead-Letter Queues per target + cross-account event sharing + Lambda/Step Functions/SQS/SNS/Kinesis/ECS targets + Capital One/Liberty Mutual/Coca-Cola/Pearson-proven + $1/M custom events pricing — the AWS serverless event router for event-driven architectures, replacing tens of thousands of Lambda glue functions with declarative routing");
+    println!(
+        "  Differentiator: AWS serverless event bus + routing service (formerly CloudWatch Events 2016, rebranded EventBridge Jul 2019) + Event Buses (default + custom + partner) + Rules with JSON pattern matching (prefix/suffix/numeric/anything-but) + 200+ AWS service event sources (auto-published, no setup) + ~40 SaaS partner sources (Zendesk, PagerDuty, Datadog, Stripe, Shopify, Auth0, MongoDB Atlas) + API Destinations (outbound webhooks with OAuth + API key + Basic auth) + EventBridge Pipes (point-to-point with filter + enrich + target, replaces Lambda glue, Dec 2022+) + EventBridge Scheduler (1M+ schedules per account, replaces CW Events Scheduled, Nov 2022+) + Schema Registry (auto-discovery + code bindings) + Archive + Replay (compress + reprocess) + global endpoints (multi-region failover) + Input transformer (reshape events) + Dead-Letter Queues per target + cross-account event sharing + Lambda/Step Functions/SQS/SNS/Kinesis/ECS targets + Capital One/Liberty Mutual/Coca-Cola/Pearson-proven + $1/M custom events pricing — the AWS serverless event router for event-driven architectures, replacing tens of thousands of Lambda glue functions with declarative routing"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "eventbridge".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "eventbridge".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_eb(&rest, &_prog);
     process::exit(code);
@@ -182,7 +226,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_eb};
+    use super::{basename, run_eb, strip_ext};
 
     #[test]
     fn basename_strips_path() {

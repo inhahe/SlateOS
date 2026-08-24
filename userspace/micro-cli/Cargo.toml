@@ -2,3 +2,8 @@
 name = "micro-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The plugin name and the file being edited are argv words -- the second is
+# a path and may hold any byte but `/`.
+quoting = { path = "../quoting" }

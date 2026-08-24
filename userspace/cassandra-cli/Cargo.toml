@@ -2,3 +2,8 @@
 name = "cassandra-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# cassandra-cli names keyspaces and tables, identifiers any client with
+# access to the cluster can create.
+quoting = { path = "../quoting" }

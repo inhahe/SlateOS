@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS periodic command execution"
 [dependencies]
+# watch names the command it is repeating, taken verbatim from the command
+# line.
+quoting = { path = "../quoting" }

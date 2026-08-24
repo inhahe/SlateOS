@@ -4,6 +4,7 @@
 //!
 //! Single personality: `trivy`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -49,16 +50,22 @@ fn run_trivy(args: Vec<String>) -> i32 {
             0
         }
         "image" => {
-            let target = args.get(1).map(|s| s.as_str()).unwrap_or("myregistry/myimage:latest");
-            let severity_filter = args.windows(2)
+            let target = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("myregistry/myimage:latest");
+            let severity_filter = args
+                .windows(2)
                 .find(|w| w[0] == "--severity")
                 .map(|w| w[1].as_str())
                 .unwrap_or("");
             let ignore_unfixed = args.iter().any(|a| a == "--ignore-unfixed");
-            let json_out = args.windows(2)
+            let json_out = args
+                .windows(2)
                 .find(|w| w[0] == "--format")
                 .map(|w| w[1].as_str())
-                .unwrap_or("table") == "json";
+                .unwrap_or("table")
+                == "json";
 
             println!("{} (alpine 3.19.0)", target);
             println!();
@@ -66,27 +73,50 @@ fn run_trivy(args: Vec<String>) -> i32 {
             println!();
 
             if json_out {
-                println!("{{\"Results\":[{{\"Target\":\"{}\",\"Vulnerabilities\":[", target);
-                println!("  {{\"VulnerabilityID\":\"CVE-2024-0001\",\"Severity\":\"CRITICAL\",\"PkgName\":\"openssl\",\"InstalledVersion\":\"3.1.4\",\"FixedVersion\":\"3.1.5\"}}");
+                println!(
+                    "{{\"Results\":[{{\"Target\":\"{}\",\"Vulnerabilities\":[",
+                    target
+                );
+                println!(
+                    "  {{\"VulnerabilityID\":\"CVE-2024-0001\",\"Severity\":\"CRITICAL\",\"PkgName\":\"openssl\",\"InstalledVersion\":\"3.1.4\",\"FixedVersion\":\"3.1.5\"}}"
+                );
                 println!("]}}]}}");
             } else {
-                println!("┌──────────────┬────────────────┬──────────┬───────────────────┬───────────────┬──────────────────────────────┐");
-                println!("│   Library    │ Vulnerability  │ Severity │ Installed Version │ Fixed Version │            Title             │");
-                println!("├──────────────┼────────────────┼──────────┼───────────────────┼───────────────┼──────────────────────────────┤");
+                println!(
+                    "┌──────────────┬────────────────┬──────────┬───────────────────┬───────────────┬──────────────────────────────┐"
+                );
+                println!(
+                    "│   Library    │ Vulnerability  │ Severity │ Installed Version │ Fixed Version │            Title             │"
+                );
+                println!(
+                    "├──────────────┼────────────────┼──────────┼───────────────────┼───────────────┼──────────────────────────────┤"
+                );
                 if severity_filter.is_empty() || severity_filter.contains("CRITICAL") {
-                    println!("│ openssl      │ CVE-2024-0001  │ CRITICAL │ 3.1.4             │ 3.1.5         │ Buffer overflow in SSL_read  │");
+                    println!(
+                        "│ openssl      │ CVE-2024-0001  │ CRITICAL │ 3.1.4             │ 3.1.5         │ Buffer overflow in SSL_read  │"
+                    );
                 }
                 if severity_filter.is_empty() || severity_filter.contains("HIGH") {
-                    println!("│ curl         │ CVE-2024-0002  │ HIGH     │ 8.5.0             │ 8.6.0         │ Header injection via HSTS    │");
+                    println!(
+                        "│ curl         │ CVE-2024-0002  │ HIGH     │ 8.5.0             │ 8.6.0         │ Header injection via HSTS    │"
+                    );
                     if !ignore_unfixed {
-                        println!("│ zlib         │ CVE-2024-0003  │ HIGH     │ 1.3               │               │ Heap overflow in inflate     │");
+                        println!(
+                            "│ zlib         │ CVE-2024-0003  │ HIGH     │ 1.3               │               │ Heap overflow in inflate     │"
+                        );
                     }
                 }
                 if severity_filter.is_empty() || severity_filter.contains("MEDIUM") {
-                    println!("│ busybox      │ CVE-2024-0004  │ MEDIUM   │ 1.36.1            │ 1.36.2        │ Command injection in awk     │");
-                    println!("│ libxml2      │ CVE-2024-0005  │ MEDIUM   │ 2.12.3            │ 2.12.4        │ XXE in xmlParseDocument      │");
+                    println!(
+                        "│ busybox      │ CVE-2024-0004  │ MEDIUM   │ 1.36.1            │ 1.36.2        │ Command injection in awk     │"
+                    );
+                    println!(
+                        "│ libxml2      │ CVE-2024-0005  │ MEDIUM   │ 2.12.3            │ 2.12.4        │ XXE in xmlParseDocument      │"
+                    );
                 }
-                println!("└──────────────┴────────────────┴──────────┴───────────────────┴───────────────┴──────────────────────────────┘");
+                println!(
+                    "└──────────────┴────────────────┴──────────┴───────────────────┴───────────────┴──────────────────────────────┘"
+                );
             }
             0
         }
@@ -96,19 +126,40 @@ fn run_trivy(args: Vec<String>) -> i32 {
             println!();
             println!("Total: 5 (UNKNOWN: 0, LOW: 1, MEDIUM: 2, HIGH: 1, CRITICAL: 1)");
             println!();
-            println!("┌──────────────────┬────────────────┬──────────┬───────────────────┬───────────────┐");
-            println!("│     Library      │ Vulnerability  │ Severity │ Installed Version │ Fixed Version │");
-            println!("├──────────────────┼────────────────┼──────────┼───────────────────┼───────────────┤");
-            println!("│ lodash           │ CVE-2024-1001  │ CRITICAL │ 4.17.20           │ 4.17.21       │");
-            println!("│ express          │ CVE-2024-1002  │ HIGH     │ 4.18.2            │ 4.19.0        │");
-            println!("│ axios            │ CVE-2024-1003  │ MEDIUM   │ 1.6.0             │ 1.6.5         │");
-            println!("│ minimatch        │ CVE-2024-1004  │ MEDIUM   │ 3.0.4             │ 3.1.0         │");
-            println!("│ debug            │ CVE-2024-1005  │ LOW      │ 4.3.4             │ 4.3.5         │");
-            println!("└──────────────────┴────────────────┴──────────┴───────────────────┴───────────────┘");
+            println!(
+                "┌──────────────────┬────────────────┬──────────┬───────────────────┬───────────────┐"
+            );
+            println!(
+                "│     Library      │ Vulnerability  │ Severity │ Installed Version │ Fixed Version │"
+            );
+            println!(
+                "├──────────────────┼────────────────┼──────────┼───────────────────┼───────────────┤"
+            );
+            println!(
+                "│ lodash           │ CVE-2024-1001  │ CRITICAL │ 4.17.20           │ 4.17.21       │"
+            );
+            println!(
+                "│ express          │ CVE-2024-1002  │ HIGH     │ 4.18.2            │ 4.19.0        │"
+            );
+            println!(
+                "│ axios            │ CVE-2024-1003  │ MEDIUM   │ 1.6.0             │ 1.6.5         │"
+            );
+            println!(
+                "│ minimatch        │ CVE-2024-1004  │ MEDIUM   │ 3.0.4             │ 3.1.0         │"
+            );
+            println!(
+                "│ debug            │ CVE-2024-1005  │ LOW      │ 4.3.4             │ 4.3.5         │"
+            );
+            println!(
+                "└──────────────────┴────────────────┴──────────┴───────────────────┴───────────────┘"
+            );
             0
         }
         "repo" => {
-            let target = args.get(1).map(|s| s.as_str()).unwrap_or("https://github.com/example/repo");
+            let target = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("https://github.com/example/repo");
             println!("Cloning {}...", target);
             println!();
             println!("Total: 3 (LOW: 1, MEDIUM: 1, HIGH: 1)");
@@ -130,19 +181,36 @@ fn run_trivy(args: Vec<String>) -> i32 {
             println!("Tests: 15 (SUCCESSES: 10, FAILURES: 4, EXCEPTIONS: 1)");
             println!("Failures: 4 (LOW: 1, MEDIUM: 1, HIGH: 1, CRITICAL: 1)");
             println!();
-            println!("┌──────────────────────────┬──────────┬──────────────────────────────────────────┐");
-            println!("│        Check ID          │ Severity │               Description                │");
-            println!("├──────────────────────────┼──────────┼──────────────────────────────────────────┤");
-            println!("│ DS002                    │ CRITICAL │ Root user in Dockerfile                   │");
-            println!("│ KSV001                   │ HIGH     │ Container running as root                 │");
-            println!("│ KSV003                   │ MEDIUM   │ Default capabilities not dropped          │");
-            println!("│ KSV011                   │ LOW      │ CPU limit not set                         │");
-            println!("└──────────────────────────┴──────────┴──────────────────────────────────────────┘");
+            println!(
+                "┌──────────────────────────┬──────────┬──────────────────────────────────────────┐"
+            );
+            println!(
+                "│        Check ID          │ Severity │               Description                │"
+            );
+            println!(
+                "├──────────────────────────┼──────────┼──────────────────────────────────────────┤"
+            );
+            println!(
+                "│ DS002                    │ CRITICAL │ Root user in Dockerfile                   │"
+            );
+            println!(
+                "│ KSV001                   │ HIGH     │ Container running as root                 │"
+            );
+            println!(
+                "│ KSV003                   │ MEDIUM   │ Default capabilities not dropped          │"
+            );
+            println!(
+                "│ KSV011                   │ LOW      │ CPU limit not set                         │"
+            );
+            println!(
+                "└──────────────────────────┴──────────┴──────────────────────────────────────────┘"
+            );
             0
         }
         "sbom" => {
             let target = args.get(1).map(|s| s.as_str()).unwrap_or("myimage:latest");
-            let format = args.windows(2)
+            let format = args
+                .windows(2)
                 .find(|w| w[0] == "--format")
                 .map(|w| w[1].as_str())
                 .unwrap_or("cyclonedx");
@@ -154,7 +222,9 @@ fn run_trivy(args: Vec<String>) -> i32 {
                     println!("  \"dataLicense\": \"CC0-1.0\",");
                     println!("  \"name\": \"{}\",", target);
                     println!("  \"packages\": [");
-                    println!("    {{\"name\": \"alpine-baselayout\", \"versionInfo\": \"3.4.3-r1\"}},");
+                    println!(
+                        "    {{\"name\": \"alpine-baselayout\", \"versionInfo\": \"3.4.3-r1\"}},"
+                    );
                     println!("    {{\"name\": \"busybox\", \"versionInfo\": \"1.36.1-r15\"}},");
                     println!("    {{\"name\": \"openssl\", \"versionInfo\": \"3.1.4-r2\"}}");
                     println!("  ]");
@@ -164,11 +234,20 @@ fn run_trivy(args: Vec<String>) -> i32 {
                     println!("{{");
                     println!("  \"bomFormat\": \"CycloneDX\",");
                     println!("  \"specVersion\": \"1.5\",");
-                    println!("  \"metadata\": {{\"component\": {{\"name\": \"{}\"}}}},", target);
+                    println!(
+                        "  \"metadata\": {{\"component\": {{\"name\": \"{}\"}}}},",
+                        target
+                    );
                     println!("  \"components\": [");
-                    println!("    {{\"type\": \"library\", \"name\": \"alpine-baselayout\", \"version\": \"3.4.3-r1\"}},");
-                    println!("    {{\"type\": \"library\", \"name\": \"busybox\", \"version\": \"1.36.1-r15\"}},");
-                    println!("    {{\"type\": \"library\", \"name\": \"openssl\", \"version\": \"3.1.4-r2\"}}");
+                    println!(
+                        "    {{\"type\": \"library\", \"name\": \"alpine-baselayout\", \"version\": \"3.4.3-r1\"}},"
+                    );
+                    println!(
+                        "    {{\"type\": \"library\", \"name\": \"busybox\", \"version\": \"1.36.1-r15\"}},"
+                    );
+                    println!(
+                        "    {{\"type\": \"library\", \"name\": \"openssl\", \"version\": \"3.1.4-r2\"}}"
+                    );
                     println!("  ]");
                     println!("}}");
                 }
@@ -207,15 +286,18 @@ fn run_trivy(args: Vec<String>) -> i32 {
                 }
                 "install" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("example");
-                    println!("Installing plugin '{}'...", name);
-                    println!("Plugin '{}' installed successfully.", name);
+                    println!("Installing plugin {}...", quoteaf_os(name));
+                    println!("Plugin {} installed successfully.", quoteaf_os(name));
                     0
                 }
                 _ => {
                     if sub.is_empty() {
                         eprintln!("Usage: trivy plugin <list|install|uninstall|run>");
                     } else {
-                        eprintln!("Error: unknown plugin subcommand '{}'. See --help.", sub);
+                        eprintln!(
+                            "Error: unknown plugin subcommand {}. See --help.",
+                            quoteaf_os(sub)
+                        );
                     }
                     1
                 }
@@ -225,7 +307,7 @@ fn run_trivy(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: trivy <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -241,7 +323,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_trivy};
+    use super::run_trivy;
 
     #[test]
     fn help_exits_zero() {

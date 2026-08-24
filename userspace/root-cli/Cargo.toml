@@ -2,3 +2,8 @@
 name = "root-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# rootcling names the dictionary it generates and hadd names the merge
+# target; both are output paths from argv.
+quoting = { path = "../quoting" }

@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS system information utility"
 [dependencies]
+# uname names the kernel release, version and machine strings it reports,
+# read out of the running kernel rather than chosen by this tool.
+quoting = { path = "../quoting" }

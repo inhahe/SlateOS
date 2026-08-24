@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `gprof`, `gcov`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -105,10 +106,15 @@ fn run_gcov(args: &[String]) -> i32 {
         return 0;
     }
 
-    let branch_info = args.iter().any(|a| a == "-b" || a == "--branch-probabilities");
-    let func_summaries = args.iter().any(|a| a == "-f" || a == "--function-summaries");
+    let branch_info = args
+        .iter()
+        .any(|a| a == "-b" || a == "--branch-probabilities");
+    let func_summaries = args
+        .iter()
+        .any(|a| a == "-f" || a == "--function-summaries");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -127,7 +133,7 @@ fn run_gcov(args: &[String]) -> i32 {
             println!("Lines executed:100.00% of 8");
             println!();
         }
-        println!("File '{}'", file);
+        println!("File {}", quoteaf_os(file));
         println!("Lines executed:87.50% of 24");
         println!("Creating '{}.gcov'", file);
         if branch_info {
@@ -140,7 +146,8 @@ fn run_gcov(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "gprof".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -154,7 +161,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_gprof};
+    use super::{basename, run_gprof, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `rq`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_rq(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -47,18 +52,21 @@ fn run_rq(args: &[String]) -> i32 {
         }
         "empty" => {
             let queue = args.get(1).map(|s| s.as_str()).unwrap_or("default");
-            println!("Queue '{}' emptied.", queue);
+            println!("Queue {} emptied.", quoteaf_os(queue));
         }
         "suspend" => println!("All workers suspended."),
         "resume" => println!("All workers resumed."),
-        _ => println!("rq: '{}' completed", subcmd),
+        _ => println!("rq: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "rq".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "rq".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_rq(&rest);
     process::exit(code);
@@ -66,7 +74,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_rq};
+    use super::{basename, run_rq, strip_ext};
 
     #[test]
     fn basename_strips_path() {

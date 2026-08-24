@@ -4,6 +4,7 @@
 //!
 //! Single personality: `packer`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -87,7 +88,7 @@ fn run_packer(args: Vec<String>) -> i32 {
             println!("({} — simulated)", cmd);
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -103,7 +104,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_packer};
+    use super::run_packer;
 
     #[test]
     fn help_exits_zero() {

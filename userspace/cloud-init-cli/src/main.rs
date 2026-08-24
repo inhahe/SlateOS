@@ -4,6 +4,7 @@
 //!
 //! Single personality: `cloud-init`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -119,7 +120,10 @@ fn run_cloud_init(args: Vec<String>) -> i32 {
             println!("cloud-init: modules complete.");
         }
         _ => {
-            eprintln!("cloud-init: unknown command '{}'. See --help.", cmd);
+            eprintln!(
+                "cloud-init: unknown command {}. See --help.",
+                quoteaf_os(cmd)
+            );
             return 1;
         }
     }
@@ -135,7 +139,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_cloud_init};
+    use super::run_cloud_init;
 
     #[test]
     fn help_exits_zero() {

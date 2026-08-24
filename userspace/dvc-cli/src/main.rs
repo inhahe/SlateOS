@@ -4,6 +4,7 @@
 //!
 //! Single personality: `dvc`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,7 +43,10 @@ fn run_dvc(args: Vec<String>) -> i32 {
             0
         }
         "add" => {
-            let file = args.get(1).map(|s| s.as_str()).unwrap_or("data/dataset.csv");
+            let file = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("data/dataset.csv");
             println!("Adding {}...", file);
             println!("  Computing MD5...");
             println!("  Created {}.dvc", file);
@@ -92,7 +96,9 @@ fn run_dvc(args: Vec<String>) -> i32 {
                     println!("metrics.json    f1_score  0.9350    0.9481      +0.0131");
                     println!("metrics.json    loss      0.1500    0.1234      -0.0266");
                 }
-                _ => { println!("Metrics operation: {}", sub); }
+                _ => {
+                    println!("Metrics operation: {}", sub);
+                }
             }
             0
         }
@@ -105,10 +111,19 @@ fn run_dvc(args: Vec<String>) -> i32 {
                 }
                 "add" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("myremote");
-                    let url = args.get(3).map(|s| s.as_str()).unwrap_or("s3://bucket/path");
-                    println!("Setting up remote '{} → {}'", name, url);
+                    let url = args
+                        .get(3)
+                        .map(|s| s.as_str())
+                        .unwrap_or("s3://bucket/path");
+                    println!(
+                        "Setting up remote {} → {}",
+                        quoteaf_os(name),
+                        quoteaf_os(url)
+                    );
                 }
-                _ => { println!("Remote operation: {}", sub); }
+                _ => {
+                    println!("Remote operation: {}", sub);
+                }
             }
             0
         }
@@ -124,7 +139,7 @@ fn run_dvc(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: dvc <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -140,7 +155,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_dvc};
+    use super::run_dvc;
 
     #[test]
     fn help_exits_zero() {

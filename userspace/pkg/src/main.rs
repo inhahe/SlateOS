@@ -25,6 +25,7 @@
 //! are atomic — each install/remove/upgrade creates a new generation that
 //! can be rolled back to if something breaks.
 
+use quoting::{quoteaf_os, quotef_os};
 use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fmt;
@@ -2051,7 +2052,7 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
     // Check all packages exist
     for name in packages {
         if !current.packages.contains_key(name) {
-            eprintln!("pkg: {name}: not installed");
+            eprintln!("pkg: {}: not installed", quotef_os(name));
             process::exit(1);
         }
     }
@@ -2208,7 +2209,7 @@ fn cmd_search(db: &PackageDb, query: &str) {
     match db.search_repo(query) {
         Ok(results) => {
             if results.is_empty() {
-                println!("No packages found matching '{query}'.");
+                println!("No packages found matching {}.", quoteaf_os(query));
                 return;
             }
             let current = db.current_generation();
@@ -2312,7 +2313,7 @@ fn cmd_info(db: &PackageDb, name: &str) {
             }
         }
         Ok(None) => {
-            eprintln!("pkg: {name}: not found");
+            eprintln!("pkg: {}: not found", quotef_os(name));
             process::exit(1);
         }
         Err(e) => {
@@ -2527,7 +2528,7 @@ fn cmd_verify(db: &PackageDb, packages: &[String]) {
             match current.packages.get(name) {
                 Some(pkg) => v.push((name, pkg)),
                 None => {
-                    eprintln!("pkg: {name}: not installed");
+                    eprintln!("pkg: {}: not installed", quotef_os(name));
                     process::exit(1);
                 }
             }
@@ -2587,7 +2588,7 @@ fn cmd_files(db: &PackageDb, name: &str) {
             }
         }
         None => {
-            eprintln!("pkg: {name}: not installed");
+            eprintln!("pkg: {}: not installed", quotef_os(name));
             process::exit(1);
         }
     }
@@ -2603,7 +2604,7 @@ fn cmd_which(db: &PackageDb, path: &str) {
             }
         }
     }
-    eprintln!("pkg: {path}: not owned by any package");
+    eprintln!("pkg: {}: not owned by any package", quotef_os(path));
     process::exit(1);
 }
 
@@ -2617,7 +2618,7 @@ fn cmd_rdeps(db: &PackageDb, target: &str) {
 
     // Check the target exists
     if !current.packages.contains_key(target) {
-        eprintln!("pkg: {target}: not installed");
+        eprintln!("pkg: {}: not installed", quotef_os(target));
         process::exit(1);
     }
 
@@ -2714,7 +2715,7 @@ fn cmd_upgrade_lib(db: &PackageDb, lib_name: &str, dry_run: bool) {
     let current = db.current_generation();
 
     if !current.packages.contains_key(lib_name) {
-        eprintln!("pkg: {lib_name}: not installed");
+        eprintln!("pkg: {}: not installed", quotef_os(lib_name));
         process::exit(1);
     }
 
@@ -2820,7 +2821,7 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
         let mut v = Vec::new();
         for name in packages {
             if !current.packages.contains_key(name) {
-                eprintln!("pkg: {name}: not installed");
+                eprintln!("pkg: {}: not installed", quotef_os(name));
                 process::exit(1);
             }
             v.push(name);
@@ -3171,7 +3172,10 @@ fn cmd_repo(args: &[String]) {
                         eprintln!("pkg: failed to save config: {e}");
                         process::exit(1);
                     }
-                    println!("Added repository '{name}' ({url}, priority {priority})");
+                    println!(
+                        "Added repository {} ({url}, priority {priority})",
+                        quoteaf_os(name)
+                    );
                     println!("Run 'pkg update' to fetch the index.");
                 }
                 Err(e) => {
@@ -3194,7 +3198,7 @@ fn cmd_repo(args: &[String]) {
                         eprintln!("pkg: failed to save config: {e}");
                         process::exit(1);
                     }
-                    println!("Removed repository '{name}'");
+                    println!("Removed repository {}", quoteaf_os(name));
                     // Also remove cached index
                     let db = PackageDb::new();
                     let index_path = db.repo_index_path(name);
@@ -3219,7 +3223,7 @@ fn cmd_repo(args: &[String]) {
                         eprintln!("pkg: failed to save config: {e}");
                         process::exit(1);
                     }
-                    println!("Enabled repository '{name}'");
+                    println!("Enabled repository {}", quoteaf_os(name));
                 }
                 Err(e) => {
                     eprintln!("pkg: {e}");
@@ -3240,7 +3244,7 @@ fn cmd_repo(args: &[String]) {
                         eprintln!("pkg: failed to save config: {e}");
                         process::exit(1);
                     }
-                    println!("Disabled repository '{name}'");
+                    println!("Disabled repository {}", quoteaf_os(name));
                 }
                 Err(e) => {
                     eprintln!("pkg: {e}");
@@ -3429,7 +3433,10 @@ fn cmd_fetch(db: &PackageDb, packages: &[String]) {
         let manifest = match repo_index.iter().find(|m| m.name == *name) {
             Some(m) => m,
             None => {
-                eprintln!("pkg: package '{name}' not found in repository index");
+                eprintln!(
+                    "pkg: package {} not found in repository index",
+                    quoteaf_os(name)
+                );
                 failures += 1;
                 continue;
             }

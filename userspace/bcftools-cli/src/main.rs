@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `bcftools`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -79,7 +80,7 @@ fn run_bcftools(args: &[String]) -> i32 {
             println!("bcftools sort: sorting...");
             println!("Done. 5678 records written.");
         }
-        _ => println!("bcftools: '{}' completed", subcmd),
+        _ => println!("bcftools: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -93,7 +94,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_bcftools};
+    use super::run_bcftools;
 
     #[test]
     fn help_exits_zero() {

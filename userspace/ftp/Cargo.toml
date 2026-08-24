@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS FTP client"
 [dependencies]
+# The glob pattern that matched nothing is echoed back, for both the remote
+# and the local listing.
+quoting = { path = "../quoting" }
 
 [lints]
 workspace = true

@@ -21,6 +21,7 @@
 // expect_used, panic, indexing_slicing, arithmetic_side_effects) are already
 // set to warn at workspace scope, so they still alert without blocking builds.
 
+use quoting::quotef_os;
 use std::env;
 use std::io::{self, Write};
 use std::process;
@@ -165,9 +166,7 @@ fn tcp_connect(ip: u32, port: u16, timeout_ms: u32) -> Result<u64, WhoisError> {
         )
     };
     if ret < 0 {
-        return Err(WhoisError::ConnectionFailed(format!(
-            "kernel error {ret}"
-        )));
+        return Err(WhoisError::ConnectionFailed(format!("kernel error {ret}")));
     }
     Ok(ret as u64)
 }
@@ -290,10 +289,7 @@ fn detect_query_kind(query: &str) -> QueryKind {
     }
     // Pure digits that could plausibly be a bare ASN (1–10 decimal digits,
     // value ≤ 4294967295).  We cap at 10 to avoid misclassifying long numbers.
-    if !query.is_empty()
-        && query.len() <= 10
-        && query.chars().all(|c| c.is_ascii_digit())
-    {
+    if !query.is_empty() && query.len() <= 10 && query.chars().all(|c| c.is_ascii_digit()) {
         return QueryKind::Asn;
     }
 
@@ -337,11 +333,7 @@ fn whois_server_for(query: &str, kind: &QueryKind) -> &'static str {
 /// Look up the WHOIS server for a domain based on its TLD.
 fn server_for_domain(domain: &str) -> &'static str {
     // Extract the rightmost label (the TLD).
-    let tld = domain
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let tld = domain.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
 
     // Two-level check: first try <sld>.<tld> for commonly delegated SLDs.
     // We do this by extracting the last two labels.
@@ -645,7 +637,9 @@ fn parse_args() -> Result<Args, WhoisError> {
     let argv: Vec<String> = env::args().collect();
 
     if argv.len() < 2 {
-        return Err(WhoisError::InvalidArgument("no query specified".to_string()));
+        return Err(WhoisError::InvalidArgument(
+            "no query specified".to_string(),
+        ));
     }
 
     let mut queries: Vec<String> = Vec::new();
@@ -671,9 +665,9 @@ fn parse_args() -> Result<Args, WhoisError> {
                 let val = argv.get(i).ok_or_else(|| {
                     WhoisError::InvalidArgument(format!("{arg} requires a value"))
                 })?;
-                port = val.parse::<u16>().map_err(|_| {
-                    WhoisError::InvalidArgument(format!("invalid port: '{val}'"))
-                })?;
+                port = val
+                    .parse::<u16>()
+                    .map_err(|_| WhoisError::InvalidArgument(format!("invalid port: '{val}'")))?;
             }
             "--no-referral" => {
                 no_referral = true;
@@ -752,7 +746,7 @@ fn run() -> Result<(), WhoisError> {
                 }
             }
             Err(e) => {
-                eprintln!("whois: {query}: {e}");
+                eprintln!("whois: {}: {e}", quotef_os(query));
             }
         }
 
@@ -951,7 +945,10 @@ mod tests {
 
     #[test]
     fn extract_plain_hostname() {
-        assert_eq!(extract_host_from_referral("whois.ripe.net"), "whois.ripe.net");
+        assert_eq!(
+            extract_host_from_referral("whois.ripe.net"),
+            "whois.ripe.net"
+        );
     }
 
     #[test]
@@ -1027,10 +1024,7 @@ mod tests {
         ];
         for tld in &known {
             let srv = lookup_tld(tld);
-            assert!(
-                !srv.is_empty(),
-                "expected non-empty server for TLD .{tld}"
-            );
+            assert!(!srv.is_empty(), "expected non-empty server for TLD .{tld}");
             assert_ne!(srv, "whois.iana.org", ".{tld} should have its own server");
         }
     }

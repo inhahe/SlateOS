@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `apk`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -37,7 +38,9 @@ fn run_apk(args: &[String]) -> i32 {
     match subcmd {
         "--version" | "version" => println!("apk-tools 2.14.0, compiled for x86_64."),
         "add" => {
-            let pkgs: Vec<&str> = args.iter().skip(1)
+            let pkgs: Vec<&str> = args
+                .iter()
+                .skip(1)
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .collect();
@@ -96,7 +99,7 @@ fn run_apk(args: &[String]) -> i32 {
             let action = args.get(1).map(|s| s.as_str()).unwrap_or("clean");
             println!("apk cache {}: done", action);
         }
-        _ => println!("apk: '{}' completed", subcmd),
+        _ => println!("apk: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -110,7 +113,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_apk};
+    use super::run_apk;
 
     #[test]
     fn help_exits_zero() {

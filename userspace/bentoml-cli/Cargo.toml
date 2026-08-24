@@ -2,3 +2,8 @@
 name = "bentoml-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# bentoml-cli names bentos, models and service tags handed to it on the
+# command line or read out of a downloaded bundle.
+quoting = { path = "../quoting" }

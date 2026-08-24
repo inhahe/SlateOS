@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `supabase`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_supabase(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -73,7 +78,7 @@ fn run_supabase(args: &[String]) -> i32 {
                     println!("-- diff output");
                     println!("ALTER TABLE users ADD COLUMN avatar_url TEXT;");
                 }
-                _ => println!("supabase db: '{}' completed", sub),
+                _ => println!("supabase db: {} completed", quoteaf_os(sub)),
             }
         }
         "functions" => {
@@ -91,9 +96,12 @@ fn run_supabase(args: &[String]) -> i32 {
                 }
                 "new" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("my-function");
-                    println!("Created function {} at supabase/functions/{}/index.ts", name, name);
+                    println!(
+                        "Created function {} at supabase/functions/{}/index.ts",
+                        name, name
+                    );
                 }
-                _ => println!("supabase functions: '{}' completed", sub),
+                _ => println!("supabase functions: {} completed", quoteaf_os(sub)),
             }
         }
         "migration" => {
@@ -108,7 +116,7 @@ fn run_supabase(args: &[String]) -> i32 {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("add_column");
                     println!("Created migration: supabase/migrations/20240615120000_{name}.sql");
                 }
-                _ => println!("supabase migration: '{}' completed", sub),
+                _ => println!("supabase migration: {} completed", quoteaf_os(sub)),
             }
         }
         "projects" => {
@@ -122,14 +130,17 @@ fn run_supabase(args: &[String]) -> i32 {
             let id = args.get(1).map(|s| s.as_str()).unwrap_or("abc12345");
             println!("Linked to project: {}", id);
         }
-        _ => println!("supabase: '{}' completed", subcmd),
+        _ => println!("supabase: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "supabase".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "supabase".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_supabase(&rest);
     process::exit(code);
@@ -137,7 +148,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_supabase};
+    use super::{basename, run_supabase, strip_ext};
 
     #[test]
     fn basename_strips_path() {

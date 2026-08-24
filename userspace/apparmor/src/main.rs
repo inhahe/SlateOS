@@ -15,6 +15,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
@@ -1109,7 +1110,7 @@ fn cmd_status(args: &[String]) -> i32 {
             "--json" => use_json = true,
             "--verbose" | "-v" => _verbose = true,
             other => {
-                eprintln!("aa-status: unknown option '{}'", other);
+                eprintln!("aa-status: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -1224,12 +1225,13 @@ fn cmd_enforce(args: &[String]) -> i32 {
     for profile_arg in args {
         if let Err(e) = set_profile_mode(profile_arg, ProfileMode::Enforce) {
             eprintln!(
-                "aa-enforce: error setting '{}' to enforce: {}",
-                profile_arg, e
+                "aa-enforce: error setting {} to enforce: {}",
+                quoteaf_os(profile_arg),
+                e
             );
             exit_code = 1;
         } else {
-            println!("Setting {} to enforce mode.", profile_arg);
+            println!("Setting {} to enforce mode.", quoteaf_os(profile_arg));
         }
     }
 
@@ -1260,12 +1262,13 @@ fn cmd_complain(args: &[String]) -> i32 {
     for profile_arg in args {
         if let Err(e) = set_profile_mode(profile_arg, ProfileMode::Complain) {
             eprintln!(
-                "aa-complain: error setting '{}' to complain: {}",
-                profile_arg, e
+                "aa-complain: error setting {} to complain: {}",
+                quoteaf_os(profile_arg),
+                e
             );
             exit_code = 1;
         } else {
-            println!("Setting {} to complain mode.", profile_arg);
+            println!("Setting {} to complain mode.", quoteaf_os(profile_arg));
         }
     }
 
@@ -1295,10 +1298,14 @@ fn cmd_disable(args: &[String]) -> i32 {
     let mut exit_code = 0;
     for profile_arg in args {
         if let Err(e) = set_profile_mode(profile_arg, ProfileMode::Disable) {
-            eprintln!("aa-disable: error disabling '{}': {}", profile_arg, e);
+            eprintln!(
+                "aa-disable: error disabling {}: {}",
+                quoteaf_os(profile_arg),
+                e
+            );
             exit_code = 1;
         } else {
-            println!("Disabling {}.", profile_arg);
+            println!("Disabling {}.", quoteaf_os(profile_arg));
         }
     }
 
@@ -1471,7 +1478,7 @@ fn cmd_genprof(args: &[String]) -> i32 {
                 if binary_path.is_empty() {
                     binary_path = arg.to_string();
                 } else {
-                    eprintln!("aa-genprof: unexpected argument '{}'", arg);
+                    eprintln!("aa-genprof: unexpected argument {}", quoteaf_os(arg));
                     return 1;
                 }
             }
@@ -1512,7 +1519,7 @@ fn cmd_genprof(args: &[String]) -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("aa-genprof: cannot write '{}': {}", dest.display(), e);
+            eprintln!("aa-genprof: cannot write {}: {}", quoteaf_os(&dest), e);
             // Still print the generated profile to stdout
             println!("{}", profile_content);
             1
@@ -1561,7 +1568,7 @@ fn cmd_logprof(args: &[String]) -> i32 {
                 }
             }
             other => {
-                eprintln!("aa-logprof: unknown option '{}'", other);
+                eprintln!("aa-logprof: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -1636,7 +1643,7 @@ fn cmd_unconfined(args: &[String]) -> i32 {
             "--paranoid" => with_paranoid = true,
             "--all" => show_all = true,
             other => {
-                eprintln!("aa-unconfined: unknown option '{}'", other);
+                eprintln!("aa-unconfined: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -1780,7 +1787,7 @@ fn cmd_parser(args: &[String]) -> i32 {
             "--quiet" | "-q" => quiet = true,
             arg => {
                 if arg.starts_with('-') {
-                    eprintln!("apparmor_parser: unknown option '{}'", arg);
+                    eprintln!("apparmor_parser: unknown option {}", quoteaf_os(arg));
                     return 1;
                 }
                 profile_files.push(arg.to_string());
@@ -1823,7 +1830,7 @@ fn cmd_parser(args: &[String]) -> i32 {
         let content = match fs::read_to_string(file) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("apparmor_parser: cannot read '{}': {}", file, e);
+                eprintln!("apparmor_parser: cannot read {}: {}", quoteaf_os(file), e);
                 exit_code = 1;
                 continue;
             }
@@ -1884,16 +1891,19 @@ fn process_profile_content(
 
     if profiles.is_empty() {
         if !quiet {
-            eprintln!("apparmor_parser: no profiles found in '{}'", source);
+            eprintln!(
+                "apparmor_parser: no profiles found in {}",
+                quoteaf_os(source)
+            );
         }
         return 1;
     }
 
     if debug {
         eprintln!(
-            "apparmor_parser: found {} profile(s) in '{}'",
+            "apparmor_parser: found {} profile(s) in {}",
             profiles.len(),
-            source
+            quoteaf_os(source)
         );
     }
 
@@ -1930,36 +1940,39 @@ fn process_profile_content(
                     && debug
                 {
                     eprintln!(
-                        "apparmor_parser: cannot load '{}': {} (expected on non-AppArmor systems)",
-                        profile.name, e
+                        "apparmor_parser: cannot load {}: {} (expected on non-AppArmor systems)",
+                        quoteaf_os(&profile.name),
+                        e
                     );
                 }
             }
             ParserAction::Replace => {
                 if !quiet {
-                    println!("Replacing profile: {}", profile.name);
+                    println!("Replacing profile: {}", quoteaf_os(&profile.name));
                 }
                 let replace_path = format!("{}/.replace", APPARMORFS);
                 if let Err(e) = write_profile_to_kernel(&replace_path, profile)
                     && debug
                 {
                     eprintln!(
-                        "apparmor_parser: cannot replace '{}': {} (expected on non-AppArmor systems)",
-                        profile.name, e
+                        "apparmor_parser: cannot replace {}: {} (expected on non-AppArmor systems)",
+                        quoteaf_os(&profile.name),
+                        e
                     );
                 }
             }
             ParserAction::Remove => {
                 if !quiet {
-                    println!("Removing profile: {}", profile.name);
+                    println!("Removing profile: {}", quoteaf_os(&profile.name));
                 }
                 let remove_path = format!("{}/.remove", APPARMORFS);
                 if let Err(e) = write_profile_to_kernel(&remove_path, profile)
                     && debug
                 {
                     eprintln!(
-                        "apparmor_parser: cannot remove '{}': {} (expected on non-AppArmor systems)",
-                        profile.name, e
+                        "apparmor_parser: cannot remove {}: {} (expected on non-AppArmor systems)",
+                        quoteaf_os(&profile.name),
+                        e
                     );
                 }
             }
@@ -2014,8 +2027,8 @@ fn main() {
         "apparmor_parser" => cmd_parser(&sub_args),
         _ => {
             eprintln!(
-                "apparmor: unknown personality '{}', defaulting to aa-status",
-                prog_name
+                "apparmor: unknown personality {}, defaulting to aa-status",
+                quoteaf_os(&prog_name)
             );
             cmd_status(&sub_args)
         }

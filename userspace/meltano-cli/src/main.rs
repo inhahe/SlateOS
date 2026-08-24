@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `meltano`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_meltano(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -32,7 +37,7 @@ fn run_meltano(args: &[String]) -> i32 {
         "--version" => println!("meltano 3.4.0"),
         "init" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("my-project");
-            println!("Creating Meltano project '{}'...", name);
+            println!("Creating Meltano project {}...", quoteaf_os(name));
             println!("  Created: meltano.yml");
             println!("  Created: .meltano/");
             println!("  Created: output/");
@@ -41,13 +46,22 @@ fn run_meltano(args: &[String]) -> i32 {
         "add" => {
             let plugin_type = args.get(1).map(|s| s.as_str()).unwrap_or("extractor");
             let plugin = args.get(2).map(|s| s.as_str()).unwrap_or("tap-csv");
-            println!("Adding {} '{}'...", plugin_type, plugin);
+            println!("Adding {plugin_type} {}...", quoteaf_os(plugin));
             println!("  Installed: {}", plugin);
             println!("  Added to meltano.yml");
         }
         "run" => {
-            let pipeline = args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
-            let pipe = if pipeline.is_empty() { "tap-csv target-jsonl" } else { &pipeline };
+            let pipeline = args
+                .iter()
+                .skip(1)
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let pipe = if pipeline.is_empty() {
+                "tap-csv target-jsonl"
+            } else {
+                &pipeline
+            };
             println!("Running pipeline: {}", pipe);
             println!("  tap-csv      | INFO Starting sync");
             println!("  tap-csv      | INFO Syncing stream: records");
@@ -69,17 +83,20 @@ fn run_meltano(args: &[String]) -> i32 {
                 println!("daily-sync      @daily      tap-csv target-jsonl");
                 println!("hourly-api      @hourly     tap-rest-api target-postgres");
             } else {
-                println!("meltano schedule: '{}' completed", sub);
+                println!("meltano schedule: {} completed", quoteaf_os(sub));
             }
         }
-        _ => println!("meltano: '{}' completed", subcmd),
+        _ => println!("meltano: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "meltano".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "meltano".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_meltano(&rest);
     process::exit(code);
@@ -87,7 +104,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_meltano};
+    use super::{basename, run_meltano, strip_ext};
 
     #[test]
     fn basename_strips_path() {

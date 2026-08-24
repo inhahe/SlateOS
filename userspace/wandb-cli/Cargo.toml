@@ -2,3 +2,8 @@
 name = "wandb-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# wandb-cli names projects, runs and entities, identifiers supplied on the
+# command line and echoed back into a URL.
+quoting = { path = "../quoting" }

@@ -19,6 +19,7 @@
 //! system), then falling back to environment variables (`$BROWSER`,
 //! `$EDITOR`).
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fmt::Write as FmtWrite;
@@ -462,16 +463,18 @@ fn detect_mime_type(path: &str) -> String {
     if let Ok(mut file) = File::open(path) {
         let mut buf = [0u8; MAGIC_BUF_LEN];
         if let Ok(n) = file.read(&mut buf)
-            && let Some(mime) = mime_from_magic(&buf[..n]) {
-                return mime.to_string();
-            }
+            && let Some(mime) = mime_from_magic(&buf[..n])
+        {
+            return mime.to_string();
+        }
     }
 
     // Fall back to extension lookup.
     if let Some(ext) = extract_extension(path)
-        && let Some(mime) = mime_from_extension(&ext) {
-            return mime.to_string();
-        }
+        && let Some(mime) = mime_from_extension(&ext)
+    {
+        return mime.to_string();
+    }
 
     "application/octet-stream".to_string()
 }
@@ -693,9 +696,7 @@ fn lookup_handler_in(apps: &MimeApps, mime: &str) -> Option<String> {
     // First check explicit defaults.
     if let Some(defaults) = apps.defaults.get(mime) {
         for desktop_id in defaults {
-            let dominated = removed
-                .map(|r| r.contains(desktop_id))
-                .unwrap_or(false);
+            let dominated = removed.map(|r| r.contains(desktop_id)).unwrap_or(false);
             if !dominated {
                 return Some(desktop_id.clone());
             }
@@ -705,9 +706,7 @@ fn lookup_handler_in(apps: &MimeApps, mime: &str) -> Option<String> {
     // Then check added associations.
     if let Some(added) = apps.added.get(mime) {
         for desktop_id in added {
-            let dominated = removed
-                .map(|r| r.contains(desktop_id))
-                .unwrap_or(false);
+            let dominated = removed.map(|r| r.contains(desktop_id)).unwrap_or(false);
             if !dominated {
                 return Some(desktop_id.clone());
             }
@@ -784,13 +783,7 @@ fn load_desktop_file(path: &Path) -> Option<DesktopEntry> {
 /// - `%%` — literal `%`
 ///
 /// Unknown `%x` codes are removed.
-fn expand_exec(
-    exec: &str,
-    files: &[&str],
-    icon: &str,
-    name: &str,
-    desktop_path: &str,
-) -> String {
+fn expand_exec(exec: &str, files: &[&str], icon: &str, name: &str, desktop_path: &str) -> String {
     let single = files.first().copied().unwrap_or("");
     let all = files.join(" ");
 
@@ -871,9 +864,10 @@ fn find_desktop_file(desktop_id: &str) -> Option<PathBuf> {
 fn resolve_handler(mime: &str) -> Option<String> {
     for path in mimeapps_search_paths() {
         if let Some(apps) = load_mimeapps(&path)
-            && let Some(handler) = lookup_handler_in(&apps, mime) {
-                return Some(handler);
-            }
+            && let Some(handler) = lookup_handler_in(&apps, mime)
+        {
+            return Some(handler);
+        }
     }
     None
 }
@@ -883,13 +877,7 @@ fn build_command(desktop_id: &str, target: &str) -> Option<(String, Vec<String>)
     let desktop_path = find_desktop_file(desktop_id)?;
     let entry = load_desktop_file(&desktop_path)?;
     let path_str = desktop_path.to_str().unwrap_or("");
-    let expanded = expand_exec(
-        &entry.exec,
-        &[target],
-        &entry.icon,
-        &entry.name,
-        path_str,
-    );
+    let expanded = expand_exec(&entry.exec, &[target], &entry.icon, &entry.name, path_str);
 
     // Split the expanded command into program + args.
     let parts: Vec<String> = shell_split(&expanded);
@@ -956,12 +944,10 @@ fn set_default_handler(mime: &str, desktop_id: &str) -> io::Result<()> {
         if sec.name == "Default Applications" {
             for (key, value) in &sec.entries {
                 if key == mime {
-                    writeln!(out, "{}={}", key, desktop_id)
-                        .expect("string write cannot fail");
+                    writeln!(out, "{}={}", key, desktop_id).expect("string write cannot fail");
                     wrote_mime = true;
                 } else {
-                    writeln!(out, "{}={}", key, value)
-                        .expect("string write cannot fail");
+                    writeln!(out, "{}={}", key, value).expect("string write cannot fail");
                 }
             }
         }
@@ -1004,11 +990,7 @@ fn install_mime_xml(xml_path: &str) -> io::Result<()> {
     let dest = dest_dir.join(file_name);
     fs::copy(src, &dest)?;
 
-    eprintln!(
-        "Installed {} to {}",
-        xml_path,
-        dest.display()
-    );
+    eprintln!("Installed {} to {}", xml_path, dest.display());
     Ok(())
 }
 
@@ -1045,17 +1027,18 @@ fn find_handlers_for_mime(mime: &str) -> Vec<(String, PathBuf)> {
                     continue;
                 }
                 if let Some(de) = load_desktop_file(&path)
-                    && de.mime_types.iter().any(|m| m == mime) {
-                        let name = if de.name.is_empty() {
-                            path.file_name()
-                                .and_then(|f| f.to_str())
-                                .unwrap_or("unknown")
-                                .to_string()
-                        } else {
-                            de.name.clone()
-                        };
-                        results.push((name, path));
-                    }
+                    && de.mime_types.iter().any(|m| m == mime)
+                {
+                    let name = if de.name.is_empty() {
+                        path.file_name()
+                            .and_then(|f| f.to_str())
+                            .unwrap_or("unknown")
+                            .to_string()
+                    } else {
+                        de.name.clone()
+                    };
+                    results.push((name, path));
+                }
             }
         }
     }
@@ -1077,9 +1060,10 @@ fn env_fallback_handler(mime: &str) -> Option<String> {
         }
     }
     if (mime.starts_with("x-scheme-handler/http") || mime == "text/html")
-        && let Ok(browser) = env::var("BROWSER") {
-            return Some(browser);
-        }
+        && let Ok(browser) = env::var("BROWSER")
+    {
+        return Some(browser);
+    }
     None
 }
 
@@ -1105,7 +1089,7 @@ fn run_xdg_open(args: &[String]) -> i32 {
             }
             other => {
                 if other.starts_with('-') {
-                    eprintln!("xdg-open: unknown option '{}'", other);
+                    eprintln!("xdg-open: unknown option {}", quoteaf_os(other));
                     return 1;
                 }
                 target = Some(other);
@@ -1154,8 +1138,8 @@ fn launch_for_mime(mime: &str, target: &str, verbose: bool) -> i32 {
             return exec_command(&program, &args);
         }
         eprintln!(
-            "xdg-open: handler '{}' found but could not build command",
-            desktop_id
+            "xdg-open: handler {} found but could not build command",
+            quoteaf_os(&desktop_id)
         );
     }
 
@@ -1168,8 +1152,9 @@ fn launch_for_mime(mime: &str, target: &str, verbose: bool) -> i32 {
     }
 
     eprintln!(
-        "xdg-open: no handler found for '{}' (MIME: {})",
-        target, mime
+        "xdg-open: no handler found for {} (MIME: {})",
+        quoteaf_os(target),
+        quoteaf_os(mime)
     );
     4 // freedesktop exit code: no handler
 }
@@ -1177,11 +1162,9 @@ fn launch_for_mime(mime: &str, target: &str, verbose: bool) -> i32 {
 /// Execute an external command, returning its exit code.
 fn exec_command(program: &str, args: &[String]) -> i32 {
     match std::process::Command::new(program).args(args).status() {
-        Ok(status) => {
-            status.code().unwrap_or(1)
-        }
+        Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("xdg-open: failed to execute '{}': {}", program, e);
+            eprintln!("xdg-open: failed to execute {}: {}", quoteaf_os(program), e);
             1
         }
     }
@@ -1226,7 +1209,7 @@ fn run_xdg_mime(args: &[String]) -> i32 {
             0
         }
         other => {
-            eprintln!("xdg-mime: unknown subcommand '{}'", other);
+            eprintln!("xdg-mime: unknown subcommand {}", quoteaf_os(other));
             print_xdg_mime_usage();
             1
         }
@@ -1265,7 +1248,7 @@ fn run_xdg_mime_query(args: &[String]) -> i32 {
             }
         }
         other => {
-            eprintln!("xdg-mime query: unknown query type '{}'", other);
+            eprintln!("xdg-mime query: unknown query type {}", quoteaf_os(other));
             1
         }
     }
@@ -1364,7 +1347,7 @@ fn run_mimeopen(args: &[String]) -> i32 {
             }
             other => {
                 if other.starts_with('-') {
-                    eprintln!("mimeopen: unknown option '{}'", other);
+                    eprintln!("mimeopen: unknown option {}", quoteaf_os(other));
                     return 1;
                 }
                 files.push(other.to_string());
@@ -1407,10 +1390,14 @@ fn interactive_open(file: &str, mime: &str, set_default: bool) -> i32 {
     let handlers = find_handlers_for_mime(mime);
 
     if handlers.is_empty() {
-        eprintln!("No handlers found for MIME type '{}'", mime);
+        eprintln!("No handlers found for MIME type {}", quoteaf_os(mime));
         eprintln!("Enter application command to use:");
     } else {
-        eprintln!("Choose an application to open '{}' ({}):", file, mime);
+        eprintln!(
+            "Choose an application to open {} ({}):",
+            quoteaf_os(file),
+            quoteaf_os(mime)
+        );
         for (i, (name, path)) in handlers.iter().enumerate() {
             let desktop_id = path
                 .file_name()
@@ -1443,20 +1430,19 @@ fn interactive_open(file: &str, mime: &str, set_default: bool) -> i32 {
         }
         if choice > 0 && choice <= handlers.len() {
             let (_name, path) = &handlers[choice - 1];
-            let desktop_id = path
-                .file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or("");
+            let desktop_id = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
 
-            if set_default
-                && let Err(e) = set_default_handler(mime, desktop_id) {
-                    eprintln!("Warning: could not set default: {}", e);
-                }
+            if set_default && let Err(e) = set_default_handler(mime, desktop_id) {
+                eprintln!("Warning: could not set default: {}", e);
+            }
 
             if let Some((program, args)) = build_command(desktop_id, file) {
                 return exec_command(&program, &args);
             }
-            eprintln!("mimeopen: could not build command for '{}'", desktop_id);
+            eprintln!(
+                "mimeopen: could not build command for {}",
+                quoteaf_os(desktop_id)
+            );
             return 1;
         }
     }
@@ -1783,10 +1769,7 @@ mod tests {
 
     #[test]
     fn ext_sqlite() {
-        assert_eq!(
-            mime_from_extension("sqlite"),
-            Some("application/x-sqlite3")
-        );
+        assert_eq!(mime_from_extension("sqlite"), Some("application/x-sqlite3"));
     }
 
     #[test]
@@ -1990,7 +1973,10 @@ image/png=imageviewer.desktop
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].name, "Default Applications");
         assert_eq!(sections[0].entries.len(), 3);
-        assert_eq!(sections[0].entries[0], ("text/plain".into(), "editor.desktop".into()));
+        assert_eq!(
+            sections[0].entries[0],
+            ("text/plain".into(), "editor.desktop".into())
+        );
     }
 
     #[test]
@@ -2171,8 +2157,7 @@ Exec=bar
 
     #[test]
     fn expand_exec_percent_u() {
-        let result =
-            expand_exec("/usr/bin/browser %u", &["https://example.com"], "", "", "");
+        let result = expand_exec("/usr/bin/browser %u", &["https://example.com"], "", "", "");
         assert_eq!(result, "/usr/bin/browser https://example.com");
     }
 
@@ -2274,10 +2259,7 @@ Exec=bar
 
     #[test]
     fn url_file() {
-        assert_eq!(
-            detect_url_scheme("file:///tmp/test"),
-            Some(UrlScheme::File)
-        );
+        assert_eq!(detect_url_scheme("file:///tmp/test"), Some(UrlScheme::File));
     }
 
     #[test]
@@ -2327,10 +2309,7 @@ Exec=bar
 
     #[test]
     fn extract_ext_path_with_dirs() {
-        assert_eq!(
-            extract_extension("/home/user/doc.pdf"),
-            Some("pdf".into())
-        );
+        assert_eq!(extract_extension("/home/user/doc.pdf"), Some("pdf".into()));
     }
 
     // --- MIME type category helpers ---

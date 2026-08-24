@@ -20,6 +20,7 @@
 //! printenv NAME [NAME...]         Display specific variables (exit 1 if missing)
 //! ```
 
+use quoting::quoteaf_os;
 use std::collections::BTreeMap;
 use std::env;
 use std::path::Path;
@@ -123,8 +124,16 @@ fn parse_env_args(args: &[String]) -> Action {
         // Long options.
         if arg.starts_with("--") {
             match arg.as_str() {
-                "--help" => return Action::Help { printenv_mode: false },
-                "--version" => return Action::Version { printenv_mode: false },
+                "--help" => {
+                    return Action::Help {
+                        printenv_mode: false,
+                    };
+                }
+                "--version" => {
+                    return Action::Version {
+                        printenv_mode: false,
+                    };
+                }
                 "--ignore-environment" => {
                     config.ignore_env = true;
                 }
@@ -154,7 +163,7 @@ fn parse_env_args(args: &[String]) -> Action {
                     config.chdir = Some(dir);
                 }
                 _ => {
-                    eprintln!("env: unrecognized option '{arg}'");
+                    eprintln!("env: unrecognized option {}", quoteaf_os(arg));
                     eprintln!("Try 'env --help' for more information.");
                     process::exit(125);
                 }
@@ -222,7 +231,10 @@ fn parse_env_args(args: &[String]) -> Action {
                         continue;
                     }
                     _ => {
-                        eprintln!("env: invalid option -- '{}'", chars[j]);
+                        eprintln!(
+                            "env: invalid option -- {}",
+                            quoteaf_os(chars[j].to_string())
+                        );
                         eprintln!("Try 'env --help' for more information.");
                         process::exit(125);
                     }
@@ -236,13 +248,14 @@ fn parse_env_args(args: &[String]) -> Action {
         // Check for NAME=VALUE assignment (must contain '=' and not start
         // with '=' to be a valid assignment).
         if let Some(eq_pos) = arg.find('=')
-            && eq_pos > 0 {
-                let name = arg[..eq_pos].to_string();
-                let value = arg[eq_pos + 1..].to_string();
-                config.modifications.push(EnvMod::Set { name, value });
-                i += 1;
-                continue;
-            }
+            && eq_pos > 0
+        {
+            let name = arg[..eq_pos].to_string();
+            let value = arg[eq_pos + 1..].to_string();
+            config.modifications.push(EnvMod::Set { name, value });
+            i += 1;
+            continue;
+        }
 
         // Not an option, not an assignment -- this is the start of the command.
         options_done = true;
@@ -266,8 +279,16 @@ fn parse_printenv_args(args: &[String]) -> Action {
 
     for arg in &args[1..] {
         match arg.as_str() {
-            "--help" | "-h" => return Action::Help { printenv_mode: true },
-            "--version" => return Action::Version { printenv_mode: true },
+            "--help" | "-h" => {
+                return Action::Help {
+                    printenv_mode: true,
+                };
+            }
+            "--version" => {
+                return Action::Version {
+                    printenv_mode: true,
+                };
+            }
             "-0" | "--null" => {
                 config.null_terminate = true;
             }
@@ -283,7 +304,7 @@ fn parse_printenv_args(args: &[String]) -> Action {
                     }
                 }
                 if !valid {
-                    eprintln!("printenv: unrecognized option '{arg}'");
+                    eprintln!("printenv: unrecognized option {}", quoteaf_os(arg));
                     eprintln!("Try 'printenv --help' for more information.");
                     process::exit(2);
                 }
@@ -408,10 +429,11 @@ fn exec_command(
 
     // Change directory if requested.
     if let Some(dir) = chdir
-        && let Err(e) = env::set_current_dir(dir) {
-            eprintln!("env: cannot change directory to '{dir}': {e}");
-            return 125;
-        }
+        && let Err(e) = env::set_current_dir(dir)
+    {
+        eprintln!("env: cannot change directory to {}: {e}", quoteaf_os(dir));
+        return 125;
+    }
 
     let mut cmd = process::Command::new(program);
 
@@ -427,12 +449,10 @@ fn exec_command(
     }
 
     match cmd.status() {
-        Ok(status) => {
-            status.code().unwrap_or(128)
-        }
+        Ok(status) => status.code().unwrap_or(128),
         Err(e) => {
             let kind = e.kind();
-            eprintln!("env: '{program}': {e}");
+            eprintln!("env: {}: {e}", quoteaf_os(program));
             match kind {
                 std::io::ErrorKind::NotFound => 127,
                 std::io::ErrorKind::PermissionDenied => 126,

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `ceph`, `rados`, `rbd`, `ceph-fuse`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ceph(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -69,8 +74,10 @@ fn run_ceph(args: &[String]) -> i32 {
                 println!("ceph: osd {} completed", sub2);
             }
         }
-        "mon" => println!("e3: 3 mons at {{a=[v2:192.168.1.10:3300],b=[v2:192.168.1.11:3300],c=[v2:192.168.1.12:3300]}}"),
-        _ => println!("ceph: command '{}' completed", subcmd),
+        "mon" => println!(
+            "e3: 3 mons at {{a=[v2:192.168.1.10:3300],b=[v2:192.168.1.11:3300],c=[v2:192.168.1.12:3300]}}"
+        ),
+        _ => println!("ceph: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -90,7 +97,7 @@ fn run_rbd(args: &[String]) -> i32 {
         }
         "info" => {
             let img = args.get(1).map(|s| s.as_str()).unwrap_or("vm-disk-1");
-            println!("rbd image '{}':", img);
+            println!("rbd image {}:", quoteaf_os(img));
             println!("\tsize 100 GiB in 25600 objects");
             println!("\torder 22 (4 MiB objects)");
             println!("\tformat: 2");
@@ -103,12 +110,21 @@ fn run_rbd(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "ceph".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "ceph".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
-        "rados" => { println!("rados: pool list completed"); 0 }
+        "rados" => {
+            println!("rados: pool list completed");
+            0
+        }
         "rbd" => run_rbd(&rest),
-        "ceph-fuse" => { println!("ceph-fuse: mounting CephFS at /mnt/cephfs"); 0 }
+        "ceph-fuse" => {
+            println!("ceph-fuse: mounting CephFS at /mnt/cephfs");
+            0
+        }
         _ => run_ceph(&rest),
     };
     process::exit(code);
@@ -116,7 +132,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ceph};
+    use super::{basename, run_ceph, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -18,6 +18,7 @@
 //!       --version   Output version information and exit
 //! ```
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
@@ -105,12 +106,12 @@ fn parse_args(args: &[String]) -> ParseResult {
                 match val_str.parse::<usize>() {
                     Ok(n) => width = Some(n),
                     Err(_) => {
-                        eprintln!("fold: invalid width: '{val_str}'");
+                        eprintln!("fold: invalid width: {}", quoteaf_os(&val_str));
                         process::exit(1);
                     }
                 }
             } else {
-                eprintln!("fold: unrecognized option '{arg}'");
+                eprintln!("fold: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'fold --help' for more information.");
                 process::exit(1);
             }
@@ -142,14 +143,14 @@ fn parse_args(args: &[String]) -> ParseResult {
                     match val_str.parse::<usize>() {
                         Ok(n) => width = Some(n),
                         Err(_) => {
-                            eprintln!("fold: invalid width: '{val_str}'");
+                            eprintln!("fold: invalid width: {}", quoteaf_os(&val_str));
                             process::exit(1);
                         }
                     }
                     break;
                 }
                 _ => {
-                    eprintln!("fold: invalid option -- '{ch}'");
+                    eprintln!("fold: invalid option -- {}", quoteaf_os(ch.to_string()));
                     eprintln!("Try 'fold --help' for more information.");
                     process::exit(1);
                 }
@@ -257,7 +258,7 @@ fn fold_line_columns<W: Write>(
         let new_col = match ch {
             '\t' => {
                 // Advance to the next tab stop.
-                
+
                 (col / TAB_STOP + 1) * TAB_STOP
             }
             '\x08' => {
@@ -269,41 +270,40 @@ fn fold_line_columns<W: Write>(
 
         if new_col > width {
             // This character would push us past the width limit.
-            if spaces
-                && let Some(sp_end) = last_space_buf_end {
-                    // Break at the last space: emit up to (and including)
-                    // the space, then carry over the remainder.
-                    out.write_all(&buf.as_bytes()[..sp_end])?;
+            if spaces && let Some(sp_end) = last_space_buf_end {
+                // Break at the last space: emit up to (and including)
+                // the space, then carry over the remainder.
+                out.write_all(&buf.as_bytes()[..sp_end])?;
+                out.write_all(b"\n")?;
+
+                let leftover = buf[sp_end..].to_string();
+                buf.clear();
+                buf.push_str(&leftover);
+
+                // Recompute column for the leftover portion.
+                col = recompute_column(&leftover);
+                last_space_buf_end = None;
+
+                // Now try to fit the current character again.
+                let retry_col = char_advance(col, ch);
+                if retry_col > width && col > 0 {
+                    // Still doesn't fit -- flush what we have and
+                    // put the character on a fresh line.
+                    out.write_all(buf.as_bytes())?;
                     out.write_all(b"\n")?;
-
-                    let leftover = buf[sp_end..].to_string();
                     buf.clear();
-                    buf.push_str(&leftover);
-
-                    // Recompute column for the leftover portion.
-                    col = recompute_column(&leftover);
+                    col = 0;
                     last_space_buf_end = None;
-
-                    // Now try to fit the current character again.
-                    let retry_col = char_advance(col, ch);
-                    if retry_col > width && col > 0 {
-                        // Still doesn't fit -- flush what we have and
-                        // put the character on a fresh line.
-                        out.write_all(buf.as_bytes())?;
-                        out.write_all(b"\n")?;
-                        buf.clear();
-                        col = 0;
-                        last_space_buf_end = None;
-                    }
-
-                    buf.push(ch);
-                    col = char_advance(col, ch);
-
-                    if ch == ' ' {
-                        last_space_buf_end = Some(buf.len());
-                    }
-                    continue;
                 }
+
+                buf.push(ch);
+                col = char_advance(col, ch);
+
+                if ch == ' ' {
+                    last_space_buf_end = Some(buf.len());
+                }
+                continue;
+            }
 
             // No space break available (or -s not active): hard break now.
             out.write_all(buf.as_bytes())?;
@@ -415,7 +415,7 @@ fn run(config: &Config) -> io::Result<i32> {
                     fold_input(&mut reader, &mut out, config)?;
                 }
                 Err(e) => {
-                    eprintln!("fold: {path}: {e}");
+                    eprintln!("fold: {}: {e}", quotef_os(path));
                     exit_code = 1;
                 }
             }

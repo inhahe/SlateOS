@@ -4,6 +4,7 @@
 //!
 //! Single personality: `notion`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -29,11 +30,21 @@ fn run_notion(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    println!("ID                                   Title                    Last Edited");
-                    println!("abc123-def456-ghi789                 Project Roadmap          2024-01-15");
-                    println!("jkl012-mno345-pqr678                 Meeting Notes            2024-01-15");
-                    println!("stu901-vwx234-yza567                 Technical Specs          2024-01-14");
-                    println!("bcd890-efg123-hij456                 Team Wiki                2024-01-13");
+                    println!(
+                        "ID                                   Title                    Last Edited"
+                    );
+                    println!(
+                        "abc123-def456-ghi789                 Project Roadmap          2024-01-15"
+                    );
+                    println!(
+                        "jkl012-mno345-pqr678                 Meeting Notes            2024-01-15"
+                    );
+                    println!(
+                        "stu901-vwx234-yza567                 Technical Specs          2024-01-14"
+                    );
+                    println!(
+                        "bcd890-efg123-hij456                 Team Wiki                2024-01-13"
+                    );
                 }
                 "get" => {
                     let id = args.get(2).map(|s| s.as_str()).unwrap_or("abc123...");
@@ -45,11 +56,17 @@ fn run_notion(args: Vec<String>) -> i32 {
                     println!("  Parent:      Engineering Space");
                 }
                 "create" => {
-                    let title = args.windows(2).find(|w| w[0] == "--title").map(|w| w[1].as_str()).unwrap_or("New Page");
+                    let title = args
+                        .windows(2)
+                        .find(|w| w[0] == "--title")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("New Page");
                     println!("✔ Created page: {}", title);
                     println!("  ID: new-page-abc123");
                 }
-                _ => { println!("Page operation: {}", sub); }
+                _ => {
+                    println!("Page operation: {}", sub);
+                }
             }
             0
         }
@@ -58,8 +75,12 @@ fn run_notion(args: Vec<String>) -> i32 {
             match sub {
                 "list" => {
                     println!("ID                   Title              Properties");
-                    println!("db-abc123            Tasks              Name, Status, Assignee, Priority, Due");
-                    println!("db-def456            Bugs               Title, Severity, Reporter, Status");
+                    println!(
+                        "db-abc123            Tasks              Name, Status, Assignee, Priority, Due"
+                    );
+                    println!(
+                        "db-def456            Bugs               Title, Severity, Reporter, Status"
+                    );
                     println!("db-ghi789            Content Calendar   Title, Date, Author, Status");
                 }
                 "query" => {
@@ -70,13 +91,15 @@ fn run_notion(args: Vec<String>) -> i32 {
                     println!("  Add dark mode       To Do        Bob         Medium");
                     println!("  Update docs         Done         Charlie     Low");
                 }
-                _ => { println!("Database operation: {}", sub); }
+                _ => {
+                    println!("Database operation: {}", sub);
+                }
             }
             0
         }
         "search" => {
             let query = args.get(1).map(|s| s.as_str()).unwrap_or("roadmap");
-            println!("Search results for '{}':", query);
+            println!("Search results for {}:", quoteaf_os(query));
             println!("  [page]     Project Roadmap          Engineering Space");
             println!("  [database] Q1 Roadmap               Planning");
             println!("  [page]     Roadmap Review Notes     Meeting Notes");
@@ -103,7 +126,9 @@ fn run_notion(args: Vec<String>) -> i32 {
                     println!("  [bulleted_list] Migrate to new API");
                     println!("  [to_do]        Review security audit ☐");
                 }
-                _ => { println!("Block operation: {}", sub); }
+                _ => {
+                    println!("Block operation: {}", sub);
+                }
             }
             0
         }
@@ -111,7 +136,7 @@ fn run_notion(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: notion <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -127,7 +152,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_notion};
+    use super::run_notion;
 
     #[test]
     fn help_exits_zero() {

@@ -23,5 +23,11 @@ description = "SlateOS shared crash-safe file writes — write-to-temporary-and-
 # known-issues.md "safeio adoption is not enforced by any test".
 audit = []
 
+# Test fixtures only: a private temp directory per test, removed on drop --
+# named from the process id and a counter, so two tests in one process can
+# never draw the same name the way a clock-tagged name could.
+[dev-dependencies]
+scratchdir = { path = "../../userspace/scratchdir" }
+
 [lints]
 workspace = true

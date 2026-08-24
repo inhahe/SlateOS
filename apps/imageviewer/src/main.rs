@@ -1785,6 +1785,7 @@ mod tests {
     )]
 
     use super::*;
+    use scratchdir::ScratchDir;
 
     /// One detent is one zoom step, and the direction is the one every other
     /// viewer uses: wheel away from the user zooms in.
@@ -2282,13 +2283,21 @@ mod tests {
 
     // ---- A failed load must not leave the previous image on screen ----
 
-    /// A scratch directory unique to one test, so the suite can run in
-    /// parallel without two tests fighting over the same names.
-    fn scratch(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("slateos-imageviewer-{label}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create scratch dir");
-        dir
+    /// A private temporary directory for one test, removed when the returned
+    /// guard drops.
+    ///
+    /// The name used to be a fixed string per test, which two runs of the suite
+    /// at once -- or one run under `cargo test` on a machine where a previous
+    /// run was killed -- would collide on; the old code papered over that by
+    /// deleting the directory on the way in, which silently destroys the other
+    /// run's tree. `ScratchDir` names itself from the process id and a
+    /// per-process atomic counter, so no two live tests can ever pick the same
+    /// name and nothing has to be deleted on the way in.
+    ///
+    /// Bind the guard to a named local, never to `_`: a bare `_` drops it
+    /// immediately and the directory is gone before the test's first line.
+    fn scratch(label: &str) -> ScratchDir {
+        ScratchDir::new(&format!("slateos-imageviewer-{label}"))
     }
 
     /// A minimal but genuine PNG header, enough for `ImageFormat::detect` and
@@ -2308,7 +2317,8 @@ mod tests {
     /// the *new* filename over the *old* picture and the old dimensions.
     #[test]
     fn a_file_that_will_not_open_does_not_keep_the_last_image_on_screen() {
-        let dir = scratch("stale-image");
+        let guard = scratch("stale-image");
+        let dir = guard.dir().to_path_buf();
         let good = dir.join("real.png");
         std::fs::write(&good, png_bytes(640, 480)).expect("write png");
 
@@ -2342,8 +2352,6 @@ mod tests {
             "the old image's format must not be shown beside the new name"
         );
         assert!(state.load_error.is_some(), "the failure must be explained");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The two empty states must render differently: "you opened nothing" and
@@ -2356,7 +2364,8 @@ mod tests {
         let fresh_text = collect_text(&fresh);
         assert!(fresh_text.iter().any(|t| t.contains("No image loaded")));
 
-        let dir = scratch("render-error");
+        let guard = scratch("render-error");
+        let dir = guard.dir().to_path_buf();
         assert!(!state.open_file(&dir.join("nope.png")));
 
         let failed = render(&state);
@@ -2375,15 +2384,14 @@ mod tests {
             failed_text.iter().any(|t| t.contains("nope.png")),
             "the reason must name the file: {failed_text:?}"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A successful load after a failed one must clear the failure, or the
     /// viewer keeps apologising for a file the user has moved on from.
     #[test]
     fn a_successful_load_clears_the_previous_failure() {
-        let dir = scratch("clears-error");
+        let guard = scratch("clears-error");
+        let dir = guard.dir().to_path_buf();
         let good = dir.join("real.png");
         std::fs::write(&good, png_bytes(32, 16)).expect("write png");
 
@@ -2395,8 +2403,6 @@ mod tests {
         assert!(state.load_error.is_none());
         assert_eq!(state.image_info.filename, "real.png");
         assert_eq!((state.image_info.width, state.image_info.height), (32, 16));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Navigating onto a file whose dimensions cannot be read must show *no*
@@ -2404,7 +2410,8 @@ mod tests {
     /// there: the arrow key that reached it has to carry them off it again.
     #[test]
     fn navigation_onto_an_unreadable_file_shows_no_stale_dimensions() {
-        let dir = scratch("nav-broken");
+        let guard = scratch("nav-broken");
+        let dir = guard.dir().to_path_buf();
         std::fs::write(dir.join("a.png"), png_bytes(10, 10)).expect("write a");
         std::fs::write(dir.join("b.png"), b"not a png at all").expect("write b");
         std::fs::write(dir.join("c.png"), png_bytes(30, 30)).expect("write c");
@@ -2427,8 +2434,6 @@ mod tests {
             "navigation must not stop at the file it could not display"
         );
         assert_eq!((state.image_info.width, state.image_info.height), (30, 30));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Every `Text` command in a render tree, so a test can assert on what the

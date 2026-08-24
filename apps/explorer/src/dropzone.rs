@@ -931,12 +931,13 @@ mod tests {
     /// inside it. `starts_with` alone said the drop was fine.
     #[test]
     fn nested_drop_sees_through_a_parent_component() {
-        let dir = std::env::temp_dir().join(format!(
-            "dropzone_nested_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
-        ));
+        // Named from the process id and a per-process counter rather than from
+        // the clock: `cargo test` runs this binary's tests as threads of one
+        // process, and the clock they read only advances on a timer interrupt,
+        // so a nanosecond tag is shared by every test that starts in the same
+        // tick and they would scribble on each other's trees.
+        let scratch = scratchdir::ScratchDir::new("dropzone_nested");
+        let dir = scratch.dir();
         let project = dir.join("project");
         std::fs::create_dir_all(project.join("sub")).expect("tree");
 
@@ -953,8 +954,6 @@ mod tests {
         let sibling = dir.join("elsewhere");
         std::fs::create_dir_all(&sibling).expect("sibling");
         assert!(check_nested_drop(&sources, &sibling).is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ------------------------------------------------------------------

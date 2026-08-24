@@ -5472,6 +5472,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use scratchdir::ScratchDir;
 
     // --- Document tests ---
 
@@ -5502,7 +5503,7 @@ mod tests {
     #[test]
     fn both_save_paths_go_through_safeio() {
         // save_as: writes to the path it is handed and adopts it.
-        let as_path = temp_path("routing_save_as");
+        let (_scratch, as_path) = temp_path("routing_save_as");
         let mut doc = Document::new();
         doc.lines = vec!["# notes".to_string(), "body".to_string()];
 
@@ -5529,8 +5530,6 @@ mod tests {
             std::fs::read_to_string(&as_path).expect("read back save"),
             "# notes\nbody\nmore"
         );
-
-        let _ = std::fs::remove_file(&as_path);
     }
 
     #[test]
@@ -7254,14 +7253,24 @@ mod tests {
 
     // --- External-change / three-way merge tests ---
 
-    fn temp_path(tag: &str) -> PathBuf {
-        let mut p = std::env::temp_dir();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        p.push(format!("slate_md_test_{tag}_{nanos}.md"));
-        p
+    /// A scratch file path for one test, together with the guard that owns the
+    /// directory it lives in. The file and its directory are removed when the
+    /// guard drops -- including during a panic unwind, which the manual
+    /// `let _ = fs::remove_file(...)` trailers this replaces did not do.
+    ///
+    /// The name used to carry the system clock in nanoseconds, which is not
+    /// unique. `cargo test` runs a binary's tests as threads of one process,
+    /// and the clock a thread reads is only refreshed on a timer interrupt, so
+    /// every test that starts within the same tick draws the same tag and they
+    /// fight over one file. `ScratchDir` names itself from the process id and a
+    /// per-process atomic counter, which is unique by construction.
+    ///
+    /// Bind the guard to a named local -- `let (_scratch, path) = ...` -- never
+    /// to a bare `_`, which drops it before the test's first line.
+    fn temp_path(tag: &str) -> (ScratchDir, PathBuf) {
+        let scratch = ScratchDir::new(&format!("slate_md_test_{tag}"));
+        let p = scratch.path("doc.md");
+        (scratch, p)
     }
 
     // --- A save that fails must say so -------------------------------------
@@ -7275,8 +7284,13 @@ mod tests {
 
     /// A path whose *parent directory does not exist*, so `fs::write` to it
     /// fails on every platform without needing permissions to be manipulated.
-    fn unwritable_path(tag: &str) -> PathBuf {
-        temp_path(tag).join("no_such_dir").join("doc.md")
+    ///
+    /// The guard comes back with it: the missing parent is missing *inside* a
+    /// real scratch directory, and that directory still has to be cleaned up.
+    fn unwritable_path(tag: &str) -> (ScratchDir, PathBuf) {
+        let (scratch, p) = temp_path(tag);
+        let p = p.join("no_such_dir").join("doc.md");
+        (scratch, p)
     }
 
     #[test]
@@ -7284,7 +7298,8 @@ mod tests {
         let mut app = App::new(1280.0, 800.0);
         app.active_document_mut().lines = vec!["precious".to_string()];
         app.active_document_mut().modified = true;
-        app.active_document_mut().path = Some(unwritable_path("ctrl_s"));
+        let (_scratch, bad_path) = unwritable_path("ctrl_s");
+        app.active_document_mut().path = Some(bad_path);
 
         handle_key(
             &mut app,
@@ -7306,11 +7321,12 @@ mod tests {
 
     #[test]
     fn a_successful_save_clears_the_message() {
-        let path = temp_path("md_clears");
+        let (_scratch, path) = temp_path("md_clears");
         let mut app = App::new(1280.0, 800.0);
         app.active_document_mut().lines = vec!["ok".to_string()];
         app.active_document_mut().modified = true;
-        app.active_document_mut().path = Some(unwritable_path("clears"));
+        let (_scratch, bad_path) = unwritable_path("clears");
+        app.active_document_mut().path = Some(bad_path);
         assert!(!app.save_active());
         assert!(app.save_error.is_some());
 
@@ -7319,7 +7335,6 @@ mod tests {
 
         assert!(app.save_error.is_none(), "stale complaint left on screen");
         assert!(!app.active_document().modified);
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -7331,7 +7346,8 @@ mod tests {
         app.autosave_interval = 1;
         app.active_document_mut().lines = vec!["work".to_string()];
         app.active_document_mut().modified = true;
-        app.active_document_mut().path = Some(unwritable_path("autosave"));
+        let (_scratch, bad_path) = unwritable_path("autosave");
+        app.active_document_mut().path = Some(bad_path);
 
         app.tick_autosave(60);
 
@@ -7342,7 +7358,7 @@ mod tests {
 
     #[test]
     fn an_autosave_that_works_clears_an_earlier_complaint() {
-        let path = temp_path("md_autoclear");
+        let (_scratch, path) = temp_path("md_autoclear");
         let mut app = App::new(1280.0, 800.0);
         app.autosave_enabled = true;
         app.autosave_interval = 1;
@@ -7354,7 +7370,6 @@ mod tests {
         app.tick_autosave(60);
 
         assert!(app.save_error.is_none());
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -7393,7 +7408,7 @@ mod tests {
 
     #[test]
     fn test_disk_changed_detects_modification() {
-        let path = temp_path("md_detect");
+        let (_scratch, path) = temp_path("md_detect");
         std::fs::write(&path, b"# Title\n\nbody\n").unwrap();
         let doc = Document::from_file(&path).unwrap();
         assert_eq!(doc.disk_changed(), DiskChange::Unchanged);
@@ -7402,7 +7417,6 @@ mod tests {
             DiskChange::Modified { disk } => assert_eq!(disk, "# Title\n\nCHANGED body"),
             other => panic!("expected Modified, got {other:?}"),
         }
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -7419,7 +7433,7 @@ mod tests {
 
     #[test]
     fn test_review_and_accept_ours() {
-        let path = temp_path("md_review");
+        let (_scratch, path) = temp_path("md_review");
         std::fs::write(&path, b"shared\n").unwrap();
         let mut app = App::new(1280.0, 800.0);
         app.open_file(&path).unwrap();
@@ -7432,19 +7446,17 @@ mod tests {
         app.review_accept();
         assert!(app.external_prompt.is_none());
         assert_eq!(app.active_document().full_text(), "local");
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn test_auto_reload_unmodified() {
-        let path = temp_path("md_autoreload");
+        let (_scratch, path) = temp_path("md_autoreload");
         std::fs::write(&path, b"first\n").unwrap();
         let mut app = App::new(1280.0, 800.0);
         app.open_file(&path).unwrap();
         std::fs::write(&path, b"second\n").unwrap();
         assert!(!app.check_external_change());
         assert_eq!(app.active_document().full_text(), "second");
-        let _ = std::fs::remove_file(&path);
     }
     // --- Text measurement ---
 

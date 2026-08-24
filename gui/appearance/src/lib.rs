@@ -758,22 +758,53 @@ pub const LIGHT_EXTREME: Color = Color::from_hex(0xEFF1F5);
 /// a leftover `CRUST` constant. See `gui/desktop/src/palette_check.rs`.
 pub const DARK_EXTREME: Color = Color::from_hex(0x11111B);
 
+/// The relative luminance of an opaque colour, and the WCAG 2 contrast ratio
+/// between two of them — re-exported from the toolkit, not defined here.
+///
+/// They belong there because the toolkit is what everything else on this
+/// desktop already depends on, whereas this crate is not: a widget asking
+/// which ink to use cannot reach an answer that lives in the appearance model,
+/// so if the answer lived here the toolkit would grow a second one. It did,
+/// for a while, and the copy was wrong for 41.78 % of the colour cube. See
+/// `guitk::theme::contrast_text`.
+///
+/// The re-export is deliberate rather than a wrapper: a wrapper would be a
+/// place where the two could drift apart.
+pub use guitk::theme::{contrast_ratio, relative_luminance};
+
 /// Black-ish or white-ish, whichever can be read on `bg`.
 ///
 /// The endpoints are the palettes' own extremes rather than pure `#000`/`#fff`
-/// so that accented surfaces still look like part of this desktop. Perceived
-/// brightness uses the usual luma weights: the eye is far more sensitive to
-/// green than to blue, so an average of the channels would call a saturated
-/// blue "bright" and put black text on it.
+/// so that accented surfaces still look like part of this desktop.
+///
+/// **The choice is measured, not estimated.** This asks
+/// [`contrast_ratio`] which of the two extremes is further from `bg` and
+/// returns that one, so the answer is the better one *by the same metric the
+/// accessibility floors are stated in* — there is no second definition of
+/// "bright" that could disagree with the ratio a test then measures.
+///
+/// That is worth stating because the obvious cheaper answer is wrong. This
+/// used to threshold a luma sum at 140, and a luma sum is not a monotone
+/// function of contrast: `#00EE02`, a perfectly legal custom accent, has a
+/// luma of 139.9 and so was called dark and inked pale, at **1.40:1**. The
+/// contrast comparison has no such corner — the worst background in the
+/// entire 24-bit cube is `#B82EE5`, and even there the returned ink reaches
+/// **4.07:1**, which is the floor this function guarantees for *any* colour a
+/// user can choose. A threshold cannot make that promise; it is exactly as
+/// good as the values that happen to be in the palette on the day it is tuned.
 ///
 /// Deliberately not [`guitk::theme::contrast_text`], which answers the same
 /// question with pure black and pure white. That is the right answer for a
 /// widget that may be drawn on any background; this is the right answer for a
-/// surface that belongs to a specific palette.
+/// surface that belongs to a specific palette. The two now share their
+/// arithmetic — [`contrast_ratio`] *is* the toolkit's — so the only thing that
+/// differs between them is the pair of inks they choose between.
 #[must_use]
 pub fn readable_on(bg: Color) -> Color {
-    let luma = 0.299 * f32::from(bg.r) + 0.587 * f32::from(bg.g) + 0.114 * f32::from(bg.b);
-    if luma > 140.0 {
+    // `>=` rather than `>`: at the exact crossover both inks are equally
+    // legible, and preferring the dark one keeps the answer stable for the
+    // palettes' own surfaces, which are overwhelmingly pale.
+    if contrast_ratio(bg, DARK_EXTREME) >= contrast_ratio(bg, LIGHT_EXTREME) {
         DARK_EXTREME
     } else {
         LIGHT_EXTREME
@@ -2249,6 +2280,16 @@ mod tests {
     ///
     /// 4.5 is the AA threshold for body text and 3.0 the one for large text;
     /// a title bar's own label is large and bold enough for the latter.
+    ///
+    /// **Deliberately a second implementation of [`contrast_ratio`], not a
+    /// call to it.** Everything below states a floor as a ratio, and
+    /// `readable_on` now *chooses* by that same ratio — so measuring the
+    /// choice with the function that made it would assert the production code
+    /// against itself and pass however wrong it was. Transcribed from the
+    /// WCAG 2 definition instead, the same way the Catppuccin values below are
+    /// transcribed from the published palette and for the same reason.
+    /// [`the_published_ratios_are_what_this_crate_computes`] is what keeps the
+    /// two honest about being the same function.
     fn contrast(a: Color, b: Color) -> f32 {
         fn channel(c: u8) -> f32 {
             let c = f32::from(c) / 255.0;
@@ -2338,12 +2379,161 @@ mod tests {
             Color::from_hex(0xEFF1F5)
         );
         // A saturated blue is dark to the eye however bright its one channel
-        // is; averaging the channels instead of weighting them would call this
-        // one light and put black text on it.
+        // is: near-white on `#0000FF` is 7.60:1 and near-black only 2.18:1.
+        // Any rule that read the largest channel, or averaged the three
+        // unweighted, would call this one light and put black text on it.
         assert_eq!(
             readable_on(Color::from_hex(0x0000FF)),
             Color::from_hex(0xEFF1F5)
         );
+    }
+
+    /// [`contrast_ratio`] is the WCAG ratio and not merely something shaped
+    /// like it.
+    ///
+    /// The three anchors are definitional rather than measured, so this can be
+    /// checked by hand against the standard: a colour against itself is 1:1,
+    /// black against white is 21:1 exactly, and the ratio does not care which
+    /// way round its arguments are given.
+    #[test]
+    fn the_published_ratios_are_what_this_crate_computes() {
+        let (black, white) = (Color::from_hex(0x000000), Color::from_hex(0xFFFFFF));
+        assert!((contrast_ratio(black, black) - 1.0).abs() < 0.001);
+        assert!((contrast_ratio(white, white) - 1.0).abs() < 0.001);
+        assert!(
+            (contrast_ratio(black, white) - 21.0).abs() < 0.01,
+            "black on white came out {:.4}:1, and it is 21:1 by definition",
+            contrast_ratio(black, white)
+        );
+        assert!((contrast_ratio(white, black) - contrast_ratio(black, white)).abs() < 0.001);
+        // And it agrees with the independent transcription the floors below
+        // are measured with, or one of the two is not the WCAG ratio.
+        for c in [
+            Color::from_hex(0x1E1E2E),
+            Color::from_hex(0xF9E2AF),
+            Color::from_hex(0x00EE02),
+            Color::from_hex(0x7F849C),
+        ] {
+            let (mine, theirs) = (contrast_ratio(c, LIGHT_EXTREME), contrast(c, LIGHT_EXTREME));
+            assert!(
+                (mine - theirs).abs() < 0.001,
+                "{c:?}: the crate says {mine:.4}:1, the standard says {theirs:.4}:1"
+            );
+        }
+    }
+
+    /// The ratio this crate publishes is the toolkit's, not a copy of it.
+    ///
+    /// Structural rather than behavioural: two independent implementations
+    /// agreeing on every colour tested is exactly what the tree had before,
+    /// and it is not the same thing as there being one implementation. If
+    /// someone gives `appearance` its own luminance again, the two items stop
+    /// being the same item and this fails, even though every ratio still
+    /// matches.
+    #[test]
+    fn the_ratio_is_the_toolkits_own_and_not_a_second_copy_of_it() {
+        let here: fn(Color, Color) -> f32 = contrast_ratio;
+        let toolkit: fn(Color, Color) -> f32 = guitk::theme::contrast_ratio;
+        assert!(
+            core::ptr::fn_addr_eq(here, toolkit),
+            "appearance::contrast_ratio is no longer guitk::theme::contrast_ratio"
+        );
+        let here: fn(Color) -> f32 = relative_luminance;
+        let toolkit: fn(Color) -> f32 = guitk::theme::relative_luminance;
+        assert!(
+            core::ptr::fn_addr_eq(here, toolkit),
+            "appearance::relative_luminance is no longer guitk::theme::relative_luminance"
+        );
+    }
+
+    /// A dense walk of the colour cube, because the accent is not a list.
+    ///
+    /// Every other legibility test in the shell walks
+    /// [`AccentColor::presets`] — the hues the appearance page offers. But
+    /// [`AccentColor::Custom`] lets a user name *any* of the sixteen million,
+    /// and `readable_on` is what inks the switch knobs, title bars and slider
+    /// labels drawn on it. A test over a palette can only ever say that the
+    /// palette is fine today; this says the *rule* is fine for anything.
+    ///
+    /// A step of 15 gives 18 levels per channel and so 5,832 colours — every
+    /// corner and every face of the cube, including the saturated primaries
+    /// and secondaries where a brightness estimate and a contrast ratio part
+    /// company.
+    #[test]
+    fn the_chosen_ink_is_the_more_legible_of_the_two_for_any_colour_at_all() {
+        let mut worst: Option<(Color, f32)> = None;
+        let mut step = 0u16;
+        while step < 18 * 18 * 18 {
+            let at = |shift: u32| {
+                let i = u32::from(step) / 18u32.pow(shift) % 18;
+                u8::try_from((i * 255 / 17).min(255)).expect("a byte")
+            };
+            let bg = Color::rgba(at(0), at(1), at(2), 255);
+            step += 1;
+
+            let ink = readable_on(bg);
+            let other = if ink == DARK_EXTREME {
+                LIGHT_EXTREME
+            } else {
+                DARK_EXTREME
+            };
+            let (chosen, rejected) = (contrast(bg, ink), contrast(bg, other));
+            assert!(
+                chosen >= rejected,
+                "on {bg:?} the ink chosen is worth {chosen:.2}:1 and the one \
+                 rejected was worth {rejected:.2}:1"
+            );
+            if worst.as_ref().is_none_or(|&(_, w)| chosen < w) {
+                worst = Some((bg, chosen));
+            }
+        }
+
+        // The floor the function guarantees, asserted on the minimum so the
+        // message names the hardest colour in the cube rather than whichever
+        // one the walk reached first.
+        //
+        // 4.07:1 is not a target anyone chose — it is what falls out of the
+        // two extremes, the ratio at the colour equidistant from both. It is
+        // above the 3:1 that SC 1.4.11 asks of a control's outline and below
+        // the 4.5:1 that SC 1.4.3 asks of body text, which is the honest
+        // statement of what a custom accent can promise. Raising it would mean
+        // moving the extremes apart, not editing this number.
+        let (where_, c) = worst.expect("the walk visits colours");
+        assert!(
+            c >= 4.0,
+            "the hardest background in the cube is {where_:?}, at {c:.2}:1"
+        );
+    }
+
+    /// The defect that removing the luma threshold repaired, kept as a case.
+    ///
+    /// `#00EE02` has a luma of 139.93 — a hair under the 140 the old rule
+    /// thresholded at — so it was called dark and inked `#EFF1F5`, which on it
+    /// is 1.40:1. It is not a contrived colour: it is what a user gets by
+    /// dragging a custom-accent picker to a bright green, and the knob of
+    /// every switch in the shell is drawn on it.
+    #[test]
+    fn a_bright_green_custom_accent_does_not_get_pale_ink() {
+        let green = Color::from_hex(0x00EE02);
+        assert_eq!(
+            readable_on(green),
+            DARK_EXTREME,
+            "a luma sum calls this dark; it is the brightest thing in the shell"
+        );
+        let c = contrast(green, readable_on(green));
+        assert!(c >= 4.0, "the knob on a green custom accent is {c:.2}:1");
+
+        // And it reaches the shell through the settings the picker writes, not
+        // only through the function — an accent that never became `p.accent`
+        // would make the paragraph above true and irrelevant.
+        let settings = AppearanceSettings {
+            accent_color: AccentColor::Custom,
+            custom_accent: green,
+            ..AppearanceSettings::default()
+        };
+        assert_eq!(settings.effective_accent(), green);
+        let ratio = contrast(green, readable_on(settings.effective_accent()));
+        assert!(ratio >= 4.0, "the ink on the chosen accent is {ratio:.2}:1");
     }
 
     #[test]

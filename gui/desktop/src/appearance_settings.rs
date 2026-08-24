@@ -846,23 +846,19 @@ impl AppearanceSettingsUI {
         });
 
         let sw_x = x + width - 44.0;
-        cmds.push(RenderCommand::FillRect {
-            x: sw_x,
-            y: y + 2.0,
-            width: 40.0,
-            height: 22.0,
-            color: if enabled { GREEN } else { SURFACE2 },
-            corner_radii: CornerRadii::all(11.0),
-        });
-        let knob_x = if enabled { sw_x + 20.0 } else { sw_x + 2.0 };
-        cmds.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: y + 4.0,
-            width: 18.0,
-            height: 18.0,
-            color: TEXT,
-            corner_radii: CornerRadii::all(9.0),
-        });
+        // The track is still a hardcoded Mocha constant rather than a palette
+        // role — this module has not been through the palette conversion, and
+        // that is tracked separately in known-issues.md. The knob is derived
+        // from it regardless, so when the track does become `p.green` the ink
+        // follows it without a second edit.
+        cmds.extend(crate::switch::switch(
+            sw_x,
+            y + 2.0,
+            40.0,
+            22.0,
+            enabled,
+            if enabled { GREEN } else { SURFACE2 },
+        ));
     }
 
     fn render_label_value(

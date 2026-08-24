@@ -62,6 +62,7 @@ where the wrong one could be passed, and it is three lines long.
 
 import hashlib
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -119,6 +120,18 @@ IM = "gui/desktop/src/input_method.rs"
 BL = "gui/desktop/src/blur.rs"
 WP = "gui/desktop/src/wallpaper.rs"
 AX = "gui/desktop/src/a11y.rs"
+SWITCH = "gui/desktop/src/switch.rs"
+SLIDER = "gui/desktop/src/slider.rs"
+# The toolkit, one crate *below* `appearance`. 537 moved the WCAG arithmetic
+# down here so there would be one copy of it; a defect patched into this file
+# is therefore visible to `appearance` and `desktop` as well as to `guitk`.
+THEME = "gui/toolkit/src/theme.rs"
+# The three toolkit text fields §541 switched to visual caret motion. Like
+# THEME these sit below `appearance` and `desktop`, so a defect patched here is
+# compiled by all three crates -- but only `guitk` has the tests that name it.
+WIDG = "gui/toolkit/src/widget.rs"
+MODAL = "gui/toolkit/src/modal.rs"
+PBAR = "gui/toolkit/src/pathbar.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -2010,15 +2023,10 @@ DEFECTS = [
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
-    (
-        "VVVVVVV: the switch knob keeps Mocha's text",
-        STARTUP,
-        [("                color: p.text,\n                corner_radii: CornerRadii::all(8.0),",
-          "                color: Color::from_hex(0xCDD6F4),\n"
-          "                corner_radii: CornerRadii::all(8.0),")],
-        ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
-    ),
+    # RETIRED by the control-module refactor: the switch knob keeps Mocha.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         "WWWWWWW: the boot tab's heading keeps Mocha's lavender",
         STARTUP,
@@ -2068,8 +2076,10 @@ DEFECTS = [
     (
         "BBBBBBBB: the boot tab's switches are a fixed blue, not the accent",
         STARTUP,
-        [("            color: if enabled { p.accent } else { p.surface2 },",
-          "            color: if enabled { p.blue } else { p.surface2 },")],
+        [
+            ('            if enabled { p.accent } else { p.surface2 },',
+             '            if enabled { p.blue } else { p.surface2 },'),
+        ],
         ["desktop"],
         ["every_control_that_offers_something_follows_the_accent"],
     ),
@@ -2601,28 +2611,27 @@ DEFECTS = [
         "RRRRRRRRRR: the enable switch is pinned to green again, so it stops "
         "following the accent",
         DTS,
-        [("            color: if enabled { p.accent } else { p.surface2 },",
-          "            color: if enabled { p.green } else { p.surface2 },")],
+        [
+            ('            if enabled { p.accent } else { p.surface2 },',
+             '            if enabled { p.green } else { p.surface2 },'),
+        ],
         ["desktop"],
         ["every_control_that_offers_something_follows_the_accent"],
     ),
     (
         "SSSSSSSSSS: the enable switch's off arm keeps Mocha's surface2",
         DTS,
-        [("            color: if enabled { p.accent } else { p.surface2 },",
-          "            color: if enabled { p.accent } else { Color::from_hex(0x585B70) },")],
+        [
+            ('            if enabled { p.accent } else { p.surface2 },',
+             '            if enabled { p.accent } else { Color::from_hex(0x585B70) },'),
+        ],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
-    (
-        "TTTTTTTTTT: the switch knob keeps Mocha's text",
-        DTS,
-        [("            color: p.text,\n            corner_radii: CornerRadii::all(9.0),",
-          "            color: Color::from_hex(0xCDD6F4),\n"
-          "            corner_radii: CornerRadii::all(9.0),")],
-        ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
-    ),
+    # RETIRED by the control-module refactor: the switch knob keeps Mocha.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         "UUUUUUUUUU: a label/value row's label keeps Mocha's subtext0",
         DTS,
@@ -2840,32 +2849,34 @@ DEFECTS = [
         "NNNNNNNNNNN: a toggle's label keeps Mocha's text",
         TPAD,
         [
-            ('            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        // Toggle track.',
-             '            color: Color::from_hex(0xCDD6F4),\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        // Toggle track.'),
+            (('            color: p.text,\n'
+              '            font_weight: FontWeightHint::Regular,\n'
+              '            max_width: None,\n'
+              '            overflow: TextOverflow::Clip,\n'
+              '        });\n'
+              '        let track_x = x + 250.0;'),
+             ('            color: Color::from_hex(0xCDD6F4),\n'
+              '            font_weight: FontWeightHint::Regular,\n'
+              '            max_width: None,\n'
+              '            overflow: TextOverflow::Clip,\n'
+              '        });\n'
+              '        let track_x = x + 250.0;')),
         ],
         ["desktop"],
         [
             'every_colour_the_panel_draws_comes_from_its_palette',
         ],
     ),
-    (
-        "OOOOOOOOOOO: a toggle's knob keeps Mocha's text",
-        TPAD,
-        [
-            ('            width: 14.0,\n            height: 14.0,\n            color: p.text,',
-             '            width: 14.0,\n            height: 14.0,\n            color: Color::from_hex(0xCDD6F4),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_panel_draws_comes_from_its_palette',
-        ],
-    ),
+    # RETIRED by the control-module refactor: a toggle.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         "PPPPPPPPPPP: a toggle's off arm keeps Mocha's surface2",
         TPAD,
         [
-            ('color: if value { p.accent } else { p.surface2 },',
-             'color: if value { p.accent } else { Color::from_hex(0x585B70) },'),
+            ('if value { p.accent } else { p.surface2 },',
+             'if value { p.accent } else { Color::from_hex(0x585B70) },'),
         ],
         ["desktop"],
         [
@@ -2889,8 +2900,8 @@ DEFECTS = [
         "RRRRRRRRRRR: a slider's track keeps Mocha's surface1",
         TPAD,
         [
-            ('            width: track_w,\n            height: 4.0,\n            color: p.surface1,',
-             '            width: track_w,\n            height: 4.0,\n            color: Color::from_hex(0x45475A),'),
+            ('            track: p.surface1,',
+             '            track: Color::from_hex(0x45475A),'),
         ],
         ["desktop"],
         [
@@ -2964,8 +2975,8 @@ DEFECTS = [
         "XXXXXXXXXXX: a slider's filled portion keeps its hardcoded blue",
         TPAD,
         [
-            ('                height: 4.0,\n                color: p.accent,',
-             '                height: 4.0,\n                color: Color::from_hex(0x89B4FA),'),
+            ('            fill: p.accent,',
+             '            fill: Color::from_hex(0x89B4FA),'),
         ],
         ["desktop"],
         [
@@ -2977,45 +2988,29 @@ DEFECTS = [
         "YYYYYYYYYYY: a slider's filled portion is the same surface as its track",
         TPAD,
         [
-            ('                height: 4.0,\n                color: p.accent,',
-             '                height: 4.0,\n                color: p.surface1,'),
+            ('            fill: p.accent,',
+             '            fill: p.surface1,'),
         ],
         ["desktop"],
         [
             'every_control_that_offers_something_follows_the_accent',
         ],
     ),
-    (
-        "ZZZZZZZZZZZ: a slider's knob keeps its hardcoded blue",
-        TPAD,
-        [
-            ('            width: 12.0,\n            height: 12.0,\n            color: p.accent,',
-             '            width: 12.0,\n            height: 12.0,\n            color: Color::from_hex(0x89B4FA),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_panel_draws_comes_from_its_palette',
-            'every_control_that_offers_something_follows_the_accent',
-        ],
-    ),
-    (
-        "AAAAAAAAAAAA: a slider's knob follows the body text instead of the accent",
-        TPAD,
-        [
-            ('            width: 12.0,\n            height: 12.0,\n            color: p.accent,',
-             '            width: 12.0,\n            height: 12.0,\n            color: p.text,'),
-        ],
-        ["desktop"],
-        [
-            'every_control_that_offers_something_follows_the_accent',
-        ],
-    ),
+    # RETIRED by the control-module refactor: a slider knob frozen to a
+    # literal. The call site no longer names the thumb colour at all --
+    # slider.rs does -- so this is unreachable here by construction. The
+    # thumb-ink family is now Gx80 and Hx80.
+    # RETIRED as superseded by the fix, not merely relocated: this defect
+    # asserted that a thumb following the body text was WRONG and the accent
+    # was right. It is the other way round -- an accent thumb on an accent
+    # fill is 1.00:1 -- so the expectation it encoded is the bug. See
+    # design-decisions 534 and Gx80.
     (
         "BBBBBBBBBBBB: a toggle's on arm keeps its hardcoded green",
         TPAD,
         [
-            ('color: if value { p.accent } else { p.surface2 },',
-             'color: if value { Color::from_hex(0xA6E3A1) } else { p.surface2 },'),
+            ('if value { p.accent } else { p.surface2 },',
+             'if value { Color::from_hex(0xA6E3A1) } else { p.surface2 },'),
         ],
         ["desktop"],
         [
@@ -3027,8 +3022,8 @@ DEFECTS = [
         "CCCCCCCCCCCC: a toggle's on arm becomes the palette's green rather than the accent",
         TPAD,
         [
-            ('color: if value { p.accent } else { p.surface2 },',
-             'color: if value { p.green } else { p.surface2 },'),
+            ('if value { p.accent } else { p.surface2 },',
+             'if value { p.green } else { p.surface2 },'),
         ],
         ["desktop"],
         [
@@ -3215,18 +3210,10 @@ DEFECTS = [
             'a_reported_value_is_the_panels_body_text',
         ],
     ),
-    (
-        'RRRRRRRRRRRR: a slider at its floor draws a rectangle that covers no pixels',
-        TPAD,
-        [
-            ('        if fill_w > 0.0 {',
-             '        if fill_w >= 0.0 {'),
-        ],
-        ["desktop"],
-        [
-            'the_panel_draws_nothing_that_is_immediately_erased',
-        ],
-    ),
+    # RETIRED by the control-module refactor: a slider at its floor draws a rectangle that covers no pixels.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Jx80.
     # ---- overview.rs (module 20 of 49) -------------------------------------
     (
         "AAAAAAAAAAAAA: the search bar keeps Mocha's surface0",
@@ -5224,18 +5211,10 @@ DEFECTS = [
             'nothing_that_reports_a_state_follows_the_accent',
         ],
     ),
-    (
-        "WWWWWWWWWWWWWWWWWWWW: a toggle's knob drops to secondary text",
-        SND,
-        [
-            ('width: 16.0,\n            height: 16.0,\n            color: p.text,',
-             'width: 16.0,\n            height: 16.0,\n            color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
-        ],
-    ),
+    # RETIRED by the control-module refactor: a toggle.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         "XXXXXXXXXXXXXXXXXXXX: the master volume label never admits to being muted",
         SND,
@@ -5440,8 +5419,8 @@ DEFECTS = [
         "LLLLLLLLLLLLLLLLLLLLLL: the slider's track is frozen back to Mocha surface0",
         OSD,
         [
-            ('color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, text_alpha),',
-             'color: Color::rgba(0x31, 0x32, 0x44, text_alpha),'),
+            ('            track: p.surface0,',
+             '            track: Color::from_hex(0x0031_3244),'),
         ],
         ["desktop"],
         [
@@ -5453,8 +5432,8 @@ DEFECTS = [
         "MMMMMMMMMMMMMMMMMMMMMM: the slider's track lightens one step",
         OSD,
         [
-            ('color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, text_alpha),',
-             'color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, text_alpha),'),
+            ('            track: p.surface0,',
+             '            track: p.surface1,'),
         ],
         ["desktop"],
         [
@@ -5465,8 +5444,8 @@ DEFECTS = [
         "NNNNNNNNNNNNNNNNNNNNNN: the slider's fill is frozen back to Mocha blue",
         OSD,
         [
-            ('width: fill_w,\n                height: track_h,\n                color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
-             'width: fill_w,\n                height: track_h,\n                color: Color::rgba(0x89, 0xB4, 0xFA, text_alpha),'),
+            ('            fill: accent,',
+             '            fill: Color::from_hex(0x0089_B4FA),'),
         ],
         ["desktop"],
         [
@@ -5479,8 +5458,8 @@ DEFECTS = [
         "OOOOOOOOOOOOOOOOOOOOOO: the slider's fill follows the accent, as if you could drag an OSD",
         OSD,
         [
-            ('width: fill_w,\n                height: track_h,\n                color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
-             'width: fill_w,\n                height: track_h,\n                color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, text_alpha),'),
+            ('            fill: accent,',
+             '            fill: p.accent,'),
         ],
         ["desktop"],
         [
@@ -5489,57 +5468,22 @@ DEFECTS = [
             'volume_and_brightness_stay_a_pair_you_can_tell_apart',
         ],
     ),
-    (
-        "PPPPPPPPPPPPPPPPPPPPPP: the slider's knob is frozen back to Mocha text",
-        OSD,
-        [
-            ('height: 10.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),',
-             'height: 10.0,\n            color: Color::rgba(0xCD, 0xD6, 0xF4, text_alpha),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_osd_draws_comes_from_its_palette',
-            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
-        ],
-    ),
-    (
-        "QQQQQQQQQQQQQQQQQQQQQQ: the slider's knob sinks into its own track",
-        OSD,
-        [
-            ('height: 10.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),',
-             'height: 10.0,\n            color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, text_alpha),'),
-        ],
-        ["desktop"],
-        [
-            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
-        ],
-    ),
-    (
-        'RRRRRRRRRRRRRRRRRRRRRR: a slider at zero draws a fill anyway',
-        OSD,
-        [
-            ('if fill_w > 0.0 {',
-             'if fill_w >= 0.0 {'),
-        ],
-        ["desktop"],
-        [
-            'the_fixtures_take_every_branch_the_osd_has',
-        ],
-    ),
-    (
-        'SSSSSSSSSSSSSSSSSSSSSS: a slider never draws its fill at all',
-        OSD,
-        [
-            ('if fill_w > 0.0 {',
-             'if fill_w < 0.0 {'),
-        ],
-        ["desktop"],
-        [
-            'the_fixtures_take_every_branch_the_osd_has',
-            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
-            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the slider.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Gx80.
+    # RETIRED by the control-module refactor: the slider.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Gx80.
+    # RETIRED by the control-module refactor: a slider at zero draws a fill anyway.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Jx80.
+    # RETIRED by the control-module refactor: a slider never draws its fill at all.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Jx80.
     (
         'TTTTTTTTTTTTTTTTTTTTTT: the music note is frozen back to Mocha lavender',
         OSD,
@@ -6176,31 +6120,14 @@ DEFECTS = [
             'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
-    (
-        "RRRRRRRRRRRRRRRRRRRRRRRR: the pill's knob is frozen back to Mocha text",
-        OSD,
-        [
-            ('height: 16.0,\n            color: p.text,',
-             'height: 16.0,\n            color: Color::from_hex(0xCDD6F4),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_osd_draws_comes_from_its_palette',
-            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
-        ],
-    ),
-    (
-        "SSSSSSSSSSSSSSSSSSSSSSSS: the pill's knob sinks into an unselected grey",
-        OSD,
-        [
-            ('height: 16.0,\n            color: p.text,',
-             'height: 16.0,\n            color: p.surface1,'),
-        ],
-        ["desktop"],
-        [
-            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the pill.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
+    # RETIRED by the control-module refactor: the pill.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         'TTTTTTTTTTTTTTTTTTTTTTTT: the enable label is frozen back to Mocha text',
         OSD,
@@ -7086,31 +7013,14 @@ DEFECTS = [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
         ],
     ),
-    (
-        'QQQQQQQQQQQQQQQQQQQQQQQQQQQ: the toggle knob is frozen back to Mocha text',
-        PRIV,
-        [
-            ('height: 16.0,\n            color: p.text,',
-             'height: 16.0,\n            color: Color::from_hex(0xCDD6F4),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_panel_draws_comes_from_its_palette',
-            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
-        ],
-    ),
-    (
-        'RRRRRRRRRRRRRRRRRRRRRRRRRRR: the toggle knob dims to secondary text',
-        PRIV,
-        [
-            ('height: 16.0,\n            color: p.text,',
-             'height: 16.0,\n            color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the toggle knob is frozen back to Mocha text.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
+    # RETIRED by the control-module refactor: the toggle knob dims to secondary text.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         'SSSSSSSSSSSSSSSSSSSSSSSSSSS: an allowed permission stops being green',
         PRIV,
@@ -13236,27 +13146,16 @@ DEFECTS = [
             'every_site_draws_the_role_it_claims',
         ],
     ),
-    (
-        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the switch knob keeps Mocha text',
-        MOUSESET,
-        [
-            ('            height: 16.0,\n            color: p.text,',
-             '            height: 16.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_panel_draws_comes_from_its_palette',
-            'none_of_the_ten_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-            'the_knob_is_the_same_ink_on_both_pills',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the switch knob keeps Mocha text.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the slider track keeps Mocha surface1',
         MOUSESET,
         [
-            ('            height: track_h,\n            color: p.surface1,',
-             '            height: track_h,\n            color: guitk::color::Color::from_hex(0x45475A),'),
+            ('            track: p.surface1,',
+             '            track: guitk::color::Color::from_hex(0x45475A),'),
         ],
         ["desktop"],
         [
@@ -13269,8 +13168,10 @@ DEFECTS = [
         'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the slider fill keeps Mocha blue',
         MOUSESET,
         [
-            ('            // Judgement 1: how much of this control is set.\n            color: p.accent,',
-             '            // Judgement 1: how much of this control is set.\n            color: guitk::color::Color::from_hex(0x89B4FA),'),
+            (('            // Judgement 1: how much of this control is set.\n'
+              '            fill: p.accent,'),
+             ('            // Judgement 1: how much of this control is set.\n'
+              '            fill: guitk::color::Color::from_hex(0x89B4FA),')),
         ],
         ["desktop"],
         [
@@ -13280,21 +13181,10 @@ DEFECTS = [
             'only_what_is_in_force_is_accented',
         ],
     ),
-    (
-        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the slider thumb keeps Mocha lavender',
-        MOUSESET,
-        [
-            ('            color: emphasized(p.accent),',
-             '            color: guitk::color::Color::from_hex(0xB4BEFE),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_panel_draws_comes_from_its_palette',
-            'none_of_the_ten_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-            'the_thumb_is_derived_from_the_fill_it_ends',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the slider thumb keeps Mocha lavender.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Gx80.
     (
         'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the panel background is drawn a rung up, on the same surface as the header that is meant to stand proud of it',
         MOUSESET,
@@ -13396,8 +13286,10 @@ DEFECTS = [
         "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the slider fill is pinned to blue, so how much is set stops following the user's accent",
         MOUSESET,
         [
-            ('            // Judgement 1: how much of this control is set.\n            color: p.accent,',
-             '            // Judgement 1: how much of this control is set.\n            color: p.blue,'),
+            (('            // Judgement 1: how much of this control is set.\n'
+              '            fill: p.accent,'),
+             ('            // Judgement 1: how much of this control is set.\n'
+              '            fill: p.blue,')),
         ],
         ["desktop"],
         [
@@ -13420,52 +13312,24 @@ DEFECTS = [
             'only_what_is_in_force_moves_when_the_accent_moves',
         ],
     ),
-    (
-        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the slider thumb is pinned to lavender again, the named-beside-it shape this conversion existed to remove',
-        MOUSESET,
-        [
-            ('            color: emphasized(p.accent),',
-             '            color: p.lavender,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-            'the_thumb_is_derived_from_the_fill_it_ends',
-        ],
-    ),
-    (
-        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the slider thumb is the fill's own colour, so there is no handle to see",
-        MOUSESET,
-        [
-            ('            color: emphasized(p.accent),',
-             '            color: p.accent,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-            'the_thumb_is_derived_from_the_fill_it_ends',
-            'only_what_is_in_force_is_accented',
-        ],
-    ),
-    (
-        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the switch knob follows its pill, so the thing that marks the position changes meaning with the state',
-        MOUSESET,
-        [
-            ('            height: 16.0,\n            color: p.text,',
-             '            height: 16.0,\n            color: bg,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-            'the_knob_is_the_same_ink_on_both_pills',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the slider thumb is pinned to lavender again, the named-beside-it shape this conversion existed to remove.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Gx80.
+    # RETIRED by the control-module refactor: the slider thumb is the fill.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Gx80.
+    # RETIRED by the control-module refactor: the switch knob follows its pill, so the thing that marks the position changes meaning with the state.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the slider track is accented along its whole length, so every control reads as fully set',
         MOUSESET,
         [
-            ('            height: track_h,\n            color: p.surface1,',
-             '            height: track_h,\n            color: p.accent,'),
+            ('            track: p.surface1,',
+             '            track: p.accent,'),
         ],
         ["desktop"],
         [
@@ -13539,33 +13403,14 @@ DEFECTS = [
             'only_what_is_in_force_moves_when_the_accent_moves',
         ],
     ),
-    (
-        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the slider thumb is emphasized off blue rather than off the fill, so it is derived from a colour the track never uses',
-        MOUSESET,
-        [
-            ('            color: emphasized(p.accent),',
-             '            color: emphasized(p.blue),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_panel_draws_comes_from_its_palette',
-            'every_site_draws_the_role_it_claims',
-            'the_thumb_is_derived_from_the_fill_it_ends',
-        ],
-    ),
-    (
-        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the switch knob is drawn at a label's dimness",
-        MOUSESET,
-        [
-            ('            height: 16.0,\n            color: p.text,',
-             '            height: 16.0,\n            color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-            'the_knob_is_the_same_ink_on_both_pills',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the slider thumb is emphasized off blue rather than off the fill, so it is derived from a colour the track never uses.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Hx80.
+    # RETIRED by the control-module refactor: the switch knob is drawn at a label.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the drop shadow keeps its own alpha instead of the palette's",
         HOTKEYS,
@@ -16076,8 +15921,8 @@ DEFECTS = [
         "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a slider's track goes back to being Mocha surface0",
         DISP,
         [
-            ('            width: track_w,\n            height: 6.0,\n            color: p.surface0,',
-             '            width: track_w,\n            height: 6.0,\n            color: Color::from_hex(0x0031_3244),'),
+            ('            track: p.surface0,',
+             '            track: Color::from_hex(0x0031_3244),'),
         ],
         ["desktop"],
         [
@@ -16090,8 +15935,10 @@ DEFECTS = [
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a slider's filled portion goes back to being Mocha blue",
         DISP,
         [
-            ('            // How much of the setting is chosen, so: the accent.\n            color: p.accent,',
-             '            // How much of the setting is chosen, so: the accent.\n            color: Color::from_hex(0x0089_B4FA),'),
+            (('            // How much of the setting is chosen, so: the accent.\n'
+              '            fill: p.accent,'),
+             ('            // How much of the setting is chosen, so: the accent.\n'
+              '            fill: Color::from_hex(0x0089_B4FA),')),
         ],
         ["desktop"],
         [
@@ -16104,8 +15951,10 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a slider stops showing how much of it is chosen",
         DISP,
         [
-            ('            // How much of the setting is chosen, so: the accent.\n            color: p.accent,',
-             '            // How much of the setting is chosen, so: the accent.\n            color: p.surface1,'),
+            (('            // How much of the setting is chosen, so: the accent.\n'
+              '            fill: p.accent,'),
+             ('            // How much of the setting is chosen, so: the accent.\n'
+              '            fill: p.surface1,')),
         ],
         ["desktop"],
         [
@@ -16116,30 +15965,22 @@ DEFECTS = [
         "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a slider's track and its filled portion trade roles",
         DISP,
         [
-            ('            width: track_w,\n            height: 6.0,\n            color: p.surface0,',
-             '            width: track_w,\n            height: 6.0,\n            color: p.accent,'),
-            ('            // How much of the setting is chosen, so: the accent.\n            color: p.accent,',
-             '            // How much of the setting is chosen, so: the accent.\n            color: p.surface0,'),
+            ('            track: p.surface0,',
+             '            track: p.accent,'),
+            (('            // How much of the setting is chosen, so: the accent.\n'
+              '            fill: p.accent,'),
+             ('            // How much of the setting is chosen, so: the accent.\n'
+              '            fill: p.surface0,')),
         ],
         ["desktop"],
         [
             'every_site_draws_the_role_it_claims',
         ],
     ),
-    (
-        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a slider's thumb goes back to being Mocha text",
-        DISP,
-        [
-            ('            width: 12.0,\n            height: 12.0,\n            color: p.text,',
-             '            width: 12.0,\n            height: 12.0,\n            color: Color::from_hex(0x00CD_D6F4),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_panel_draws_comes_from_its_palette',
-            'none_of_the_nine_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
+    # RETIRED by the control-module refactor: a slider.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Gx80.
     (
         "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the grey ramp is tinted, so a display's colour cast is measured against a tint",
         DISP,
@@ -16675,8 +16516,8 @@ DEFECTS = [
         "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the on switch keeps its own Mocha green",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: if enabled { guitk::color::Color::from_hex(0xA6E3A1) } else { p.surface2 },'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            if enabled { guitk::color::Color::from_hex(0xA6E3A1) } else { p.surface2 },'),
         ],
         ["desktop"],
         [
@@ -16691,8 +16532,8 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the off switch keeps its own Mocha surface2",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: if enabled { p.green } else { guitk::color::Color::from_hex(0x585B70) },'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            if enabled { p.green } else { guitk::color::Color::from_hex(0x585B70) },'),
         ],
         ["desktop"],
         [
@@ -16707,8 +16548,8 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the on switch follows the accent, so on means chosen",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: if enabled { p.accent } else { p.surface2 },'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            if enabled { p.accent } else { p.surface2 },'),
         ],
         ["desktop"],
         [
@@ -16720,8 +16561,8 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the switch's on and off branches are swapped",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: if enabled { p.surface2 } else { p.green },'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            if enabled { p.surface2 } else { p.green },'),
         ],
         ["desktop"],
         [
@@ -16734,8 +16575,8 @@ DEFECTS = [
         "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: every switch reads as on",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: p.green,'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            p.green,'),
         ],
         ["desktop"],
         [
@@ -16748,8 +16589,8 @@ DEFECTS = [
         "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: every switch reads as off",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: p.surface2,'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            p.surface2,'),
         ],
         ["desktop"],
         [
@@ -16761,8 +16602,8 @@ DEFECTS = [
         "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the off switch sits a rung too low",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: if enabled { p.green } else { p.surface0 },'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            if enabled { p.green } else { p.surface0 },'),
         ],
         ["desktop"],
         [
@@ -16770,57 +16611,24 @@ DEFECTS = [
             'green_means_on_and_the_accent_means_chosen',
         ],
     ),
-    (
-        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the switch knob keeps its own Mocha text",
-        A11Y,
-        [
-            ('            height: 18.0,\n            color: p.text,',
-             '            height: 18.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_panel_draws_comes_from_its_palette',
-            'none_of_the_nine_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-            'green_means_on_and_the_accent_means_chosen',
-            'every_site_changes_when_the_mode_does',
-        ],
-    ),
-    (
-        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the switch knob drops to the secondary rung",
-        A11Y,
-        [
-            ('            height: 18.0,\n            color: p.text,',
-             '            height: 18.0,\n            color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-            'green_means_on_and_the_accent_means_chosen',
-        ],
-    ),
-    (
-        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the switch knob turns green, so every row reads as on",
-        A11Y,
-        [
-            ('            height: 18.0,\n            color: p.text,',
-             '            height: 18.0,\n            color: p.green,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-            'green_means_on_and_the_accent_means_chosen',
-            'the_active_feature_line_is_green_and_only_drawn_when_there_is_one',
-        ],
-    ),
+    # RETIRED by the control-module refactor: the switch knob keeps its own Mocha text.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
+    # RETIRED by the control-module refactor: the switch knob drops to the secondary rung.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
+    # RETIRED by the control-module refactor: the switch knob turns green, so every row reads as on.
+    # The call site no longer names this colour -- switch.rs/slider.rs
+    # does -- so the defect is unreachable here by construction. Its
+    # one shell-wide replacement is Cx80.
     (
         "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a switch's pill and its knob are traded",
         A11Y,
         [
-            ('            color: if enabled { p.green } else { p.surface2 },',
-             '            color: p.text,'),
-            ('            height: 18.0,\n            color: p.text,',
-             '            height: 18.0,\n            color: if enabled { p.green } else { p.surface2 },'),
+            ('            if enabled { p.green } else { p.surface2 },',
+             '            p.text,'),
         ],
         ["desktop"],
         [
@@ -22443,6 +22251,869 @@ DEFECTS = [
             'the_filters_still_produce_the_weights_they_were_written_with',
         ],
     ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a switch knob reaches the very edge of its pill when on",
+        SWITCH,
+        [
+            ('        x + width - knob - INSET\n',
+             '        x + width - knob\n'),
+        ],
+        ["desktop"],
+        [
+            'the_geometry_is_the_one_every_hand_written_switch_already_used',
+            'the_knob_is_at_the_right_end_when_on_and_the_left_end_when_off',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a switch shows its off position when on and vice versa",
+        SWITCH,
+        [
+            ('    let knob_x = if on {\n',
+             '    let knob_x = if !on {\n'),
+        ],
+        ["desktop"],
+        [
+            'the_geometry_is_the_one_every_hand_written_switch_already_used',
+            'the_knob_is_at_the_right_end_when_on_and_the_left_end_when_off',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a switch knob stops being derived from the pill under it",
+        SWITCH,
+        [
+            ('            color: readable_on(track),\n',
+             '            color: appearance::LIGHT_EXTREME,\n'),
+        ],
+        ["desktop"],
+        [
+            # The ink is still one of the two extremes, so every 'comes from its
+            # palette' sweep still passes -- only *which* extreme changes, and
+            # only for a light background.
+            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'the_knob_is_legible_on_every_track_a_panel_can_choose',
+            'the_knob_follows_the_track_rather_than_the_theme',
+            # The one call-site test that pins the ink by equality with
+            # readable_on(pill) rather than by a contrast floor, so it fails
+            # for any change to that line at all. It is the inheritor of the
+            # fourteen per-panel knob defects this module retired.
+            'the_knob_is_legible_on_both_pills',
+        ],
+    ),
+    # RETIRED by 536: `readable_on` has no threshold left to drift. It now
+    # compares the two candidate inks by contrast ratio, so the constant this
+    # defect moved does not exist. It was never observable in any case -- the
+    # palette colours nearest 140 are luma 133 and 161, so a five-point drift
+    # changed no verdict, and the sweep of 2026-08-24 duly recorded it as the
+    # module's one escape. Its replacement is Ax81, which puts the whole luma
+    # rule back rather than nudging a number inside it.
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a slider thumb hangs off the bottom of its own track",
+        SLIDER,
+        [
+            ('            y: self.y + self.height / 2.0 - self.thumb / 2.0,\n',
+             '            y: self.y + self.height / 2.0,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_geometry_is_the_one_every_hand_written_slider_already_used',
+            'the_thumb_overhangs_the_track_on_every_shape_the_shell_draws',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: a slider thumb shrinks to the height of its track",
+        SLIDER,
+        [
+            (('            width: self.thumb,\n'
+              '            height: self.thumb,\n'),
+             ('            width: self.height,\n'
+              '            height: self.height,\n')),
+        ],
+        ["desktop"],
+        [
+            # The overhang test is the premise of the ink rule: a contained
+            # thumb would be read against the track, not the card, and 'text'
+            # would stop being the right answer.
+            'the_geometry_is_the_one_every_hand_written_slider_already_used',
+            'the_thumb_overhangs_the_track_on_every_shape_the_shell_draws',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a slider thumb takes the colour of the fill it ends",
+        SLIDER,
+        [
+            ('            color: fade(self.p.text, self.alpha),\n',
+             '            color: fade(self.fill, self.alpha),\n'),
+        ],
+        ["desktop"],
+        [
+            # This is the touchpad bug (1.00:1) generalised to all five sliders.
+            'the_thumb_is_legible_against_every_card_it_can_sit_on',
+            'every_control_that_offers_something_follows_the_accent',
+            'the_thumb_does_not_follow_the_fill_it_ends',
+            # `text_beats_readable_on_the_fill_against_the_card` was declared
+            # here and the sweep of 2026-08-24 recorded it as MISSING. Correctly
+            # so, and the declaration was the error: that test renders nothing.
+            # It compares two palette values -- contrast(base, text) against
+            # contrast(base, readable_on(fill)) -- to establish *why* the thumb
+            # uses `text`, so no change to what the thumb is actually drawn with
+            # can reach it. It is the rule's premise, not its witness.
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a slider thumb takes the switch knob's rule instead of its own",
+        SLIDER,
+        [
+            ('            color: fade(self.p.text, self.alpha),\n',
+             '            color: fade(appearance::readable_on(self.fill), self.alpha),\n'),
+        ],
+        ["desktop"],
+        [
+            # The plausible 'fix' a future reader would reach for, having seen
+            # switch.rs. On Mocha it inks the thumb #11111B -- 1.1:1 against a
+            # base card. Containment, not consistency, decides the rule.
+            'the_thumb_is_legible_against_every_card_it_can_sit_on',
+            'every_control_that_offers_something_follows_the_accent',
+            'the_thumb_does_not_follow_the_fill_it_ends',
+            # Not `text_beats_readable_on_the_fill_against_the_card`, for the
+            # reason given under GGG...x80 above: it renders no slider, so a
+            # change to the thumb's colour is invisible to it.
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the light theme's ink drifts toward the page it is read on",
+        APP,
+        [
+            ('pub const LIGHT_TEXT: Color = Color::from_hex(0x4C4F69);\n',
+             'pub const LIGHT_TEXT: Color = Color::from_hex(0x8A8DA0);\n'),
+        ],
+        ["appearance", "desktop"],
+        [
+            # 2.90:1 on a Latte base. 0x8C8FA1 would have been the rounder
+            # number but it is light overlay1's own value, and a duplicate would
+            # trip the palette's distinctness tests for the wrong reason.
+            'the_thumb_is_legible_against_every_card_it_can_sit_on',
+            'every_role_a_user_reads_is_legible_on_the_base_of_its_own_palette',
+            # `text_beats_readable_on_the_fill_against_the_card` was declared
+            # here too, and was MISSING for a subtler reason than under
+            # GGG...x80: it *does* read LIGHT_TEXT. But the value it compares
+            # the drifted ink against is contrast(base, readable_on(fill)), and
+            # on the light palette `readable_on` of any preset accent returns
+            # LIGHT_EXTREME -- which is the light base's own value. So the
+            # right-hand side is 1.00:1, and even a 2.90:1 ink beats it. The
+            # test constrains the ink from below only as far as the base itself,
+            # which is not far enough to see this.
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a slider at its floor still emits a zero-width fill",
+        SLIDER,
+        [
+            ('        if fill_w > 0.0 {\n',
+             '        if fill_w >= 0.0 {\n'),
+        ],
+        ["desktop"],
+        [
+            'a_slider_on_its_floor_emits_no_fill_rectangle',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a slider's fraction stops being bounded",
+        SLIDER,
+        [
+            ('            self.frac.clamp(0.0, 1.0)\n',
+             '            self.frac\n'),
+        ],
+        ["desktop"],
+        [
+            'an_out_of_range_fraction_cannot_push_the_thumb_off_the_track',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a fading slider's thumb stays opaque",
+        SLIDER,
+        [
+            ('            color: fade(self.p.text, self.alpha),\n',
+             '            color: self.p.text,\n'),
+        ],
+        ["desktop"],
+        [
+            # The osd is the only caller that fades, so this is invisible
+            # everywhere else -- which is exactly why the helper owns the fade
+            # rather than the caller pre-multiplying.
+            'the_alpha_reaches_every_part_of_the_control',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the structural knob locator stops matching what it locates",
+        A11Y,
+        [
+            (('                && *kw == 18.0\n'
+              '            {\n'
+              '                knobs.push(i + 1);\n'),
+             ('                && *kw == 19.0\n'
+              '            {\n'
+              '                knobs.push(i + 1);\n')),
+        ],
+        ["desktop"],
+        [
+            # Proves the guard is load-bearing: with nothing located, the
+            # exclusion silently excludes nothing and the sweep would judge knob
+            # colours it has no claim over. The trailing push line is part of
+            # the pattern because the pill test above it is textually identical.
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: every slider reads as fully set, so its track is drawn and immediately covered",
+        TPAD,
+        [
+            ('            frac: (value - min) / (max - min),\n',
+             '            frac: 1.0,\n'),
+        ],
+        ["desktop"],
+        [
+            # The inheritor of RRRRRRRRRRRR, which patched the fill guard this
+            # panel used to own. The guard now lives in slider.rs and is proved
+            # once, by JJJ...x80 -- but that leaves this panel's erasure sweep
+            # with nothing to catch, and a sweep nothing can trip is a sweep
+            # that proves nothing. A full fill covers the track exactly, which
+            # is the erasure the test is named for.
+            'the_panel_draws_nothing_that_is_immediately_erased',
+        ],
+    ),
+    # ---------------------------------------------------------------- 51
+    # 536: `readable_on` stops estimating brightness and measures contrast.
+    #
+    # The rule it replaced could not be broken observably -- see the retired
+    # Dx80 above -- because a luma threshold is only ever as constrained as the
+    # colours that happen to sit near it, and none did. What replaced it is
+    # constrained by the whole 24-bit cube, so every way of getting it wrong
+    # below is caught by something.
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the ink chooser goes back to estimating brightness from a luma sum",
+        APP,
+        [
+            ('    if contrast_ratio(bg, DARK_EXTREME) >= contrast_ratio(bg, LIGHT_EXTREME) {\n',
+             '    if 0.299 * f32::from(bg.r) + 0.587 * f32::from(bg.g) + 0.114 * f32::from(bg.b) > 140.0 {\n'),
+        ],
+        ["appearance", "desktop"],
+        [
+            # The exact code 536 removed. A luma sum agrees with the ratio on
+            # every colour in the shell's own palettes, so nothing that walks a
+            # palette can see this -- only the cube walk, and the one colour
+            # kept as a named case, look anywhere it is wrong.
+            'the_chosen_ink_is_the_more_legible_of_the_two_for_any_colour_at_all',
+            'a_bright_green_custom_accent_does_not_get_pale_ink',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the ink chooser returns whichever of the two inks is harder to read",
+        APP,
+        [
+            ('    if contrast_ratio(bg, DARK_EXTREME) >= contrast_ratio(bg, LIGHT_EXTREME) {\n',
+             '    if contrast_ratio(bg, DARK_EXTREME) < contrast_ratio(bg, LIGHT_EXTREME) {\n'),
+        ],
+        ["appearance", "desktop"],
+        [
+            # One character. Unlike the luma rule this is wrong for *every*
+            # colour, so the two fixtures 536 taught to assert their own
+            # premise are expected to be among the first to say so.
+            'the_chosen_ink_is_the_more_legible_of_the_two_for_any_colour_at_all',
+            'a_bright_green_custom_accent_does_not_get_pale_ink',
+            'readable_on_answers_with_the_palettes_own_extremes',
+            'green_means_on_and_the_accent_means_chosen',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'the_knob_is_legible_on_every_track_a_panel_can_choose',
+            # Everything below was found by the sweep of 2026-08-24, not
+            # predicted: an ink rule that is wrong for every colour is
+            # visible from every site that inks anything, so the blast
+            # radius is the whole shell. Recorded in full so that a
+            # *shrinking* radius shows up as a regression in coverage.
+            'a_category_with_no_default_app_is_not_accented_as_if_it_had_one',
+            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
+            'a_title_is_readable_on_every_bar_the_settings_can_produce',
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+            'an_accented_taskbar_keeps_its_glyph_visible',
+            'an_empty_search_box_is_dimmer_than_a_typed_query',
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'every_colour_the_popup_draws_comes_from_its_palette',
+            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_pairing_the_calendar_draws_clears_the_contrast_floor',
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+            'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'test_ui_render_audio',
+            'test_ui_render_input',
+            'test_ui_render_magnifier',
+            'test_ui_render_reader',
+            'test_ui_render_visual',
+            'test_ui_render_with_active_features',
+            'text_beats_readable_on_the_fill_against_the_card',
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+            'the_active_feature_line_is_green_and_only_drawn_when_there_is_one',
+            'the_content_well_is_deeper_than_the_panel_it_sits_in',
+            'the_crosshairs_are_legible_on_the_lens_in_both_modes',
+            'the_knob_follows_the_track_rather_than_the_theme',
+            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'the_section_headings_keep_their_hue_in_both_modes',
+            'the_wordmark_is_legible_on_the_logo_tile',
+            'what_is_drawn_on_the_accent_is_chosen_for_the_accent',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: luminance is read straight off the stored bytes, skipping the sRGB curve",
+        # Re-targeted by 537: the function moved from `appearance` down into the
+        # toolkit, so that the toolkit's own ink chooser could reach it instead
+        # of keeping a second copy. The patch text is unchanged -- only the file
+        # it lands in. Its catchers gained the toolkit's tests and kept all the
+        # others, since `appearance` now re-exports what this breaks.
+        THEME,
+        [
+            ('        if v <= 0.039_28 {\n            v / 12.92\n        } else {\n            ((v + 0.055) / 1.055).powf(2.4)\n        }\n',
+             '        v\n'),
+        ],
+        ["guitk", "appearance", "desktop"],
+        [
+            # The plausible simplification: the weights are still there, only
+            # the un-gamma-ing is gone. It moves the crossover from a true
+            # luminance of 0.178 to 0.071, which flips eighteen of the fifty
+            # palette constants -- every light accent among them -- so unlike
+            # the luma rule this one is caught by anything walking a palette.
+            'the_published_ratios_are_what_this_crate_computes',
+            # Added by 537, when the function moved into the toolkit: the
+            # toolkit now has its own transcription of the standard to disagree
+            # with, and its own cube walk.
+            'the_published_ratios_are_what_this_module_computes',
+            # NOT the toolkit's cube walk, though it was predicted here and the
+            # sweep of 2026-08-24 proved otherwise. The walk is written entirely
+            # in terms of `contrast_text` and `contrast_ratio`, which share this
+            # very luminance function -- so replacing the sRGB curve moves both
+            # sides of every comparison together. `chosen >= other` still holds
+            # (it is the max by construction), and the 4.58:1 floor still holds
+            # because for *any* luminance mapping into [0,1] the worst case sits
+            # at the crossover and is 1.05/sqrt(1.05*0.05). The walk proves the
+            # decision *rule*; only the f64 re-transcription above can prove the
+            # *arithmetic*. Ex81 -- a wrong rule with this same curve -- is the
+            # complementary case, and the walk does catch that one.
+            'plain_red_and_mid_grey_are_lettered_in_black',
+            'the_chosen_ink_is_the_more_legible_of_the_two_for_any_colour_at_all',
+            'a_title_is_readable_on_every_bar_the_settings_can_produce',
+            'the_knob_is_legible_on_every_track_a_panel_can_choose',
+            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
+            # Everything below was found by the sweep of 2026-08-24. The
+            # eighteen constants that flip are concentrated in the light
+            # palette, which is why the mode-sensitive tests dominate.
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'an_accented_taskbar_keeps_its_glyph_visible',
+            'each_badges_mark_can_be_read_on_the_badge',
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'every_colour_the_popup_draws_comes_from_its_palette',
+            'every_pairing_the_calendar_draws_clears_the_contrast_floor',
+            'every_site_changes_when_the_mode_does',
+            'green_means_on_and_the_accent_means_chosen',
+            'text_beats_readable_on_the_fill_against_the_card',
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+            'the_wordmark_is_legible_on_the_logo_tile',
+            'what_is_drawn_on_the_accent_is_chosen_for_the_accent',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the contrast ratio is computed upside down, dividing the darker by the lighter",
+        # Re-targeted by 537 along with Cx81, for the same reason: the ratio
+        # itself now lives in the toolkit and `appearance` re-exports it.
+        THEME,
+        [
+            ('    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };\n',
+             '    let (hi, lo) = if la > lb { (lb, la) } else { (la, lb) };\n'),
+        ],
+        ["guitk", "appearance", "desktop"],
+        [
+            # Added by 537: the toolkit's own definitional anchors and cube walk
+            # see this too, and `contrast_text` -- picking the larger of two
+            # reciprocals -- returns the worse ink for every colour.
+            'the_published_ratios_are_what_this_module_computes',
+            'the_chosen_ink_is_the_more_legible_of_the_two_for_every_colour_there_is',
+            'plain_red_and_mid_grey_are_lettered_in_black',
+            # Found undeclared by the sweep of 2026-08-24, and worth recording
+            # rather than just adding: these are the six pre-537 tests that
+            # 537's own write-up noted could *not* see the old luma rule, and
+            # they cannot see Cx81's wrong curve either. They see this one
+            # because inverting the ratio flips the ink on every colour at once,
+            # including the six hand-picked ones they pin. The rule they encode
+            # is "these particular colours get this particular ink", which is
+            # blind to how the answer was reached and sharp about the answer.
+            'test_catppuccin_latte_is_light_mode',
+            'test_catppuccin_mocha_is_dark_mode',
+            'test_contrast_text_on_dark_bg',
+            'test_contrast_text_on_light_bg',
+            'test_is_dark_black',
+            'test_is_dark_white',
+            # Returns the reciprocal, so every floor assertion in the tree
+            # compares a number below 1.0 against 3.0 or 4.5 -- and
+            # `readable_on`, picking the larger of two reciprocals, returns the
+            # worse ink every time. The definitional anchors are what name it:
+            # black on white is 21:1 by definition and would read 0.05:1.
+            'the_published_ratios_are_what_this_crate_computes',
+            'the_chosen_ink_is_the_more_legible_of_the_two_for_any_colour_at_all',
+            'a_bright_green_custom_accent_does_not_get_pale_ink',
+            'green_means_on_and_the_accent_means_chosen',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'the_knob_is_legible_on_every_track_a_panel_can_choose',
+            # Everything below was found by the sweep of 2026-08-24. A
+            # reciprocal ratio fails every floor assertion in the tree at
+            # once, so this is the widest blast radius of the four.
+            'a_category_with_no_default_app_is_not_accented_as_if_it_had_one',
+            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
+            'a_title_is_readable_on_every_bar_the_settings_can_produce',
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+            'an_accented_taskbar_keeps_its_glyph_visible',
+            'an_empty_search_box_is_dimmer_than_a_typed_query',
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'every_colour_the_popup_draws_comes_from_its_palette',
+            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_pairing_the_calendar_draws_clears_the_contrast_floor',
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+            'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'readable_on_answers_with_the_palettes_own_extremes',
+            'test_ui_render_audio',
+            'test_ui_render_input',
+            'test_ui_render_magnifier',
+            'test_ui_render_reader',
+            'test_ui_render_visual',
+            'test_ui_render_with_active_features',
+            'text_beats_readable_on_the_fill_against_the_card',
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+            'the_active_feature_line_is_green_and_only_drawn_when_there_is_one',
+            'the_content_well_is_deeper_than_the_panel_it_sits_in',
+            'the_crosshairs_are_legible_on_the_lens_in_both_modes',
+            'the_knob_follows_the_track_rather_than_the_theme',
+            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'the_section_headings_keep_their_hue_in_both_modes',
+            'the_wordmark_is_legible_on_the_logo_tile',
+            'what_is_drawn_on_the_accent_is_chosen_for_the_accent',
+        ],
+    ),
+    # ---------------------------------------------------------------- 52
+    # 537: the toolkit's own ink chooser, which had the same defect as
+    # `readable_on` in a worse form and no production caller to reveal it.
+    #
+    # The six tests it shipped with all passed both before and after the fix,
+    # because every colour they name is far from the crossover. That is the
+    # condition this module exists to make impossible: after it, breaking the
+    # rule is caught, and a future reader can tell the tests constrain it.
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the toolkit's ink chooser goes back to thresholding luminance at a half",
+        THEME,
+        [
+            ('    if contrast_ratio(background, Color::BLACK) >= contrast_ratio(background, Color::WHITE) {\n        Color::BLACK\n    } else {\n        Color::WHITE\n    }\n',
+             '    if relative_luminance(background) < 0.5 {\n        Color::WHITE\n    } else {\n        Color::BLACK\n    }\n'),
+        ],
+        ["guitk", "appearance", "desktop"],
+        [
+            # The exact code 537 removed, minus its `powf(2.2)` (which is
+            # Cx81's business). It is wrong for 41.78% of the cube, but for
+            # none of the six colours the module's original tests name -- so
+            # the two tests 537 added are expected to be the only catchers,
+            # exactly as Ax81 was for `readable_on`.
+            'the_chosen_ink_is_the_more_legible_of_the_two_for_every_colour_there_is',
+            'plain_red_and_mid_grey_are_lettered_in_black',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the toolkit returns whichever of black and white is harder to read",
+        THEME,
+        [
+            ('    if contrast_ratio(background, Color::BLACK) >= contrast_ratio(background, Color::WHITE) {\n',
+             '    if contrast_ratio(background, Color::BLACK) < contrast_ratio(background, Color::WHITE) {\n'),
+        ],
+        ["guitk", "appearance", "desktop"],
+        [
+            # Wrong for every colour rather than 41.78% of them, so unlike Ex81
+            # the module's original tests do see it -- which is worth recording,
+            # because it is the difference between a test that pins the answer
+            # at the extremes and one that constrains the rule.
+            'the_chosen_ink_is_the_more_legible_of_the_two_for_every_colour_there_is',
+            'plain_red_and_mid_grey_are_lettered_in_black',
+            'test_contrast_text_on_dark_bg',
+            'test_contrast_text_on_light_bg',
+            'test_is_dark_black',
+            'test_is_dark_white',
+            'test_catppuccin_mocha_is_dark_mode',
+            'test_catppuccin_latte_is_light_mode',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: is_dark gets a threshold of its own again and drifts from the ink it explains",
+        THEME,
+        [
+            ('    contrast_text(color) == Color::WHITE\n',
+             '    relative_luminance(color) < 0.5\n'),
+        ],
+        ["guitk", "appearance", "desktop"],
+        [
+            # The whole reason `is_dark` is defined in terms of `contrast_text`
+            # rather than given a corrected threshold: two thresholds can
+            # disagree about a colour, and this is what that looks like.
+            'is_dark_and_contrast_text_cannot_disagree',
+            'plain_red_and_mid_grey_are_lettered_in_black',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the appearance crate goes back to its own copy of the luminance curve",
+        APP,
+        [
+            ('pub use guitk::theme::{contrast_ratio, relative_luminance};\n',
+             ('#[must_use]\n'
+              'pub fn relative_luminance(c: Color) -> f32 {\n'
+              '    fn channel(v: u8) -> f32 {\n'
+              '        let v = f32::from(v) / 255.0;\n'
+              '        if v <= 0.039_28 {\n'
+              '            v / 12.92\n'
+              '        } else {\n'
+              '            ((v + 0.055) / 1.055).powf(2.4)\n'
+              '        }\n'
+              '    }\n'
+              '    0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)\n'
+              '}\n'
+              '#[must_use]\n'
+              'pub fn contrast_ratio(a: Color, b: Color) -> f32 {\n'
+              '    let (la, lb) = (relative_luminance(a), relative_luminance(b));\n'
+              '    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };\n'
+              '    (hi + 0.05) / (lo + 0.05)\n'
+              '}\n')),
+        ],
+        ["guitk", "appearance", "desktop"],
+        [
+            # A *correct* copy -- byte-for-byte what the toolkit computes, so
+            # every ratio in the tree is unchanged and no legibility test can
+            # see it. That is the point: the defect 537 fixed is the existence
+            # of the second copy, not a wrong number in it, and a defect that
+            # nothing observes is a rule nothing is holding. The one test that
+            # catches this compares the two as function items rather than
+            # comparing their answers.
+            'the_ratio_is_the_toolkits_own_and_not_a_second_copy_of_it',
+        ],
+    ),
+    # ---------------------------------------------------------------- 53
+    # 541 / C-Q2: the arrow keys move the caret by the *screen* rather than
+    # through the string. The operator chose visual motion; five text fields
+    # implement it -- three in the toolkit, two in the desktop shell.
+    #
+    # This module exists because the change has a trap in it that a careless
+    # "simplification" walks straight into, and because half of it is invisible
+    # to any test that only reads `cursor`.
+    #
+    # The trap: on `ab` + two Hebrew letters + `cd`, drawn `a b <bet> <aleph>
+    # c d`, the two gaps where the directions meet each answer to *both* byte
+    # offsets 2 and 6. Walking left reports 6 at both, walking right reports 2
+    # at both, and only the affinity inside `TextCursor` separates them. A
+    # field that stores the byte and rebuilds the rest each keypress reads the
+    # second 6 as the first and skips the entire Hebrew word in one press --
+    # worse than the logical motion it replaced. Defect J is exactly that.
+    #
+    # The invisible half: moving correctly is not enough, the caret must also
+    # be *drawn* where it moved to, and a prefix-width measurement is only
+    # right while the line runs in one direction. O and Q are that, and their
+    # catchers are the only two tests in the tree that look at the drawn caret.
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the toolkit text field's arrows go back to stepping through the string",
+        WIDG,
+        [
+            ('                        if let Some(prev) = crate::text::caret_left(\n'
+             '                            value,\n'
+             '                            *cursor,\n'
+             '                            font_size,\n'
+             '                            FontWeightHint::Regular,\n'
+             '                        ) {\n',
+             '                        if let Some(prev) = cursor.prev_in(value) {\n'),
+            ('                        if let Some(next) = crate::text::caret_right(\n'
+             '                            value,\n'
+             '                            *cursor,\n'
+             '                            font_size,\n'
+             '                            FontWeightHint::Regular,\n'
+             '                        ) {\n',
+             '                        if let Some(next) = cursor.next_in(value) {\n'),
+        ],
+        ["guitk"],
+        [
+            # Exactly the code 541 replaced. Every ASCII test of this widget
+            # passes throughout, because on a line that runs one way the two
+            # motions are the same motion.
+            'the_arrows_move_by_the_screen_and_keep_the_side_they_are_on',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the field keeps the caret's byte and throws away which side of the boundary it is on",
+        WIDG,
+        [
+            # The `FontWeightHint` line is carried along only to disambiguate:
+            # Backspace three arms up also ends `*cursor = prev;`, and patching
+            # *that* would be a different defect about editing, not movement.
+            ('                            FontWeightHint::Regular,\n'
+             '                        ) {\n'
+             '                            *cursor = prev;\n',
+             '                            FontWeightHint::Regular,\n'
+             '                        ) {\n'
+             '                            *cursor = crate::text::TextCursor::from(prev.byte());\n'),
+            ('                            *cursor = next;\n',
+             '                            *cursor = crate::text::TextCursor::from(next.byte());\n'),
+        ],
+        ["guitk"],
+        [
+            # 541's measured trap, and the reason the widget stores a
+            # `TextCursor` rather than a `usize`. `From<usize>` resets the
+            # affinity to `Downstream`, so the second visit to byte 6 is
+            # indistinguishable from the first and the walk jumps the whole
+            # Hebrew word. The failure shows a *shorter* sequence than the six
+            # stops the six letters have -- which is what the catcher's doc
+            # comment tells its reader to look for.
+            'the_arrows_move_by_the_screen_and_keep_the_side_they_are_on',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the plain input dialog is given the password field's logical motion",
+        MODAL,
+        [
+            ('        } else if right {\n'
+             '            crate::text::caret_right(\n'
+             '                &self.input_text,\n'
+             '                self.cursor,\n'
+             '                FONT_SIZE,\n'
+             '                FontWeightHint::Regular,\n'
+             '            )\n'
+             '        } else {\n'
+             '            crate::text::caret_left(\n'
+             '                &self.input_text,\n'
+             '                self.cursor,\n'
+             '                FONT_SIZE,\n'
+             '                FontWeightHint::Regular,\n'
+             '            )\n'
+             '        };\n',
+             '        } else if right {\n'
+             '            self.cursor.next_in(&self.input_text)\n'
+             '        } else {\n'
+             '            self.cursor.prev_in(&self.input_text)\n'
+             '        };\n'),
+        ],
+        ["guitk"],
+        [
+            # The password exception spreading to the field it is an exception
+            # *from*. Note the password test next door still passes: it asserts
+            # the logical sequence, which is now what both branches do.
+            'a_plain_input_dialog_moves_its_caret_by_the_screen',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the password field loses its exception and moves by the layout of the hidden text",
+        MODAL,
+        [
+            ('        let stepped = if self.password_mode {\n'
+             '            if right {\n'
+             '                self.cursor.next_in(&self.input_text)\n'
+             '            } else {\n'
+             '                self.cursor.prev_in(&self.input_text)\n'
+             '            }\n'
+             '        } else if right {\n',
+             '        let stepped = if right {\n'),
+        ],
+        ["guitk"],
+        [
+            # The one documented exception to 541, deleted. What the field
+            # draws is a row of identical asterisks in string order, so moving
+            # by the layout of the secret scatters the caret among marks that
+            # cannot explain the jumps -- and the jumps themselves disclose the
+            # shape of the secret to anyone watching, which is the single thing
+            # masking exists to prevent.
+            'a_password_field_steps_through_its_mask_not_its_secret',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the path bar's arrows jump across a right-to-left directory name instead of entering it",
+        PBAR,
+        [
+            ('        if let Some(prev) = crate::text::caret_left(\n'
+             '            &self.edit_text,\n'
+             '            self.cursor,\n'
+             '            FONT_SIZE,\n'
+             '            FontWeightHint::Regular,\n'
+             '        ) {\n',
+             '        if let Some(prev) = self.cursor.prev_in(&self.edit_text) {\n'),
+            ('        if let Some(next) = crate::text::caret_right(\n'
+             '            &self.edit_text,\n'
+             '            self.cursor,\n'
+             '            FONT_SIZE,\n'
+             '            FontWeightHint::Regular,\n'
+             '        ) {\n',
+             '        if let Some(next) = self.cursor.next_in(&self.edit_text) {\n'),
+        ],
+        ["guitk"],
+        [
+            # The path bar was switched with the other two but shipped no test
+            # of its own until 78a7c5102 -- which is the whole reason this
+            # defect can be written down as a question the suite answers.
+            'the_path_bars_arrows_cross_a_right_to_left_directory_name_letter_by_letter',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the launcher's search box is the one field left stepping through the string",
+        LAUN,
+        [
+            ('                if let Some(prev) = text::caret_left(\n'
+             '                    &self.query,\n'
+             '                    self.cursor,\n'
+             '                    INPUT_FONT_SIZE,\n'
+             '                    FontWeightHint::Regular,\n'
+             '                ) {\n',
+             '                if let Some(prev) = self.cursor.prev_in(&self.query) {\n'),
+            ('                if let Some(next) = text::caret_right(\n'
+             '                    &self.query,\n'
+             '                    self.cursor,\n'
+             '                    INPUT_FONT_SIZE,\n'
+             '                    FontWeightHint::Regular,\n'
+             '                ) {\n',
+             '                if let Some(next) = self.cursor.next_in(&self.query) {\n'),
+        ],
+        ["desktop"],
+        [
+            # A half-switched desktop, which 541 records as the failure mode
+            # worth naming: the caret then obeys two different rules depending
+            # on which box has focus, and neither one is wrong on its own.
+            'the_arrows_walk_the_query_by_the_screen_not_by_the_string',
+            # Found by the sweep of 2026-08-24, not predicted, and worth
+            # keeping: the drawn-caret test catches the *movement* defect too,
+            # because a logical Right on this text moves the offset 2 -> 6 and
+            # the shaper then draws that offset to the left of where it was.
+            # So the drawn caret goes backwards under a Right press for a
+            # reason that has nothing to do with how it is placed. The two
+            # halves of 541 are not independently observable after all.
+            'the_drawn_caret_moves_rightwards_every_time_the_right_arrow_does',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the launcher draws its caret at the width of the text before it again",
+        LAUN,
+        [
+            ('        let cursor_x = 12.0\n'
+             '            + text::caret_x(\n'
+             '                &self.query,\n'
+             '                self.cursor,\n'
+             '                INPUT_FONT_SIZE,\n'
+             '                FontWeightHint::Regular,\n'
+             '            );\n',
+             '        let cursor_x = 12.0\n'
+             '            + text::measure(\n'
+             '                self.query.get(..self.cursor.byte()).unwrap_or_default(),\n'
+             '                INPUT_FONT_SIZE,\n'
+             '                FontWeightHint::Regular,\n'
+             '            );\n'),
+        ],
+        ["desktop"],
+        [
+            # The half of 541 that no cursor-only test can see. A prefix width
+            # is the caret's place only while the line runs one way, so with
+            # the arrows walking 2, 4, 2 through the Hebrew the drawn caret
+            # goes *backwards* twice while the user presses Right. Note this
+            # reintroduction is the non-panicking form -- `.get(..)` rather
+            # than a slice -- so what fails is the position, not a crash.
+            'the_drawn_caret_moves_rightwards_every_time_the_right_arrow_does',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the Run dialog's arrows go back to stepping through the string",
+        RUN,
+        [
+            ('        if let Some(prev) = text::caret_left(\n'
+             '            &self.text,\n'
+             '            self.cursor,\n'
+             '            INPUT_FONT_SIZE,\n'
+             '            FontWeightHint::Regular,\n'
+             '        ) {\n',
+             '        if let Some(prev) = self.cursor.prev_in(&self.text) {\n'),
+            ('        if let Some(next) = text::caret_right(\n'
+             '            &self.text,\n'
+             '            self.cursor,\n'
+             '            INPUT_FONT_SIZE,\n'
+             '            FontWeightHint::Regular,\n'
+             '        ) {\n',
+             '        if let Some(next) = self.cursor.next_in(&self.text) {\n'),
+        ],
+        ["desktop"],
+        [
+            'the_run_dialogs_arrows_walk_the_line_by_the_screen_not_by_the_string',
+            # Undeclared until the sweep of 2026-08-24, for the same reason as
+            # N above: a logical Right moves the offset from 2 to 6, and the
+            # shaper draws 6 to the *left* of 2, so the drawn-caret test sees
+            # a movement defect even though nothing about the drawing changed.
+            'the_run_dialogs_drawn_caret_only_ever_moves_rightwards_under_the_right_arrow',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the Run dialog goes back to slicing its text at the caret's raw byte offset",
+        RUN,
+        [
+            ('        let cursor_px = text::caret_x(\n'
+             '            &self.input.text,\n'
+             '            self.input.cursor,\n'
+             '            INPUT_FONT_SIZE,\n'
+             '            FontWeightHint::Regular,\n'
+             '        );\n',
+             '        let cursor_px = text::measure(\n'
+             '            &self.input.text[..self.input.cursor.byte()],\n'
+             '            INPUT_FONT_SIZE,\n'
+             '            FontWeightHint::Regular,\n'
+             '        );\n'),
+        ],
+        ["desktop"],
+        [
+            # Two faults in one line, so two catchers. The prefix width puts
+            # the caret in the wrong place on a bidirectional line, and the
+            # *slice* panics outright on an offset inside a character -- inside
+            # `render`, so a drifted cursor took the whole shell down while
+            # merely painting the dialog.
+            'the_run_dialogs_drawn_caret_only_ever_moves_rightwards_under_the_right_arrow',
+            'a_run_dialog_caret_off_a_character_boundary_draws_rather_than_panicking',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a password is masked with one asterisk per byte again",
+        MODAL,
+        [
+            ('            "*".repeat(self.input_text.chars().count())\n',
+             '            "*".repeat(self.input_text.len())\n'),
+        ],
+        ["guitk"],
+        [
+            # Found while implementing 541 next door. An eight-character
+            # password of sixteen bytes drew sixteen marks: the row stops
+            # lining up with the places the caret can be, and its width
+            # discloses the secret's *encoding* rather than its length, which
+            # for a non-Latin password narrows it far more than a character
+            # count does.
+            'the_mask_has_one_mark_per_character_not_per_byte',
+        ],
+    ),
 ]
 def run_tests(pkg):
     r = subprocess.run(
@@ -22528,6 +23199,118 @@ def check(snap):
             noop += 1
     print(f"\n{len(DEFECTS)} defects, {bad} stale, {amb} ambiguous, {noop} no-op")
     return 1 if bad or amb or noop else 0
+
+
+# A `#[test]` may carry further attributes before the function, and
+# `#[should_panic(expected = "...")]` puts brackets inside brackets, so the
+# attribute run is matched line-wise rather than with a bracket-balancing regex.
+_TEST_ATTR = re.compile(r"^\s*#\[test\]\s*$")
+_ATTR = re.compile(r"^\s*#\[")
+_FN = re.compile(r"^\s*(?:async\s+)?fn\s+([A-Za-z0-9_]+)\s*\(")
+
+# The two packages this harness sweeps. A test in guitk or the compositor is
+# not unproven-by-this-harness; it is simply out of scope, and listing it would
+# bury the finding in noise.
+COVERED_DIRS = ("gui/desktop/src", "gui/appearance/src")
+
+
+def tests_in_tree():
+    """`{path: [test names]}` for every `#[test] fn` in the swept packages."""
+    found = {}
+    for d in COVERED_DIRS:
+        for p in sorted((ROOT / d).rglob("*.rs")):
+            names = []
+            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+            for i, ln in enumerate(lines):
+                if not _TEST_ATTR.match(ln):
+                    continue
+                for nxt in lines[i + 1:]:
+                    if _ATTR.match(nxt) or not nxt.strip():
+                        continue
+                    m = _FN.match(nxt)
+                    if m:
+                        names.append(m.group(1))
+                    break
+            if names:
+                found[p.relative_to(ROOT).as_posix()] = names
+    return found
+
+
+def coverage():
+    """Report the tests no defect ever asks a question of.
+
+    `check()` answers "does every defect still apply?". This answers the
+    question one level up, which nothing else does: "is every test actually
+    proved by something?" A test with no defect behind it has never been seen
+    to fail for the right reason, yet it counts toward a green suite exactly
+    like a proved one does. That is the harness's own failure mode, and it is
+    invisible to `check()` -- a list of defects can be entirely healthy and
+    still leave half the suite unexamined.
+
+    It is deliberately **not** a gate. Plenty of tests cannot be reached by a
+    source-level find/replace at all: a test of a pure arithmetic helper has no
+    "defect" short of rewriting the helper, and inventing one would be
+    ceremony, not proof. The output is a worklist whose number should be driven
+    down on purpose, not a build failure to be silenced.
+
+    Three findings, in decreasing order of severity:
+
+    1. **Unproved** -- a test whose name no defect names anywhere. Nothing has
+       ever asked it anything.
+    2. **Dangling** -- a declared name matching no test in the tree, i.e. a
+       test renamed out from under a defect. Today this surfaces only as a
+       `[MISSING: ...]` at the end of a run that takes hours.
+    3. **Single-prover** -- a test exactly one defect names. These are the
+       fragile ones: one refactor from becoming unproved, which is precisely
+       what happened to touchpad's erasure sweep when the empty-fill guard
+       moved into slider.rs (design-decisions.md 535).
+    """
+    provers = {}
+    for _name, path, _edits, _pkgs, expect in DEFECTS:
+        for t in expect:
+            provers.setdefault(t, []).append(path)
+
+    in_tree = tests_in_tree()
+    everywhere = {t for names in in_tree.values() for t in names}
+
+    unproved = {
+        f: [t for t in names if t not in provers]
+        for f, names in in_tree.items()
+    }
+    unproved = {f: ts for f, ts in unproved.items() if ts}
+    total_tests = sum(len(v) for v in in_tree.values())
+    total_unproved = sum(len(v) for v in unproved.values())
+
+    print("=== tests no defect names (never asked anything) ===")
+    for f in sorted(unproved):
+        print(f"  {f}  ({len(unproved[f])} of {len(in_tree[f])})")
+        for t in unproved[f]:
+            print(f"      {t}")
+    if not unproved:
+        print("  none")
+
+    dangling = sorted(t for t in provers if t not in everywhere)
+    print(f"\n=== declared names matching no test ({len(dangling)}) ===")
+    for t in dangling:
+        print(f"  {t}  <- declared by {len(provers[t])} defect(s)")
+    if not dangling:
+        print("  none")
+
+    single = sorted(t for t, ps in provers.items() if len(ps) == 1 and t in everywhere)
+    print(f"\n=== proved by exactly one defect ({len(single)}) ===")
+    for t in single:
+        print(f"  {t}  ({provers[t][0]})")
+    if not single:
+        print("  none")
+
+    pct = 100.0 * (total_tests - total_unproved) / total_tests if total_tests else 0.0
+    print(
+        f"\n{total_tests} tests in the swept packages, {total_unproved} unproved "
+        f"({pct:.1f}% proved), {len(dangling)} dangling, {len(single)} single-prover"
+    )
+    # Dangling is the one finding that is unambiguously a mistake: a defect
+    # declaring a test that does not exist can only ever report MISSING.
+    return 1 if dangling else 0
 
 
 def apply_to(snap, path, edits):
@@ -22642,6 +23425,12 @@ def restore(files, snap, digest):
 
 
 def main():
+    # Before the snapshot: `--coverage` reads the tree and writes nothing, so
+    # it must not print a snapshot banner implying otherwise, and it is the one
+    # mode that is safe to run while a sweep is in flight elsewhere.
+    if sys.argv[1:2] == ["--coverage"]:
+        sys.exit(coverage())
+
     files = sorted({d[1] for d in DEFECTS})
     snap = {f: (ROOT / f).read_bytes() for f in files}
     digest = {f: hashlib.sha256(b).hexdigest() for f, b in snap.items()}

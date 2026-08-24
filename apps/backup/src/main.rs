@@ -3013,6 +3013,7 @@ mod tests {
     )]
 
     use super::*;
+    use scratchdir::ScratchDir;
 
     // --- Write routing (safeio audit counters) ---
 
@@ -3038,14 +3039,20 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// A temporary directory unique to one test.
-    fn temp_dir(tag: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let dir = std::env::temp_dir().join(format!("slate_backup_{tag}_{nanos}"));
-        fs::create_dir_all(&dir).expect("temp dir");
-        dir
+    /// A private temporary directory for one test, removed when the returned
+    /// guard drops.
+    ///
+    /// The name used to carry the system clock in nanoseconds, which is not
+    /// unique. `cargo test` runs a binary's tests as threads of one process,
+    /// and the clock a thread reads is only refreshed on a timer interrupt, so
+    /// every test that starts within the same tick draws the same tag and they
+    /// share one directory. `ScratchDir` names itself from the process id and a
+    /// per-process atomic counter, which is unique by construction.
+    ///
+    /// Bind the guard to a named local, never to `_`: a bare `_` drops it
+    /// immediately and the directory is gone before the test's first line.
+    fn temp_dir(tag: &str) -> ScratchDir {
+        ScratchDir::new(&format!("slate_backup_{tag}"))
     }
 
     /// Every file a *command* writes goes through `safeio`, not `fs::write`.
@@ -3071,7 +3078,8 @@ mod tests {
     fn command_level_writes_go_through_safeio() {
         let _guard = audit_lock();
 
-        let root = temp_dir("cmd_routing");
+        let root_scratch = temp_dir("cmd_routing");
+        let root = root_scratch.dir().to_path_buf();
         let source = root.join("src");
         fs::create_dir_all(&source).expect("source dir");
         fs::write(source.join("a.txt"), b"alpha").expect("a.txt");
@@ -3135,8 +3143,6 @@ mod tests {
             "cmd_schedule must write schedules.json through safeio"
         );
         assert!(schedules_path(&dest).exists(), "the schedule was saved");
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     // --- Blob-store write routing ---
@@ -3168,7 +3174,8 @@ mod tests {
     fn both_blob_store_paths_go_through_safeio() {
         let _guard = audit_lock();
 
-        let dir = temp_dir("blob_routing");
+        let scratch = temp_dir("blob_routing");
+        let dir = scratch.dir().to_path_buf();
         let store = ContentStore::new(&dir);
 
         // store_bytes -> safeio::write_atomically
@@ -3196,8 +3203,6 @@ mod tests {
             "store_file did not go through safeio -- it must not use fs::copy"
         );
         assert_eq!(store.read_blob(&file_hash).expect("read back"), body);
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // --- SHA-256 Tests ---

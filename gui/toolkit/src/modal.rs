@@ -1135,31 +1135,50 @@ impl InputDialog {
         EventResult::Consumed
     }
 
-    /// Step the caret one character earlier or later **in the string**.
+    /// Step the caret one position left or right **on the screen**.
     ///
-    /// On a line that mixes directions this is not one step left or right on
-    /// the *screen*: the caret jumps across a right-to-left word rather than
-    /// walking through it. That is deliberate. Logical motion is what macOS,
-    /// GTK and Qt do and Windows moves visually; both ship, and choosing
-    /// between them is a user-visible policy the operator has not yet decided
-    /// (`open-questions.md` → C-Q2).
+    /// On a line that mixes directions that is not the same as one character
+    /// earlier or later in the string: the caret walks *through* a
+    /// right-to-left word rather than jumping across it. macOS, GTK and Qt move
+    /// logically and Windows moves visually; the operator chose visual, and the
+    /// reasoning is `design-decisions.md` §541.
     ///
-    /// The visual alternative is built and tested — `text::caret_left` /
-    /// `caret_right`, and this dialog already stores the `TextCursor` they
-    /// need. Answering C-Q2 "visual" means calling those here for the
-    /// non-password case, and nothing else. **A password field would stay on
-    /// this path either way:** what it draws is a row of asterisks, so its
-    /// drawn order is its string order whatever was typed, and moving by the
-    /// layout of the hidden text would scatter the caret among identical marks
-    /// with nothing on screen to explain the jumps.
+    /// **A password field is the documented exception and stays logical.** What
+    /// it draws is a row of asterisks, so its drawn order is its string order
+    /// whatever was typed. Moving by the layout of the *hidden* text would
+    /// scatter the caret among identical marks with nothing on screen to
+    /// explain the jumps — and would leak the shape of the secret to anyone
+    /// watching the caret, which is the one thing the masking exists to
+    /// prevent.
     fn move_caret(&mut self, right: bool) {
         // A whole character at a time, never a byte: `String::remove` and
-        // `insert` panic on an offset inside one. `prev_in`/`next_in` return
+        // `insert` panic on an offset inside one. Both paths below return
         // offsets the text named, so there is no width to add or subtract.
-        let stepped = if right {
-            self.cursor.next_in(&self.input_text)
+        //
+        // Note the visual arms assign the returned cursor whole rather than
+        // just its byte. Where two directions meet, one byte offset names two
+        // screen positions; the affinity carried in `TextCursor` is what tells
+        // them apart, and dropping it would skip a whole word per keypress.
+        let stepped = if self.password_mode {
+            if right {
+                self.cursor.next_in(&self.input_text)
+            } else {
+                self.cursor.prev_in(&self.input_text)
+            }
+        } else if right {
+            crate::text::caret_right(
+                &self.input_text,
+                self.cursor,
+                FONT_SIZE,
+                FontWeightHint::Regular,
+            )
         } else {
-            self.cursor.prev_in(&self.input_text)
+            crate::text::caret_left(
+                &self.input_text,
+                self.cursor,
+                FONT_SIZE,
+                FontWeightHint::Regular,
+            )
         };
         if let Some(next) = stepped {
             self.cursor = next;
@@ -1337,7 +1356,15 @@ impl InputDialog {
         let display_text = if self.input_text.is_empty() {
             self.placeholder.clone()
         } else if self.password_mode {
-            "*".repeat(self.input_text.len())
+            // One mark per *caret stop*, not per byte. `len()` is the UTF-8
+            // byte count, so a password with any non-ASCII character in it drew
+            // more asterisks than it has characters — two for an accented
+            // letter, four for an emoji. That is wrong twice over: the row of
+            // marks no longer lines up with the positions the caret can occupy
+            // (`caret_offsets` walks characters), and the width of the row
+            // leaks how many bytes the secret encodes to, which for a password
+            // typed in a non-Latin script is most of what an observer wants.
+            "*".repeat(self.input_text.chars().count())
         } else {
             self.input_text.clone()
         };
@@ -2953,18 +2980,18 @@ mod tests {
         })
     }
 
-    /// The arrows move **logically** — one character earlier or later in the
-    /// string — so on `ab` + two Hebrew letters + `cd`, drawn
-    /// `a b <bet> <aleph> c d`, walking left from the end visits the byte
-    /// offsets 7, 6, 4, 2, 1, 0 and the caret jumps sideways across the Hebrew
-    /// rather than stepping through it.
+    /// The arrows move **visually** — one position left or right on the screen
+    /// — so on `ab` + two Hebrew letters + `cd`, drawn `a b <bet> <aleph> c d`,
+    /// the caret steps through the Hebrew rather than jumping across it.
+    /// `design-decisions.md` §541.
     ///
-    /// **This pins a policy, not a truth.** Logical is macOS/GTK/Qt; Windows
-    /// moves visually; the choice is `open-questions.md` → C-Q2 and is
-    /// unanswered. If it answers "visual" this expectation becomes
-    /// 7, 6, 4, 6, 1, 0. Do not change it to match without that answer.
+    /// Byte 6 is visited twice on the way left and byte 2 twice on the way
+    /// right, at the two opposite ends of the Hebrew both times: each of those
+    /// gaps answers to both offsets, and only the affinity inside `TextCursor`
+    /// says which. See the fuller account on the toolkit's own
+    /// `the_arrows_move_by_the_screen_and_keep_the_side_they_are_on`.
     #[test]
-    fn the_arrows_move_by_the_string_pending_c_q2() {
+    fn a_plain_input_dialog_moves_its_caret_by_the_screen() {
         let text = "ab\u{05D0}\u{05D1}cd";
         let mut dialog = InputDialog::prompt("Test", "Path:", "").with_initial_text(text);
         dialog.show();
@@ -2973,26 +3000,31 @@ mod tests {
             dialog.handle_event(&key(Key::Left));
             seen.push(dialog.cursor.byte());
         }
-        assert_eq!(seen, vec![7, 6, 4, 2, 1, 0]);
+        assert_eq!(seen, vec![7, 6, 4, 6, 1, 0]);
         let mut seen = vec![];
         for _ in 0..6 {
             dialog.handle_event(&key(Key::Right));
             seen.push(dialog.cursor.byte());
         }
-        assert_eq!(seen, vec![1, 2, 4, 6, 7, 8]);
+        assert_eq!(seen, vec![1, 2, 4, 2, 7, 8]);
         // Past the end it stays put rather than wrapping.
         dialog.handle_event(&key(Key::Right));
         assert_eq!(dialog.cursor.byte(), text.len());
     }
 
-    /// A password field would keep stepping logically **even if C-Q2 answers
-    /// "visual"**, so this is the one place the answer is already known. What
-    /// it draws is a row of asterisks: its drawn order is its string order
-    /// whatever was typed, and moving by the layout of the hidden text would
-    /// scatter the caret among identical marks with nothing on screen to
-    /// explain the jumps — and would leak the shape of the secret besides.
+    /// A password field keeps stepping **logically**, and is the one documented
+    /// exception to §541's visual arrows. What it draws is a row of asterisks:
+    /// its drawn order is its string order whatever was typed, so moving by the
+    /// layout of the hidden text would scatter the caret among identical marks
+    /// with nothing on screen to explain the jumps — and would leak the shape
+    /// of the secret to anyone watching, which is the one thing masking exists
+    /// to prevent.
+    ///
+    /// This is now a live contrast rather than a hypothetical one: the plain
+    /// dialog next door really does walk 7, 6, 4, 6, 1, 0 on this same text,
+    /// and this one must not.
     #[test]
-    fn a_password_field_would_step_through_its_mask_not_its_secret() {
+    fn a_password_field_steps_through_its_mask_not_its_secret() {
         let text = "ab\u{05D0}\u{05D1}cd";
         let mut hidden = InputDialog::prompt("Test", "Password:", "")
             .with_password_mode(true)
@@ -3177,6 +3209,55 @@ mod tests {
 
         dialog.handle_event(&tab);
         assert_eq!(dialog.focused_element, InputFocus::TextField);
+    }
+
+    /// The mask has one asterisk per caret stop, whatever the secret encodes to.
+    ///
+    /// It used to be `"*".repeat(text.len())` — the UTF-8 *byte* count. An
+    /// accented letter therefore drew two marks, an emoji four, and a password
+    /// typed in Greek or Hebrew or Japanese drew a row two or three times its
+    /// own length. Two things break at once:
+    ///
+    /// - the marks stop lining up with the places the caret can be. The caret
+    ///   steps by character (`caret_offsets` walks `char_indices`), so in an
+    ///   eight-character password of eleven bytes the caret has nine stops
+    ///   spread across twelve asterisks and points between the wrong ones.
+    /// - the width of the row leaks the secret's *encoded* length rather than
+    ///   its typed length, which for a non-Latin password narrows it far more
+    ///   than a character count does. Masking exists to stop exactly that.
+    ///
+    /// **A failure here counting more marks than characters is that bug back.**
+    #[test]
+    fn the_mask_has_one_mark_per_character_not_per_byte() {
+        // 8 characters; 16 bytes — the old code drew exactly twice as many
+        // marks as the user typed. ASCII, Latin-1, Greek, Hebrew, CJK, emoji:
+        // one, two, two, two, three and four bytes respectively.
+        let secret = "ab\u{00E9}\u{03B1}\u{05D0}\u{4E2D}\u{1F600}c";
+        assert_eq!(secret.chars().count(), 8);
+        assert_eq!(secret.len(), 16);
+
+        let mut dialog = InputDialog::prompt("Test", "Password:", "")
+            .with_password_mode(true)
+            .with_initial_text(secret);
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+        let masks: Vec<&String> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } if text.starts_with('*') => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(masks.len(), 1, "the field is drawn once");
+        assert_eq!(masks[0].len(), 8, "one mark per character, not per byte");
+        assert!(
+            !masks[0].contains(|c| c != '*'),
+            "nothing of the secret itself is drawn"
+        );
     }
 
     #[test]

@@ -1176,29 +1176,20 @@ impl InstallConfig {
 
     fn parse_size_with_unit(s: &str, idx: usize) -> Result<PartitionSize, ConfigError> {
         let s_trimmed = s.trim();
-        let (num_part, unit) = if s_trimmed
+        // Split at the start of the trailing run of letters, however long it
+        // is. The previous version looked at the last one or two bytes only,
+        // which meant a three-letter unit could never be produced -- so the
+        // `KIB`/`MIB`/`GIB`/`TIB` arms below were unreachable and `"32 GiB"`
+        // was rejected as an invalid *number* ("32 G" does not parse). That
+        // matters more than it looks: §542 refuses `GB` and directs the author
+        // to `GiB`, so `GiB` has to actually work or the diagnostic sends them
+        // somewhere no better.
+        let split = s_trimmed
             .as_bytes()
-            .last()
-            .is_some_and(|b| b.is_ascii_alphabetic())
-        {
-            let split = s_trimmed.len().wrapping_sub(1);
-            // Handle two-char units like "MB", "GB", "TB".
-            if split > 0
-                && s_trimmed
-                    .as_bytes()
-                    .get(split.wrapping_sub(1))
-                    .is_some_and(|b| b.is_ascii_alphabetic())
-            {
-                (
-                    &s_trimmed[..split.wrapping_sub(1)],
-                    &s_trimmed[split.wrapping_sub(1)..],
-                )
-            } else {
-                (&s_trimmed[..split], &s_trimmed[split..])
-            }
-        } else {
-            (s_trimmed, "")
-        };
+            .iter()
+            .rposition(|b| !b.is_ascii_alphabetic())
+            .map_or(0, |i| i.saturating_add(1));
+        let (num_part, unit) = s_trimmed.split_at(split);
 
         let num: u64 = num_part
             .trim()
@@ -1208,12 +1199,37 @@ impl InstallConfig {
                 message: format!("invalid size '{s}'"),
             })?;
 
+        // §542: a bare `KB`/`MB`/`GB`/`TB` is refused rather than guessed at.
+        // The suffix means 10^3 on the drive's own box and 2^10 in every
+        // partitioning tool, this parser silently meant the latter, and either
+        // choice leaves some existing config file meaning something its author
+        // did not intend with nothing announcing it. A partition table is not
+        // a place to be helpful about a guess, so the ambiguity goes back to
+        // the one party who can resolve it -- the author, who knows which
+        // number they meant.
         let multiplier: u64 = match unit.to_ascii_uppercase().as_str() {
             "" | "B" => 1,
-            "K" | "KB" | "KIB" => 1024,
-            "M" | "MB" | "MIB" => 1024 * 1024,
-            "G" | "GB" | "GIB" => 1024 * 1024 * 1024,
-            "T" | "TB" | "TIB" => 1024 * 1024 * 1024 * 1024,
+            "K" | "KIB" => 1024,
+            "M" | "MIB" => 1024 * 1024,
+            "G" | "GIB" => 1024 * 1024 * 1024,
+            "T" | "TIB" => 1024 * 1024 * 1024 * 1024,
+            "KB" | "MB" | "GB" | "TB" => {
+                // Name *both* replacements. An author who is refused needs to
+                // know which spelling preserves the layout they have now
+                // (the binary one -- that is what this parser always did), and
+                // an error that only says "ambiguous" makes them guess again
+                // one level up.
+                let binary = format!("{}iB", unit.get(..1).unwrap_or_default());
+                return Err(ConfigError::InvalidValue {
+                    field: format!("disk.partitions[{idx}].size"),
+                    message: format!(
+                        "ambiguous size unit '{unit}' in '{s}': '{unit}' means 10^3 on a drive's \
+                         label but 2^10 in most partitioning tools. Write '{binary}' for the \
+                         binary size this installer has always used, or give the exact byte \
+                         count. See design-decisions.md §542."
+                    ),
+                });
+            }
             other => {
                 return Err(ConfigError::InvalidValue {
                     field: format!("disk.partitions[{idx}].size"),
@@ -1878,7 +1894,11 @@ mod tests {
             ("name: trailing\"", "trailing\""),
         ] {
             let val = YamlParser::parse(input).expect(input);
-            assert_eq!(val.get("name").unwrap().as_str(), Some(want), "on {input:?}");
+            assert_eq!(
+                val.get("name").unwrap().as_str(),
+                Some(want),
+                "on {input:?}"
+            );
         }
     }
 
@@ -2684,5 +2704,111 @@ users:
         assert_eq!(format_bytes(1024 * 1024), "1.0 MiB");
         assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2.0 GiB");
         assert_eq!(format_bytes(3 * 1024 * 1024 * 1024 * 1024), "3.0 TiB");
+    }
+
+    /// The unambiguous spellings parse, including the three-letter ones.
+    ///
+    /// `GiB` is the spelling §542's diagnostic sends a refused author to, and
+    /// before that change it did not parse at all: the splitter only ever
+    /// looked at the last one or two bytes, so `"32 GiB"` split as `("32 G",
+    /// "iB")` and failed as an invalid *number*. The `KIB`/`MIB`/`GIB`/`TIB`
+    /// match arms had therefore been unreachable for as long as they existed.
+    #[test]
+    fn the_binary_spellings_all_parse_including_the_three_letter_ones() {
+        const K: u64 = 1024;
+        for (text, want) in [
+            ("512", 512),
+            ("512 B", 512),
+            ("4 K", 4 * K),
+            ("4 KiB", 4 * K),
+            ("4KiB", 4 * K),
+            ("8 M", 8 * K * K),
+            ("8 MiB", 8 * K * K),
+            ("32 G", 32 * K * K * K),
+            ("32 GiB", 32 * K * K * K),
+            ("2 T", 2 * K * K * K * K),
+            ("2 TiB", 2 * K * K * K * K),
+        ] {
+            let got = InstallConfig::parse_size_with_unit(text, 0);
+            assert!(
+                matches!(got, Ok(PartitionSize::Fixed(n)) if n == want),
+                "{text:?} should be {want} bytes, got {got:?}"
+            );
+        }
+    }
+
+    /// Case is not what distinguishes the two families, so it must not decide.
+    #[test]
+    fn the_binary_spellings_do_not_care_about_case() {
+        const G: u64 = 1024 * 1024 * 1024;
+        for text in ["32 GiB", "32 gib", "32 GIB", "32 gIb", "32 g"] {
+            let got = InstallConfig::parse_size_with_unit(text, 0);
+            assert!(
+                matches!(got, Ok(PartitionSize::Fixed(n)) if n == 32 * G),
+                "{text:?} should be {} bytes, got {got:?}",
+                32 * G
+            );
+        }
+    }
+
+    /// §542: the decimal spellings are refused, not guessed at.
+    #[test]
+    fn a_bare_decimal_suffix_is_refused_rather_than_silently_taken_as_binary() {
+        for text in ["100 GB", "100gb", "500 KB", "8 MB", "2 TB"] {
+            let got = InstallConfig::parse_size_with_unit(text, 0);
+            assert!(
+                matches!(got, Err(ConfigError::InvalidValue { .. })),
+                "{text:?} is ambiguous and must be refused, got {got:?}"
+            );
+        }
+    }
+
+    /// The diagnostic has to name the spelling that preserves today's layout.
+    ///
+    /// An author refused for writing `GB` knows only that something is wrong;
+    /// if the message does not say *which* spelling keeps the partition the
+    /// size it is today, they are left guessing again one level up — which is
+    /// the same failure the refusal was introduced to prevent.
+    #[test]
+    fn the_refusal_names_the_binary_spelling_that_keeps_the_current_layout() {
+        for (text, want) in [
+            ("100 GB", "GiB"),
+            ("500 KB", "KiB"),
+            ("8 MB", "MiB"),
+            ("2 TB", "TiB"),
+        ] {
+            let got = InstallConfig::parse_size_with_unit(text, 0);
+            // A parse that succeeded has no message, and the empty string
+            // contains nothing -- so the assertion below covers both failures
+            // (not refused at all, refused without naming the replacement)
+            // and reports which it was, without a `panic!` arm.
+            let message = match &got {
+                Err(ConfigError::InvalidValue { message, .. }) => message.as_str(),
+                _ => "",
+            };
+            assert!(
+                message.contains(want),
+                "the refusal of {text:?} must name {want:?}, got {got:?}"
+            );
+        }
+    }
+
+    /// A genuinely unknown unit keeps its own, different diagnostic — the
+    /// ambiguity message would be actively misleading about what went wrong.
+    #[test]
+    fn an_unknown_unit_is_not_reported_as_an_ambiguous_one() {
+        let got = InstallConfig::parse_size_with_unit("12 QB", 0);
+        let message = match &got {
+            Err(ConfigError::InvalidValue { message, .. }) => message.as_str(),
+            _ => "",
+        };
+        assert!(
+            message.contains("unknown"),
+            "'12 QB' is not a size and should be refused as an unknown unit, got {got:?}"
+        );
+        assert!(
+            !message.contains("ambiguous"),
+            "an unknown unit is not an ambiguous one, said: {message}"
+        );
     }
 }

@@ -36,7 +36,8 @@
 //!    It is [`readable_on`] of the accent, because the chip is a filled
 //!    accent-coloured pill and its label has to stay legible on whatever
 //!    the accent happens to be. This site is the module's one real trap:
-//!    the stock accent is blue, whose luma is 175, so `readable_on` answers
+//!    the stock accent is blue, on which near-black is the more legible of
+//!    the two endpoints, so `readable_on` answers
 //!    `0x11111B` — which *is* Mocha `crust`, the very constant that used to
 //!    be written here. A leftover literal would therefore be invisible both
 //!    to the membership sweep (which allows the endpoints outright) and to
@@ -1594,17 +1595,25 @@ mod tests {
     /// site that still drew the deleted `BLUE` constant would be
     /// indistinguishable from one correctly reading `p.accent` — every
     /// assertion about the accent would pass while the bug was present.
-    /// Magenta is in neither Mocha nor Latte, which separates the two.
+    /// Indigo is in neither Mocha nor Latte, which separates the two.
     ///
-    /// It is also chosen for its *luma*: at 105 it sits below `readable_on`'s
-    /// threshold of 140, so ink computed from it is the light endpoint rather
-    /// than `0x11111B`. Since `0x11111B` is exactly the Mocha `CRUST` that
-    /// used to be written at the chip-ink site, the stock accent would make a
-    /// leftover constant there indistinguishable from the correct answer —
-    /// see judgement 4.
+    /// It is also chosen for being *dark by contrast*: `#4B0082` is 11.4:1
+    /// against the pale extreme and 1.4:1 against the dark one, so ink
+    /// computed from it is the light endpoint rather than `0x11111B`. Since
+    /// `0x11111B` is exactly the Mocha `CRUST` that used to be written at the
+    /// chip-ink site, an accent that inked dark would make a leftover constant
+    /// there indistinguishable from the correct answer — see judgement 4.
+    ///
+    /// It used to be magenta, on the strength of its luma (105, under the
+    /// threshold of 140 that `readable_on` then used). That reading was the
+    /// estimate's, not the eye's: near-black on `#FF00FF` is 5.98:1 and
+    /// near-white only 2.77:1. When `readable_on` began measuring contrast
+    /// instead (§536) magenta's ink flipped and took this fixture's premise
+    /// with it — which is why the premise is now asserted below rather than
+    /// left to a doc comment.
     fn accented(light: bool) -> Palette {
         let mut p = Palette::for_mode(light);
-        p.accent = Color::from_hex(0xFF00FF);
+        p.accent = Color::from_hex(0x4B0082);
         for (name, role) in p.roles() {
             assert!(
                 name == "accent"
@@ -1613,6 +1622,13 @@ mod tests {
                  about the accent could pass while reading the wrong role"
             );
         }
+        assert_eq!(
+            p.on_accent(),
+            Color::from_hex(0xEFF1F5),
+            "the fixture accent stopped inking pale, so a leftover Mocha CRUST \
+             at the chip-ink site is no longer distinguishable from the right \
+             answer and the deleted-constant table can no longer forbid it"
+        );
         p
     }
 
@@ -2208,8 +2224,9 @@ mod tests {
     /// either, because it allows both `readable_on` endpoints outright.
     ///
     /// Sweeping the accent across the palette is what breaks the tie: the
-    /// expected ink flips between the two endpoints as the accent's luma
-    /// crosses 140, and a frozen value cannot flip. The final assertion
+    /// expected ink flips between the two endpoints as the accent crosses
+    /// the point where they are equally legible, and a frozen value cannot
+    /// flip. The final assertion
     /// insists the sweep actually saw both endpoints, so that a palette which
     /// happened to be all-dark could not quietly turn this into a constant
     /// check.

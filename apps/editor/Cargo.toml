@@ -18,6 +18,7 @@ safeio = { path = "../safeio" }
 # tests, so the counters cost nothing in the shipped binary.
 [dev-dependencies]
 safeio = { path = "../safeio", features = ["audit"] }
+scratchdir = { path = "../../userspace/scratchdir" }
 
 # The real compositor, for the one test module that puts the shipped code on
 # *both* ends of the display protocol (`against_the_real_compositor`). A test

@@ -1629,7 +1629,10 @@ fn cmd_stop() {
             process::exit(1);
         }
         Err(e) => {
-            eprintln!("error: could not tell whether the indexer is running: {}", e);
+            eprintln!(
+                "error: could not tell whether the indexer is running: {}",
+                e
+            );
             process::exit(1);
         }
     }
@@ -1929,6 +1932,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scratchdir::ScratchDir;
 
     // ---- Configuration Tests ----
 
@@ -2865,21 +2869,28 @@ exclude_extensions = .o, .tmp
 
     // ---- Service Control Tests ----
 
-    /// A directory of its own per test, so the locks never collide.
-    fn service_dir(label: &str) -> PathBuf {
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let dir = std::env::temp_dir().join(format!("indexer_svc_{label}_{ts}"));
-        fs::create_dir_all(&dir).expect("could not create the test directory");
-        dir
+    /// A private temporary directory for one test, removed when the returned
+    /// guard drops.
+    ///
+    /// The name used to carry the system clock in nanoseconds, which is not
+    /// unique. `cargo test` runs a binary's tests as threads of one process,
+    /// and the clock a thread reads is only refreshed on a timer interrupt, so
+    /// every test that starts within the same tick draws the same tag and they
+    /// share one directory. `ScratchDir` names itself from the process id and a
+    /// per-process atomic counter, which is unique by construction.
+    ///
+    /// Bind the guard to a named local, never to `_`: a bare `_` drops it
+    /// immediately and the directory is gone before the test's first line.
+    fn service_dir(label: &str) -> ScratchDir {
+        ScratchDir::new(&format!("indexer_svc_{label}"))
     }
 
     /// The bug this whole type exists to prevent: the files a service leaves
     /// behind when it dies must not make it look alive.
     #[test]
     fn a_crashed_service_leaves_nothing_that_looks_alive() {
-        let dir = service_dir("crashed");
+        let scratch = service_dir("crashed");
+        let dir = scratch.dir().to_path_buf();
         let control = ServiceControl::new(&dir);
 
         // Exactly the state a killed service leaves: every file present, no
@@ -2894,14 +2905,16 @@ exclude_extensions = .o, .tmp
         );
 
         control.clear_stale_files();
-        assert!(!control.pid_path().exists(), "the stale pid file is cleaned up");
-
-        fs::remove_dir_all(&dir).ok();
+        assert!(
+            !control.pid_path().exists(),
+            "the stale pid file is cleaned up"
+        );
     }
 
     #[test]
     fn holding_the_lock_is_what_reports_a_running_service() {
-        let dir = service_dir("running");
+        let scratch = service_dir("running");
+        let dir = scratch.dir().to_path_buf();
         let control = ServiceControl::new(&dir);
         assert!(!control.is_running().unwrap(), "nothing has run here yet");
 
@@ -2919,13 +2932,12 @@ exclude_extensions = .o, .tmp
             "releasing the lock is what makes the service stopped"
         );
         assert!(!control.pid_path().exists());
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn a_second_service_cannot_start_alongside_the_first() {
-        let dir = service_dir("second");
+        let scratch = service_dir("second");
+        let dir = scratch.dir().to_path_buf();
         let control = ServiceControl::new(&dir);
         let first = control.acquire().unwrap();
 
@@ -2939,13 +2951,12 @@ exclude_extensions = .o, .tmp
         // And once the first is gone, the second may take over.
         let second = control.acquire().unwrap();
         drop(second);
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn a_stop_request_is_visible_to_the_service_and_cleared_on_exit() {
-        let dir = service_dir("stopreq");
+        let scratch = service_dir("stopreq");
+        let dir = scratch.dir().to_path_buf();
         let control = ServiceControl::new(&dir);
         let guard = control.acquire().unwrap();
         assert!(!control.stop_requested());
@@ -2962,13 +2973,12 @@ exclude_extensions = .o, .tmp
             !control.stop_requested(),
             "an honoured request must not stop the next service too"
         );
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn starting_discards_a_stop_request_left_by_a_crash() {
-        let dir = service_dir("stalestop");
+        let scratch = service_dir("stalestop");
+        let dir = scratch.dir().to_path_buf();
         let control = ServiceControl::new(&dir);
         control.request_stop().unwrap();
 
@@ -2979,12 +2989,12 @@ exclude_extensions = .o, .tmp
         );
 
         drop(guard);
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn waiting_for_a_stop_returns_when_the_service_lets_go() {
-        let dir = service_dir("wait");
+        let scratch = service_dir("wait");
+        let dir = scratch.dir().to_path_buf();
         let control = ServiceControl::new(&dir);
         let guard = control.acquire().unwrap();
 
@@ -2998,13 +3008,12 @@ exclude_extensions = .o, .tmp
             "the wait must end when the lock is released"
         );
         holder.join().unwrap();
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn waiting_gives_up_rather_than_hanging_on_a_service_that_will_not_go() {
-        let dir = service_dir("timeout");
+        let scratch = service_dir("timeout");
+        let dir = scratch.dir().to_path_buf();
         let control = ServiceControl::new(&dir);
         let guard = control.acquire().unwrap();
 
@@ -3016,19 +3025,17 @@ exclude_extensions = .o, .tmp
         );
 
         drop(guard);
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn a_status_check_never_creates_the_lock_it_looks_for() {
-        let dir = service_dir("nocreate");
+        let scratch = service_dir("nocreate");
+        let dir = scratch.dir().to_path_buf();
         let control = ServiceControl::new(&dir);
         assert!(!control.is_running().unwrap());
         assert!(
             !control.lock_path().exists(),
             "`indexer status` must not leave state behind"
         );
-
-        fs::remove_dir_all(&dir).ok();
     }
 }

@@ -189,9 +189,10 @@ pub fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
 /// an existing file. Deriving a name and trusting it to be free is how a
 /// second saver ends up writing into the first's temporary.
 fn create_temp_in(dir: &Path, target: &Path) -> io::Result<(fs::File, PathBuf)> {
-    let stem = target
-        .file_name()
-        .map_or_else(|| "unnamed".to_string(), |n| n.to_string_lossy().to_string());
+    let stem = target.file_name().map_or_else(
+        || "unnamed".to_string(),
+        |n| n.to_string_lossy().to_string(),
+    );
     let pid = std::process::id();
 
     for _ in 0..MAX_TEMP_ATTEMPTS {
@@ -212,7 +213,10 @@ fn create_temp_in(dir: &Path, target: &Path) -> io::Result<(fs::File, PathBuf)> 
 
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
-        format!("could not create a temporary file next to {}", target.display()),
+        format!(
+            "could not create a temporary file next to {}",
+            target.display()
+        ),
     ))
 }
 
@@ -300,38 +304,45 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use scratchdir::ScratchDir;
 
-    fn temp_dir(label: &str) -> PathBuf {
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let dir = std::env::temp_dir().join(format!("safeio_test_{label}_{ts}"));
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A private temporary directory for one test, removed when the returned
+    /// guard drops.
+    ///
+    /// The name used to carry the system clock in nanoseconds, which is not
+    /// unique. `cargo test` runs a binary's tests as threads of one process,
+    /// and the clock a thread reads is only refreshed on a timer interrupt, so
+    /// every test that starts within the same tick draws the same tag and they
+    /// share one directory. `ScratchDir` names itself from the process id and a
+    /// per-process atomic counter, which is unique by construction.
+    ///
+    /// Bind the guard to a named local, never to `_`: a bare `_` drops it
+    /// immediately and the directory is gone before the test's first line.
+    fn temp_dir(label: &str) -> ScratchDir {
+        ScratchDir::new(&format!("safeio_test_{label}"))
     }
 
     #[test]
     fn a_new_file_is_created_with_the_given_contents() {
-        let dir = temp_dir("new");
+        let scratch = temp_dir("new");
+        let dir = scratch.dir().to_path_buf();
         let path = dir.join("doc.txt");
 
         write_atomically(&path, b"hello").unwrap();
 
         assert_eq!(fs::read(&path).unwrap(), b"hello");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn an_existing_file_is_replaced_wholesale() {
-        let dir = temp_dir("replace");
+        let scratch = temp_dir("replace");
+        let dir = scratch.dir().to_path_buf();
         let path = dir.join("doc.txt");
         fs::write(&path, b"the old and much longer contents").unwrap();
 
         write_atomically(&path, b"new").unwrap();
 
         assert_eq!(fs::read(&path).unwrap(), b"new");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The whole point: a save that cannot complete must not damage the file
@@ -340,7 +351,8 @@ mod tests {
     /// portable stand-in for a disk filling up mid-write.
     #[test]
     fn a_failed_save_leaves_the_original_untouched() {
-        let dir = temp_dir("fail_keeps_original");
+        let scratch = temp_dir("fail_keeps_original");
+        let dir = scratch.dir().to_path_buf();
         let path = dir.join("doc.txt");
         fs::create_dir_all(&path).unwrap();
         fs::write(path.join("marker"), b"still here").unwrap();
@@ -351,8 +363,6 @@ mod tests {
         assert!(path.is_dir(), "the target must not have been replaced");
         assert_eq!(fs::read(path.join("marker")).unwrap(), b"still here");
         let _ = err;
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A failed save must not leave its temporary behind either. A stray
@@ -360,7 +370,8 @@ mod tests {
     /// large file silently consumes its own size in disk space.
     #[test]
     fn a_failed_save_cleans_up_after_itself() {
-        let dir = temp_dir("fail_no_litter");
+        let scratch = temp_dir("fail_no_litter");
+        let dir = scratch.dir().to_path_buf();
         let path = dir.join("doc.txt");
         fs::create_dir_all(&path).unwrap();
 
@@ -372,15 +383,17 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .filter(|n| n.contains("slate-save"))
             .collect();
-        assert!(leftovers.is_empty(), "temporaries left behind: {leftovers:?}");
-
-        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            leftovers.is_empty(),
+            "temporaries left behind: {leftovers:?}"
+        );
     }
 
     /// A successful save must not litter either.
     #[test]
     fn a_successful_save_leaves_only_the_file() {
-        let dir = temp_dir("clean");
+        let scratch = temp_dir("clean");
+        let dir = scratch.dir().to_path_buf();
         let path = dir.join("doc.txt");
 
         write_atomically(&path, b"contents").unwrap();
@@ -391,15 +404,14 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(names, vec!["doc.txt".to_string()]);
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Two documents saved at once must not pick the same temporary name and
     /// write into each other's half-finished file.
     #[test]
     fn concurrent_saves_do_not_share_a_temporary() {
-        let dir = temp_dir("concurrent");
+        let scratch = temp_dir("concurrent");
+        let dir = scratch.dir().to_path_buf();
         let paths: Vec<PathBuf> = (0..8).map(|i| dir.join(format!("doc{i}.txt"))).collect();
 
         std::thread::scope(|s| {
@@ -415,40 +427,38 @@ mod tests {
             let expected = format!("contents of {i}").repeat(500);
             assert_eq!(fs::read_to_string(path).unwrap(), expected);
         }
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The same file saved repeatedly, which is what an editor with autosave
     /// does. Every save must land whole.
     #[test]
     fn repeated_saves_of_one_file_all_land() {
-        let dir = temp_dir("repeat");
+        let scratch = temp_dir("repeat");
+        let dir = scratch.dir().to_path_buf();
         let path = dir.join("doc.txt");
 
         for i in 0..50 {
             write_str_atomically(&path, &format!("revision {i}")).unwrap();
             assert_eq!(fs::read_to_string(&path).unwrap(), format!("revision {i}"));
         }
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn an_empty_write_produces_an_empty_file() {
-        let dir = temp_dir("empty");
+        let scratch = temp_dir("empty");
+        let dir = scratch.dir().to_path_buf();
         let path = dir.join("doc.txt");
         fs::write(&path, b"previous").unwrap();
 
         write_atomically(&path, b"").unwrap();
 
         assert_eq!(fs::read(&path).unwrap(), b"");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_copy_reproduces_the_source() {
-        let dir = temp_dir("copy_ok");
+        let scratch = temp_dir("copy_ok");
+        let dir = scratch.dir().to_path_buf();
         let src = dir.join("src.bin");
         let dest = dir.join("dest.bin");
         let body: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
@@ -458,7 +468,6 @@ mod tests {
 
         assert_eq!(n, body.len() as u64);
         assert_eq!(fs::read(&dest).unwrap(), body);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The content-addressed-store case: a copy that cannot complete must not
@@ -466,12 +475,16 @@ mod tests {
     /// presence of that name as proof the content is there.
     #[test]
     fn a_failed_copy_leaves_nothing_at_the_destination() {
-        let dir = temp_dir("copy_fail");
+        let scratch = temp_dir("copy_fail");
+        let dir = scratch.dir().to_path_buf();
         let dest = dir.join("blob");
 
         let err = copy_atomically(&dir.join("no_such_source"), &dest).unwrap_err();
 
-        assert!(!dest.exists(), "a failed copy must not create the destination");
+        assert!(
+            !dest.exists(),
+            "a failed copy must not create the destination"
+        );
         let leftovers: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .filter_map(Result::ok)
@@ -479,15 +492,14 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
         let _ = err;
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A path with no directory component must still work — it means the
     /// current directory, not "no directory".
     #[test]
     fn a_bare_file_name_writes_to_the_current_directory() {
-        let dir = temp_dir("bare");
+        let scratch = temp_dir("bare");
+        let dir = scratch.dir().to_path_buf();
         let path = dir.join("bare.txt");
         // Exercised through a full path whose parent exists; the bare-name
         // branch is the `dir` fallback in `write_atomically`, checked here by
@@ -503,7 +515,5 @@ mod tests {
             None,
             "a bare name has no usable parent, so the fallback is the branch taken"
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 }

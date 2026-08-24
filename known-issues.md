@@ -15233,6 +15233,75 @@ candidates; the `\xNN` escape (still must be built); the editor buffer
 (`line_buf`, `History.entries`) and the 3580 input guard, with the 3583
 `ch as char` landmine still live.
 
+**[A] 2026-08-24 — the follow-up landed too: the line-oriented commands are
+byte-clean end to end** (`b3c828edb`, `eb8f4109d`). The sink could carry bytes
+that no *command* could produce; that gap is closed for the commands where
+byte handling is unambiguously correct. Converted, on **both** their pipe and
+their file paths (which had drifted apart from each other): `sort`, `uniq`,
+`head`, `tail`, `wc`, `nl`, `rev`, `tac`, `tee`, `paste`, and bare `cat`.
+
+The enabling piece is `bytestr::lines()`, matching `str::lines` exactly. It
+had to be *written* rather than substituted with `split_byte(b'\n')`, which
+differs in three ways that each add or drop a line in a real pipeline:
+
+| | `str::lines` / `bytestr::lines` | `split_byte(b'\n')` |
+|---|---|---|
+| `"a\n"` | one line | two (`"a"`, `""`) |
+| `""` | no lines | one empty field |
+| `"a\r\n"` | `"a"` (CR stripped) | `"a\r"` |
+
+The first is the one that matters: shell output almost always ends in `\n`,
+so getting it wrong appends a blank line to *every* `head`/`tail`/`nl`.
+
+**Four silent wrong answers found while converting** — each printed
+plausible-looking output and exited **0**, which is why none had been noticed:
+
+| Command(s) | Was | Effect |
+|---|---|---|
+| `head`, `tail`, `nl`, `rev` (file path) | `from_utf8(&data).unwrap_or("<binary>")` | printed one line reading `<binary>` — a well-formed answer unrelated to the file |
+| `tac` (file path) | `from_utf8(&data).unwrap_or("")` | printed **nothing at all** |
+| `paste` (both paths) | `from_utf8(&data).unwrap_or("")` | undecodable file became an *empty column*; output kept its shape, so blank cells read as "that file had nothing there" |
+| `sort`, `uniq` (file path) | raw arg passed to the VFS, no `resolve_path` | the only two file commands missing cwd resolution, so `cd /tmp && sort notes.txt` reported the file missing while `cat notes.txt` beside it worked |
+
+**The chokepoint narrowed rather than moved.** `dispatch_with_input` now calls
+`shell_bytes_as_str` **per-command at the point of use** instead of once at the
+top. Two consequences, both deliberate: a command that ignores its input
+entirely is no longer refused for a reason that cannot apply to it; and
+converting one more command is now a matter of moving its arm up into the
+byte-clean block. Still behind the chokepoint, with the reason recorded on the
+dispatch arm itself: `grep`, `cut`, `tr`, `fold` (`char`-oriented — character
+classes, field indices, display width), `sed`, `awk` (real text interpreters),
+`xargs`, `column` (re-parse into words / measure display width), and
+`mapfile`/`readarray` — which is the one blocked on something **other than
+itself**: it stores its lines in the shell environment, still a `String` map,
+so converting it would move the decode one call deeper rather than remove it.
+Two corrections to the follow-up list in the entry above, both found only by
+reading the implementations rather than reasoning from the command names:
+
+- It listed **`mapfile`** as byte-safe. It is not — see the environment
+  blocker just described. It stays behind the chokepoint.
+- The first conversion commit then over-corrected and grouped **`paste`** with
+  `mapfile` as environment-blocked. That was also wrong: `paste` only built
+  `String`s internally, by its own choice, and nothing downstream of it needs
+  text. Hence the second commit.
+
+The lesson worth keeping is the one that also caught `rev` during the first
+pass (initially assumed unsafe because reversing a line's bytes would tear a
+multi-byte character — but this `rev` reverses the *order of lines*, an alias
+of `tac`, which cannot): **classify each command by reading it, never by what
+its name implies.** Three of the four guesses made from names were wrong.
+
+*Verification:* `kshell::self_test` section 8 drives the real
+`dispatch_with_input` rather than the `cmd_*_input` functions directly,
+because the **routing** decision is the part that can regress; it covers each
+converted command over 0xFF input, `tee`'s byte-identical file copy, `paste`
+against an undecodable column, the file-path halves, the `sort`/`uniq` cwd
+fix, and both sides of the routing decision (a text-only command still refuses
+and exits 1; `echo` still runs). `bytestr::self_test` section 6 pairs every
+`lines` assertion with the `str::lines` call it must agree with. Clippy diffed
+before/after by stashing only the two touched files: **93 warnings before, 93
+after, identical multisets.**
+
 ### B-KSHELL-APPEND-TRUNCATES-BINARY-FILES. `cmd >> file` silently discarded the entire existing contents of any file that was not valid UTF-8, and reported success — 2026-08-24 — ✅ FIXED 2026-08-24 by lane A (`kernel/src/kshell.rs`, `redirect_write`)
 
 **Where:** `kernel/src/kshell.rs`. Four duplicated copies of the append path,

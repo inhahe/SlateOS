@@ -3742,6 +3742,15 @@ fn reverse_search_mode(buf: &mut String, cursor: &mut usize, history: &mut Histo
 /// left/right arrow cursor movement, Home/End, Up/Down history browsing,
 /// Ctrl+R reverse incremental search, ESC to clear line.
 /// Returns when Enter is pressed.
+///
+/// Every write in this function and its search helpers goes to
+/// `console::write_str`, never through `shell_write`, and that is correct
+/// rather than an oversight: prompt redraws, `\r\x1b[2K` erases, the
+/// `(reverse-i-search)` overlay and the echo of the user's own keystrokes are
+/// terminal *interaction*. They are not any command's output and must never
+/// end up inside a captured value. Bash makes the same split by leaving all of
+/// it to the tty. A sweep that converts console writes to shell writes must
+/// skip this region.
 fn read_line(buf: &mut String, history: &mut History) {
     use crate::keyboard;
 
@@ -92577,8 +92586,15 @@ fn cmd_container(args: &str) {
                                 ),
                             };
                             if !out.is_empty() {
-                                crate::console::write_str(&out);
-                                shell_println!();
+                                // The log body must go to the *caller*, not the
+                                // console. It used to do neither consistently:
+                                // the body went to the console and only the
+                                // trailing newline to the shell, so
+                                // `$(container logs 1)` evaluated to a single
+                                // "\n" while the log printed on the host's
+                                // screen. Byte-clean because a container's
+                                // captured output is not ours to reformat.
+                                shell_println_bytes(out.as_bytes());
                             }
                         }
                         // Non-UTF-8 capture: don't force bytes through the text

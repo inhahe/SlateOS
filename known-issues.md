@@ -72350,10 +72350,21 @@ the conversion" later.
 typo over SSH previously showed the remote user nothing whatsoever — and the
 xtrace exclusion, asserting `$(echo hi)` under `set -x` is exactly `hi\n`.
 
-**Still open in this class:** 38 raw `crate::console::write` calls in
-kshell.rs, not yet examined. They are the same shape but are not macro calls,
-so the sweep did not reach them; each needs reading to decide whether it is
-command output (convert) or a genuine console-only write.
+**The 38 raw `crate::console::write` calls are now audited too**, since a
+macro sweep cannot reach them. 36 of them are the line editor — prompt
+redraws, `\r\x1b[2K` erases, the `(reverse-i-search)` overlay, keystroke echo
+— and are correctly console-only under the rule above; `read_line`'s doc
+comment now says so explicitly, so the next sweep skips the region on purpose
+rather than by luck. One is `shell_write_bytes`'s own fallback. **The
+thirty-eighth was a live instance of exactly this bug**: `container logs`
+wrote the log body with `console::write_str` and only its trailing newline
+with `shell_println!`, so `$(container logs 1)` evaluated to a single `"\n"`
+while the log itself printed on the host's screen. Fixed with
+`shell_println_bytes`, which is also byte-clean — a container's captured
+output is not ours to launder through a format string.
+
+**Still open in this class:** nothing known in kshell. The same audit has not
+been done for other kernel-side command surfaces.
 
 **Lesson:** the fourth silent-success bug in the shell in two days. Here the
 tell was the *absence* of a distinction — with no `shell_eprintln!` in the

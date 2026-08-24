@@ -3102,10 +3102,14 @@ impl DesktopShell {
             .unwrap_or_default()
             .as_secs();
         let mut tree = RenderTree::new();
-        tree.commands.extend(
-            self.calendar
-                .render(x, y, self.calendar_scale(), now, &self.events),
-        );
+        tree.commands.extend(self.calendar.render(
+            &Palette::from_settings(&self.appearance),
+            x,
+            y,
+            self.calendar_scale(),
+            now,
+            &self.events,
+        ));
         Some(tree)
     }
 

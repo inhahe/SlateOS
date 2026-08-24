@@ -9671,7 +9671,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // The other half of the dispatch decision: a command that has *not*
         // been converted still refuses non-UTF-8 rather than corrupting it,
         // and the refusal is per-command, at the point of use.
-        assert_eq!(piped("grep x", b"\xffx\n").as_slice(), &b""[..]);
+        // This used to assert the capture was *empty*, which was that bug
+        // wearing a test's clothes: the refusal was printed with
+        // `console_println!`, so it went to the host's screen and the caller
+        // got nothing — a refusal nobody downstream could see. Now the message
+        // is the answer, so assert on the message.
+        assert_eq!(
+            piped("grep x", b"\xffx\n").as_slice(),
+            &b"grep: not valid UTF-8, and this stage cannot handle arbitrary bytes yet\n"[..],
+            "a refusal must reach the caller, not the console behind its back"
+        );
         assert_eq!(
             last_exit(),
             1,

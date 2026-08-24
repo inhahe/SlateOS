@@ -73349,3 +73349,42 @@ their arrows were equally invisible before the switch. Bundling a
 caret/selection/scrolling implementation into the change that moved five
 fields' arrows would have made a reviewable diff unreviewable. Nothing depends
 on it: `pathbar` is the toolkit field the shell actually uses for typing.
+
+## TD-A-BOOT-HISTORY-IS-A-TRACKED-FILE-EVERY-BOOT-DIRTIES (lane A, 2026-08-24) — **open**
+
+`bench/boot-history.jsonl` is committed to git *and* appended to by every run of
+`scripts/boot-test.sh`. So a boot always leaves the worktree dirty in a tracked
+file that all three lanes write, and the record of a run exists only in the
+working tree until someone remembers to commit it.
+
+That is structurally exposed to ordinary git hygiene. On 2026-08-24 a
+`git checkout -- bench/boot-history.jsonl`, run to clear the dirty file before a
+merge, discarded two unrecorded boots — including the **passing** one that had
+just turned the tree green. `git checkout --` restores from the index, and for a
+file whose only copy of the new lines is the working tree, that is a delete.
+Nothing warned, because a dirty ledger is the file's normal state.
+
+The entries were not reconstructed. `boot-history.py` can re-read a surviving
+serial log, but it computes `src_digest` from the tree *as it is now* — which by
+then was mid-merge and 26 commits removed from what was booted. A ledger entry
+whose digest describes a different tree is worse than an absent one: it is
+evidence that reads as true. Two data points out of 387 are missing instead.
+
+### What the proper fix looks like
+
+Either of these removes the hazard; the first is smaller and probably right:
+
+- **Have `boot-test.sh` commit the record itself**, as its own single-file
+  commit, immediately after appending. The ledger is append-only and per-run, so
+  such commits never conflict textually — this is the same reasoning that makes
+  the shared docs' append convention merge cleanly. The worktree then returns to
+  clean on its own and no later git command can eat the entry.
+- Or **untrack it** and keep the history outside the repo. Rejected on sight:
+  the streak and wall-time medians are cross-lane and cross-machine, which is
+  exactly what a tracked file gives for free.
+
+### Until then
+
+Never run `git checkout --`, `git restore`, or `git stash` against
+`bench/boot-history.jsonl`. If it is dirty before a merge, **commit it**, do not
+clear it.

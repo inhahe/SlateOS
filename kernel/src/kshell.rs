@@ -2688,6 +2688,7 @@ fn execute_for_loop(variable: &str, words_raw: &str, body: &[String]) {
             "Error: for loop word list too large ({} words, max 1000)",
             words.len(),
         );
+        set_exit(1);
         return;
     }
 
@@ -8105,6 +8106,7 @@ fn cmd_profile(args: &str) {
         _ => {
             shell_println!("Unknown profile: {}", arg);
             shell_println!("Available: desktop, server, dev, gaming");
+            set_exit(1);
             return;
         }
     };
@@ -8189,11 +8191,13 @@ fn cmd_kill(args: &str) {
 
     let Ok(task_id) = args.parse::<u64>() else {
         shell_println!("Invalid task ID: {}", args);
+        set_exit(1);
         return;
     };
 
     if task_id == 0 {
         shell_println!("Cannot kill task 0 (BSP idle).");
+        set_exit(1);
         return;
     }
 
@@ -8229,16 +8233,19 @@ fn cmd_renice(args: &str) {
 
     let Ok(task_id) = tid_str.parse::<u64>() else {
         shell_println!("Invalid task ID: {}", tid_str);
+        set_exit(1);
         return;
     };
 
     let Ok(priority) = pri_str.parse::<u8>() else {
         shell_println!("Invalid priority: {} (must be 0-31)", pri_str);
+        set_exit(1);
         return;
     };
 
     if priority > 31 {
         shell_println!("Priority must be 0-31, got {}", priority);
+        set_exit(1);
         return;
     }
 
@@ -8272,6 +8279,7 @@ fn cmd_throttle(args: &str) {
     };
     let Ok(task_id) = tid_str.parse::<u64>() else {
         shell_println!("Invalid task ID: {}", tid_str);
+        set_exit(1);
         return;
     };
 
@@ -8279,10 +8287,12 @@ fn cmd_throttle(args: &str) {
         // Set quota.
         let Ok(pct) = pct_str.parse::<u8>() else {
             shell_println!("Invalid percentage: {} (must be 0-100)", pct_str);
+            set_exit(1);
             return;
         };
         if pct > 100 {
             shell_println!("Percentage must be 0-100, got {}", pct);
+            set_exit(1);
             return;
         }
         crate::sched::set_cpu_quota(task_id, pct);
@@ -8320,6 +8330,7 @@ fn cmd_taskset(args: &str) {
     };
     let Ok(task_id) = tid_str.parse::<u64>() else {
         shell_println!("Invalid task ID: {}", tid_str);
+        set_exit(1);
         return;
     };
 
@@ -8335,11 +8346,13 @@ fn cmd_taskset(args: &str) {
 
         let Some(mask) = mask else {
             shell_println!("Invalid mask: {} (use hex 0x... or decimal)", mask_str);
+            set_exit(1);
             return;
         };
 
         if mask == 0 {
             shell_println!("Error: mask cannot be 0 (task must be runnable on at least one CPU)");
+            set_exit(1);
             return;
         }
 
@@ -10419,6 +10432,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 fn cmd_printf(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: printf FORMAT [ARGS...]");
+        set_exit(1);
         return;
     }
 
@@ -11196,6 +11210,7 @@ fn cmd_blkread(args: &str) {
     let Some(sector) = sector else {
         shell_println!("Usage: blkread [device] <sector>");
         shell_println!("  e.g., blkread 0  or  blkread vda 0");
+        set_exit(1);
         return;
     };
 
@@ -11569,6 +11584,7 @@ fn ls_list_dir(
 fn cmd_cat(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: cat <filename>");
+        set_exit(1);
         return;
     }
 
@@ -11607,6 +11623,7 @@ fn cmd_write(args: &str) {
         Some(f) if !f.is_empty() => f,
         _ => {
             shell_println!("Usage: write <filename> <text>");
+            set_exit(1);
             return;
         }
     };
@@ -11649,6 +11666,7 @@ fn cmd_rm(args: &str) {
 
     if args.is_empty() {
         shell_println!("Usage: rm [-r] <filename>");
+        set_exit(1);
         return;
     }
 
@@ -11680,6 +11698,7 @@ fn cmd_rm(args: &str) {
 fn cmd_mkdir(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: mkdir [-p] <dirname>");
+        set_exit(1);
         return;
     }
 
@@ -11688,6 +11707,7 @@ fn cmd_mkdir(args: &str) {
         (true, args.get(3..).unwrap_or("").trim())
     } else if args == "-p" {
         shell_println!("Usage: mkdir [-p] <dirname>");
+        set_exit(1);
         return;
     } else {
         (false, args)
@@ -11715,6 +11735,7 @@ fn cmd_mkdir(args: &str) {
 fn cmd_rmdir(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: rmdir <dirname>");
+        set_exit(1);
         return;
     }
 
@@ -11736,6 +11757,7 @@ fn cmd_rmdir(args: &str) {
 fn cmd_stat(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: stat <path>");
+        set_exit(1);
         return;
     }
 
@@ -11843,6 +11865,7 @@ fn cmd_ln(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
         shell_println!("Usage: ln <source> <link-name>");
+        set_exit(1);
         return;
     }
 
@@ -12014,6 +12037,7 @@ fn cmd_cp(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
         shell_println!("Usage: cp [-r] <source> <dest>");
+        set_exit(1);
         return;
     }
 
@@ -12061,6 +12085,7 @@ fn cmd_mv(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
         shell_println!("Usage: mv <source> <dest>");
+        set_exit(1);
         return;
     }
 
@@ -12087,6 +12112,7 @@ fn cmd_chmod(args: &str) {
     if parts.len() < 2 || parts[1].is_empty() {
         shell_println!("Usage: chmod <mode> <path>");
         shell_println!("  mode: octal (e.g., 755, 644)");
+        set_exit(1);
         return;
     }
 
@@ -12097,6 +12123,7 @@ fn cmd_chmod(args: &str) {
         Ok(m) => m,
         Err(_) => {
             shell_println!("chmod: invalid mode '{}' (use octal, e.g., 755)", mode_str);
+            set_exit(1);
             return;
         }
     };
@@ -12119,6 +12146,7 @@ fn cmd_chown(args: &str) {
     if parts.len() < 2 || parts[1].is_empty() {
         shell_println!("Usage: chown <uid:gid> <path>");
         shell_println!("  e.g., chown 1000:1000 /home/user");
+        set_exit(1);
         return;
     }
 
@@ -12133,6 +12161,7 @@ fn cmd_chown(args: &str) {
             Ok(u) => u,
             Err(_) => {
                 shell_println!("chown: invalid uid '{}'", uid_s);
+                set_exit(1);
                 return;
             }
         };
@@ -12140,6 +12169,7 @@ fn cmd_chown(args: &str) {
             Ok(g) => g,
             Err(_) => {
                 shell_println!("chown: invalid gid '{}'", gid_s);
+                set_exit(1);
                 return;
             }
         };
@@ -12150,6 +12180,7 @@ fn cmd_chown(args: &str) {
             Ok(u) => (u, u),
             Err(_) => {
                 shell_println!("chown: invalid owner '{}'", owner_str);
+                set_exit(1);
                 return;
             }
         }
@@ -12327,6 +12358,7 @@ fn cmd_lsattr(args: &str) {
 fn cmd_touch(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: touch [-d DATETIME | -r REFFILE] <path>");
+        set_exit(1);
         return;
     }
 
@@ -12495,6 +12527,7 @@ fn cmd_append(args: &str) {
         Some(f) if !f.is_empty() => f,
         _ => {
             shell_println!("Usage: append <filename> <text>");
+            set_exit(1);
             return;
         }
     };
@@ -12678,6 +12711,7 @@ fn cmd_find(args: &str) {
         shell_println!("    -maxdepth N     Limit recursion depth");
         shell_println!("    -empty          Empty files or directories");
         shell_println!("  Example: find /tmp -name *.txt -type f");
+        set_exit(1);
         return;
     }
 
@@ -12793,6 +12827,7 @@ fn cmd_locate(args: &str) {
     // `updatedb` with no args → rebuild
     if parts.is_empty() {
         shell_println!("Usage: locate [--update|--stats|--ext E|--size MIN-MAX|--path] PATTERN");
+        set_exit(1);
         return;
     }
 
@@ -13044,6 +13079,7 @@ fn cmd_dedup(args: &str) {
                     "  --delete: remove duplicates, keeping the first file in each group."
                 );
                 shell_println!("  --stats:  show summary only (no file listing).");
+                set_exit(1);
                 return;
             }
             s => {
@@ -13578,6 +13614,7 @@ fn cmd_fhist(args: &str) {
         shell_println!(
             "Usage: fhist <show|restore|record|clear|stats|list|enable|disable|autoversion> [FILE] [VERSION]"
         );
+        set_exit(1);
         return;
     }
 
@@ -13635,6 +13672,7 @@ fn cmd_fhist(args: &str) {
                     Ok(n) => n,
                     Err(_) => {
                         shell_println!("Invalid version number: {}", s);
+                        set_exit(1);
                         return;
                     }
                 },
@@ -13986,6 +14024,7 @@ fn cmd_quota(args: &str) {
                 "disabled"
             }
         );
+        set_exit(1);
         return;
     }
 
@@ -14007,6 +14046,7 @@ fn cmd_quota(args: &str) {
                 shell_println!(
                     "Usage: quota set <user|group> <ID> <soft_bytes> <hard_bytes> [grace_secs]"
                 );
+                set_exit(1);
                 return;
             }
             let subject = match parts[1] {
@@ -14014,6 +14054,7 @@ fn cmd_quota(args: &str) {
                     Ok(uid) => quota::QuotaSubject::User(uid),
                     Err(_) => {
                         shell_println!("Invalid UID: {}", parts[2]);
+                        set_exit(1);
                         return;
                     }
                 },
@@ -14021,11 +14062,13 @@ fn cmd_quota(args: &str) {
                     Ok(gid) => quota::QuotaSubject::Group(gid),
                     Err(_) => {
                         shell_println!("Invalid GID: {}", parts[2]);
+                        set_exit(1);
                         return;
                     }
                 },
                 _ => {
                     shell_println!("Expected 'user' or 'group', got '{}'", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -14034,6 +14077,7 @@ fn cmd_quota(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid size: {}", parts[3]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -14041,6 +14085,7 @@ fn cmd_quota(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid size: {}", parts[4]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -14084,6 +14129,7 @@ fn cmd_quota(args: &str) {
                     Ok(uid) => quota::QuotaSubject::User(uid),
                     Err(_) => {
                         shell_println!("Invalid UID: {}", parts[2]);
+                        set_exit(1);
                         return;
                     }
                 },
@@ -14091,11 +14137,13 @@ fn cmd_quota(args: &str) {
                     Ok(gid) => quota::QuotaSubject::Group(gid),
                     Err(_) => {
                         shell_println!("Invalid GID: {}", parts[2]);
+                        set_exit(1);
                         return;
                     }
                 },
                 _ => {
                     shell_println!("Expected 'user' or 'group', got '{}'", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -14104,6 +14152,7 @@ fn cmd_quota(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid number: {}", parts[3]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -14111,6 +14160,7 @@ fn cmd_quota(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid number: {}", parts[4]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -14149,6 +14199,7 @@ fn cmd_quota(args: &str) {
                     Ok(uid) => quota::QuotaSubject::User(uid),
                     Err(_) => {
                         shell_println!("Invalid UID: {}", parts[2]);
+                        set_exit(1);
                         return;
                     }
                 },
@@ -14156,11 +14207,13 @@ fn cmd_quota(args: &str) {
                     Ok(gid) => quota::QuotaSubject::Group(gid),
                     Err(_) => {
                         shell_println!("Invalid GID: {}", parts[2]);
+                        set_exit(1);
                         return;
                     }
                 },
                 _ => {
                     shell_println!("Expected 'user' or 'group', got '{}'", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -14248,6 +14301,7 @@ fn cmd_quota(args: &str) {
                     Ok(uid) => quota::QuotaSubject::User(uid),
                     Err(_) => {
                         shell_println!("Invalid UID: {}", parts[2]);
+                        set_exit(1);
                         return;
                     }
                 },
@@ -14255,11 +14309,13 @@ fn cmd_quota(args: &str) {
                     Ok(gid) => quota::QuotaSubject::Group(gid),
                     Err(_) => {
                         shell_println!("Invalid GID: {}", parts[2]);
+                        set_exit(1);
                         return;
                     }
                 },
                 _ => {
                     shell_println!("Expected 'user' or 'group', got '{}'", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -14360,6 +14416,7 @@ fn cmd_intercept(args: &str) {
         shell_println!(
             "Usage: intercept <list|stats|add-ro|add-nodelete|add-audit|enable|disable|remove> [args...]"
         );
+        set_exit(1);
         return;
     }
 
@@ -14710,6 +14767,7 @@ fn cmd_overlay(args: &str) {
         shell_println!(
             "Usage: overlay <list|create|destroy|ls|cat|write|rm|which|whiteouts|stats|reset|commit> ..."
         );
+        set_exit(1);
         return;
     }
 
@@ -15022,6 +15080,7 @@ fn cmd_mkfifo(args: &str) {
             (cap as usize, parts[2])
         } else {
             shell_println!("Invalid size: {}", parts[1]);
+            set_exit(1);
             return;
         }
     } else {
@@ -15780,6 +15839,7 @@ fn cmd_fssnapshot(args: &str) {
                     parent = Some(snapshot::SnapshotId(id));
                 } else {
                     shell_println!("Error: invalid parent ID");
+                    set_exit(1);
                     return;
                 }
             }
@@ -15813,6 +15873,7 @@ fn cmd_fssnapshot(args: &str) {
                 Ok(v) => snapshot::SnapshotId(v),
                 Err(_) => {
                     shell_println!("Error: invalid snapshot ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -15836,6 +15897,7 @@ fn cmd_fssnapshot(args: &str) {
                     }
                     Err(e) => {
                         shell_println!("Error: {:?}", e);
+                        set_exit(1);
                         return;
                     }
                 },
@@ -15894,6 +15956,7 @@ fn cmd_fssnapshot(args: &str) {
                 Ok(v) => snapshot::SnapshotId(v),
                 Err(_) => {
                     shell_println!("Error: invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -15929,6 +15992,7 @@ fn cmd_fssnapshot(args: &str) {
                 Ok(v) => snapshot::SnapshotId(v),
                 Err(_) => {
                     shell_println!("Error: invalid ID1");
+                    set_exit(1);
                     return;
                 }
             };
@@ -15936,6 +16000,7 @@ fn cmd_fssnapshot(args: &str) {
                 Ok(v) => snapshot::SnapshotId(v),
                 Err(_) => {
                     shell_println!("Error: invalid ID2");
+                    set_exit(1);
                     return;
                 }
             };
@@ -15975,6 +16040,7 @@ fn cmd_fssnapshot(args: &str) {
                 Ok(v) => snapshot::SnapshotId(v),
                 Err(_) => {
                     shell_println!("Error: invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -15993,6 +16059,7 @@ fn cmd_fssnapshot(args: &str) {
                 Ok(v) => snapshot::SnapshotId(v),
                 Err(_) => {
                     shell_println!("Error: invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -16108,6 +16175,7 @@ fn cmd_reclaim(args: &str) {
             let lo = parts[2].parse::<u64>().unwrap_or(80);
             if lo >= hi {
                 shell_println!("Error: LOW must be < HIGH");
+                set_exit(1);
                 return;
             }
             reclaim::set_high_watermark(hi);
@@ -16160,6 +16228,7 @@ fn cmd_fstx(args: &str) {
                 Ok(n) => transaction::TxId(n),
                 Err(_) => {
                     shell_println!("Invalid TXID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -16180,6 +16249,7 @@ fn cmd_fstx(args: &str) {
                 Ok(n) => transaction::TxId(n),
                 Err(_) => {
                     shell_println!("Invalid TXID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -16199,6 +16269,7 @@ fn cmd_fstx(args: &str) {
                 Ok(n) => transaction::TxId(n),
                 Err(_) => {
                     shell_println!("Invalid TXID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -16218,6 +16289,7 @@ fn cmd_fstx(args: &str) {
                 Ok(n) => transaction::TxId(n),
                 Err(_) => {
                     shell_println!("Invalid TXID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -16243,6 +16315,7 @@ fn cmd_fstx(args: &str) {
                 Ok(n) => transaction::TxId(n),
                 Err(_) => {
                     shell_println!("Invalid TXID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -16268,6 +16341,7 @@ fn cmd_fstx(args: &str) {
                 Ok(n) => transaction::TxId(n),
                 Err(_) => {
                     shell_println!("Invalid TXID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -16286,6 +16360,7 @@ fn cmd_fstx(args: &str) {
                 Ok(n) => transaction::TxId(n),
                 Err(_) => {
                     shell_println!("Invalid TXID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -16304,6 +16379,7 @@ fn cmd_fstx(args: &str) {
                 Ok(n) => transaction::TxId(n),
                 Err(_) => {
                     shell_println!("Invalid TXID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -16351,6 +16427,7 @@ fn cmd_fstx(args: &str) {
                 Ok(n) => transaction::TxId(n),
                 Err(_) => {
                     shell_println!("Invalid TXID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -16744,6 +16821,7 @@ fn cmd_fcompress(args: &str) {
                     Some(a) => a,
                     None => {
                         shell_println!("Unknown algorithm: {}", parts[2]);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -17157,6 +17235,7 @@ fn cmd_fsearch(args: &str) {
                     Ok(v) => v,
                     Err(_) => {
                         shell_println!("Invalid min size: {}", tok[0]);
+                        set_exit(1);
                         return;
                     }
                 };
@@ -17656,6 +17735,7 @@ fn cmd_fswatch(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid watch ID: {}", id_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -17707,6 +17787,7 @@ fn cmd_fswatch(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid watch ID: {}", rest);
+                    set_exit(1);
                     return;
                 }
             };
@@ -17725,6 +17806,7 @@ fn cmd_fswatch(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid watch ID: {}", rest);
+                    set_exit(1);
                     return;
                 }
             };
@@ -17895,6 +17977,7 @@ fn cmd_backup(args: &str) {
                 shell_println!(
                     "Usage: backup create <src> <dst> [--incremental] [--no-verify] [--dry-run] [--exclude <prefix>]"
                 );
+                set_exit(1);
                 return;
             }
             let src = parts[1];
@@ -17980,6 +18063,7 @@ fn cmd_backup(args: &str) {
                 shell_println!(
                     "Usage: backup restore <backup_root> <dst> [manifest_id] [--no-verify] [--dry-run]"
                 );
+                set_exit(1);
                 return;
             }
             let backup_root = parts[1];
@@ -19211,6 +19295,7 @@ fn cmd_ionice(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid task ID: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -19218,6 +19303,7 @@ fn cmd_ionice(args: &str) {
                 Some(c) => c,
                 None => {
                     shell_println!("Unknown class: {} (use: rt, be, idle)", parts[2]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -19238,6 +19324,7 @@ fn cmd_ionice(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid task ID: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -19257,6 +19344,7 @@ fn cmd_ionice(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid task ID: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -19812,6 +19900,7 @@ fn cmd_fstrim(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid offset");
+                    set_exit(1);
                     return;
                 }
             };
@@ -19819,6 +19908,7 @@ fn cmd_fstrim(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid length");
+                    set_exit(1);
                     return;
                 }
             };
@@ -19875,6 +19965,7 @@ fn cmd_sparse(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid offset");
+                    set_exit(1);
                     return;
                 }
             };
@@ -19882,6 +19973,7 @@ fn cmd_sparse(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid length");
+                    set_exit(1);
                     return;
                 }
             };
@@ -19906,6 +19998,7 @@ fn cmd_sparse(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid offset");
+                    set_exit(1);
                     return;
                 }
             };
@@ -19913,6 +20006,7 @@ fn cmd_sparse(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid length");
+                    set_exit(1);
                     return;
                 }
             };
@@ -19932,6 +20026,7 @@ fn cmd_sparse(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid offset");
+                    set_exit(1);
                     return;
                 }
             };
@@ -19939,6 +20034,7 @@ fn cmd_sparse(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid length");
+                    set_exit(1);
                     return;
                 }
             };
@@ -19960,6 +20056,7 @@ fn cmd_sparse(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid offset");
+                    set_exit(1);
                     return;
                 }
             };
@@ -19967,6 +20064,7 @@ fn cmd_sparse(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid length");
+                    set_exit(1);
                     return;
                 }
             };
@@ -20340,6 +20438,7 @@ fn cmd_seal(args: &str) {
                 "exec" | "x" => sealing::SealOp::ChangeExec,
                 _ => {
                     shell_println!("Unknown op: {}", parts[2]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -20453,6 +20552,7 @@ fn cmd_recent(args: &str) {
                         "Unknown type: {}. Use: open, modify, create, exec",
                         parts[2]
                     );
+                    set_exit(1);
                     return;
                 }
             };
@@ -21158,6 +21258,7 @@ fn cmd_bookmark(args: &str) {
                         parts[1],
                         path.display()
                     );
+                    set_exit(1);
                     return;
                 };
                 set_cwd(text);
@@ -21389,6 +21490,7 @@ fn cmd_contextmenu(args: &str) {
                         "Unknown target: {}. Use: file, dir, multi, desktop, explorer, taskbar",
                         target_str
                     );
+                    set_exit(1);
                     return;
                 }
             };
@@ -21776,6 +21878,7 @@ fn cmd_fileops(args: &str) {
                 shell_println!(
                     "Usage: fileops copy <source...> <dest> [--overwrite|--skip|--rename]"
                 );
+                set_exit(1);
                 return;
             }
             let mut sources = Vec::new();
@@ -21795,6 +21898,7 @@ fn cmd_fileops(args: &str) {
 
             if non_flags.len() < 2 {
                 shell_println!("Need at least one source and one destination.");
+                set_exit(1);
                 return;
             }
 
@@ -21829,6 +21933,7 @@ fn cmd_fileops(args: &str) {
                 shell_println!(
                     "Usage: fileops move <source...> <dest> [--overwrite|--skip|--rename]"
                 );
+                set_exit(1);
                 return;
             }
             let mut policy = fileops::ConflictPolicy::AutoRename;
@@ -21845,6 +21950,7 @@ fn cmd_fileops(args: &str) {
 
             if non_flags.len() < 2 {
                 shell_println!("Need at least one source and one destination.");
+                set_exit(1);
                 return;
             }
 
@@ -22858,6 +22964,7 @@ fn cmd_queryable(args: &str) {
                     Ok(n) => queryable::AttrValue::Int(n),
                     Err(_) => {
                         shell_println!("Invalid integer: {}", val_str);
+                        set_exit(1);
                         return;
                     }
                 },
@@ -22866,6 +22973,7 @@ fn cmd_queryable(args: &str) {
                     "false" | "0" | "no" => queryable::AttrValue::Bool(false),
                     _ => {
                         shell_println!("Invalid bool: {}", val_str);
+                        set_exit(1);
                         return;
                     }
                 },
@@ -22979,6 +23087,7 @@ fn cmd_queryable(args: &str) {
                 "ends-with" | "$" => queryable::CompareOp::EndsWith,
                 _ => {
                     shell_println!("Unknown operator: {}", op_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -23735,6 +23844,7 @@ fn cmd_appregistry(args: &str) {
                     "              games, development, education, science, accessories,"
                 );
                 shell_println!("              terminal, filemanager, settings, other");
+                set_exit(1);
                 return;
             }
             let cat = parts
@@ -24026,6 +24136,7 @@ fn cmd_theme(args: &str) {
                 Some(r) => r,
                 None => {
                     shell_println!("Unknown role: {}", role_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -24033,6 +24144,7 @@ fn cmd_theme(args: &str) {
                 Some(c) => c,
                 None => {
                     shell_println!("Invalid hex color: {}", hex);
+                    set_exit(1);
                     return;
                 }
             };
@@ -24181,6 +24293,7 @@ fn cmd_hotkey(args: &str) {
                 Some(c) => c,
                 None => {
                     shell_println!("Invalid combo: {}", combo_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -24188,6 +24301,7 @@ fn cmd_hotkey(args: &str) {
                 Some(a) => a,
                 None => {
                     shell_println!("Unknown action: {}", action_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -24212,6 +24326,7 @@ fn cmd_hotkey(args: &str) {
                 Some(c) => c,
                 None => {
                     shell_println!("Invalid combo: {}", combo_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -24231,6 +24346,7 @@ fn cmd_hotkey(args: &str) {
                 Some(c) => c,
                 None => {
                     shell_println!("Invalid combo: {}", combo_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -24255,6 +24371,7 @@ fn cmd_hotkey(args: &str) {
                 Some(c) => c,
                 None => {
                     shell_println!("Invalid combo: {}", combo_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -29903,6 +30020,7 @@ fn cmd_useracct(args: &str) {
                 }
                 let Ok(uid) = parts[1].parse::<u64>() else {
                     shell_println!("Invalid uid");
+                    set_exit(1);
                     return;
                 };
                 // Rejoin the tail so a path containing spaces survives the
@@ -33118,6 +33236,7 @@ fn cmd_autostart(args: &str) {
                         "Unknown phase: {}. Use system/desktop/login/deferred",
                         parts[3]
                     );
+                    set_exit(1);
                     return;
                 }
             };
@@ -33209,6 +33328,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -33216,6 +33336,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid delay.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -33234,6 +33355,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -33241,6 +33363,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid order.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -33259,6 +33382,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -33269,6 +33393,7 @@ fn cmd_autostart(args: &str) {
                 "deferred" => autostart::StartPhase::Deferred,
                 _ => {
                     shell_println!("Unknown phase. Use system/desktop/login/deferred");
+                    set_exit(1);
                     return;
                 }
             };
@@ -33287,6 +33412,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -33297,6 +33423,7 @@ fn cmd_autostart(args: &str) {
                 "firstlogin" => autostart::StartCondition::FirstLoginOnly,
                 _ => {
                     shell_println!("Unknown condition. Use always/ac/network/firstlogin");
+                    set_exit(1);
                     return;
                 }
             };
@@ -33315,6 +33442,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -33334,6 +33462,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -33353,6 +33482,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -33363,6 +33493,7 @@ fn cmd_autostart(args: &str) {
                 "unknown" => autostart::Impact::Unknown,
                 _ => {
                     shell_println!("Unknown impact. Use low/medium/high/unknown");
+                    set_exit(1);
                     return;
                 }
             };
@@ -33381,6 +33512,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -33388,6 +33520,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid duration.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -33585,6 +33718,7 @@ fn cmd_schedtune(args: &str) {
                     "lowpower" | "lp" => schedtune::WorkloadType::LowPower,
                     _ => {
                         shell_println!("Unknown workload type.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33596,6 +33730,7 @@ fn cmd_schedtune(args: &str) {
                     "rtfifo" | "rt" => schedtune::SchedModel::RtFifo,
                     _ => {
                         shell_println!("Unknown model.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33654,6 +33789,7 @@ fn cmd_schedtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33661,6 +33797,7 @@ fn cmd_schedtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid microseconds.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33683,6 +33820,7 @@ fn cmd_schedtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33693,6 +33831,7 @@ fn cmd_schedtune(args: &str) {
                     "realtime" | "rt" => schedtune::PreemptModel::RealTime,
                     _ => {
                         shell_println!("Unknown model.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33715,6 +33854,7 @@ fn cmd_schedtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33722,6 +33862,7 @@ fn cmd_schedtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid microseconds.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33744,6 +33885,7 @@ fn cmd_schedtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33769,6 +33911,7 @@ fn cmd_schedtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33776,6 +33919,7 @@ fn cmd_schedtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid value.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33798,6 +33942,7 @@ fn cmd_schedtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33808,6 +33953,7 @@ fn cmd_schedtune(args: &str) {
                     "pinned" | "none" => schedtune::BalanceStrategy::Pinned,
                     _ => {
                         shell_println!("Unknown strategy.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33830,6 +33976,7 @@ fn cmd_schedtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34073,6 +34220,7 @@ fn cmd_mmtune(args: &str) {
                     "vmhost" | "vm" => mmtune::WorkloadType::VmHost,
                     _ => {
                         shell_println!("Unknown workload.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34083,6 +34231,7 @@ fn cmd_mmtune(args: &str) {
                     "zonebased" | "zone" => mmtune::AllocModel::ZoneBased,
                     _ => {
                         shell_println!("Unknown allocator.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34141,6 +34290,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34150,6 +34300,7 @@ fn cmd_mmtune(args: &str) {
                     "always" => mmtune::OvercommitMode::Always,
                     _ => {
                         shell_println!("Unknown mode.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34172,6 +34323,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34182,6 +34334,7 @@ fn cmd_mmtune(args: &str) {
                     "always" => mmtune::HugePageMode::Always,
                     _ => {
                         shell_println!("Unknown mode.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34204,6 +34357,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34214,6 +34368,7 @@ fn cmd_mmtune(args: &str) {
                     "aggressive" | "agg" => mmtune::CompactLevel::Aggressive,
                     _ => {
                         shell_println!("Unknown level.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34236,6 +34391,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34243,6 +34399,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid value.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34265,6 +34422,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34272,6 +34430,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid ratio.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34279,11 +34438,13 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid bg ratio.");
+                        set_exit(1);
                         return;
                     }
                 };
                 if let Err(e) = mmtune::set_dirty_ratio(id, ratio) {
                     shell_println!("Error: {:?}", e);
+                    set_exit(1);
                     return;
                 }
                 match mmtune::set_dirty_bg_ratio(id, bg) {
@@ -34305,6 +34466,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34312,6 +34474,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid value.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34334,6 +34497,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34357,6 +34521,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34380,6 +34545,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34390,6 +34556,7 @@ fn cmd_mmtune(args: &str) {
                     "workingset" | "ws" => mmtune::ReclaimStrategy::WorkingSet,
                     _ => {
                         shell_println!("Unknown strategy.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34612,6 +34779,7 @@ fn cmd_capsettings(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid group id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34619,6 +34787,7 @@ fn cmd_capsettings(args: &str) {
                     Some(c) => c,
                     None => {
                         shell_println!("Unknown capability: {}", parts[2]);
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34641,6 +34810,7 @@ fn cmd_capsettings(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid group id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34648,6 +34818,7 @@ fn cmd_capsettings(args: &str) {
                     Some(c) => c,
                     None => {
                         shell_println!("Unknown capability: {}", parts[2]);
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34732,6 +34903,7 @@ fn cmd_capsettings(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid uid.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34754,6 +34926,7 @@ fn cmd_capsettings(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid uid.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34761,6 +34934,7 @@ fn cmd_capsettings(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid group id.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34783,6 +34957,7 @@ fn cmd_capsettings(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid uid.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34790,6 +34965,7 @@ fn cmd_capsettings(args: &str) {
                     Some(c) => c,
                     None => {
                         shell_println!("Unknown capability.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34812,6 +34988,7 @@ fn cmd_capsettings(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid uid.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34819,6 +34996,7 @@ fn cmd_capsettings(args: &str) {
                     Some(c) => c,
                     None => {
                         shell_println!("Unknown capability.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34841,6 +35019,7 @@ fn cmd_capsettings(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Invalid uid.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34906,6 +35085,7 @@ fn cmd_capsettings(args: &str) {
                     Some(c) => c,
                     None => {
                         shell_println!("Unknown capability.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -35168,6 +35348,7 @@ fn cmd_vpn(args: &str) {
                 "ssh" => vpn::VpnProtocol::SshTunnel,
                 _ => {
                     shell_println!("Unknown protocol.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35175,6 +35356,7 @@ fn cmd_vpn(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid port.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35225,6 +35407,7 @@ fn cmd_vpn(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35235,6 +35418,7 @@ fn cmd_vpn(args: &str) {
                 "token" | "otp" => vpn::AuthMethod::Token,
                 _ => {
                     shell_println!("Unknown auth method.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35253,6 +35437,7 @@ fn cmd_vpn(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35279,6 +35464,7 @@ fn cmd_vpn(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35300,6 +35486,7 @@ fn cmd_vpn(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35322,6 +35509,7 @@ fn cmd_vpn(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35343,6 +35531,7 @@ fn cmd_vpn(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35475,6 +35664,7 @@ fn cmd_dyndns(args: &str) {
                 "custom" => dyndns::DynDnsProvider::Custom,
                 _ => {
                     shell_println!("Unknown provider.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35535,6 +35725,7 @@ fn cmd_dyndns(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35542,6 +35733,7 @@ fn cmd_dyndns(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid seconds.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35560,6 +35752,7 @@ fn cmd_dyndns(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid id.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35610,6 +35803,7 @@ fn cmd_dyndns(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid external port.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35617,6 +35811,7 @@ fn cmd_dyndns(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Invalid internal port.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35626,6 +35821,7 @@ fn cmd_dyndns(args: &str) {
                 "both" => dyndns::ForwardProtocol::Both,
                 _ => {
                     shell_println!("Unknown protocol.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -36058,6 +36254,7 @@ fn cmd_appnotify(args: &str) {
                     "suppress" | "off" => appnotify::DisplayMode::Suppressed,
                     _ => {
                         shell_println!("Unknown mode: {}", parts[2]);
+                        set_exit(1);
                         return;
                     }
                 };
@@ -37909,6 +38106,7 @@ fn cmd_focusassist(args: &str) {
                 "total" => focusassist::FocusMode::Total,
                 _ => {
                     shell_println!("Unknown mode '{}'. Use: priority, alarms, total", mode_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -37949,6 +38147,7 @@ fn cmd_focusassist(args: &str) {
                 "total" => focusassist::FocusMode::Total,
                 _ => {
                     shell_println!("Unknown mode '{}'", mode_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -38104,6 +38303,7 @@ fn cmd_focusassist(args: &str) {
                     "Usage: focusassist addsched <name> <HH:MM> <HH:MM> <profile_id> [days]"
                 );
                 shell_println!("  days: comma-separated 0-6 (0=Sun). Default: all days.");
+                set_exit(1);
                 return;
             }
             let parse_time = |t: &str| -> Option<(u8, u8)> {
@@ -38117,6 +38317,7 @@ fn cmd_focusassist(args: &str) {
                 Some(t) => t,
                 None => {
                     shell_println!("Invalid start time");
+                    set_exit(1);
                     return;
                 }
             };
@@ -38124,6 +38325,7 @@ fn cmd_focusassist(args: &str) {
                 Some(t) => t,
                 None => {
                     shell_println!("Invalid end time");
+                    set_exit(1);
                     return;
                 }
             };
@@ -38311,6 +38513,7 @@ fn cmd_storageclean(args: &str) {
                     "Unknown category '{}'. Use: trash, temp, thumbs, logs, pkg, large, dl, dupes, all",
                     cat_name
                 );
+                set_exit(1);
                 return;
             };
             match storageclean::clean(&cats) {
@@ -38632,6 +38835,7 @@ fn cmd_sysdiag(args: &str) {
                     _ => {
                         shell_println!("Unknown severity: {}", sev_str);
                         shell_println!("Severities: info, warning, error, critical");
+                        set_exit(1);
                         return;
                     }
                 }
@@ -39151,6 +39355,7 @@ fn cmd_tasksched(args: &str) {
                         "login" => tasksched::ScheduleType::Login,
                         other => {
                             shell_println!("Unknown schedule type: {}", other);
+                            set_exit(1);
                             return;
                         }
                     };
@@ -40365,6 +40570,7 @@ fn cmd_screenrec(args: &str) {
                     "gif" => screenrec::OutputFormat::Gif,
                     _ => {
                         shell_println!("Unknown format. Options: webm, mp4, gif");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -40385,6 +40591,7 @@ fn cmd_screenrec(args: &str) {
                     "both" | "all" => screenrec::AudioMode::Both,
                     _ => {
                         shell_println!("Unknown mode. Options: none, system, mic, both");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -40405,6 +40612,7 @@ fn cmd_screenrec(args: &str) {
                     "lossless" => screenrec::QualityPreset::Lossless,
                     _ => {
                         shell_println!("Unknown quality. Options: low, medium, high, lossless");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -42229,6 +42437,7 @@ fn cmd_notifprefs(args: &str) {
                     Ok(p) => p,
                     Err(e) => {
                         shell_println!("Error: no preferences for '{}': {:?}", app_id, e);
+                        set_exit(1);
                         return;
                     }
                 };
@@ -42641,6 +42850,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid UID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42660,6 +42870,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid UID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42678,6 +42889,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid UID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42701,6 +42913,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid UID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42711,6 +42924,7 @@ fn cmd_parental(args: &str) {
                 "strict" => parental::FilterLevel::Strict,
                 _ => {
                     shell_println!("Unknown filter: {}", parts[2]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -42729,6 +42943,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid UID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42748,6 +42963,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid UID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42766,6 +42982,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid UID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42775,6 +42992,7 @@ fn cmd_parental(args: &str) {
                 "blockall" => parental::AppRestrictionMode::BlockAll,
                 _ => {
                     shell_println!("Unknown mode: {}", parts[2]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -42793,6 +43011,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid UID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42811,6 +43030,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid UID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42829,6 +43049,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid UID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42836,6 +43057,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid minutes");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42849,12 +43071,14 @@ fn cmd_parental(args: &str) {
                 shell_println!(
                     "Usage: parental schedule <uid> <day 0-6> <start_hour> <end_hour> [max_min]"
                 );
+                set_exit(1);
                 return;
             }
             let uid: u32 = match parts[1].parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid UID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42862,6 +43086,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) if v < 7 => v,
                 _ => {
                     shell_println!("Invalid day (0-6)");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42869,6 +43094,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid start hour");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42876,6 +43102,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid end hour");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42884,6 +43111,7 @@ fn cmd_parental(args: &str) {
                     Ok(v) => v,
                     Err(_) => {
                         shell_println!("Invalid max minutes");
+                        set_exit(1);
                         return;
                     }
                 }
@@ -42913,6 +43141,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid UID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -42955,6 +43184,7 @@ fn cmd_parental(args: &str) {
                         Ok(v) => v,
                         Err(_) => {
                             shell_println!("Invalid hour");
+                            set_exit(1);
                             return;
                         }
                     };
@@ -42962,6 +43192,7 @@ fn cmd_parental(args: &str) {
                         Ok(v) => v,
                         Err(_) => {
                             shell_println!("Invalid day");
+                            set_exit(1);
                             return;
                         }
                     };
@@ -42987,6 +43218,7 @@ fn cmd_parental(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid UID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43151,6 +43383,7 @@ fn cmd_audiodevice(args: &str) {
                 "dac" => audiodevice::AudioDeviceType::ExternalDac,
                 _ => {
                     shell_println!("Unknown type: {}", parts[2]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -43160,6 +43393,7 @@ fn cmd_audiodevice(args: &str) {
                 "duplex" => audiodevice::DeviceDirection::Duplex,
                 _ => {
                     shell_println!("Unknown direction: {}", parts[3]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -43179,6 +43413,7 @@ fn cmd_audiodevice(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43197,6 +43432,7 @@ fn cmd_audiodevice(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43222,6 +43458,7 @@ fn cmd_audiodevice(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43229,6 +43466,7 @@ fn cmd_audiodevice(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid volume");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43247,6 +43485,7 @@ fn cmd_audiodevice(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43266,6 +43505,7 @@ fn cmd_audiodevice(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43280,6 +43520,7 @@ fn cmd_audiodevice(args: &str) {
                         "Unknown rate: {} (44100|48000|88200|96000|192000)",
                         parts[2]
                     );
+                    set_exit(1);
                     return;
                 }
             };
@@ -43320,6 +43561,7 @@ fn cmd_audiodevice(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43429,6 +43671,7 @@ fn cmd_sessionmgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid UID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43458,6 +43701,7 @@ fn cmd_sessionmgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid session ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43476,6 +43720,7 @@ fn cmd_sessionmgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid session ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43498,6 +43743,7 @@ fn cmd_sessionmgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid session ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43526,6 +43772,7 @@ fn cmd_sessionmgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid seconds");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43544,6 +43791,7 @@ fn cmd_sessionmgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid session ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43643,6 +43891,7 @@ fn cmd_crashreport(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43685,6 +43934,7 @@ fn cmd_crashreport(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43707,6 +43957,7 @@ fn cmd_crashreport(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43840,6 +44091,7 @@ fn cmd_netproxy(args: &str) {
                 "detect" | "wpad" => netproxy::ProxyMode::SystemDetect,
                 _ => {
                     shell_println!("Unknown mode: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -43862,6 +44114,7 @@ fn cmd_netproxy(args: &str) {
                 "ftp" => netproxy::ProxyProtocol::Ftp,
                 _ => {
                     shell_println!("Unknown protocol: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -43870,6 +44123,7 @@ fn cmd_netproxy(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid port");
+                    set_exit(1);
                     return;
                 }
             };
@@ -43892,6 +44146,7 @@ fn cmd_netproxy(args: &str) {
                 "ftp" => netproxy::ProxyProtocol::Ftp,
                 _ => {
                     shell_println!("Unknown protocol: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -44047,6 +44302,7 @@ fn cmd_fileversion(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid version ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44074,6 +44330,7 @@ fn cmd_fileversion(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid version ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44093,6 +44350,7 @@ fn cmd_fileversion(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid version ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44116,6 +44374,7 @@ fn cmd_fileversion(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid version ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44266,6 +44525,7 @@ fn cmd_devicemgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44311,6 +44571,7 @@ fn cmd_devicemgr(args: &str) {
                 "virtual" => devicemgr::BusType::Virtual,
                 _ => {
                     shell_println!("Unknown bus: {}", parts[2]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -44342,6 +44603,7 @@ fn cmd_devicemgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44360,6 +44622,7 @@ fn cmd_devicemgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44379,6 +44642,7 @@ fn cmd_devicemgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44397,6 +44661,7 @@ fn cmd_devicemgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44502,6 +44767,7 @@ fn cmd_location(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid latitude");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44509,6 +44775,7 @@ fn cmd_location(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid longitude");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44516,6 +44783,7 @@ fn cmd_location(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid accuracy");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44561,6 +44829,7 @@ fn cmd_location(args: &str) {
                 "ask" => location::LocationPermission::AskNextTime,
                 _ => {
                     shell_println!("Unknown permission: {} (allow|while|deny|ask)", parts[2]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -44686,6 +44955,7 @@ fn cmd_diskencrypt(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44733,6 +45003,7 @@ fn cmd_diskencrypt(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44751,6 +45022,7 @@ fn cmd_diskencrypt(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44770,6 +45042,7 @@ fn cmd_diskencrypt(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44782,6 +45055,7 @@ fn cmd_diskencrypt(args: &str) {
                     "chacha20" => diskencrypt::EncryptAlgorithm::ChaCha20,
                     _ => {
                         shell_println!("Unknown algorithm");
+                        set_exit(1);
                         return;
                     }
                 }
@@ -44805,6 +45079,7 @@ fn cmd_diskencrypt(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -44827,6 +45102,7 @@ fn cmd_diskencrypt(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -45120,6 +45396,7 @@ fn cmd_remotedesktop(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid port");
+                    set_exit(1);
                     return;
                 }
             };
@@ -45163,6 +45440,7 @@ fn cmd_remotedesktop(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -45184,6 +45462,7 @@ fn cmd_remotedesktop(args: &str) {
                 "adaptive" => remotedesktop::QualityPreset::Adaptive,
                 _ => {
                     shell_println!("Unknown quality preset");
+                    set_exit(1);
                     return;
                 }
             };
@@ -45282,6 +45561,7 @@ fn cmd_restorepoint(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -45300,6 +45580,7 @@ fn cmd_restorepoint(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -45318,6 +45599,7 @@ fn cmd_restorepoint(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -45435,6 +45717,7 @@ fn cmd_battery(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -45499,6 +45782,7 @@ fn cmd_battery(args: &str) {
                         Ok(v) => v,
                         Err(_) => {
                             shell_println!("Invalid %");
+                            set_exit(1);
                             return;
                         }
                     };
@@ -45510,6 +45794,7 @@ fn cmd_battery(args: &str) {
                         Ok(v) => v,
                         Err(_) => {
                             shell_println!("Invalid %");
+                            set_exit(1);
                             return;
                         }
                     };
@@ -45642,6 +45927,7 @@ fn cmd_dictation(args: &str) {
                 "it" => dictation::DictationLanguage::ItIT,
                 _ => {
                     shell_println!("Unknown language: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -45788,6 +46074,7 @@ fn cmd_screenreader(args: &str) {
                 "very-fast" | "veryfast" => screenreader::SpeechRate::VeryFast,
                 _ => {
                     shell_println!("Unknown rate: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -45809,6 +46096,7 @@ fn cmd_screenreader(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid volume.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -45829,6 +46117,7 @@ fn cmd_screenreader(args: &str) {
                 "high" => screenreader::Verbosity::High,
                 _ => {
                     shell_println!("Unknown verbosity: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -45973,6 +46262,7 @@ fn cmd_langpack(args: &str) {
                 shell_println!(
                     "Usage: lpack install <code> <native-name> <english-name> [rtl] [keyboard]"
                 );
+                set_exit(1);
                 return;
             }
             let code = parts[1];
@@ -46293,6 +46583,7 @@ fn cmd_screentime(args: &str) {
                 Ok(m) => m,
                 Err(_) => {
                     shell_println!("Invalid minutes.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -46533,6 +46824,7 @@ fn cmd_magnifier(args: &str) {
                         Ok(v) => v,
                         Err(_) => {
                             shell_println!("Invalid zoom level.");
+                            set_exit(1);
                             return;
                         }
                     };
@@ -46555,6 +46847,7 @@ fn cmd_magnifier(args: &str) {
                 "docked" | "dock" => magnifier::MagMode::Docked,
                 _ => {
                     shell_println!("Unknown mode: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -46568,6 +46861,7 @@ fn cmd_magnifier(args: &str) {
                 shell_println!(
                     "Usage: mag filter <none|inverted|grayscale|highcontrast|yellowblack|whiteblack>"
                 );
+                set_exit(1);
                 return;
             }
             let f = match parts[1] {
@@ -46579,6 +46873,7 @@ fn cmd_magnifier(args: &str) {
                 "whiteblack" | "wb" => magnifier::ColorFilter::WhiteOnBlack,
                 _ => {
                     shell_println!("Unknown filter: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -46677,6 +46972,7 @@ fn cmd_cloudsync(args: &str) {
                 "s3" => cloudsync::CloudProvider::S3Compatible,
                 _ => {
                     shell_println!("Unknown provider: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -46695,6 +46991,7 @@ fn cmd_cloudsync(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -46938,6 +47235,7 @@ fn cmd_soundevents(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid volume.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -47035,6 +47333,7 @@ fn cmd_usbmgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid bus.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -47042,6 +47341,7 @@ fn cmd_usbmgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid port.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -47074,6 +47374,7 @@ fn cmd_usbmgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid bus.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -47081,6 +47382,7 @@ fn cmd_usbmgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid port.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -47169,6 +47471,7 @@ fn cmd_cliphistory(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -47187,6 +47490,7 @@ fn cmd_cliphistory(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -47205,6 +47509,7 @@ fn cmd_cliphistory(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -47223,6 +47528,7 @@ fn cmd_cliphistory(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -47354,6 +47660,7 @@ fn cmd_displaycolor(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid display ID.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -47361,6 +47668,7 @@ fn cmd_displaycolor(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -47379,6 +47687,7 @@ fn cmd_displaycolor(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid display ID.");
+                    set_exit(1);
                     return;
                 }
             };
@@ -47514,6 +47823,7 @@ fn cmd_syslog(args: &str) {
                 Some(s) => s,
                 None => {
                     shell_println!("Unknown severity: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -47647,6 +47957,7 @@ fn cmd_elog(args: &str) {
                 Some(s) => s,
                 None => {
                     shell_println!("Unknown severity: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -47671,6 +47982,7 @@ fn cmd_elog(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("Invalid PID: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -47728,6 +48040,7 @@ fn cmd_elog(args: &str) {
                 Some(s) => s,
                 None => {
                     shell_println!("Unknown severity: {}", parts[2]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -47944,6 +48257,7 @@ fn cmd_logpersist(args: &str) {
                     "critical" | "crit" => Severity::Critical,
                     _ => {
                         shell_println!("Unknown severity: {}", s);
+                        set_exit(1);
                         return;
                     }
                 };
@@ -47967,6 +48281,7 @@ fn cmd_logpersist(args: &str) {
                     "gzip" | "gz" => LogCompression::Gzip,
                     _ => {
                         shell_println!("Unknown algorithm: {}. Use: none, zstd, lz4, gzip", algo);
+                        set_exit(1);
                         return;
                     }
                 };
@@ -48273,6 +48588,7 @@ fn cmd_svcstart(args: &str) {
                         "ipc" => (SocketType::IpcChannel, 0u16, String::from(port_or_path)),
                         _ => {
                             shell_println!("Unknown socket type: {}", sock_type_str);
+                            set_exit(1);
                             return;
                         }
                     };
@@ -48410,6 +48726,7 @@ fn cmd_drvmon(args: &str) {
                             "Unknown bus: {}. Use: pci, usb, platform, virtual",
                             bus_str
                         );
+                        set_exit(1);
                         return;
                     }
                 };
@@ -49661,12 +49978,14 @@ fn cmd_upnp(args: &str) {
                 "udp" | "UDP" => upnp::Protocol::Udp,
                 _ => {
                     shell_println!("Protocol must be 'tcp' or 'udp'");
+                    set_exit(1);
                     return;
                 }
             };
             let int_port: u16 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             if int_port == 0 {
                 shell_println!("Invalid port");
+                set_exit(1);
                 return;
             }
             let ext_port: u16 = parts
@@ -49704,6 +50023,7 @@ fn cmd_upnp(args: &str) {
                 "udp" | "UDP" => upnp::Protocol::Udp,
                 _ => {
                     shell_println!("Protocol must be 'tcp' or 'udp'");
+                    set_exit(1);
                     return;
                 }
             };
@@ -49893,6 +50213,7 @@ fn cmd_httpd(args: &str) {
             let port: u16 = port_str.parse().unwrap_or(0);
             if port == 0 {
                 shell_println!("Invalid port: {}", port_str);
+                set_exit(1);
                 return;
             }
             match httpd::start(port) {
@@ -49909,6 +50230,7 @@ fn cmd_httpd(args: &str) {
             let port: u16 = port_str.parse().unwrap_or(0);
             if port == 0 {
                 shell_println!("Invalid port: {}", port_str);
+                set_exit(1);
                 return;
             }
             match httpd::start_tls(port) {
@@ -50275,6 +50597,7 @@ fn cmd_dhcpd(args: &str) {
                     Ok(idx) => shell_println!("Added default pool (index {})", idx),
                     Err(e) => {
                         shell_println!("Failed to add default pool: {:?}", e);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -50945,6 +51268,7 @@ fn cmd_tftp(args: &str) {
                 Some(ip) => ip,
                 None => {
                     shell_println!("Invalid IP: {}", ip_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -50975,6 +51299,7 @@ fn cmd_tftp(args: &str) {
                 Some(ip) => ip,
                 None => {
                     shell_println!("Invalid IP: {}", ip_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -51010,6 +51335,7 @@ fn cmd_tftp(args: &str) {
                 Some(addr) => addr,
                 None => {
                     shell_println!("Invalid IPv6 address: {}", ip_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -51040,6 +51366,7 @@ fn cmd_tftp(args: &str) {
                 Some(addr) => addr,
                 None => {
                     shell_println!("Invalid IPv6 address: {}", ip_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -51158,6 +51485,7 @@ fn cmd_netsyslog(args: &str) {
                 Some(ip) => ip,
                 None => {
                     shell_println!("Invalid IP: {}", ip_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -51183,6 +51511,7 @@ fn cmd_netsyslog(args: &str) {
                 Some(ip) => ip,
                 None => {
                     shell_println!("Invalid IPv6 address: {}", ip_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -51304,6 +51633,7 @@ fn cmd_wol(args: &str) {
                 None => {
                     shell_println!("Invalid MAC address: {}", sub);
                     shell_println!("Use format: AA:BB:CC:DD:EE:FF");
+                    set_exit(1);
                     return;
                 }
             };
@@ -51487,6 +51817,7 @@ fn cmd_traceroute(args: &str) {
                         }
                         Err(_) => {
                             shell_println!("Cannot resolve '{}' — use IP address", sub);
+                            set_exit(1);
                             return;
                         }
                     }
@@ -51606,6 +51937,7 @@ fn cmd_traceroute6(args: &str) {
                         }
                         Err(_) => {
                             shell_println!("Cannot resolve '{}' — use IPv6 address", sub);
+                            set_exit(1);
                             return;
                         }
                     }
@@ -52247,6 +52579,7 @@ fn cmd_bridge(args: &str) {
                 Ok(i) => i,
                 Err(_) => {
                     shell_println!("brctl: invalid index");
+                    set_exit(1);
                     return;
                 }
             };
@@ -52266,6 +52599,7 @@ fn cmd_bridge(args: &str) {
                 Ok(i) => i,
                 Err(_) => {
                     shell_println!("brctl: invalid bridge index");
+                    set_exit(1);
                     return;
                 }
             };
@@ -52273,6 +52607,7 @@ fn cmd_bridge(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("brctl: invalid port id");
+                    set_exit(1);
                     return;
                 }
             };
@@ -52292,6 +52627,7 @@ fn cmd_bridge(args: &str) {
                 Ok(i) => i,
                 Err(_) => {
                     shell_println!("brctl: invalid bridge index");
+                    set_exit(1);
                     return;
                 }
             };
@@ -52299,6 +52635,7 @@ fn cmd_bridge(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("brctl: invalid port id");
+                    set_exit(1);
                     return;
                 }
             };
@@ -52321,6 +52658,7 @@ fn cmd_bridge(args: &str) {
                 "xor-hash" | "xor" => crate::net::bridge::BondMode::XorHash,
                 _ => {
                     shell_println!("brctl: unknown mode '{}'", parts[2]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -52340,6 +52678,7 @@ fn cmd_bridge(args: &str) {
                 Ok(i) => i,
                 Err(_) => {
                     shell_println!("brctl: invalid index");
+                    set_exit(1);
                     return;
                 }
             };
@@ -52497,6 +52836,7 @@ fn cmd_nat(args: &str) {
                         shell_println!(
                             "Usage: nat forward add <tcp|udp> <host_port> <container_ip> <container_port> <ns_id>"
                         );
+                        set_exit(1);
                         return;
                     }
                     let proto = match parts.get(2).copied().unwrap_or("tcp") {
@@ -52598,6 +52938,7 @@ fn cmd_socks(args: &str) {
                 shell_println!(
                     "Usage: socks connect <proxy> <proxy_port> <target> <target_port> [user] [pass]"
                 );
+                set_exit(1);
                 return;
             }
             let proxy_str = parts[1];
@@ -52605,6 +52946,7 @@ fn cmd_socks(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("socks: invalid proxy port");
+                    set_exit(1);
                     return;
                 }
             };
@@ -52613,6 +52955,7 @@ fn cmd_socks(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("socks: invalid target port");
+                    set_exit(1);
                     return;
                 }
             };
@@ -52626,6 +52969,7 @@ fn cmd_socks(args: &str) {
                     Ok(ip) => ip,
                     Err(_) => {
                         shell_println!("socks: cannot resolve proxy '{}'", proxy_str);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -52756,6 +53100,7 @@ fn cmd_qos(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("qos: invalid value '{}'", parts[2]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -52763,6 +53108,7 @@ fn cmd_qos(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("qos: invalid priority '{}'", parts[3]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -52774,6 +53120,7 @@ fn cmd_qos(args: &str) {
                 "dscp" => crate::net::qos::ClassifyMatch::Dscp(value as u8),
                 _ => {
                     shell_println!("qos: unknown match type '{}' (use port/proto/dscp)", kind);
+                    set_exit(1);
                     return;
                 }
             };
@@ -52819,6 +53166,7 @@ fn cmd_qos(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("qos: invalid priority");
+                    set_exit(1);
                     return;
                 }
             };
@@ -52826,6 +53174,7 @@ fn cmd_qos(args: &str) {
                 Ok(r) => r,
                 Err(_) => {
                     shell_println!("qos: invalid rate");
+                    set_exit(1);
                     return;
                 }
             };
@@ -52833,6 +53182,7 @@ fn cmd_qos(args: &str) {
                 Ok(b) => b,
                 Err(_) => {
                     shell_println!("qos: invalid burst");
+                    set_exit(1);
                     return;
                 }
             };
@@ -52858,6 +53208,7 @@ fn cmd_qos(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("qos: invalid priority");
+                    set_exit(1);
                     return;
                 }
             };
@@ -52977,6 +53328,7 @@ fn cmd_vlan(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("vlan: invalid VLAN ID '{}'", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -52998,6 +53350,7 @@ fn cmd_vlan(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("vlan: invalid VLAN ID '{}'", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -53100,6 +53453,7 @@ fn cmd_smtp(args: &str) {
                     Ok(ip) => ip,
                     Err(_) => {
                         shell_println!("smtp: cannot resolve server '{}'", server_str);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -53183,6 +53537,7 @@ fn cmd_ftp(args: &str) {
                     Ok(ip) => ip,
                     Err(_) => {
                         shell_println!("ftp: cannot resolve host '{}'", host_str);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -53221,6 +53576,7 @@ fn cmd_ftp(args: &str) {
                     Ok(ip) => ip,
                     Err(_) => {
                         shell_println!("ftp: cannot resolve host '{}'", host_str);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -53260,6 +53616,7 @@ fn cmd_ftp(args: &str) {
                     Ok(ip) => ip,
                     Err(_) => {
                         shell_println!("ftp: cannot resolve host '{}'", host_str);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -53357,6 +53714,7 @@ fn cmd_snmp(args: &str) {
                     Ok(ip) => ip,
                     Err(_) => {
                         shell_println!("snmp: cannot resolve host '{}'", host_str);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -53366,6 +53724,7 @@ fn cmd_snmp(args: &str) {
                 Some(o) => o,
                 None => {
                     shell_println!("snmp: invalid OID '{}'", oid_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -53403,6 +53762,7 @@ fn cmd_snmp(args: &str) {
                     Ok(ip) => ip,
                     Err(_) => {
                         shell_println!("snmp: cannot resolve host '{}'", host_str);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -53412,6 +53772,7 @@ fn cmd_snmp(args: &str) {
                 Some(o) => o,
                 None => {
                     shell_println!("snmp: invalid OID '{}'", oid_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -53455,6 +53816,7 @@ fn cmd_snmp(args: &str) {
                     Ok(ip) => ip,
                     Err(_) => {
                         shell_println!("snmp: cannot resolve host '{}'", host_str);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -53492,6 +53854,7 @@ fn cmd_snmp(args: &str) {
                         Ok(addr) => addr,
                         Err(_) => {
                             shell_println!("snmp: cannot resolve IPv6 host '{}'", host_str);
+                            set_exit(1);
                             return;
                         }
                     }
@@ -53502,6 +53865,7 @@ fn cmd_snmp(args: &str) {
                 Some(o) => o,
                 None => {
                     shell_println!("snmp: invalid OID '{}'", oid_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -53539,6 +53903,7 @@ fn cmd_snmp(args: &str) {
                     Ok(addr) => addr,
                     Err(_) => {
                         shell_println!("snmp: cannot resolve IPv6 host '{}'", host_str);
+                        set_exit(1);
                         return;
                     }
                 },
@@ -53548,6 +53913,7 @@ fn cmd_snmp(args: &str) {
                 Some(o) => o,
                 None => {
                     shell_println!("snmp: invalid OID '{}'", oid_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -53591,6 +53957,7 @@ fn cmd_snmp(args: &str) {
                     Ok(addr) => addr,
                     Err(_) => {
                         shell_println!("snmp: cannot resolve IPv6 host '{}'", host_str);
+                        set_exit(1);
                         return;
                     }
                 },
@@ -53685,6 +54052,7 @@ fn cmd_iperf(args: &str) {
                     Ok(ip) => ip,
                     Err(_) => {
                         shell_println!("iperf: cannot resolve host '{}'", host_str);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -53694,6 +54062,7 @@ fn cmd_iperf(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("iperf: invalid port '{}'", port_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -53731,6 +54100,7 @@ fn cmd_iperf(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("iperf: invalid port '{}'", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -53776,6 +54146,7 @@ fn cmd_iperf(args: &str) {
                     Ok(ip) => ip,
                     Err(_) => {
                         shell_println!("iperf: cannot resolve host '{}'", host_str);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -53785,6 +54156,7 @@ fn cmd_iperf(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("iperf: invalid port '{}'", port_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -53842,6 +54214,7 @@ fn cmd_iperf(args: &str) {
                         Ok(addr) => addr,
                         Err(_) => {
                             shell_println!("iperf: cannot resolve IPv6 host '{}'", host_str);
+                            set_exit(1);
                             return;
                         }
                     }
@@ -53852,6 +54225,7 @@ fn cmd_iperf(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("iperf: invalid port '{}'", port_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -53949,6 +54323,7 @@ fn cmd_nc(args: &str) {
                     Ok(ip) => ip,
                     Err(_) => {
                         shell_println!("nc: cannot resolve host '{}'", host_str);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -53958,6 +54333,7 @@ fn cmd_nc(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("nc: invalid port '{}'", port_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -54019,6 +54395,7 @@ fn cmd_nc(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("nc: invalid port '{}'", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -54068,6 +54445,7 @@ fn cmd_nc(args: &str) {
                     Ok(ip) => ip,
                     Err(_) => {
                         shell_println!("nc: cannot resolve host '{}'", host_str);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -54077,6 +54455,7 @@ fn cmd_nc(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("nc: invalid port '{}'", port_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -54125,6 +54504,7 @@ fn cmd_nc(args: &str) {
                     Ok(ip) => ip,
                     Err(_) => {
                         shell_println!("nc: cannot resolve host '{}'", host_str);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -54134,6 +54514,7 @@ fn cmd_nc(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("nc: invalid port '{}'", port_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -54162,6 +54543,7 @@ fn cmd_nc(args: &str) {
                     Ok(addr) => addr,
                     Err(_) => {
                         shell_println!("nc: cannot resolve IPv6 host '{}'", host_str);
+                        set_exit(1);
                         return;
                     }
                 },
@@ -54171,6 +54553,7 @@ fn cmd_nc(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("nc: invalid port '{}'", port_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -54194,6 +54577,7 @@ fn cmd_nc(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("nc: invalid port '{}'", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -54246,6 +54630,7 @@ fn cmd_nc(args: &str) {
                     Ok(ip) => ip,
                     Err(_) => {
                         shell_println!("nc: cannot resolve host '{}'", host_str);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -54255,6 +54640,7 @@ fn cmd_nc(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("nc: invalid port '{}'", start_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -54262,6 +54648,7 @@ fn cmd_nc(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("nc: invalid port '{}'", end_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -54298,6 +54685,7 @@ fn cmd_nc(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("nc: invalid port '{}'", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -55231,6 +55619,7 @@ fn cmd_taskmon(args: &str) {
                     "idle" | "i" => taskmon::TaskPriority::Idle,
                     _ => {
                         shell_println!("Unknown priority: {}", prio_str);
+                        set_exit(1);
                         return;
                     }
                 };
@@ -55614,6 +56003,7 @@ fn cmd_servicemgr(args: &str) {
                     "delayed" => servicemgr::StartupType::DelayedAutomatic,
                     _ => {
                         shell_println!("Unknown type: {}", type_str);
+                        set_exit(1);
                         return;
                     }
                 };
@@ -55979,6 +56369,7 @@ fn cmd_appsandbox(args: &str) {
                     "camera" => appsandbox::Permission::Camera,
                     _ => {
                         shell_println!("Unknown permission.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -56000,6 +56391,7 @@ fn cmd_appsandbox(args: &str) {
                     "network" | "net" => appsandbox::Permission::NetworkAccess,
                     _ => {
                         shell_println!("Unknown permission.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -59349,6 +59741,7 @@ fn cmd_sharesheet(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid target ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -59375,6 +59768,7 @@ fn cmd_sharesheet(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid target ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -59633,6 +60027,7 @@ fn cmd_hdrdisplay(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid display ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -59652,6 +60047,7 @@ fn cmd_hdrdisplay(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid display ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -59665,6 +60061,7 @@ fn cmd_hdrdisplay(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid display ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -59685,6 +60082,7 @@ fn cmd_hdrdisplay(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid display ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -59699,6 +60097,7 @@ fn cmd_hdrdisplay(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid display ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -59805,6 +60204,7 @@ fn cmd_surroundsound(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -59826,6 +60226,7 @@ fn cmd_surroundsound(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -59857,6 +60258,7 @@ fn cmd_surroundsound(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -59875,6 +60277,7 @@ fn cmd_surroundsound(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -59889,6 +60292,7 @@ fn cmd_surroundsound(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -59962,6 +60366,7 @@ fn cmd_audioeq(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -59987,6 +60392,7 @@ fn cmd_audioeq(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60002,6 +60408,7 @@ fn cmd_audioeq(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60016,6 +60423,7 @@ fn cmd_audioeq(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60029,6 +60437,7 @@ fn cmd_audioeq(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60049,6 +60458,7 @@ fn cmd_audioeq(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60128,6 +60538,7 @@ fn cmd_screensaver(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid saver ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60141,6 +60552,7 @@ fn cmd_screensaver(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid saver ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60154,6 +60566,7 @@ fn cmd_screensaver(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid saver ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60168,6 +60581,7 @@ fn cmd_screensaver(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid saver ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60268,6 +60682,7 @@ fn cmd_colortemp(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60282,6 +60697,7 @@ fn cmd_colortemp(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60301,6 +60717,7 @@ fn cmd_colortemp(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60320,6 +60737,7 @@ fn cmd_colortemp(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60343,6 +60761,7 @@ fn cmd_colortemp(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60364,6 +60783,7 @@ fn cmd_colortemp(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60439,6 +60859,7 @@ fn cmd_gamemode(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid game ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60550,6 +60971,7 @@ fn cmd_dpiscaling(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid display ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60564,6 +60986,7 @@ fn cmd_dpiscaling(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid display ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60695,6 +61118,7 @@ fn cmd_netprofile(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60708,6 +61132,7 @@ fn cmd_netprofile(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60728,6 +61153,7 @@ fn cmd_netprofile(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60742,6 +61168,7 @@ fn cmd_netprofile(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60758,6 +61185,7 @@ fn cmd_netprofile(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60986,6 +61414,7 @@ fn cmd_kbshortcuts(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid shortcut ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -60999,6 +61428,7 @@ fn cmd_kbshortcuts(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid shortcut ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -61012,6 +61442,7 @@ fn cmd_kbshortcuts(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid shortcut ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -61119,6 +61550,7 @@ fn cmd_displayarrange(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid display ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -61134,6 +61566,7 @@ fn cmd_displayarrange(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid display ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -61147,6 +61580,7 @@ fn cmd_displayarrange(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid display ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -61319,6 +61753,7 @@ fn cmd_filevault(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid vault ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -61333,6 +61768,7 @@ fn cmd_filevault(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid vault ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -61346,6 +61782,7 @@ fn cmd_filevault(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid vault ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -61457,6 +61894,7 @@ fn cmd_mousegestures(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid binding ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -61859,6 +62297,7 @@ fn cmd_lockwallpaper(args: &str) {
                     shell_println!(
                         "Usage: lockwallpaper mode <static|slideshow|spotlight|color|desktop>"
                     );
+                    set_exit(1);
                     return;
                 }
             };
@@ -62028,6 +62467,7 @@ fn cmd_systemsounds(args: &str) {
                         "Unknown event '{}'. Use: startup, shutdown, login, logout, lock, unlock, notification, error, warning, info, device_connect, device_disconnect, recycle_bin, message_send, message_receive, screenshot, volume, low_battery",
                         event_name
                     );
+                    set_exit(1);
                     return;
                 }
             };
@@ -62046,6 +62486,7 @@ fn cmd_systemsounds(args: &str) {
                     shell_println!(
                         "Unknown event. Use: startup, shutdown, notification, error, etc."
                     );
+                    set_exit(1);
                     return;
                 }
             };
@@ -62071,6 +62512,7 @@ fn cmd_systemsounds(args: &str) {
                     Some(e) => e,
                     None => {
                         shell_println!("Unknown event.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -62092,6 +62534,7 @@ fn cmd_systemsounds(args: &str) {
                     Some(e) => e,
                     None => {
                         shell_println!("Unknown event.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -62626,6 +63069,7 @@ fn cmd_haptfeedback(args: &str) {
                 shell_println!(
                     "Usage: haptfeedback add <name> [trackpad|controller|touchscreen|stylus]"
                 );
+                set_exit(1);
                 return;
             }
             let dtype = match dtype_str {
@@ -62965,6 +63409,7 @@ fn cmd_pinnedapps(args: &str) {
                     shell_println!(
                         "Usage: pinnedapps pin <taskbar|start|desktop> <app> [display_name]"
                     );
+                    set_exit(1);
                     return;
                 }
             };
@@ -63039,6 +63484,7 @@ fn cmd_pinnedapps(args: &str) {
                         "Usage: pinnedapps {} <taskbar|start|desktop> <app> <path>",
                         sub
                     );
+                    set_exit(1);
                     return;
                 }
             };
@@ -63356,6 +63802,7 @@ fn cmd_storagesense(args: &str) {
                     shell_println!(
                         "Usage: storagesense schedule <manual|daily|weekly|monthly|lowspace>"
                     );
+                    set_exit(1);
                     return;
                 }
             };
@@ -63652,6 +64099,7 @@ fn cmd_recentsearch(args: &str) {
                     "help" => recentsearch::SearchSource::HelpSearch,
                     _ => {
                         shell_println!("Unknown source.");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -66586,6 +67034,7 @@ fn cmd_usbpolicy(args: &str) {
                 shell_println!(
                     "Usage: usbpolicy add <name> <decision> [class=<class>] [vid=<hex>] [pid=<hex>]"
                 );
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -67697,6 +68146,7 @@ fn cmd_diskquota(args: &str) {
                 shell_println!(
                     "Usage: diskquota update <name> <user|group> <bytes_delta> [file_delta]"
                 );
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -67874,6 +68324,7 @@ fn cmd_appdefaults(args: &str) {
                         appdefaults::PrefValue::Int(v)
                     } else {
                         shell_println!("Invalid integer");
+                        set_exit(1);
                         return;
                     }
                 }
@@ -68043,6 +68494,7 @@ fn cmd_policyengine(args: &str) {
                 shell_println!(
                     "Usage: policyengine add <name> <category> <subject> <action> <resource> <effect> [priority]"
                 );
+                set_exit(1);
                 return;
             }
             let cat = parse_policy_category(parts[2]);
@@ -68331,6 +68783,7 @@ fn cmd_fontpreview(args: &str) {
                 shell_println!(
                     "Usage: fontpreview add <family> <style> <category> <path> [version] [glyphs]"
                 );
+                set_exit(1);
                 return;
             }
             let style = parse_font_style(parts[2]);
@@ -68434,6 +68887,7 @@ fn cmd_wifiscan(args: &str) {
                 shell_println!(
                     "Usage: wifiscan discover <ssid> <bssid> <security> <band> <channel> [signal]"
                 );
+                set_exit(1);
                 return;
             }
             let security = parse_wifi_security(parts[3]);
@@ -69641,6 +70095,7 @@ fn cmd_energysaver(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid CPU limit");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69778,6 +70233,7 @@ fn cmd_filerules(args: &str) {
                 shell_println!(
                     "Usage: filerules add <name> <condition> <pattern> <action> [param]"
                 );
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -70282,6 +70738,7 @@ fn cmd_systemimage(args: &str) {
                 shell_println!(
                     "Usage: systemimage create <name> <type> [description] [size] [base_id]"
                 );
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -70437,6 +70894,7 @@ fn cmd_raidmgr(args: &str) {
                 shell_println!(
                     "Usage: raidmgr create <name> <level> <disk1,disk2,...> [disk_size] [stripe_kb]"
                 );
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -70476,6 +70934,7 @@ fn cmd_raidmgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid array ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70505,6 +70964,7 @@ fn cmd_raidmgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid array ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70523,6 +70983,7 @@ fn cmd_raidmgr(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid array ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70679,6 +71140,7 @@ fn cmd_networkbridge(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid bridge ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70700,6 +71162,7 @@ fn cmd_networkbridge(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid bridge ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70737,6 +71200,7 @@ fn cmd_networkbridge(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid bridge ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70755,6 +71219,7 @@ fn cmd_networkbridge(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid bridge ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70762,6 +71227,7 @@ fn cmd_networkbridge(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid MTU");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71158,6 +71624,7 @@ fn cmd_backupsched(args: &str) {
                 shell_println!(
                     "Usage: backupsched create <name> <source> <dest> [type] [freq] [retention]"
                 );
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -71373,6 +71840,7 @@ fn cmd_displaycal(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid monitor ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71387,12 +71855,14 @@ fn cmd_displaycal(args: &str) {
                 shell_println!(
                     "Usage: displaycal gamma <id> <r> <g> <b> (values * 100, e.g., 220 = 2.20)"
                 );
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid monitor ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71414,6 +71884,7 @@ fn cmd_displaycal(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid monitor ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71421,6 +71892,7 @@ fn cmd_displaycal(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid temperature");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71598,6 +72070,7 @@ fn cmd_vpnprofile(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -72037,6 +72510,7 @@ fn cmd_userprofile(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                     return;
                 }
             };
@@ -75757,6 +76231,7 @@ fn cmd_authbroker(args: &str) {
                 "pubkey" | "pk" => authbroker::AuthMethod::PublicKey,
                 _ => {
                     shell_println!("Unknown method: {}", method_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -75883,6 +76358,7 @@ fn cmd_prociso(args: &str) {
                 "cgroup" => prociso::NsType::Cgroup,
                 _ => {
                     shell_println!("Unknown type: {}", ns_type_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -76056,6 +76532,7 @@ fn cmd_dmevent(args: &str) {
                 shell_println!(
                     "Usage: dmevent notify <add|remove|change> <block|net|usb|...> <devpath> <devname>"
                 );
+                set_exit(1);
                 return;
             }
             let event_type = match ev_str {
@@ -76066,6 +76543,7 @@ fn cmd_dmevent(args: &str) {
                 "offline" => dmevent::EventType::Offline,
                 _ => {
                     shell_println!("Unknown event: {}", ev_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -76080,6 +76558,7 @@ fn cmd_dmevent(args: &str) {
                 "gpu" => dmevent::Subsystem::Gpu,
                 _ => {
                     shell_println!("Unknown subsystem: {}", sub_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -79691,6 +80170,7 @@ fn cmd_kthread(args: &str) {
                 "exiting" => kthread::KthreadState::Exiting,
                 _ => {
                     shell_println!("kthread: state must be running|sleeping|idle|parked|exiting");
+                    set_exit(1);
                     return;
                 }
             };
@@ -84013,6 +84493,7 @@ fn cmd_taskbar(args: &str) {
                 shell_println!(
                     "Usage: taskbar progress <app-id> <none|pulse|0-100|pause:N|error:N>"
                 );
+                set_exit(1);
                 return;
             }
             let ps = if val == "none" {
@@ -84089,6 +84570,7 @@ fn cmd_taskbar(args: &str) {
                         "right" => taskbar::TaskbarPosition::Right,
                         _ => {
                             shell_println!("Unknown position: {}", val);
+                            set_exit(1);
                             return;
                         }
                     };
@@ -84572,6 +85054,7 @@ fn cmd_systray(args: &str) {
                 "hidden" | "hide" => systray::IconVisibility::Hidden,
                 _ => {
                     shell_println!("Unknown visibility: {}", vis_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -84624,6 +85107,7 @@ fn cmd_systray(args: &str) {
                 "tray-only" | "trayonly" => systray::TrayOverride::TrayOnly,
                 _ => {
                     shell_println!("Unknown override: {}", ov_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -84717,6 +85201,7 @@ fn cmd_fflags(args: &str) {
                     Some(b) => bits |= b,
                     None => {
                         shell_println!("Unknown flag: {}", flag_name);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -84744,6 +85229,7 @@ fn cmd_fflags(args: &str) {
                     Some(b) => bits |= b,
                     None => {
                         shell_println!("Unknown flag: {}", flag_name);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -84788,6 +85274,7 @@ fn cmd_fflags(args: &str) {
                 shell_println!(
                     "Usage: fflags check <write|append|delete|truncate|meta|link> <path>"
                 );
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -84800,6 +85287,7 @@ fn cmd_fflags(args: &str) {
                 "link" => immutable::check_link(&path),
                 _ => {
                     shell_println!("Unknown check: {}", check_type);
+                    set_exit(1);
                     return;
                 }
             };
@@ -85723,6 +86211,7 @@ fn cmd_setfacl(args: &str) {
                 None => {
                     shell_println!("Invalid ACL spec: {}", spec);
                     shell_println!("Format: u:UID:rwx or g:GID:rwx");
+                    set_exit(1);
                     return;
                 }
             };
@@ -85777,6 +86266,7 @@ fn cmd_setfacl(args: &str) {
                 Some(t) => t,
                 None => {
                     shell_println!("Invalid ACL spec: {}", spec);
+                    set_exit(1);
                     return;
                 }
             };
@@ -85823,6 +86313,7 @@ fn cmd_setfacl(args: &str) {
                 Ok(m) => m,
                 Err(_) => {
                     shell_println!("Invalid octal mode: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -86450,6 +86941,7 @@ fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, count: &mut u64, 
 fn cmd_wc(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: wc <file>");
+        set_exit(1);
         return;
     }
 
@@ -86500,6 +86992,7 @@ fn cmd_head(args: &str) {
         }
     } else {
         shell_println!("Usage: head [N] <file>");
+        set_exit(1);
         return;
     };
 
@@ -86534,6 +87027,7 @@ fn cmd_tail(args: &str) {
         }
     } else {
         shell_println!("Usage: tail [N] <file>");
+        set_exit(1);
         return;
     };
 
@@ -86566,6 +87060,7 @@ fn cmd_tail(args: &str) {
 fn cmd_hexdump(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: hexdump [-n count] <file>");
+        set_exit(1);
         return;
     }
 
@@ -86593,6 +87088,7 @@ fn cmd_hexdump(args: &str) {
 
     if file_path.is_empty() {
         shell_println!("Usage: hexdump [-n count] <file>");
+        set_exit(1);
         return;
     }
 
@@ -86748,6 +87244,7 @@ fn cmd_grep(args: &str) {
                     'r' | 'R' => flags.recursive = true,
                     _ => {
                         shell_println!("grep: unknown flag '-{}'", ch);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -86759,6 +87256,7 @@ fn cmd_grep(args: &str) {
 
     if words.is_empty() {
         shell_println!("Usage: grep [-ivclnwrI] <pattern> <file|dir> [file2 ...]");
+        set_exit(1);
         return;
     }
 
@@ -86767,6 +87265,7 @@ fn cmd_grep(args: &str) {
         &words[1..]
     } else {
         shell_println!("Usage: grep [-ivclnwrI] <pattern> <file|dir> [file2 ...]");
+        set_exit(1);
         return;
     };
 
@@ -86958,6 +87457,7 @@ fn cmd_cmp(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
         shell_println!("Usage: cmp <file1> <file2>");
+        set_exit(1);
         return;
     }
 
@@ -87023,6 +87523,7 @@ fn cmd_diff(args: &str) {
     let parts: Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
         shell_println!("Usage: diff <file1> <file2>");
+        set_exit(1);
         return;
     }
 
@@ -87252,6 +87753,7 @@ fn cmd_fallocate(args: &str) {
     if parts.len() < 2 || parts[1].is_empty() {
         shell_println!("Usage: fallocate <size> <file>");
         shell_println!("  Size can be suffixed with K, M, G (e.g., 4K, 1M)");
+        set_exit(1);
         return;
     }
 
@@ -87275,6 +87777,7 @@ fn cmd_fallocate(args: &str) {
             Ok(n) => n.saturating_mul(multiplier),
             Err(_) => {
                 shell_println!("fallocate: invalid size '{}'", size_str);
+                set_exit(1);
                 return;
             }
         }
@@ -87610,6 +88113,7 @@ fn cmd_mount(args: &str) {
 fn cmd_umount(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: umount <mount-path>");
+        set_exit(1);
         return;
     }
 
@@ -87649,6 +88153,7 @@ fn cmd_sync() {
 fn cmd_run(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: run <elf-file>");
+        set_exit(1);
         return;
     }
 
@@ -87891,10 +88396,12 @@ fn cmd_audio(args: &str) {
                     Ok(()) => {
                         if let Err(e) = crate::hda::fill_test_tone() {
                             shell_println!("Failed to generate tone: {:?}", e);
+                            set_exit(1);
                             return;
                         }
                         if let Err(e) = crate::hda::start_playback() {
                             shell_println!("Failed to start playback: {:?}", e);
+                            set_exit(1);
                             return;
                         }
                         shell_println!("Playing 440 Hz test tone via HDA...");
@@ -88457,6 +88964,7 @@ fn cmd_ping(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: ping <ip-address>");
         shell_println!("  e.g., ping 10.0.2.2");
+        set_exit(1);
         return;
     }
 
@@ -88472,6 +88980,7 @@ fn cmd_ping(args: &str) {
             }
             Err(e) => {
                 shell_println!("Cannot resolve {}: {:?}", args, e);
+                set_exit(1);
                 return;
             }
         }
@@ -88560,6 +89069,7 @@ fn cmd_ping6(args: &str) {
         shell_println!("Usage: ping6 <ipv6-address>");
         shell_println!("  e.g., ping6 fe80::1");
         shell_println!("  e.g., ping6 ff02::1  (all nodes link-local)");
+        set_exit(1);
         return;
     }
 
@@ -88567,6 +89077,7 @@ fn cmd_ping6(args: &str) {
         Some(addr) => addr,
         None => {
             shell_println!("Invalid IPv6 address: {}", args);
+            set_exit(1);
             return;
         }
     };
@@ -88631,12 +89142,14 @@ fn cmd_udp6(args: &str) {
         "send" | "s" => {
             if parts.len() < 4 {
                 shell_println!("Usage: udp6 send <ipv6-addr> <port> <message...>");
+                set_exit(1);
                 return;
             }
             let dst = match crate::net::ipv6::Ipv6Addr::parse(parts[1]) {
                 Some(addr) => addr,
                 None => {
                     shell_println!("Invalid IPv6 address: {}", parts[1]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -88644,6 +89157,7 @@ fn cmd_udp6(args: &str) {
                 Ok(p) => p,
                 Err(_) => {
                     shell_println!("Invalid port: {}", parts[2]);
+                    set_exit(1);
                     return;
                 }
             };
@@ -88662,6 +89176,7 @@ fn cmd_udp6(args: &str) {
                 Ok(p) if p > 0 => p,
                 _ => {
                     shell_println!("Usage: udp6 listen <port> [timeout_ms]");
+                    set_exit(1);
                     return;
                 }
             };
@@ -88827,6 +89342,7 @@ fn cmd_firewall(args: &str) {
                             "Usage: firewall {} in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]",
                             cmd
                         );
+                        set_exit(1);
                         return;
                     }
                 };
@@ -88841,6 +89357,7 @@ fn cmd_firewall(args: &str) {
                             "Usage: firewall {} in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]",
                             cmd
                         );
+                        set_exit(1);
                         return;
                     }
                 };
@@ -88929,6 +89446,7 @@ fn cmd_firewall(args: &str) {
                             "Usage: fw {} in|out|both tcp|udp|icmp|any [port N] [ip ADDR[/N]] [prio N]",
                             cmd
                         );
+                        set_exit(1);
                         return;
                     }
                 };
@@ -88943,6 +89461,7 @@ fn cmd_firewall(args: &str) {
                             "Usage: fw {} in|out|both tcp|udp|icmp|any [port N] [ip ADDR[/N]] [prio N]",
                             cmd
                         );
+                        set_exit(1);
                         return;
                     }
                 };
@@ -89621,6 +90140,7 @@ fn cmd_service_limits(args: &str) {
             // slimit set NAME rss=N cpu=N thr=N hdl=N
             if parts.len() < 3 {
                 shell_println!("Usage: slimit set <name> rss=N cpu=N thr=N hdl=N");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -89637,6 +90157,7 @@ fn cmd_service_limits(args: &str) {
                     limits.max_handles = val.parse().unwrap_or(0);
                 } else {
                     shell_println!("Unknown parameter: {} (use rss=, cpu=, thr=, hdl=)", param);
+                    set_exit(1);
                     return;
                 }
             }
@@ -89659,6 +90180,7 @@ fn cmd_service_limits(args: &str) {
                             "Unknown profile: {} (daemon|network|system|sandbox)",
                             parts[2]
                         );
+                        set_exit(1);
                         return;
                     }
                 };
@@ -89724,6 +90246,7 @@ fn cmd_wget(args: &str) {
         shell_println!("Usage: wget <url>");
         shell_println!("  e.g., wget http://example.com/");
         shell_println!("  e.g., wget https://secure.example.com/");
+        set_exit(1);
         return;
     }
 
@@ -89748,6 +90271,7 @@ fn cmd_wget(args: &str) {
 
     let Some((host, port, path)) = parse_url(args) else {
         shell_println!("Invalid URL: {}", args);
+        set_exit(1);
         return;
     };
 
@@ -89822,6 +90346,7 @@ fn cmd_dns(args: &str) {
         shell_println!("Usage: dns <domain-name>");
         shell_println!("       dns -6 <domain-name>   (AAAA / IPv6)");
         shell_println!("  e.g., dns example.com");
+        set_exit(1);
         return;
     }
 
@@ -89830,6 +90355,7 @@ fn cmd_dns(args: &str) {
         (true, args[3..].trim())
     } else if args == "-6" {
         shell_println!("Usage: dns -6 <domain-name>");
+        set_exit(1);
         return;
     } else {
         (false, args.trim())
@@ -89837,6 +90363,7 @@ fn cmd_dns(args: &str) {
 
     if name.is_empty() {
         shell_println!("Usage: dns <domain-name>");
+        set_exit(1);
         return;
     }
 
@@ -90020,10 +90547,12 @@ fn cmd_cgroup(args: &str) {
         "delete" | "del" | "rm" => {
             let Some(id_str) = parts.get(1) else {
                 shell_println!("Usage: cgroup delete <id>");
+                set_exit(1);
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 shell_println!("Invalid cgroup ID");
+                set_exit(1);
                 return;
             };
             match cgroup::delete(id) {
@@ -90034,18 +90563,22 @@ fn cmd_cgroup(args: &str) {
         "cpu" => {
             let Some(id_str) = parts.get(1) else {
                 shell_println!("Usage: cgroup cpu <id> <percent>");
+                set_exit(1);
                 return;
             };
             let Some(pct_str) = parts.get(2) else {
                 shell_println!("Usage: cgroup cpu <id> <percent>");
+                set_exit(1);
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 shell_println!("Invalid cgroup ID");
+                set_exit(1);
                 return;
             };
             let Ok(pct) = pct_str.parse::<u64>() else {
                 shell_println!("Invalid percentage");
+                set_exit(1);
                 return;
             };
             let limit = cgroup::CpuLimit::from_percent(pct);
@@ -90063,18 +90596,22 @@ fn cmd_cgroup(args: &str) {
         "mem" | "memory" => {
             let Some(id_str) = parts.get(1) else {
                 shell_println!("Usage: cgroup mem <id> <frames>");
+                set_exit(1);
                 return;
             };
             let Some(frames_str) = parts.get(2) else {
                 shell_println!("Usage: cgroup mem <id> <frames>");
+                set_exit(1);
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 shell_println!("Invalid cgroup ID");
+                set_exit(1);
                 return;
             };
             let Ok(frames) = frames_str.parse::<u64>() else {
                 shell_println!("Invalid frame count");
+                set_exit(1);
                 return;
             };
             let limit = cgroup::MemLimit::frames(frames);
@@ -90092,14 +90629,17 @@ fn cmd_cgroup(args: &str) {
         "stats" | "info" => {
             let Some(id_str) = parts.get(1) else {
                 shell_println!("Usage: cgroup stats <id>");
+                set_exit(1);
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 shell_println!("Invalid cgroup ID");
+                set_exit(1);
                 return;
             };
             let Some(s) = cgroup::stats(id) else {
                 shell_println!("Cgroup {} not found", id);
+                set_exit(1);
                 return;
             };
             shell_println!("=== Cgroup {} ===", id);
@@ -90189,18 +90729,22 @@ fn cmd_cgroup(args: &str) {
         "io" => {
             let Some(id_str) = parts.get(1) else {
                 shell_println!("Usage: cgroup io <id> <ops_max> [bytes_max]");
+                set_exit(1);
                 return;
             };
             let Some(ops_str) = parts.get(2) else {
                 shell_println!("Usage: cgroup io <id> <ops_max> [bytes_max]");
+                set_exit(1);
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 shell_println!("Invalid cgroup ID");
+                set_exit(1);
                 return;
             };
             let Ok(ops) = ops_str.parse::<u64>() else {
                 shell_println!("Invalid ops count");
+                set_exit(1);
                 return;
             };
             let bytes = parts
@@ -90309,10 +90853,12 @@ fn cmd_pidns(args: &str) {
         "delete" | "del" | "rm" => {
             let Some(id_str) = parts.get(1) else {
                 shell_println!("Usage: pidns delete <id>");
+                set_exit(1);
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 shell_println!("Invalid namespace ID");
+                set_exit(1);
                 return;
             };
             match pidns::delete(id) {
@@ -90323,14 +90869,17 @@ fn cmd_pidns(args: &str) {
         "stats" | "info" => {
             let Some(id_str) = parts.get(1) else {
                 shell_println!("Usage: pidns stats <id>");
+                set_exit(1);
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 shell_println!("Invalid namespace ID");
+                set_exit(1);
                 return;
             };
             let Some(s) = pidns::stats(id) else {
                 shell_println!("PID namespace {} not found", id);
+                set_exit(1);
                 return;
             };
             shell_println!("=== PID Namespace {} ===", id);
@@ -90425,10 +90974,12 @@ fn cmd_userns(args: &str) {
         "delete" | "del" | "rm" => {
             let Some(id_str) = parts.get(1) else {
                 shell_println!("Usage: userns delete <id>");
+                set_exit(1);
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 shell_println!("Invalid namespace ID");
+                set_exit(1);
                 return;
             };
             match userns::delete(id) {
@@ -90440,6 +90991,7 @@ fn cmd_userns(args: &str) {
             // userns uidmap <ns> <inner_start> <outer_start> <count>
             if parts.len() < 5 {
                 shell_println!("Usage: userns uidmap <ns> <inner> <outer> <count>");
+                set_exit(1);
                 return;
             }
             let ns = parts[1].parse::<u32>().unwrap_or(u32::MAX);
@@ -90462,6 +91014,7 @@ fn cmd_userns(args: &str) {
             // userns gidmap <ns> <inner_start> <outer_start> <count>
             if parts.len() < 5 {
                 shell_println!("Usage: userns gidmap <ns> <inner> <outer> <count>");
+                set_exit(1);
                 return;
             }
             let ns = parts[1].parse::<u32>().unwrap_or(u32::MAX);
@@ -90483,14 +91036,17 @@ fn cmd_userns(args: &str) {
         "stats" | "info" => {
             let Some(id_str) = parts.get(1) else {
                 shell_println!("Usage: userns stats <id>");
+                set_exit(1);
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 shell_println!("Invalid namespace ID");
+                set_exit(1);
                 return;
             };
             let Some(s) = userns::stats(id) else {
                 shell_println!("User namespace {} not found", id);
+                set_exit(1);
                 return;
             };
             shell_println!("=== User Namespace {} ===", id);
@@ -90600,10 +91156,12 @@ fn cmd_netns(args: &str) {
         "delete" | "del" | "rm" => {
             let Some(id_str) = parts.get(1) else {
                 shell_println!("Usage: netns delete <id>");
+                set_exit(1);
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 shell_println!("Invalid namespace ID");
+                set_exit(1);
                 return;
             };
             match netns::delete(id) {
@@ -90618,6 +91176,7 @@ fn cmd_netns(args: &str) {
                 shell_println!(
                     "  Example: netns ifconfig 1 10.0.0.2 255.255.255.0 10.0.0.1 8.8.8.8"
                 );
+                set_exit(1);
                 return;
             }
             let ns = parts[1].parse::<u32>().unwrap_or(u32::MAX);
@@ -90635,18 +91194,22 @@ fn cmd_netns(args: &str) {
             };
             let Some(ip) = parse_ip(parts[2]) else {
                 shell_println!("Invalid IP address: {}", parts[2]);
+                set_exit(1);
                 return;
             };
             let Some(mask) = parse_ip(parts[3]) else {
                 shell_println!("Invalid subnet mask: {}", parts[3]);
+                set_exit(1);
                 return;
             };
             let Some(gw) = parse_ip(parts[4]) else {
                 shell_println!("Invalid gateway: {}", parts[4]);
+                set_exit(1);
                 return;
             };
             let Some(dns) = parse_ip(parts[5]) else {
                 shell_println!("Invalid DNS: {}", parts[5]);
+                set_exit(1);
                 return;
             };
             match netns::configure_interface(ns, ip, mask, gw, dns) {
@@ -90667,10 +91230,12 @@ fn cmd_netns(args: &str) {
             // netns route <ns> del <dest> <mask>
             let Some(ns_str) = parts.get(1) else {
                 shell_println!("Usage: netns route <ns> [add|del ...]");
+                set_exit(1);
                 return;
             };
             let Ok(ns) = ns_str.parse::<u32>() else {
                 shell_println!("Invalid namespace ID");
+                set_exit(1);
                 return;
             };
             let sub = parts.get(2).copied().unwrap_or("");
@@ -90714,18 +91279,22 @@ fn cmd_netns(args: &str) {
                 "add" => {
                     if parts.len() < 6 {
                         shell_println!("Usage: netns route <ns> add <dest> <mask> <gw> [metric]");
+                        set_exit(1);
                         return;
                     }
                     let Some(dest) = parse_ip(parts[3]) else {
                         shell_println!("Invalid destination");
+                        set_exit(1);
                         return;
                     };
                     let Some(mask) = parse_ip(parts[4]) else {
                         shell_println!("Invalid mask");
+                        set_exit(1);
                         return;
                     };
                     let Some(gw) = parse_ip(parts[5]) else {
                         shell_println!("Invalid gateway");
+                        set_exit(1);
                         return;
                     };
                     let metric = parts.get(6).and_then(|s| s.parse().ok()).unwrap_or(100);
@@ -90743,14 +91312,17 @@ fn cmd_netns(args: &str) {
                 "del" | "delete" => {
                     if parts.len() < 5 {
                         shell_println!("Usage: netns route <ns> del <dest> <mask>");
+                        set_exit(1);
                         return;
                     }
                     let Some(dest) = parse_ip(parts[3]) else {
                         shell_println!("Invalid destination");
+                        set_exit(1);
                         return;
                     };
                     let Some(mask) = parse_ip(parts[4]) else {
                         shell_println!("Invalid mask");
+                        set_exit(1);
                         return;
                     };
                     match netns::remove_route(ns, dest, mask) {
@@ -90766,14 +91338,17 @@ fn cmd_netns(args: &str) {
         "stats" | "info" => {
             let Some(id_str) = parts.get(1) else {
                 shell_println!("Usage: netns stats <id>");
+                set_exit(1);
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 shell_println!("Invalid namespace ID");
+                set_exit(1);
                 return;
             };
             let Some(s) = netns::stats(id) else {
                 shell_println!("Network namespace {} not found", id);
+                set_exit(1);
                 return;
             };
             shell_println!("=== Network Namespace {} ===", id);
@@ -90802,10 +91377,12 @@ fn cmd_netns(args: &str) {
         "up" | "down" => {
             let Some(id_str) = parts.get(1) else {
                 shell_println!("Usage: netns up|down <id>");
+                set_exit(1);
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 shell_println!("Invalid namespace ID");
+                set_exit(1);
                 return;
             };
             let up = cmd == "up";
@@ -90888,10 +91465,12 @@ fn container_exec_rootfs(rest: &[&str]) {
     }
     let Some(id_str) = rest.get(idx) else {
         shell_println!("Usage: container run-in [-d] [-w DIR] <id> <command> [args...]");
+        set_exit(1);
         return;
     };
     let Ok(id) = id_str.parse::<u32>() else {
         shell_println!("Invalid container ID");
+        set_exit(1);
         return;
     };
 
@@ -90901,6 +91480,7 @@ fn container_exec_rootfs(rest: &[&str]) {
     let argv: alloc::vec::Vec<&[u8]> = cmd_tokens.iter().map(|s| s.as_bytes()).collect();
     let Some(&guest_cmd) = argv.first() else {
         shell_println!("Usage: container run-in [-d] [-w DIR] <id> <command> [args...]");
+        set_exit(1);
         return;
     };
 
@@ -91261,6 +91841,7 @@ fn cmd_container(args: &str) {
                     .collect();
                 if ids.is_empty() {
                     shell_println!("Usage: container delete [-f|--force] <id> [id...]");
+                    set_exit(1);
                     return;
                 }
                 for id_str in ids {
@@ -91288,6 +91869,7 @@ fn cmd_container(args: &str) {
                 // independently and failures don't abort the rest.
                 if parts.len() < 2 {
                     shell_println!("Usage: container start <id> [id...]");
+                    set_exit(1);
                     return;
                 }
                 for &id_str in parts.iter().skip(1) {
@@ -91308,6 +91890,7 @@ fn cmd_container(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: container stop <id> [id...]");
+                    set_exit(1);
                     return;
                 }
                 for &id_str in parts.iter().skip(1) {
@@ -91339,14 +91922,17 @@ fn cmd_container(args: &str) {
                 }
                 let Some(id_str) = id_str else {
                     shell_println!("Usage: container info [--json] <id>");
+                    set_exit(1);
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
                     shell_println!("Invalid container ID");
+                    set_exit(1);
                     return;
                 };
                 let Some(ci) = container::info(id) else {
                     shell_println!("Container {} not found", id);
+                    set_exit(1);
                     return;
                 };
                 if want_json {
@@ -91548,14 +92134,17 @@ fn cmd_container(args: &str) {
                 // name resolved from the process table.
                 let Some(id_str) = parts.get(1) else {
                     shell_println!("Usage: container top <id>");
+                    set_exit(1);
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
                     shell_println!("Invalid container ID");
+                    set_exit(1);
                     return;
                 };
                 let Some(pids) = container::pids(id) else {
                     shell_println!("Container {} not found", id);
+                    set_exit(1);
                     return;
                 };
                 if pids.is_empty() {
@@ -91643,10 +92232,12 @@ fn cmd_container(args: &str) {
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
                     shell_println!("Invalid container ID");
+                    set_exit(1);
                     return;
                 };
                 let Some(ci) = container::info(id) else {
                     shell_println!("Container {} not found", id);
+                    set_exit(1);
                     return;
                 };
                 let Some(cg) = crate::cgroup::stats(ci.cgroup_id) else {
@@ -91728,10 +92319,12 @@ fn cmd_container(args: &str) {
                     shell_println!(
                         "Usage: container update <id> [--cpus N] [--memory SIZE] [--restart POLICY]"
                     );
+                    set_exit(1);
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
                     shell_println!("Invalid container ID");
+                    set_exit(1);
                     return;
                 };
                 let mut cpu_percent: Option<u64> = None;
@@ -91752,6 +92345,7 @@ fn cmd_container(args: &str) {
                                     "Invalid restart policy '{}' (want no|always|unless-stopped|on-failure[:N])",
                                     val
                                 );
+                                set_exit(1);
                                 return;
                             }
                         }
@@ -91770,6 +92364,7 @@ fn cmd_container(args: &str) {
                                     "Invalid restart policy '{}' (want no|always|unless-stopped|on-failure[:N])",
                                     val
                                 );
+                                set_exit(1);
                                 return;
                             }
                         }
@@ -91791,6 +92386,7 @@ fn cmd_container(args: &str) {
                                     Some(p) => cpu_percent = Some(p),
                                     None => {
                                         shell_println!("Invalid --cpus value: {}", val);
+                                        set_exit(1);
                                         return;
                                     }
                                 }
@@ -91809,6 +92405,7 @@ fn cmd_container(args: &str) {
                                     Some(f) => mem_frames = Some(f),
                                     None => {
                                         shell_println!("Invalid --memory value: {}", val);
+                                        set_exit(1);
                                         return;
                                     }
                                 }
@@ -91817,6 +92414,7 @@ fn cmd_container(args: &str) {
                         }
                         other => {
                             shell_println!("Unknown option: {}", other);
+                            set_exit(1);
                             return;
                         }
                     }
@@ -91825,6 +92423,7 @@ fn cmd_container(args: &str) {
                     shell_println!(
                         "Usage: container update <id> [--cpus N] [--memory SIZE] [--restart POLICY] (at least one)"
                     );
+                    set_exit(1);
                     return;
                 }
                 // Apply the restart-policy change first (it can't fail on a valid
@@ -91836,6 +92435,7 @@ fn cmd_container(args: &str) {
                         }
                         Err(e) => {
                             shell_println!("Error: {:?}", e);
+                            set_exit(1);
                             return;
                         }
                     }
@@ -91875,14 +92475,17 @@ fn cmd_container(args: &str) {
                 // container rename <id> <new-name>  (Docker `rename`)
                 let Some(id_str) = parts.get(1) else {
                     shell_println!("Usage: container rename <id> <new-name>");
+                    set_exit(1);
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
                     shell_println!("Invalid container ID");
+                    set_exit(1);
                     return;
                 };
                 let Some(&new_name) = parts.get(2) else {
                     shell_println!("Usage: container rename <id> <new-name>");
+                    set_exit(1);
                     return;
                 };
                 match container::rename(id, new_name) {
@@ -91900,6 +92503,7 @@ fn cmd_container(args: &str) {
                 // auto-stops the container with exit code 137.
                 if parts.len() < 2 {
                     shell_println!("Usage: container kill <id> [id...]");
+                    set_exit(1);
                     return;
                 }
                 for &id_str in parts.iter().skip(1) {
@@ -91928,14 +92532,17 @@ fn cmd_container(args: &str) {
                 // form `CONTAINER/PROTO -> HOST`, matching Docker's output.
                 let Some(id_str) = parts.get(1) else {
                     shell_println!("Usage: container port <id>");
+                    set_exit(1);
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
                     shell_println!("Invalid container ID");
+                    set_exit(1);
                     return;
                 };
                 let Some(ports) = container::published_ports(id) else {
                     shell_println!("Container {} not found", id);
+                    set_exit(1);
                     return;
                 };
                 if ports.is_empty() {
@@ -91963,10 +92570,12 @@ fn cmd_container(args: &str) {
                 // scheduler when it exits — no CPU-burning poll loop.
                 let Some(id_str) = parts.get(1) else {
                     shell_println!("Usage: container wait <id>");
+                    set_exit(1);
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
                     shell_println!("Invalid container ID");
+                    set_exit(1);
                     return;
                 };
                 match container::wait(id) {
@@ -91991,10 +92600,12 @@ fn cmd_container(args: &str) {
                 // D (deleted) — by inspecting the overlay's writable upper layer.
                 let Some(id_str) = parts.get(1) else {
                     shell_println!("Usage: container diff <id>");
+                    set_exit(1);
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
                     shell_println!("Invalid container ID");
+                    set_exit(1);
                     return;
                 };
                 match container::diff(id) {
@@ -92022,6 +92633,7 @@ fn cmd_container(args: &str) {
                 // container, suspending all of its threads until `unpause`.
                 if parts.len() < 2 {
                     shell_println!("Usage: container pause <id> [id...]");
+                    set_exit(1);
                     return;
                 }
                 for &id_str in parts.iter().skip(1) {
@@ -92046,6 +92658,7 @@ fn cmd_container(args: &str) {
                 // container, resuming all of its threads.
                 if parts.len() < 2 {
                     shell_println!("Usage: container unpause <id> [id...]");
+                    set_exit(1);
                     return;
                 }
                 for &id_str in parts.iter().skip(1) {
@@ -92075,14 +92688,17 @@ fn cmd_container(args: &str) {
                 // while the container is still in the Created state.
                 let Some(id_str) = parts.get(1) else {
                     shell_println!("Usage: container rootfs <id> <host-path>");
+                    set_exit(1);
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
                     shell_println!("Invalid container ID");
+                    set_exit(1);
                     return;
                 };
                 let Some(&path) = parts.get(2) else {
                     shell_println!("Usage: container rootfs <id> <host-path>");
+                    set_exit(1);
                     return;
                 };
                 match container::set_root_path(id, path) {
@@ -92110,14 +92726,17 @@ fn cmd_container(args: &str) {
                 // path to the binary you want as the container's init process.
                 let Some(id_str) = parts.get(1) else {
                     shell_println!("Usage: container run <id> <elf-path> [args...]");
+                    set_exit(1);
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
                     shell_println!("Invalid container ID");
+                    set_exit(1);
                     return;
                 };
                 let Some(&path) = parts.get(2) else {
                     shell_println!("Usage: container run <id> <elf-path> [args...]");
+                    set_exit(1);
                     return;
                 };
 
@@ -92147,6 +92766,7 @@ fn cmd_container(args: &str) {
                 // container's recorded init command (from the last `run`).
                 if parts.len() < 2 {
                     shell_println!("Usage: container restart <id> [id...]");
+                    set_exit(1);
                     return;
                 }
                 for &id_str in parts.iter().skip(1) {
@@ -92173,6 +92793,7 @@ fn cmd_container(args: &str) {
                 // plain host VFS path.
                 let (Some(&src), Some(&dst)) = (parts.get(1), parts.get(2)) else {
                     shell_println!("Usage: container cp <src> <dest>  (one side is ID:/path)");
+                    set_exit(1);
                     return;
                 };
                 // Parse "ID:/path" into (id, path); a plain host path yields None.
@@ -92302,10 +92923,12 @@ fn cmd_container(args: &str) {
                     shell_println!(
                         "       container exec --rootfs [-d] [-w DIR] <id> <path> [args...]  (real rootfs exec)"
                     );
+                    set_exit(1);
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
                     shell_println!("Invalid container ID");
+                    set_exit(1);
                     return;
                 };
                 // The command tail is everything in the raw arg string after the id
@@ -92315,16 +92938,19 @@ fn cmd_container(args: &str) {
                 let after_id = after_id.strip_prefix(id_str).unwrap_or("").trim_start();
                 if after_id.is_empty() {
                     shell_println!("Usage: container exec <id> <kshell-command...>");
+                    set_exit(1);
                     return;
                 }
 
                 // Look up the container's network namespace and verify it is running.
                 let Some((_, _, net_ns)) = container::namespace_ids(id) else {
                     shell_println!("Container {} not found", id);
+                    set_exit(1);
                     return;
                 };
                 let Some(ci) = container::info(id) else {
                     shell_println!("Container {} not found", id);
+                    set_exit(1);
                     return;
                 };
                 if !matches!(ci.state, container::ContainerState::Running) {
@@ -92339,6 +92965,7 @@ fn cmd_container(args: &str) {
                 let orig_ns = crate::sched::current_task_net_ns();
                 if let Err(e) = crate::sched::set_task_net_ns(task_id, net_ns) {
                     shell_println!("Failed to enter namespace: {:?}", e);
+                    set_exit(1);
                     return;
                 }
                 shell_println!("[exec] Entering container {} (net_ns={})", id, net_ns);
@@ -92449,10 +93076,12 @@ fn cmd_container(args: &str) {
                 // container's rootfs into a tar archive written to the host VFS.
                 let (Some(id_str), Some(&out_path)) = (parts.get(1), parts.get(2)) else {
                     shell_println!("Usage: container export <id> <host-tar-path>");
+                    set_exit(1);
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
                     shell_println!("Invalid container ID");
+                    set_exit(1);
                     return;
                 };
                 match container::export_rootfs(id) {
@@ -92482,6 +93111,7 @@ fn cmd_container(args: &str) {
                     (parts.get(1), parts.get(2), parts.get(3))
                 else {
                     shell_println!("Usage: container import <host-tar-path> <name> <rootfs-dir>");
+                    set_exit(1);
                     return;
                 };
                 match crate::fs::vfs::Vfs::read_file(tar_path) {
@@ -92510,10 +93140,12 @@ fn cmd_container(args: &str) {
                     (parts.get(1), parts.get(2), parts.get(3))
                 else {
                     shell_println!("Usage: container commit <src-id> <new-name> <rootfs-dir>");
+                    set_exit(1);
                     return;
                 };
                 let Ok(src) = id_str.parse::<u32>() else {
                     shell_println!("Invalid container ID");
+                    set_exit(1);
                     return;
                 };
                 match container::commit(src, new_name, dest_dir) {
@@ -92551,6 +93183,7 @@ fn cmd_container(args: &str) {
                                 }
                                 Err(_) => {
                                     shell_println!("container logs: invalid --tail value '{}'", n);
+                                    set_exit(1);
                                     return;
                                 }
                             },
@@ -92568,10 +93201,12 @@ fn cmd_container(args: &str) {
                 }
                 let Some(id_str) = id_str else {
                     shell_println!("Usage: container logs [--tail N] ID");
+                    set_exit(1);
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
                     shell_println!("Invalid container ID");
+                    set_exit(1);
                     return;
                 };
                 match container::logs(id) {
@@ -92664,6 +93299,7 @@ fn cmd_container(args: &str) {
                                 Ok(v) => filter_id = Some(v),
                                 Err(_) => {
                                     shell_println!("container events: unknown argument '{}'", tok);
+                                    set_exit(1);
                                     return;
                                 }
                             }
@@ -92730,6 +93366,7 @@ fn cmd_container(args: &str) {
                     "create" => {
                         let Some(name) = parts.get(2) else {
                             shell_println!("Usage: container volume create NAME");
+                            set_exit(1);
                             return;
                         };
                         match crate::volume::create(name) {
@@ -92740,6 +93377,7 @@ fn cmd_container(args: &str) {
                     "rm" | "remove" | "delete" => {
                         if parts.len() < 3 {
                             shell_println!("Usage: container volume rm NAME [NAME...]");
+                            set_exit(1);
                             return;
                         }
                         for name in parts.iter().skip(2) {
@@ -92752,6 +93390,7 @@ fn cmd_container(args: &str) {
                     "inspect" => {
                         let Some(name) = parts.get(2) else {
                             shell_println!("Usage: container volume inspect NAME");
+                            set_exit(1);
                             return;
                         };
                         match crate::volume::path_of(name) {
@@ -92950,6 +93589,7 @@ fn cmd_container_network(parts: &[&str]) {
                 shell_println!(
                     "Usage: container network create NAME [--subnet CIDR] [--gateway IP]"
                 );
+                set_exit(1);
                 return;
             };
             // Optional --subnet CIDR and --gateway IP flags.
@@ -92964,6 +93604,7 @@ fn cmd_container_network(parts: &[&str]) {
                                 Ok(v) => subnet = Some(v),
                                 Err(_) => {
                                     shell_println!("Invalid --subnet '{}' (want A.B.C.D/N)", cidr);
+                                    set_exit(1);
                                     return;
                                 }
                             },
@@ -92980,6 +93621,7 @@ fn cmd_container_network(parts: &[&str]) {
                                 Ok(v) => gateway = Some(v),
                                 Err(_) => {
                                     shell_println!("Invalid --gateway '{}' (want A.B.C.D)", ip);
+                                    set_exit(1);
                                     return;
                                 }
                             },
@@ -92992,6 +93634,7 @@ fn cmd_container_network(parts: &[&str]) {
                     }
                     Some(other) => {
                         shell_println!("Unknown network create flag '{}'", other);
+                        set_exit(1);
                         return;
                     }
                     None => break,
@@ -93018,6 +93661,7 @@ fn cmd_container_network(parts: &[&str]) {
         "rm" | "remove" | "delete" => {
             if parts.len() < 3 {
                 shell_println!("Usage: container network rm NAME [NAME...]");
+                set_exit(1);
                 return;
             }
             for name in parts.iter().skip(2) {
@@ -93030,6 +93674,7 @@ fn cmd_container_network(parts: &[&str]) {
         "inspect" => {
             let Some(&name) = parts.get(2) else {
                 shell_println!("Usage: container network inspect NAME");
+                set_exit(1);
                 return;
             };
             match crate::cnetwork::inspect(name) {
@@ -93071,6 +93716,7 @@ fn cmd_container_network(parts: &[&str]) {
             // container network resolve NET NAME — Docker embedded-DNS query.
             let (Some(&net), Some(&query)) = (parts.get(2), parts.get(3)) else {
                 shell_println!("Usage: container network resolve NET NAME");
+                set_exit(1);
                 return;
             };
             match crate::cnetwork::resolve(net, query) {
@@ -93085,10 +93731,12 @@ fn cmd_container_network(parts: &[&str]) {
             // container to an additional user-defined network (Docker parity, §60).
             let (Some(&net), Some(&ctref)) = (parts.get(2), parts.get(3)) else {
                 shell_println!("Usage: container network connect NET CONTAINER");
+                set_exit(1);
                 return;
             };
             let Some(ct_id) = resolve_container_ref(ctref) else {
                 shell_println!("Container '{}' not found", ctref);
+                set_exit(1);
                 return;
             };
             // Embedded-DNS names for the new network: the container's name plus
@@ -93122,10 +93770,12 @@ fn cmd_container_network(parts: &[&str]) {
             // container network disconnect NET CONTAINER — leave a network (§60).
             let (Some(&net), Some(&ctref)) = (parts.get(2), parts.get(3)) else {
                 shell_println!("Usage: container network disconnect NET CONTAINER");
+                set_exit(1);
                 return;
             };
             let Some(ct_id) = resolve_container_ref(ctref) else {
                 shell_println!("Container '{}' not found", ctref);
+                set_exit(1);
                 return;
             };
             match crate::cnetwork::disconnect_container(net, ct_id) {
@@ -93371,10 +94021,12 @@ fn cmd_docker(args: &str) {
             let mut it = rest.split_whitespace();
             let (Some(id_str), Some(reference)) = (it.next(), it.next()) else {
                 shell_println!("Usage: docker commit <container-id> <name:tag>");
+                set_exit(1);
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
                 shell_println!("Invalid container ID");
+                set_exit(1);
                 return;
             };
             let tmp = "/tmp/oci-commit-tmp";
@@ -94759,6 +95411,7 @@ fn oci_run(parts: &[&str]) {
         shell_println!(
             "Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [--network-alias NAME ...] [-v src:/guest[:ro|:rw] ...] [--tmpfs /guest ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [--restart POLICY] [--rm] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]"
         );
+        set_exit(1);
         return;
     };
 
@@ -94775,6 +95428,7 @@ fn oci_run(parts: &[&str]) {
         Ok(pair) => pair,
         Err(e) => {
             shell_println!("[oci] Failed to load image: {:?}", e);
+            set_exit(1);
             return;
         }
     };
@@ -94825,6 +95479,7 @@ fn oci_run(parts: &[&str]) {
                 }
                 Err(e) => {
                     shell_println!("[oci] Cannot allocate IP from network '{}': {:?}", nn, e);
+                    set_exit(1);
                     return;
                 }
             }
@@ -94942,6 +95597,7 @@ fn cmd_oci(args: &str) {
             fn case(parts: &[&str]) {
                 let Some(dir) = parts.get(1) else {
                     shell_println!("Usage: oci inspect <image-dir>");
+                    set_exit(1);
                     return;
                 };
                 match oci::resolve_image_source(dir) {
@@ -95010,6 +95666,7 @@ fn cmd_oci(args: &str) {
             fn case(parts: &[&str]) {
                 let Some(dir) = parts.get(1) else {
                     shell_println!("Usage: oci layers <image-dir>");
+                    set_exit(1);
                     return;
                 };
                 match oci::resolve_image_source(dir) {
@@ -95040,6 +95697,7 @@ fn cmd_oci(args: &str) {
             fn case(parts: &[&str]) {
                 let Some(dir) = parts.get(1) else {
                     shell_println!("Usage: oci history <image-dir>");
+                    set_exit(1);
                     return;
                 };
                 match oci::resolve_image_source(dir) {
@@ -95087,6 +95745,7 @@ fn cmd_oci(args: &str) {
                 // layered on-disk layout verbatim.
                 let (Some(&src), Some(&out_path)) = (parts.get(1), parts.get(2)) else {
                     shell_println!("Usage: oci save <image-dir|name:tag> <out-tar>");
+                    set_exit(1);
                     return;
                 };
                 let is_layout = crate::fs::vfs::Vfs::metadata(alloc::format!(
@@ -95161,12 +95820,14 @@ fn cmd_oci(args: &str) {
                 // where `load` repopulates the local image store.
                 let Some(&tar_path) = parts.get(1) else {
                     shell_println!("Usage: oci load <in-tar> [dest-dir]");
+                    set_exit(1);
                     return;
                 };
                 let archive = match crate::fs::vfs::Vfs::read_file(tar_path) {
                     Ok(a) => a,
                     Err(e) => {
                         shell_println!("Failed to read '{}': {:?}", tar_path, e);
+                        set_exit(1);
                         return;
                     }
                 };
@@ -95295,6 +95956,7 @@ fn cmd_oci(args: &str) {
                     shell_println!(
                         "Usage: oci build <dockerfile> <context-dir> <dest-image-dir> [-t name:tag] [--build-arg KEY=VALUE ...] [--target STAGE]"
                     );
+                    set_exit(1);
                     return;
                 };
                 match crate::fs::vfs::Vfs::read_file(dockerfile) {
@@ -95339,6 +96001,7 @@ fn cmd_oci(args: &str) {
                 //   oci tag <src-ref>   <name:tag>    — add a second tag (both in store)
                 let (Some(&a), Some(&b)) = (parts.get(1), parts.get(2)) else {
                     shell_println!("Usage: oci tag <image-dir|src-ref> <name:tag>");
+                    set_exit(1);
                     return;
                 };
                 // A source that looks like a path (has a `/` or exists as a dir) is
@@ -95389,6 +96052,7 @@ fn cmd_oci(args: &str) {
             fn case(parts: &[&str]) {
                 let Some(&reference) = parts.get(1) else {
                     shell_println!("Usage: oci rmi <name:tag>");
+                    set_exit(1);
                     return;
                 };
                 match oci::store_remove(reference) {
@@ -95409,10 +96073,12 @@ fn cmd_oci(args: &str) {
                 // `name:tag` also tags it into the image store.
                 let (Some(id_str), Some(&dest_dir)) = (parts.get(1), parts.get(2)) else {
                     shell_println!("Usage: oci commit <container-id> <dest-dir> [name:tag]");
+                    set_exit(1);
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
                     shell_println!("Invalid container ID");
+                    set_exit(1);
                     return;
                 };
                 match crate::container::commit_image(id, dest_dir) {
@@ -95491,10 +96157,12 @@ fn cmd_scfilter(args: &str) {
         "install" => {
             let Some(pid_str) = parts.get(1) else {
                 shell_println!("Usage: scfilter install <pid> [deny-all]");
+                set_exit(1);
                 return;
             };
             let Ok(pid) = pid_str.parse::<u64>() else {
                 shell_println!("Invalid PID");
+                set_exit(1);
                 return;
             };
             let mode = parts.get(2).copied().unwrap_or("allow-all");
@@ -95511,10 +96179,12 @@ fn cmd_scfilter(args: &str) {
         "remove" | "rm" => {
             let Some(pid_str) = parts.get(1) else {
                 shell_println!("Usage: scfilter remove <pid>");
+                set_exit(1);
                 return;
             };
             let Ok(pid) = pid_str.parse::<u64>() else {
                 shell_println!("Invalid PID");
+                set_exit(1);
                 return;
             };
             scfilter::remove(pid);
@@ -95524,14 +96194,17 @@ fn cmd_scfilter(args: &str) {
             // scfilter deny <pid> <syscall_nr>
             if parts.len() < 3 {
                 shell_println!("Usage: scfilter deny <pid> <syscall_nr>");
+                set_exit(1);
                 return;
             }
             let Ok(pid) = parts[1].parse::<u64>() else {
                 shell_println!("Invalid PID");
+                set_exit(1);
                 return;
             };
             let Ok(nr) = parts[2].parse::<u64>() else {
                 shell_println!("Invalid syscall number");
+                set_exit(1);
                 return;
             };
             match scfilter::deny(pid, nr) {
@@ -95542,14 +96215,17 @@ fn cmd_scfilter(args: &str) {
         "allow" => {
             if parts.len() < 3 {
                 shell_println!("Usage: scfilter allow <pid> <syscall_nr>");
+                set_exit(1);
                 return;
             }
             let Ok(pid) = parts[1].parse::<u64>() else {
                 shell_println!("Invalid PID");
+                set_exit(1);
                 return;
             };
             let Ok(nr) = parts[2].parse::<u64>() else {
                 shell_println!("Invalid syscall number");
+                set_exit(1);
                 return;
             };
             match scfilter::allow(pid, nr) {
@@ -95560,14 +96236,17 @@ fn cmd_scfilter(args: &str) {
         "check" => {
             if parts.len() < 3 {
                 shell_println!("Usage: scfilter check <pid> <syscall_nr>");
+                set_exit(1);
                 return;
             }
             let Ok(pid) = parts[1].parse::<u64>() else {
                 shell_println!("Invalid PID");
+                set_exit(1);
                 return;
             };
             let Ok(nr) = parts[2].parse::<u64>() else {
                 shell_println!("Invalid syscall number");
+                set_exit(1);
                 return;
             };
             let allowed = scfilter::check(pid, nr);
@@ -95581,10 +96260,12 @@ fn cmd_scfilter(args: &str) {
         "info" => {
             let Some(pid_str) = parts.get(1) else {
                 shell_println!("Usage: scfilter info <pid>");
+                set_exit(1);
                 return;
             };
             let Ok(pid) = pid_str.parse::<u64>() else {
                 shell_println!("Invalid PID");
+                set_exit(1);
                 return;
             };
             if !scfilter::has_filter(pid) {
@@ -95684,6 +96365,7 @@ fn cmd_cap_request(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Usage: capreq approve <request-id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -95708,6 +96390,7 @@ fn cmd_cap_request(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Usage: capreq deny <request-id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -95889,6 +96572,7 @@ fn cmd_sort(args: &str) {
 
     if path.is_empty() {
         shell_println!("Usage: sort [-r] <file>");
+        set_exit(1);
         return;
     }
 
@@ -95902,6 +96586,7 @@ fn cmd_sort(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("sort: cannot read '{}': {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -95933,6 +96618,7 @@ fn cmd_uniq(args: &str) {
 
     if path.is_empty() {
         shell_println!("Usage: uniq [-c] <file>");
+        set_exit(1);
         return;
     }
 
@@ -95943,6 +96629,7 @@ fn cmd_uniq(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("uniq: cannot read '{}': {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -96231,6 +96918,7 @@ fn cmd_source(args: &str) {
 
     if args.is_empty() {
         shell_println!("Usage: source <script-file>");
+        set_exit(1);
         return;
     }
 
@@ -96310,6 +96998,7 @@ fn cmd_seq(args: &str) {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Usage: seq N [M]");
+                    set_exit(1);
                     return;
                 }
             };
@@ -96322,6 +97011,7 @@ fn cmd_seq(args: &str) {
         }
         _ => {
             shell_println!("Usage: seq N [M]");
+            set_exit(1);
             return;
         }
     };
@@ -96345,6 +97035,7 @@ fn cmd_seq(args: &str) {
 fn cmd_nl(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: nl <file>");
+        set_exit(1);
         return;
     }
 
@@ -96387,6 +97078,7 @@ fn cmd_nl_input(args: &str, input: &[u8]) {
 fn cmd_rev(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: rev <file>");
+        set_exit(1);
         return;
     }
 
@@ -96712,6 +97404,7 @@ fn cmd_yes(args: &str) {
 fn cmd_tac(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: tac <file>");
+        set_exit(1);
         return;
     }
 
@@ -96944,6 +97637,7 @@ fn cmd_sleep(args: &str) {
         Ok(n) if n > 0 => n,
         _ => {
             shell_println!("Usage: sleep <milliseconds>");
+            set_exit(1);
             return;
         }
     };
@@ -97993,6 +98687,7 @@ fn cmd_set(args: &str) {
 fn cmd_local(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: local VAR[=VALUE]");
+        set_exit(1);
         return;
     }
 
@@ -98010,6 +98705,7 @@ fn cmd_local(args: &str) {
 
     if name.is_empty() {
         shell_println!("local: invalid variable name");
+        set_exit(1);
         return;
     }
 
@@ -98095,6 +98791,7 @@ fn cmd_unset(args: &str) {
 fn cmd_type(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: type <name> [<name> ...]");
+        set_exit(1);
         return;
     }
 
@@ -98421,6 +99118,7 @@ fn cmd_tee(args: &str) {
 
     if path.is_empty() || text.is_empty() {
         shell_println!("Usage: tee <file> <text>");
+        set_exit(1);
         return;
     }
 
@@ -98446,6 +99144,7 @@ fn cmd_truncate(args: &str) {
 
     if size_str.is_empty() || path.is_empty() {
         shell_println!("Usage: truncate <size>[K|M|G] <file>");
+        set_exit(1);
         return;
     }
 
@@ -98470,6 +99169,7 @@ fn cmd_truncate(args: &str) {
         Ok(n) => n.saturating_mul(multiplier),
         Err(_) => {
             shell_println!("truncate: invalid size '{}'", size_str);
+            set_exit(1);
             return;
         }
     };
@@ -98498,6 +99198,7 @@ fn cmd_sha256(args: &str) {
     let path = args.trim();
     if path.is_empty() {
         shell_println!("Usage: sha256 <file>");
+        set_exit(1);
         return;
     }
 
@@ -98525,6 +99226,7 @@ fn cmd_readlink(args: &str) {
     let path = args.trim();
     if path.is_empty() {
         shell_println!("Usage: readlink <symlink>");
+        set_exit(1);
         return;
     }
 
@@ -98546,6 +99248,7 @@ fn cmd_symlink(args: &str) {
 
     if target.is_empty() || link_path.is_empty() {
         shell_println!("Usage: symlink <target> <link_path>");
+        set_exit(1);
         return;
     }
 
@@ -98567,6 +99270,7 @@ fn cmd_xattr(args: &str) {
 
     if file.is_empty() {
         shell_println!("Usage: xattr <file> [list | get <key> | set <key> <value> | rm <key>]");
+        set_exit(1);
         return;
     }
 
@@ -98597,6 +99301,7 @@ fn cmd_xattr(args: &str) {
         "get" => {
             if key.is_empty() {
                 shell_println!("Usage: xattr <file> get <key>");
+                set_exit(1);
                 return;
             }
             match crate::fs::Vfs::get_xattr(file, key) {
@@ -98625,6 +99330,7 @@ fn cmd_xattr(args: &str) {
             let value = sub_parts.next().unwrap_or("").trim();
             if key.is_empty() {
                 shell_println!("Usage: xattr <file> set <key> <value>");
+                set_exit(1);
                 return;
             }
             match crate::fs::Vfs::set_xattr(file, key, value.as_bytes()) {
@@ -98639,6 +99345,7 @@ fn cmd_xattr(args: &str) {
         "rm" | "remove" | "del" => {
             if key.is_empty() {
                 shell_println!("Usage: xattr <file> rm <key>");
+                set_exit(1);
                 return;
             }
             match crate::fs::Vfs::remove_xattr(file, key) {
@@ -98718,6 +99425,7 @@ fn cmd_journal(args: &str) {
                         max_show = n as usize;
                     } else {
                         shell_println!("journal: invalid count: {}", count_str);
+                        set_exit(1);
                         return;
                     }
                     i = i.wrapping_add(1);
@@ -98735,6 +99443,7 @@ fn cmd_journal(args: &str) {
                         since_seq = n;
                     } else {
                         shell_println!("journal: invalid sequence: {}", seq_str);
+                        set_exit(1);
                         return;
                     }
                     i = i.wrapping_add(1);
@@ -98752,6 +99461,7 @@ fn cmd_journal(args: &str) {
                      \x20 --stats     Show journal statistics\n\
                      \x20 --flush     Flush journal to disk"
                 );
+                set_exit(1);
                 return;
             }
             _ => {}
@@ -98862,6 +99572,7 @@ fn cmd_trash(args: &str) {
              \x20      trash --purge <name>    Permanently delete one item\n\
              \x20      trash --prune           Auto-prune if disk space low"
         );
+        set_exit(1);
         return;
     }
 
@@ -98904,6 +99615,7 @@ fn cmd_trash(args: &str) {
             let name = args.get(10..).unwrap_or("").trim();
             if name.is_empty() {
                 shell_println!("Usage: trash --restore <name>");
+                set_exit(1);
                 return;
             }
             match crate::fs::trash::restore(name) {
@@ -98917,6 +99629,7 @@ fn cmd_trash(args: &str) {
             let name = args.get(8..).unwrap_or("").trim();
             if name.is_empty() {
                 shell_println!("Usage: trash --purge <name>");
+                set_exit(1);
                 return;
             }
             match crate::fs::trash::purge_one(name) {
@@ -98940,6 +99653,7 @@ fn cmd_basename(args: &str) {
     let path = args.trim();
     if path.is_empty() {
         shell_println!("Usage: basename <path>");
+        set_exit(1);
         return;
     }
 
@@ -98968,6 +99682,7 @@ fn cmd_dirname(args: &str) {
     let path = args.trim();
     if path.is_empty() {
         shell_println!("Usage: dirname <path>");
+        set_exit(1);
         return;
     }
 
@@ -98998,6 +99713,7 @@ fn cmd_realpath(args: &str) {
     let path = args.trim();
     if path.is_empty() {
         shell_println!("Usage: realpath <path>");
+        set_exit(1);
         return;
     }
 
@@ -99226,6 +99942,7 @@ fn cmd_dd(args: &str) {
                 Some(n) => n as usize,
                 None => {
                     shell_println!("dd: invalid block size '{}'", val);
+                    set_exit(1);
                     return;
                 }
             };
@@ -99234,6 +99951,7 @@ fn cmd_dd(args: &str) {
                 Ok(n) => Some(n),
                 Err(_) => {
                     shell_println!("dd: invalid count '{}'", val);
+                    set_exit(1);
                     return;
                 }
             };
@@ -99242,6 +99960,7 @@ fn cmd_dd(args: &str) {
                 Ok(n) => n,
                 Err(_) => {
                     shell_println!("dd: invalid skip '{}'", val);
+                    set_exit(1);
                     return;
                 }
             };
@@ -99250,12 +99969,14 @@ fn cmd_dd(args: &str) {
                 Ok(n) => n,
                 Err(_) => {
                     shell_println!("dd: invalid seek '{}'", val);
+                    set_exit(1);
                     return;
                 }
             };
         } else {
             shell_println!("dd: unknown option '{}'", token);
             shell_println!("Usage: dd if=FILE of=FILE [bs=N] [count=N] [skip=N] [seek=N]");
+            set_exit(1);
             return;
         }
     }
@@ -101816,6 +102537,7 @@ fn cmd_hotplug(args: &str) {
             };
             let Ok(cpu) = cpu_str.parse::<usize>() else {
                 shell_println!("Invalid CPU number: {}", cpu_str);
+                set_exit(1);
                 return;
             };
             match crate::cpu_hotplug::offline(cpu) {
@@ -101833,6 +102555,7 @@ fn cmd_hotplug(args: &str) {
             };
             let Ok(cpu) = cpu_str.parse::<usize>() else {
                 shell_println!("Invalid CPU number: {}", cpu_str);
+                set_exit(1);
                 return;
             };
             match crate::cpu_hotplug::online(cpu) {
@@ -102438,6 +103161,7 @@ fn cmd_checkpoint(args: &str) {
                 let label = label_str.as_bytes().first().copied().unwrap_or(b'A');
                 if !label.is_ascii_uppercase() {
                     shell_println!("Error: label must be A-D");
+                    set_exit(1);
                     return;
                 }
                 let slot = alloc_checkpoint::save(label);
@@ -102846,6 +103570,7 @@ fn cmd_snapshot(args: &str) {
                 .unwrap_or(b'A');
             if label != b'A' && label != b'B' {
                 shell_println!("Error: label must be A or B");
+                set_exit(1);
                 return;
             }
             ksnapshot::save(label);
@@ -103942,10 +104667,12 @@ fn cmd_irqbalance(args: &str) {
             };
             let Ok(irq) = irq_str.parse::<u8>() else {
                 shell_println!("Invalid IRQ: {}", irq_str);
+                set_exit(1);
                 return;
             };
             let Ok(cpu) = cpu_str.parse::<usize>() else {
                 shell_println!("Invalid CPU: {}", cpu_str);
+                set_exit(1);
                 return;
             };
             crate::irqbalance::pin_irq(irq, cpu);
@@ -103959,6 +104686,7 @@ fn cmd_irqbalance(args: &str) {
             };
             let Ok(irq) = irq_str.parse::<u8>() else {
                 shell_println!("Invalid IRQ: {}", irq_str);
+                set_exit(1);
                 return;
             };
             crate::irqbalance::unpin_irq(irq);
@@ -104751,6 +105479,7 @@ fn cmd_fsck_ext4(args: &str) {
             shell_println!("Usage: fsck.ext4 [-v] DEVICE");
             shell_println!("  Check ext4 filesystem consistency (read-only).");
             shell_println!("  -v  Verbose output (show all phases)");
+            set_exit(1);
             return;
         } else {
             device = w;
@@ -105041,6 +105770,7 @@ fn cmd_glob(args: &str) {
         shell_println!("Usage: glob <pattern>");
         shell_println!("  Example: glob /tmp/*.txt");
         shell_println!("  Example: glob /proc/*/status");
+        set_exit(1);
         return;
     }
 
@@ -105326,6 +106056,7 @@ fn cmd_tar(args: &str) {
         shell_println!("  -xf       Extract archive (auto-detects compression)");
         shell_println!("  -tf       List archive contents");
         shell_println!("  -v        Verbose output");
+        set_exit(1);
         return;
     }
 
@@ -105355,6 +106086,7 @@ fn cmd_tar(args: &str) {
 
     if parts.len() < 2 {
         shell_println!("tar: missing archive filename after -f");
+        set_exit(1);
         return;
     }
 
@@ -105865,6 +106597,7 @@ fn cmd_unzip(args: &str) {
              \x20 -l      List archive contents\n\
              \x20 -d DIR  Extract to directory DIR"
         );
+        set_exit(1);
         return;
     }
 
@@ -105920,6 +106653,7 @@ fn cmd_unzip(args: &str) {
                 "unzip: '{}': not a valid ZIP archive",
                 archive_path.display()
             );
+            set_exit(1);
             return;
         }
     };
@@ -106073,6 +106807,7 @@ fn cmd_cpio(args: &str) {
              \x20      cpio -i archive.cpio [-d DIR]  Extract archive\n\
              \x20      cpio -o archive.cpio FILE..    Create archive from files"
         );
+        set_exit(1);
         return;
     }
 
@@ -106431,6 +107166,7 @@ fn cmd_ar(args: &str) {
              \x20      ar x archive.a [-d DIR]  Extract members\n\
              \x20      ar r archive.a FILE..    Create archive from files"
         );
+        set_exit(1);
         return;
     }
 
@@ -106684,6 +107420,7 @@ fn cmd_dpkg(args: &str) {
              \x20      dpkg -c pkg.deb          List data files\n\
              \x20      dpkg -x pkg.deb [-d DIR] Extract data files"
         );
+        set_exit(1);
         return;
     }
 
@@ -106871,6 +107608,7 @@ fn cmd_dpkg_info(args: &[&str]) {
         Ok(e) => e,
         Err(e) => {
             shell_println!("  (control.tar is not a valid tar: {:?})", e);
+            set_exit(1);
             return;
         }
     };
@@ -106930,6 +107668,7 @@ fn cmd_dpkg_contents(args: &[&str]) {
         Ok(e) => e,
         Err(e) => {
             shell_println!("dpkg: data.tar is not a valid tar: {:?}", e);
+            set_exit(1);
             return;
         }
     };
@@ -107005,6 +107744,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
         Ok(e) => e,
         Err(e) => {
             shell_println!("dpkg: data.tar is not a valid tar: {:?}", e);
+            set_exit(1);
             return;
         }
     };
@@ -107091,6 +107831,7 @@ fn cmd_un7z(args: &str) {
              \x20 -l      List archive contents\n\
              \x20 -d DIR  Extract to directory DIR"
         );
+        set_exit(1);
         return;
     }
 
@@ -107257,6 +107998,7 @@ fn cmd_unrar(args: &str) {
              \x20 -d DIR  Extract to directory DIR\n\
              \x20 Note: only Store-mode (uncompressed) entries can be extracted"
         );
+        set_exit(1);
         return;
     }
 
@@ -107505,6 +108247,7 @@ fn cmd_zip(args: &str) {
                -0      Store files uncompressed (method 0)\n  \
                -r      Recurse into directories"
         );
+        set_exit(1);
         return;
     }
 
@@ -107523,6 +108266,7 @@ fn cmd_zip(args: &str) {
                         'r' => recursive = true,
                         _ => {
                             shell_println!("zip: unknown option '-{}'", ch);
+                            set_exit(1);
                             return;
                         }
                     }
@@ -107657,6 +108401,7 @@ fn cmd_zip(args: &str) {
 fn cmd_crc32(args: &str) {
     if args.trim().is_empty() {
         shell_println!("Usage: crc32 <file> [file ...]");
+        set_exit(1);
         return;
     }
 
@@ -107776,6 +108521,7 @@ fn cmd_base64(args: &str) {
     if parts.is_empty() {
         shell_println!("Usage: base64 [-d] <file>");
         shell_println!("  -d   Decode (input is Base64 text)");
+        set_exit(1);
         return;
     }
 
@@ -107783,6 +108529,7 @@ fn cmd_base64(args: &str) {
     let file_arg = if decode {
         if parts.len() < 2 {
             shell_println!("base64: missing file argument");
+            set_exit(1);
             return;
         }
         parts[1]
@@ -107844,6 +108591,7 @@ fn cmd_wipe(args: &str) {
     if args.trim().is_empty() {
         shell_println!("Usage: wipe <file> [file ...]");
         shell_println!("  Overwrites file with zeros, then deletes it");
+        set_exit(1);
         return;
     }
 
@@ -107890,6 +108638,7 @@ fn cmd_checksum(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
         shell_println!("Usage: checksum [-t sha256|crc32] <file> [file ...]");
+        set_exit(1);
         return;
     }
 
@@ -107924,6 +108673,7 @@ fn cmd_checksum(args: &str) {
                         "checksum: unknown algorithm '{}' (use crc32 or sha256)",
                         algo
                     );
+                    set_exit(1);
                     return;
                 }
             },
@@ -107956,6 +108706,7 @@ fn cmd_gunzip(args: &str) {
              \x20 -l   List compressed/uncompressed sizes\n\
              \x20 -o F Write output to F instead of auto-naming"
         );
+        set_exit(1);
         return;
     }
 
@@ -108142,6 +108893,7 @@ fn cmd_bunzip2(args: &str) {
              \x20 -t   Test integrity only (no output written)\n\
              \x20 -o F Write output to F instead of auto-naming"
         );
+        set_exit(1);
         return;
     }
 
@@ -108262,6 +109014,7 @@ fn cmd_bzip2(args: &str) {
              \x20 -1..-9  Block size (1=100K .. 9=900K, default 1)\n\
              \x20 -o F    Write output to F instead of FILE.bz2"
         );
+        set_exit(1);
         return;
     }
 
@@ -108362,6 +109115,7 @@ fn cmd_xz(args: &str) {
             "Usage: xz FILE [-o OUTPUT]   Compress file with XZ/LZMA2\n\
              \x20 -o F    Write output to F instead of FILE.xz"
         );
+        set_exit(1);
         return;
     }
 
@@ -108457,6 +109211,7 @@ fn cmd_unxz(args: &str) {
              \x20 -t   Test integrity only (no output written)\n\
              \x20 -o F Write output to F instead of auto-naming"
         );
+        set_exit(1);
         return;
     }
 
@@ -108571,6 +109326,7 @@ fn cmd_unzstd(args: &str) {
              \x20 -t   Test integrity only (no output written)\n\
              \x20 -o F Write output to F instead of auto-naming"
         );
+        set_exit(1);
         return;
     }
 
@@ -108700,6 +109456,7 @@ fn cmd_zstd(args: &str) {
              \x20 -s   Store mode (no LZ77, raw/RLE blocks only)\n\
              \x20 -o F Write output to F instead of FILE.zst"
         );
+        set_exit(1);
         return;
     }
 
@@ -108803,6 +109560,7 @@ fn cmd_unlz4(args: &str) {
              \x20 -t   Test integrity only (no output written)\n\
              \x20 -o F Write output to F instead of auto-naming"
         );
+        set_exit(1);
         return;
     }
 
@@ -108931,6 +109689,7 @@ fn cmd_lz4(args: &str) {
             "Usage: lz4 FILE [-o OUTPUT]   Compress file with LZ4\n\
              \x20 -o F Write output to F instead of FILE.lz4"
         );
+        set_exit(1);
         return;
     }
 
@@ -109038,6 +109797,7 @@ fn cmd_sed(args: &str) {
         shell_println!("Usage: sed [-i] [-n] [-e CMD] 's/old/new/[g]' [file]");
         shell_println!("       sed [-i] [-n] '/pattern/d' [file]");
         shell_println!("       sed [-i] [-n] 'Nd' [file]  (delete line N)");
+        set_exit(1);
         return;
     }
 
@@ -109084,6 +109844,7 @@ fn cmd_sed(args: &str) {
 
     if parsed.is_empty() {
         shell_println!("sed: invalid command syntax");
+        set_exit(1);
         return;
     }
 
@@ -109426,6 +110187,7 @@ fn cmd_awk(args: &str) {
         shell_println!("  Fields: $0 (line), $1..$N, $NF (last)");
         shell_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
         shell_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
+        set_exit(1);
         return;
     }
 
@@ -110769,6 +111531,7 @@ fn cmd_tsession(args: &str) {
                 Ok(id) => id,
                 Err(_) => {
                     shell_println!("Invalid session ID: {}", id_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -110787,6 +111550,7 @@ fn cmd_tsession(args: &str) {
                 Ok(id) => id,
                 Err(_) => {
                     shell_println!("Invalid session ID: {}", id_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -110822,6 +111586,7 @@ fn cmd_tsession(args: &str) {
                 Ok(id) => id,
                 Err(_) => {
                     shell_println!("Invalid session ID: {}", id_str);
+                    set_exit(1);
                     return;
                 }
             };
@@ -110864,6 +111629,7 @@ fn do_session_switch(target_id: u32) {
         Ok(()) => {}
         Err(crate::error::KernelError::NotFound) => {
             shell_println!("Session {} not found", target_id);
+            set_exit(1);
             return;
         }
         Err(e) => {

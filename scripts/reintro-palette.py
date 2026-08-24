@@ -111,6 +111,7 @@ DISP = "gui/desktop/src/display_settings.rs"
 A11Y = "gui/desktop/src/accessibility_settings.rs"
 FOCUS = "gui/desktop/src/focus_assist.rs"
 PEEK = "gui/desktop/src/window_peek.rs"
+ABOUT = "gui/desktop/src/about.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -18401,6 +18402,732 @@ DEFECTS = [
         [
             'every_site_draws_the_role_it_claims',
             'only_the_focused_thumbnail_wears_the_accent',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the dialog background is still Mocha BASE',
+        ABOUT,
+        [
+            ('        let bg = p.base;',
+             '        let bg = guitk::color::Color::from_hex(0x1E1E2E);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the dialog border is still Mocha SURFACE1',
+        ABOUT,
+        [
+            ('        let border = p.surface1;',
+             '        let border = guitk::color::Color::from_hex(0x45475A);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the title is still lettered in Mocha TEXT',
+        ABOUT,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = guitk::color::Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the chosen tab's fill is still Mocha SURFACE1",
+        ABOUT,
+        [
+            ('        let tab_fill = p.surface1;',
+             '        let tab_fill = guitk::color::Color::from_hex(0x45475A);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the logo tile is still Mocha BLUE',
+        ABOUT,
+        [
+            ('        let logo = p.blue;',
+             '        let logo = guitk::color::Color::from_hex(0x89B4FA);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the version line is still Mocha TEXT',
+        ABOUT,
+        [
+            ('        let version_ink = p.text;',
+             '        let version_ink = guitk::color::Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the build date is still Mocha SUBTEXT0',
+        ABOUT,
+        [
+            ('        let built_ink = p.subtext0;',
+             '        let built_ink = guitk::color::Color::from_hex(0xA6ADC8);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the tagline is still Mocha OVERLAY0',
+        ABOUT,
+        [
+            ('        let tagline_ink = p.overlay0;',
+             '        let tagline_ink = guitk::color::Color::from_hex(0x6C7086);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the Hardware heading is still Mocha TEXT',
+        ABOUT,
+        [
+            ('        let hardware_heading = p.text;',
+             '        let hardware_heading = guitk::color::Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the Software heading is still Mocha TEXT',
+        ABOUT,
+        [
+            ('        let software_heading = p.text;',
+             '        let software_heading = guitk::color::Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Licenses heading is still Mocha TEXT',
+        ABOUT,
+        [
+            ('        let licenses_heading = p.text;',
+             '        let licenses_heading = guitk::color::Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a licence's header bar is still Mocha SURFACE0",
+        ABOUT,
+        [
+            ('        let name_bg = p.surface0;',
+             '        let name_bg = guitk::color::Color::from_hex(0x313244);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a licence's name is still Mocha LAVENDER",
+        ABOUT,
+        [
+            ('        let name_ink = p.lavender;',
+             '        let name_ink = guitk::color::Color::from_hex(0xB4BEFE);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: a licence's body is still Mocha SUBTEXT0",
+        ABOUT,
+        [
+            ('        let body_ink = p.subtext0;',
+             '        let body_ink = guitk::color::Color::from_hex(0xA6ADC8);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a property row's label is still Mocha SUBTEXT0",
+        ABOUT,
+        [
+            ('    let label_ink = p.subtext0;',
+             '    let label_ink = guitk::color::Color::from_hex(0xA6ADC8);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a property row's value is still Mocha TEXT",
+        ABOUT,
+        [
+            ('    let value_ink = p.text;',
+             '    let value_ink = guitk::color::Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the wordmark is back to the hard-coded Mocha MANTLE that made it unreadable in Latte',
+        ABOUT,
+        [
+            ('        let wordmark = readable_on(logo);',
+             '        let wordmark = guitk::color::Color::from_hex(0x181825);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_wordmark_is_legible_on_the_logo_tile',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the chosen tab's label is still the Mocha BLUE it was hard-coded to",
+        ABOUT,
+        [
+            ('            let label = if is_active { p.accent } else { p.subtext0 };',
+             '            let label = if is_active { guitk::color::Color::from_hex(0x89B4FA) } else { p.subtext0 };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the unchosen tabs are still lettered in Mocha SUBTEXT0',
+        ABOUT,
+        [
+            ('            let label = if is_active { p.accent } else { p.subtext0 };',
+             '            let label = if is_active { p.accent } else { guitk::color::Color::from_hex(0xA6ADC8) };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the empty-licence line is still Mocha SUBTEXT0 — a site only the empty fixture renders',
+        ABOUT,
+        [
+            ('        let empty_ink = p.subtext0;',
+             '        let empty_ink = guitk::color::Color::from_hex(0xA6ADC8);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_empty_licence_list_is_drawn_from_the_palette',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the dialog is filled with MANTLE, so it does not sit above the desktop',
+        ABOUT,
+        [
+            ('        let bg = p.base;',
+             '        let bg = p.mantle;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the dialog border is a rung too loud',
+        ABOUT,
+        [
+            ('        let border = p.surface1;',
+             '        let border = p.surface2;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the dialog's own title is as quiet as a property label",
+        ABOUT,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the chosen tab is filled a rung too quietly to read as chosen',
+        ABOUT,
+        [
+            ('        let tab_fill = p.surface1;',
+             '        let tab_fill = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the chosen tab's fill takes the logo's colour, so the strip competes with the branding",
+        ABOUT,
+        [
+            ('        let tab_fill = p.surface1;',
+             '        let tab_fill = p.blue;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the chosen tab stops being marked as chosen at all',
+        ABOUT,
+        [
+            ('            let label = if is_active { p.accent } else { p.subtext0 };',
+             '            let label = if is_active { p.text } else { p.subtext0 };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: every tab is lettered as loudly as the chosen one',
+        ABOUT,
+        [
+            ('            let label = if is_active { p.accent } else { p.subtext0 };',
+             '            let label = if is_active { p.accent } else { p.text };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the tab strip is inverted, so the three tabs you are not on look chosen',
+        ABOUT,
+        [
+            ('            let label = if is_active { p.accent } else { p.subtext0 };',
+             '            let label = if is_active { p.subtext0 } else { p.accent };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the logo tile follows the user's accent, so the product's mark changes with a preference",
+        ABOUT,
+        [
+            ('        let logo = p.blue;',
+             '        let logo = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+            'every_site_changes_when_the_mode_does',
+            # The wordmark is readable_on(logo), so pointing the logo at the
+            # accent re-derives the ink from the fixture's off-palette magenta.
+            # readable_on answers white there, and white on magenta is 3.14:1 —
+            # so the legibility test fires too, and correctly. That is the
+            # off-palette fixture earning its keep twice: it is not a member of
+            # the palette *and* it is not a colour anything reads well on.
+            'the_wordmark_is_legible_on_the_logo_tile',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the logo tile is the wrong hue',
+        ABOUT,
+        [
+            ('        let logo = p.blue;',
+             '        let logo = p.mauve;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            # The accent test's other half is `colors[8] == p.blue` — a claim
+            # about the logo, not about the accent — so it sees any hue swap
+            # there, not merely a swap to the accent.
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the wordmark is body text, which is unreadable on the tile in both modes',
+        ABOUT,
+        [
+            ('        let wordmark = readable_on(logo);',
+             '        let wordmark = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_wordmark_is_legible_on_the_logo_tile',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the wordmark is inked for the page behind the tile rather than the tile',
+        ABOUT,
+        [
+            ('        let wordmark = readable_on(logo);',
+             '        let wordmark = readable_on(p.base);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_wordmark_is_legible_on_the_logo_tile',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the wordmark is CRUST — which is what readable_on answers in Mocha, so only the light render can see it',
+        ABOUT,
+        [
+            ('        let wordmark = readable_on(logo);',
+             '        let wordmark = p.crust;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            # This is the documented hole in the membership sweep — CRUST is
+            # 0x11111B, which is a readable_on endpoint, so assert_drawn_from
+            # is obliged to accept it in a light render and cannot see this at
+            # all. The contrast test can: near-black on Latte's *dark* blue is
+            # 1.36:1. A membership test cannot check a value it was told to
+            # accept, but a test that computes a ratio never agreed to anything.
+            'the_wordmark_is_legible_on_the_logo_tile',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: readable_on is applied twice, which inverts the ink it just chose',
+        ABOUT,
+        [
+            ('        let wordmark = readable_on(logo);',
+             '        let wordmark = readable_on(readable_on(logo));'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_wordmark_is_legible_on_the_logo_tile',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the wordmark is inked for the accent, a colour it is not drawn on',
+        ABOUT,
+        [
+            ('        let wordmark = readable_on(logo);',
+             '        let wordmark = readable_on(p.accent);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_wordmark_is_legible_on_the_logo_tile',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the version number is as quiet as the date under it',
+        ABOUT,
+        [
+            ('        let version_ink = p.text;',
+             '        let version_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the build date is as loud as the version above it',
+        ABOUT,
+        [
+            ('        let built_ink = p.subtext0;',
+             '        let built_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the tagline is a rung louder than the quietest text on the page',
+        ABOUT,
+        [
+            ('        let tagline_ink = p.overlay0;',
+             '        let tagline_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the Hardware tab's heading is as quiet as the labels under it",
+        ABOUT,
+        [
+            ('        let hardware_heading = p.text;',
+             '        let hardware_heading = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the Software tab's heading is as quiet as the labels under it",
+        ABOUT,
+        [
+            ('        let software_heading = p.text;',
+             '        let software_heading = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the Licenses tab's heading is as quiet as the bodies under it",
+        ABOUT,
+        [
+            ('        let licenses_heading = p.text;',
+             '        let licenses_heading = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: an empty licence list is reported in RED, as though having no licences were an error',
+        ABOUT,
+        [
+            ('        let empty_ink = p.subtext0;',
+             '        let empty_ink = p.red;'),
+        ],
+        ["desktop"],
+        [
+            'the_empty_licence_list_is_drawn_from_the_palette',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a licence's header bar is a rung too loud",
+        ABOUT,
+        [
+            ('        let name_bg = p.surface0;',
+             '        let name_bg = p.surface1;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: every licence name wears the accent, so a list with no selection looks entirely selected',
+        ABOUT,
+        [
+            ('        let name_ink = p.lavender;',
+             '        let name_ink = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a licence's name is indistinguishable from its body",
+        ABOUT,
+        [
+            ('        let name_ink = p.lavender;',
+             '        let name_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: licence bodies are a rung quieter than everything else on the page',
+        ABOUT,
+        [
+            ('        let body_ink = p.subtext0;',
+             '        let body_ink = p.overlay0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: a property row's label is as loud as its value, so nothing distinguishes the question from the answer",
+        ABOUT,
+        [
+            ('    let label_ink = p.subtext0;',
+             '    let label_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a property row's value is as quiet as its label",
+        ABOUT,
+        [
+            ('    let value_ink = p.text;',
+             '    let value_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the dialog builds a palette of its own instead of drawing with the one it was handed',
+        ABOUT,
+        [
+            ('        let mut cmds = Vec::with_capacity(64);',
+             '        let mut cmds = Vec::with_capacity(64);\n        let p = &Palette::for_mode(false);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+            'the_empty_licence_list_is_drawn_from_the_palette',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the Overview tab builds a palette of its own, so only that one tab ignores the mode',
+        ABOUT,
+        [
+            ("        // The product's own mark: themed, but never the user's accent.\n        let logo = p.blue;",
+             "        // The product's own mark: themed, but never the user's accent.\n        let p = &Palette::for_mode(false);\n        let logo = p.blue;"),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the property row builds a palette of its own, so the Hardware and Software tabs ignore the mode',
+        ABOUT,
+        [
+            ('    let label_ink = p.subtext0;\n    let value_ink = p.text;',
+             '    let p = &Palette::for_mode(false);\n    let label_ink = p.subtext0;\n    let value_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: a property row draws its label and value in each other's roles",
+        ABOUT,
+        [
+            ('    let label_ink = p.subtext0;\n    let value_ink = p.text;',
+             '    let label_ink = p.text;\n    let value_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
         ],
     ),
 ]

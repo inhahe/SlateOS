@@ -109095,7 +109095,8 @@ fn cmd_pgfault() {
     shell_println!("");
     shell_println!("  Kernel-mode resolved:  {}", s.kernel_resolved);
     shell_println!("  User-mode resolved:    {}", s.user_resolved);
-    shell_println!("  Fatal (unresolvable):  {}", s.fatal);
+    shell_println!("  Handled by userspace:  {}", s.delivered);
+    shell_println!("  Fatal (task killed):   {}", s.fatal);
     shell_println!("");
     shell_println!("  By type:");
     shell_println!("    Copy-on-Write:       {}", s.cow);

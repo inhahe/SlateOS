@@ -49,8 +49,26 @@ static KERNEL_FAULTS_RESOLVED: AtomicU64 = AtomicU64::new(0);
 /// swap-in, CoW).
 static USER_FAULTS_RESOLVED: AtomicU64 = AtomicU64::new(0);
 
-/// Page faults that were unresolvable (fatal — led to task kill or halt).
+/// Page faults that were unresolvable *and* unhandled — they killed the task
+/// or halted the machine.
+///
+/// A fault the kernel cannot resolve is not yet fatal: it is offered to the
+/// faulting program first (a Linux `SIGSEGV` handler, then a native SEH
+/// handler), and a program that takes it goes on running.  Only a fault
+/// nothing was willing to take is counted here.  See [`FAULTS_DELIVERED`] for
+/// the other outcome, and `idt::dispatch_or_kill_userspace_raw` for the site
+/// that draws the line.
 static FAULTS_FATAL: AtomicU64 = AtomicU64::new(0);
+
+/// Faults the kernel could not resolve but userspace *did* — handed to a Linux
+/// signal handler or a native SEH handler, after which the program continued.
+///
+/// Tracked apart from the buckets on either side of it, because it is neither:
+/// not a resolution (the memory access never succeeded) and not a death (the
+/// program survived).  Folding it into either one erases the distinction that
+/// matters — a program with a working fault handler would look identical to
+/// one that crashed.
+static FAULTS_DELIVERED: AtomicU64 = AtomicU64::new(0);
 
 /// Copy-on-Write faults resolved.
 static COW_FAULTS: AtomicU64 = AtomicU64::new(0);
@@ -68,8 +86,12 @@ pub struct PageFaultStats {
     pub kernel_resolved: u64,
     /// User-mode faults resolved (any mechanism).
     pub user_resolved: u64,
-    /// Unresolvable faults (fatal).
+    /// Faults that killed the task or halted the machine — unresolvable by the
+    /// kernel *and* unhandled by the program.
     pub fatal: u64,
+    /// Faults the kernel could not resolve but that a userspace handler took,
+    /// after which the program continued.
+    pub delivered: u64,
     /// Copy-on-Write resolutions.
     pub cow: u64,
     /// Swap-in resolutions.
@@ -85,6 +107,7 @@ pub fn fault_stats() -> PageFaultStats {
         kernel_resolved: KERNEL_FAULTS_RESOLVED.load(Ordering::Relaxed),
         user_resolved: USER_FAULTS_RESOLVED.load(Ordering::Relaxed),
         fatal: FAULTS_FATAL.load(Ordering::Relaxed),
+        delivered: FAULTS_DELIVERED.load(Ordering::Relaxed),
         cow: COW_FAULTS.load(Ordering::Relaxed),
         swap_in: SWAP_IN_FAULTS.load(Ordering::Relaxed),
         stack_growth: STACK_GROWTH_FAULTS.load(Ordering::Relaxed),
@@ -101,9 +124,17 @@ pub(crate) fn record_user_resolved() {
     USER_FAULTS_RESOLVED.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Record an unresolvable (fatal) page fault.
+/// Record a page fault that killed the task or halted the machine.
+///
+/// Call this only once the fault is *known* to be unhandled — after every
+/// delivery attempt has failed — never on entry to the unresolvable path.
 pub(crate) fn record_fatal() {
     FAULTS_FATAL.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a page fault handed to a userspace fault handler.
+pub(crate) fn record_delivered() {
+    FAULTS_DELIVERED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Record a Copy-on-Write fault resolution.

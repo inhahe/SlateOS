@@ -21482,15 +21482,42 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
 
     serial_println!("[spawn] Running Linux execveat(2) (ring 3) integration test...");
 
+    // Every skip below used to be decided by a discarded `Result` from
+    // `write_file` or `symlink` -- both VFS entry points that
+    // `vfs::check_path_access` gates.  A gate that started refusing them would
+    // have switched off the execveat coverage entirely and returned `Ok`, so
+    // the suite would have reported success for a test that never ran.  The
+    // precondition is now the mount table, and staging errors are classified:
+    // only "this system cannot" is a reason to skip.
+    if !crate::fs::Vfs::mounts()
+        .iter()
+        .any(|(p, _)| p.as_path() == crate::fs::path::Path::new("/"))
+    {
+        serial_println!("[spawn]   Linux execveat (ring 3): SKIP (/ not mounted)");
+        return Ok(());
+    }
+
     // Step 1: stage the execveat *target* — a Linux-ABI ELF that exit()s
     // with the sentinel.  If control reaches it, execveat worked.
     let tgt_elf = elf::build_linux_exit_elf(SENTINEL);
-    if let Err(e) = crate::fs::Vfs::write_file(TGT_PATH, &tgt_elf) {
-        serial_println!(
-            "[spawn]   Linux execveat (ring 3): SKIP (VFS write failed: {:?})",
-            e
-        );
-        return Ok(());
+    match crate::fs::selftest::classify(crate::fs::Vfs::write_file(TGT_PATH, &tgt_elf)) {
+        crate::fs::selftest::Setup::Ready => {}
+        crate::fs::selftest::Setup::Unsupported(e) => {
+            serial_println!(
+                "[spawn]   Linux execveat (ring 3): SKIP (root filesystem cannot store it: {:?})",
+                e
+            );
+            return Ok(());
+        }
+        crate::fs::selftest::Setup::Failed(e) => {
+            serial_println!(
+                "[spawn]   FAIL: / is mounted but staging {} failed: {:?} — that is not a \
+                 missing feature, so it is a defect rather than a reason to skip",
+                TGT_PATH,
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
     }
 
     // `run_one` spawns a launcher that execveat()s the target, lets it run to
@@ -21595,16 +21622,19 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
 
     // Re-stage the target (Case A/B removed it above) and the symlink to it.
     let tgt_elf2 = elf::build_linux_exit_elf(SENTINEL);
-    if crate::fs::Vfs::write_file(TGT_PATH, &tgt_elf2).is_err()
-        || crate::fs::Vfs::symlink(LINK_PATH, TGT_PATH).is_err()
-    {
-        // Symlink staging unsupported here — skip the NOFOLLOW case but keep
-        // the (already-passed) happy-path result.
+    let mut nofollow_skips = crate::fs::selftest::Skips::new();
+    let nofollow_ready = crate::selftest_setup!(
+        nofollow_skips,
+        "[spawn]",
+        "Linux execveat(2) AT_SYMLINK_NOFOLLOW",
+        "this filesystem has no symlinks",
+        crate::fs::Vfs::write_file(TGT_PATH, &tgt_elf2),
+        crate::fs::Vfs::symlink(LINK_PATH, TGT_PATH),
+    );
+    if !nofollow_ready {
         let _ = crate::fs::Vfs::remove(LINK_PATH);
         let _ = crate::fs::Vfs::remove(TGT_PATH);
-        serial_println!(
-            "[spawn]   Linux execveat(2) AT_SYMLINK_NOFOLLOW: SKIP (symlink staging failed)"
-        );
+        nofollow_skips.report("[spawn]");
         return Ok(());
     }
 
@@ -21689,9 +21719,25 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
     const ARGC_EXIT: i32 = 3;
 
     let argc_tgt_elf = elf::build_linux_argc_exit_test_elf();
-    if crate::fs::Vfs::write_file(ARGC_TGT_PATH, &argc_tgt_elf).is_err() {
-        serial_println!("[spawn]   Linux execveat(2) argv propagation: SKIP (VFS write failed)");
-        return Ok(());
+    match crate::fs::selftest::classify(crate::fs::Vfs::write_file(ARGC_TGT_PATH, &argc_tgt_elf)) {
+        crate::fs::selftest::Setup::Ready => {}
+        crate::fs::selftest::Setup::Unsupported(e) => {
+            serial_println!(
+                "[spawn]   Linux execveat(2) argv propagation: SKIP (root filesystem cannot \
+                 store it: {:?})",
+                e
+            );
+            return Ok(());
+        }
+        crate::fs::selftest::Setup::Failed(e) => {
+            serial_println!(
+                "[spawn]   FAIL: staging {} failed with {:?} — that is not a missing feature, \
+                 so it is a defect rather than a reason to skip",
+                ARGC_TGT_PATH,
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
     }
 
     let elf_argv = elf::build_linux_execveat_test_elf(false, 0, ARGC, ARGC_TGT_PATH_NUL);

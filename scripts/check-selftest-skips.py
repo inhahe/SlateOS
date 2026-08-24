@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+"""Guard self-tests against skipping themselves and reporting success anyway.
+
+The rule
+--------
+**A self-test may skip, but it must skip for a reason it looked up, and it
+must say so in the line a reader believes.**
+
+Two failures, and the second is the dangerous one
+-------------------------------------------------
+1. *The skip does not reach the summary.*  `kernel/src/fs/index.rs` printed
+   ``(skipped VFS tests: /tmp not mounted)`` in the middle of a run and
+   ``[index] Self-test passed`` at the end.  The last line is the one that
+   gets believed, so a run that tested half of what it claimed was
+   byte-indistinguishable from one that tested all of it.
+
+2. *The decision to skip is a swallowed error from the code under test.*
+   This is worse, because it is self-concealing.  ``if mkdir(d).is_ok() {
+   ..test.. } else { print SKIPPED }`` reads as "skip when the filesystem has
+   no directories", but it actually means "skip on **any** failure" --
+   including a permission gate wrongly denying the `mkdir`, a full disk, or
+   the very bug the section exists to catch.  The worse the code under test
+   gets, the more tests switch themselves off, and the suite goes green.
+
+   `kernel/src/fs/handle.rs` had six of these, and their setup steps included
+   `mkdir`, `symlink`, `set_owner` and `set_permissions` -- every one a VFS
+   entry point that `fs::vfs::check_path_access` now gates.  A gate that
+   started refusing them would have disabled the six tests that would have
+   noticed, and printed ``Self-test PASSED``.
+
+Both are invisible at runtime by construction: the whole point of the defect
+is that the log looks like a pass.  Only a source-level invariant catches it.
+
+What is checked
+---------------
+For every function whose name marks it a self-test (``self_test``,
+``self_test_inner``, ``*_self_test``, ``self_test_*``):
+
+1. **A skip must not be decided by a discarded `Result`.**  If a branch whose
+   body announces a skip is selected by ``.is_ok()``/``.is_err()`` on a call
+   -- directly, or through a `let` binding of such an expression -- that is a
+   finding.  Ask the environment instead (the mount table, a feature query),
+   or classify the error and treat only "unimplemented" as a reason to skip.
+
+2. **A section-level skip must not be followed by an unconditional success
+   claim.**  If a skip is announced inside a branch *and that branch does not
+   return*, then the function may not also print an unqualified "passed" at
+   its top level.  Put the success line behind a branch that accounts for the
+   skips, or name them in the message (``passed with 2 section(s) SKIPPED``).
+
+   A skip branch that `return`s is exempt: the success line is unreachable in
+   that case, so the log cannot claim both.
+
+Scope and honesty about it
+--------------------------
+A textual, single-file heuristic in the style of its siblings
+`check-vfs-under-lock.py`, `check-recursive-locks.py` and
+`check-vfs-permission-gate.py`, sharing their parser.  It keys off function
+*names* to find self-tests, so a helper called from one -- but named
+something else -- is not examined.  It keys off the word "skip" in a printed
+literal to find a skip, so a section that quietly does nothing and prints
+nothing at all is invisible to it; that failure has no textual signature and
+is why ALLOW below demands a reason rather than just a name.
+
+Exit codes: 0 clean, 1 findings, 2 could not run.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import re
+import sys
+from pathlib import Path
+
+_SIBLING = Path(__file__).resolve().parent / "check-recursive-locks.py"
+_spec = importlib.util.spec_from_file_location("check_recursive_locks", _SIBLING)
+if _spec is None or _spec.loader is None:  # pragma: no cover - packaging error
+    print(f"error: cannot load {_SIBLING}", file=sys.stderr)
+    raise SystemExit(2)
+_rl = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_rl)
+
+# A function is a self-test if its name says so.  Being name-based is a real
+# limitation (see the docstring), but the alternative -- following calls --
+# needs a resolver this family of checkers deliberately does not have.
+SELFTEST_NAME = re.compile(r"\A(?:self_test(?:_inner)?|self_test_.*|.*_self_test)\Z")
+
+IS_RESULT = re.compile(r"\.is_(?:ok|err)\s*\(\s*\)")
+PRINTLN = re.compile(r"\b(?:serial_println|shell_println|println)\s*!\s*\(")
+SKIP_WORD = re.compile(r"skip", re.IGNORECASE)
+# "passed", "PASSED", "PASS" -- a claim that the whole test succeeded.  Not
+# "OK", which self-tests print per-section and which claims nothing global.
+PASS_WORD = re.compile(r"\bpass(?:ed)?\b", re.IGNORECASE)
+RETURN_KW = re.compile(r"\breturn\b")
+LET_BINDING = re.compile(r"\blet\s+(?:mut\s+)?([a-z_][a-z0-9_]*)\s*(?::[^=]*)?=\s*\Z")
+
+# Sites that look like the pattern but are not, each with the reason it is
+# exempt.  The reason is the point: this list is where a reader checks whether
+# an exemption is still true.
+ALLOW: dict[str, str] = {}
+
+
+def _macro_span(src: str, start: int) -> tuple[int, int] | None:
+    """Byte span of a `foo!( ... )` invocation whose `(` is at `start`."""
+    depth = 0
+    i = start
+    while i < len(src):
+        if src[i] == "(":
+            depth += 1
+        elif src[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return (start, i + 1)
+        i += 1
+    return None
+
+
+def _block_span(src: str, brace: int) -> int | None:
+    """Offset just past the `}` matching the `{` at `brace`."""
+    depth = 0
+    i = brace
+    while i < len(src):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _prints(src: str, raw: str, lo: int, hi: int) -> list[tuple[int, int, str]]:
+    """Every print macro in [lo, hi), as (start, end, raw text)."""
+    out: list[tuple[int, int, str]] = []
+    for m in PRINTLN.finditer(src, lo, hi):
+        span = _macro_span(src, m.end() - 1)
+        if span is None:
+            continue
+        out.append((m.start(), span[1], raw[m.start() : span[1]]))
+    return out
+
+
+def _depth_at(src: str, lo: int, pos: int) -> int:
+    """Brace depth of `pos` relative to `lo`."""
+    return src.count("{", lo, pos) - src.count("}", lo, pos)
+
+
+def _selftest_bodies(src: str) -> list[tuple[str, int, int]]:
+    out = []
+    for name, (b, e) in _rl.find_bodies(src).items():
+        if SELFTEST_NAME.match(name):
+            out.append((name, b, e))
+    return out
+
+
+def _branch_blocks(src: str, cond_end: int, body_end: int) -> list[tuple[int, int]]:
+    """The `{..}` blocks of the `if` whose condition ends at `cond_end`.
+
+    Returns the then-block and, when present, the else-block.  An `else if`
+    chain contributes its own then-block and continues.
+    """
+    blocks: list[tuple[int, int]] = []
+    i = cond_end
+    while i < body_end and src[i] != "{":
+        # A `;` before any `{` means this was a statement, not a condition.
+        if src[i] == ";":
+            return blocks
+        i += 1
+    while i < body_end and src[i] == "{":
+        end = _block_span(src, i)
+        if end is None:
+            break
+        blocks.append((i, end))
+        # Look for a following `else`.
+        j = end
+        while j < body_end and src[j].isspace():
+            j += 1
+        if src[j : j + 4] != "else":
+            break
+        j += 4
+        while j < body_end and src[j].isspace():
+            j += 1
+        if src[j : j + 2] == "if":
+            # `else if <cond> {` -- walk to that block's `{`.
+            j += 2
+            while j < body_end and src[j] != "{":
+                j += 1
+        i = j
+    return blocks
+
+
+def check_file(path: Path, rel: str) -> list[str]:
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    if "self_test" not in raw:
+        return []
+    src = _rl.strip_noise(raw)
+    findings: list[str] = []
+
+    for name, blo, bhi in _selftest_bodies(src):
+        skip_prints = [
+            p for p in _prints(src, raw, blo, bhi) if SKIP_WORD.search(p[2])
+        ]
+        if not skip_prints:
+            continue
+
+        # --- Rule 1: the skip must not be decided by a discarded Result. ---
+        for m in IS_RESULT.finditer(src, blo, bhi):
+            blocks = _branch_blocks(src, m.end(), bhi)
+            if not blocks:
+                # No block follows, so this is a binding: `let x = a.is_ok()
+                # && b.is_ok();`.  Find the name and the `if x` that uses it.
+                stmt_end = src.find(";", m.end(), bhi)
+                if stmt_end < 0:
+                    continue
+                line_start = src.rfind(";", blo, m.start()) + 1
+                lb = LET_BINDING.search(src[line_start : m.start()] + "")
+                # The `let` may be several sub-expressions back; search the
+                # whole statement for its opening.
+                lb = re.search(
+                    r"\blet\s+(?:mut\s+)?([a-z_][a-z0-9_]*)\s*(?::[^=]*?)?=",
+                    src[line_start : stmt_end],
+                )
+                if lb is None:
+                    continue
+                var = lb.group(1)
+                use = re.search(
+                    r"\bif\s+!?\s*" + re.escape(var) + r"\s*\{", src[stmt_end:bhi]
+                )
+                if use is None:
+                    continue
+                blocks = _branch_blocks(src, stmt_end + use.end() - 1, bhi)
+            for lo, hi in blocks:
+                if any(SKIP_WORD.search(p[2]) for p in _prints(src, raw, lo, hi)):
+                    key = f"{rel}::{name}"
+                    if key in ALLOW:
+                        break
+                    line = raw.count("\n", 0, m.start()) + 1
+                    findings.append(
+                        f"{rel}:{line}: `{name}` decides to skip a section from "
+                        f"`.is_ok()`/`.is_err()` on the code under test -- any "
+                        f"failure, including the bug the section exists to "
+                        f"catch, silently disables it. Ask the environment "
+                        f"(mount table, feature query), or match the error and "
+                        f"skip only on `NotSupported`."
+                    )
+                    break
+
+        # --- Rule 2: a non-returning section skip forbids an unconditional
+        # top-level success claim. ---
+        section_skip = False
+        for pstart, pend, _text in skip_prints:
+            if _depth_at(src, blo, pstart) < 1:
+                continue  # a skip printed at function top level, not a section
+            # Find the innermost enclosing block and ask whether it returns.
+            open_pos = None
+            depth = 0
+            i = pstart
+            while i > blo:
+                i -= 1
+                if src[i] == "}":
+                    depth += 1
+                elif src[i] == "{":
+                    if depth == 0:
+                        open_pos = i
+                        break
+                    depth -= 1
+            if open_pos is None:
+                continue
+            close_pos = _block_span(src, open_pos)
+            if close_pos is None:
+                continue
+            if RETURN_KW.search(src[open_pos:close_pos]):
+                continue  # early-exit skip: the success line is unreachable
+            section_skip = True
+
+        if not section_skip:
+            continue
+        for pstart, _pend, text in _prints(src, raw, blo, bhi):
+            if _depth_at(src, blo, pstart) != 0:
+                continue  # conditional: it is not an unqualified claim
+            if not PASS_WORD.search(text):
+                continue
+            if SKIP_WORD.search(text):
+                continue  # the message names the skips
+            key = f"{rel}::{name}"
+            if key in ALLOW:
+                continue
+            line = raw.count("\n", 0, pstart) + 1
+            findings.append(
+                f"{rel}:{line}: `{name}` prints an unconditional success after "
+                f"a section skipped -- the last line is the one a reader "
+                f"believes, so a partial run reads as a full one. Guard it, or "
+                f"name the skipped sections in the message."
+            )
+    return findings
+
+
+def main() -> int:
+    root = Path(__file__).resolve().parent.parent / "kernel" / "src"
+    if not root.is_dir():
+        print(f"error: no such directory: {root}", file=sys.stderr)
+        return 2
+    findings: list[str] = []
+    files = 0
+    for path in sorted(root.rglob("*.rs")):
+        files += 1
+        findings.extend(check_file(path, path.relative_to(root).as_posix()))
+    for f in findings:
+        print(f)
+    print(
+        f"\n[selftest-skips] {files} file(s): {len(findings)} finding(s)",
+        file=sys.stderr,
+    )
+    return 1 if findings else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

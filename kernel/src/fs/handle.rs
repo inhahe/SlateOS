@@ -1206,13 +1206,31 @@ fn allocate_dir_handle(path: PathBuf, flags: OpenFlags) -> KernelResult<u64> {
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[fs::handle] Running self-test...");
 
-    // Try to create a test file.  If no FS is mounted, skip.
+    // Sections that could not run, reported next to the closing line rather
+    // than only where they happen — see `selftest::Skips`.
+    let mut skips = crate::fs::selftest::Skips::new();
+
     let test_path = "/handle_test.txt";
     let test_data = b"Hello from handle test!";
 
-    if crate::fs::Vfs::write_file(test_path, test_data).is_err() {
-        crate::serial_println!("[fs::handle] Self-test SKIPPED (no FS mounted)");
+    // A suite may decline to run when its environment lacks a precondition,
+    // but the precondition has to be something it looked up.  This was
+    // `if write_file(..).is_err() { SKIPPED; return Ok(()) }`, which reads as
+    // "no filesystem is mounted" and means "the write failed for any reason
+    // whatsoever" — a permission gate refusing it, a full disk, a bug in the
+    // write path.  Every one of those silently deleted all twenty-one
+    // sections below and returned success.
+    if crate::fs::Vfs::mounts().is_empty() {
+        crate::serial_println!("[fs::handle] Self-test SKIPPED (no filesystem mounted)");
         return Ok(());
+    }
+    if let Err(e) = crate::fs::Vfs::write_file(test_path, test_data) {
+        crate::serial_println!(
+            "[fs::handle]   FAIL: a filesystem is mounted but writing {} failed: {:?}",
+            test_path,
+            e
+        );
+        return Err(KernelError::InternalError);
     }
 
     // 1. Open for reading.
@@ -1504,7 +1522,14 @@ pub fn self_test() -> KernelResult<()> {
     crate::fs::Vfs::remove(dir_path).ok();
     crate::fs::Vfs::remove(file_outside).ok();
 
-    if crate::fs::Vfs::mkdir(dir_path).is_ok() {
+    let dir_ready = crate::selftest_setup!(
+        skips,
+        "[fs::handle]",
+        "directory handle ops",
+        "no directory support",
+        crate::fs::Vfs::mkdir(dir_path),
+    );
+    if dir_ready {
         crate::fs::Vfs::write_file(file_a, b"a")?;
         crate::fs::Vfs::write_file(file_b, b"b")?;
         crate::fs::Vfs::write_file(file_outside, b"o")?;
@@ -1639,8 +1664,6 @@ pub fn self_test() -> KernelResult<()> {
         crate::fs::Vfs::remove(file_outside).ok();
 
         crate::serial_println!("[fs::handle]   directory handle ops: OK");
-    } else {
-        crate::serial_println!("[fs::handle]   directory handle test SKIPPED (mkdir failed)");
     }
 
     // 16. O_EXCL — exclusive create semantics.
@@ -1721,7 +1744,14 @@ pub fn self_test() -> KernelResult<()> {
     crate::fs::Vfs::remove(nf_link).ok();
     crate::fs::Vfs::remove(nf_target).ok();
     crate::fs::Vfs::write_file(nf_target, b"nofollow target")?;
-    if crate::fs::Vfs::symlink(nf_link, nf_target).is_ok() {
+    let nf_ready = crate::selftest_setup!(
+        skips,
+        "[fs::handle]",
+        "O_NOFOLLOW final-symlink guard",
+        "no symlink support",
+        crate::fs::Vfs::symlink(nf_link, nf_target),
+    );
+    if nf_ready {
         // (a) without NOFOLLOW the symlink resolves to the target.
         let hnf = open(nf_link, OpenFlags::READ)?;
         close(hnf)?;
@@ -1749,7 +1779,6 @@ pub fn self_test() -> KernelResult<()> {
         crate::serial_println!("[fs::handle]   O_NOFOLLOW final-symlink guard: OK");
     } else {
         crate::fs::Vfs::remove(nf_target).ok();
-        crate::serial_println!("[fs::handle]   O_NOFOLLOW test SKIPPED (no symlink support)");
     }
 
     // 18. NO_SYMLINKS (openat2 RESOLVE_NO_SYMLINKS) — refuse a symlink in ANY
@@ -1774,10 +1803,16 @@ pub fn self_test() -> KernelResult<()> {
     crate::fs::Vfs::remove(ns_dirlink).ok();
     crate::fs::Vfs::remove(ns_file).ok();
     crate::fs::Vfs::rmdir(ns_dir).ok();
-    let ns_ready = crate::fs::Vfs::mkdir(ns_dir).is_ok()
-        && crate::fs::Vfs::write_file(ns_file, b"nsym").is_ok()
-        && crate::fs::Vfs::symlink(ns_dirlink, ns_dir).is_ok()
-        && crate::fs::Vfs::symlink(ns_flink, ns_file).is_ok();
+    let ns_ready = crate::selftest_setup!(
+        skips,
+        "[fs::handle]",
+        "NO_SYMLINKS any-component guard",
+        "no mkdir/symlink support",
+        crate::fs::Vfs::mkdir(ns_dir),
+        crate::fs::Vfs::write_file(ns_file, b"nsym"),
+        crate::fs::Vfs::symlink(ns_dirlink, ns_dir),
+        crate::fs::Vfs::symlink(ns_flink, ns_file),
+    );
     if ns_ready {
         // Local cleanup helper for the early-return failure paths.
         let cleanup = || {
@@ -1853,9 +1888,6 @@ pub fn self_test() -> KernelResult<()> {
         crate::fs::Vfs::remove(ns_dirlink).ok();
         crate::fs::Vfs::remove(ns_file).ok();
         crate::fs::Vfs::rmdir(ns_dir).ok();
-        crate::serial_println!(
-            "[fs::handle]   NO_SYMLINKS test SKIPPED (no mkdir/symlink support)"
-        );
     }
 
     // -- §19: no-follow chown/times operate on the LINK inode, not target --
@@ -1869,11 +1901,21 @@ pub fn self_test() -> KernelResult<()> {
     let nfo_link = "/handle_nfo_link";
     crate::fs::Vfs::remove(nfo_link).ok();
     crate::fs::Vfs::remove(nfo_target).ok();
-    let nfo_ready = crate::fs::Vfs::write_file(nfo_target, b"nfo").is_ok()
-        && crate::fs::Vfs::symlink(nfo_link, nfo_target).is_ok()
+    // `set_owner` and `set_owner_no_follow` here are both entry points that
+    // `vfs::check_path_access` gates.  Under the old `.is_ok()` chain, a gate
+    // that started refusing them would have switched off precisely the test
+    // that noticed, and the suite would still have printed PASSED.
+    let nfo_ready = crate::selftest_setup!(
+        skips,
+        "[fs::handle]",
+        "no-follow chown targets link inode",
+        "no symlink/chown support",
+        crate::fs::Vfs::write_file(nfo_target, b"nfo"),
+        crate::fs::Vfs::symlink(nfo_link, nfo_target),
         // Seed distinct baseline owners so a mistaken follow is detectable.
-        && crate::fs::Vfs::set_owner(nfo_target, 1000, 1000).is_ok()
-        && crate::fs::Vfs::set_owner_no_follow(nfo_link, 1000, 1000).is_ok();
+        crate::fs::Vfs::set_owner(nfo_target, 1000, 1000),
+        crate::fs::Vfs::set_owner_no_follow(nfo_link, 1000, 1000),
+    );
     if nfo_ready {
         let nfo_cleanup = || {
             crate::fs::Vfs::remove(nfo_link).ok();
@@ -1929,9 +1971,6 @@ pub fn self_test() -> KernelResult<()> {
     } else {
         crate::fs::Vfs::remove(nfo_link).ok();
         crate::fs::Vfs::remove(nfo_target).ok();
-        crate::serial_println!(
-            "[fs::handle]   no-follow chown test SKIPPED (no symlink/chown support)"
-        );
     }
 
     // -- §20: no-follow xattr operate on the LINK inode, not target --
@@ -1949,10 +1988,16 @@ pub fn self_test() -> KernelResult<()> {
     let nfx_key = "user.nfx";
     crate::fs::Vfs::remove(nfx_link).ok();
     crate::fs::Vfs::remove(nfx_target).ok();
-    let nfx_ready = crate::fs::Vfs::write_file(nfx_target, b"nfx").is_ok()
-        && crate::fs::Vfs::symlink(nfx_link, nfx_target).is_ok()
+    let nfx_ready = crate::selftest_setup!(
+        skips,
+        "[fs::handle]",
+        "no-follow xattr targets link inode",
+        "no symlink/xattr support",
+        crate::fs::Vfs::write_file(nfx_target, b"nfx"),
+        crate::fs::Vfs::symlink(nfx_link, nfx_target),
         // Probe xattr support on the link itself; skip if unsupported.
-        && crate::fs::Vfs::set_xattr_no_follow(nfx_link, nfx_key, b"link").is_ok();
+        crate::fs::Vfs::set_xattr_no_follow(nfx_link, nfx_key, b"link"),
+    );
     if nfx_ready {
         let nfx_cleanup = || {
             crate::fs::Vfs::remove(nfx_link).ok();
@@ -2041,9 +2086,6 @@ pub fn self_test() -> KernelResult<()> {
     } else {
         crate::fs::Vfs::remove(nfx_link).ok();
         crate::fs::Vfs::remove(nfx_target).ok();
-        crate::serial_println!(
-            "[fs::handle]   no-follow xattr test SKIPPED (no symlink/xattr support)"
-        );
     }
 
     // -- §21: no-follow chmod operates on the LINK inode, not target --
@@ -2057,11 +2099,17 @@ pub fn self_test() -> KernelResult<()> {
     let nfp_link = "/handle_nfp_link";
     crate::fs::Vfs::remove(nfp_link).ok();
     crate::fs::Vfs::remove(nfp_target).ok();
-    let nfp_ready = crate::fs::Vfs::write_file(nfp_target, b"nfp").is_ok()
-        && crate::fs::Vfs::symlink(nfp_link, nfp_target).is_ok()
+    let nfp_ready = crate::selftest_setup!(
+        skips,
+        "[fs::handle]",
+        "no-follow chmod targets link inode",
+        "no symlink/chmod support",
+        crate::fs::Vfs::write_file(nfp_target, b"nfp"),
+        crate::fs::Vfs::symlink(nfp_link, nfp_target),
         // Seed distinct baseline modes so a mistaken follow is detectable.
-        && crate::fs::Vfs::set_permissions(nfp_target, 0o644).is_ok()
-        && crate::fs::Vfs::set_permissions_no_follow(nfp_link, 0o644).is_ok();
+        crate::fs::Vfs::set_permissions(nfp_target, 0o644),
+        crate::fs::Vfs::set_permissions_no_follow(nfp_link, 0o644),
+    );
     if nfp_ready {
         let nfp_cleanup = || {
             crate::fs::Vfs::remove(nfp_link).ok();
@@ -2113,9 +2161,6 @@ pub fn self_test() -> KernelResult<()> {
     } else {
         crate::fs::Vfs::remove(nfp_link).ok();
         crate::fs::Vfs::remove(nfp_target).ok();
-        crate::serial_println!(
-            "[fs::handle]   no-follow chmod test SKIPPED (no symlink/chmod support)"
-        );
     }
 
     // Cleanup test files.
@@ -2123,6 +2168,7 @@ pub fn self_test() -> KernelResult<()> {
     crate::fs::Vfs::remove(test_path).ok();
     crate::fs::Vfs::remove("/handle_write_test.txt").ok();
 
-    crate::serial_println!("[fs::handle] Self-test PASSED");
+    skips.report("[fs::handle]");
+    crate::serial_println!("[fs::handle] Self-test PASSED{}", skips.suffix());
     Ok(())
 }

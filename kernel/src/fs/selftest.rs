@@ -290,3 +290,214 @@ pub fn pristine_atomic<A: AtomicScalar>(cell: &A, pristine: A::Value) -> Restore
     cell.store_relaxed(pristine);
     RestoreOnDrop { cell, saved }
 }
+
+// ---------------------------------------------------------------------------
+// Skips
+// ---------------------------------------------------------------------------
+
+/// The sections of a self-test that could not run, carried to the line that
+/// announces the result.
+///
+/// ## The problem this exists for
+///
+/// A self-test's **last** line is the one a reader believes.  Nearly every
+/// suite in this tree ends with one — `[pcid] Self-test PASSED`, `[svcstart]
+/// All 11 self-tests passed.` — and several of them can skip a section first:
+/// no filesystem is mounted, the CPU has no PCID, QEMU was started without an
+/// AC97 device.  When the skip is announced mid-run and the closing line is
+/// unconditional, a run that tested half of what it claims is
+/// byte-indistinguishable in the log from one that tested all of it.  The
+/// half-run is then believed, indefinitely: `kernel/src/fs/index.rs` had this
+/// shape, and 26 of lane B's Path-Z rungs no-op'd unnoticed for weeks for the
+/// same reason (`known-issues.md` → `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`).
+///
+/// A skip that is reported gets acted on; a silent one gets believed.
+///
+/// ## What it does not fix
+///
+/// Reporting is only half of it, and the smaller half.  The *condition* that
+/// decides to skip must be a question about the environment — is `/tmp` in the
+/// mount table, does `CPUID` advertise the feature — and never a discarded
+/// `Result` from the code under test.  `if mkdir(d).is_ok() { ..test.. } else
+/// { skip }` reads as "skip when this filesystem has no directories" but means
+/// "skip on **any** failure", so the worse the code under test gets, the more
+/// sections switch themselves off.  `scripts/check-selftest-skips.py` refuses
+/// both shapes; this type only helps with the second.
+///
+/// ## Using it
+///
+/// ```ignore
+/// let mut skips = Skips::new();
+/// if tmp_mounted() {
+///     /* ..the section.. */
+/// } else {
+///     skips.record("VFS add/search", "/tmp not mounted");
+/// }
+/// skips.report("[index]");
+/// serial_println!("[index] Self-test passed{}", skips.suffix());
+/// ```
+#[derive(Debug, Default)]
+pub struct Skips {
+    /// `(section, why)` pairs, in the order the sections were reached.
+    ///
+    /// `&'static str` rather than `String` on purpose: a skip reason is a
+    /// property of the code, not of the run, so there is nothing to format and
+    /// no allocation to fail in a suite that may be diagnosing the allocator.
+    entries: alloc::vec::Vec<(&'static str, &'static str)>,
+}
+
+impl Skips {
+    /// An empty record.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            entries: alloc::vec::Vec::new(),
+        }
+    }
+
+    /// Record that `section` did not run, because `why`.
+    ///
+    /// `why` should name the missing *precondition* ("no AC97 device",
+    /// "/tmp not mounted"), not the failing call — the reader's next question
+    /// is always whether the absence is expected on this machine.
+    pub fn record(&mut self, section: &'static str, why: &'static str) {
+        self.entries.push((section, why));
+    }
+
+    /// Whether every section ran.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// How many sections did not run.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Print one `SKIP:` line per skipped section, prefixed with `tag`.
+    ///
+    /// Call this immediately before the closing line, not at the point of the
+    /// skip: the two lines being adjacent is what stops a reader who scrolls
+    /// to the bottom from missing it.  Prints nothing when nothing was
+    /// skipped.
+    pub fn report(&self, tag: &str) {
+        for (section, why) in &self.entries {
+            crate::serial_println!("{}   SKIP: {} ({})", tag, section, why);
+        }
+    }
+
+    /// Text to append to a suite's closing line: empty when every section ran,
+    /// and a count of what did not when some did.
+    ///
+    /// Returning a suffix rather than printing the whole line keeps each
+    /// suite's own wording — `Self-test PASSED`, `All 11 self-tests passed.`,
+    /// `Self-test passed (148 entries, 1 rebuilds)` — which is what makes this
+    /// a one-line change at ~25 call sites rather than a rewrite of each.
+    #[must_use]
+    pub fn suffix(&self) -> alloc::string::String {
+        if self.entries.is_empty() {
+            alloc::string::String::new()
+        } else {
+            alloc::format!(" — {} section(s) SKIPPED", self.entries.len())
+        }
+    }
+}
+
+/// The outcome of a self-test's setup step, split into the two things that
+/// `.is_ok()` collapses into one.
+///
+/// `if mkdir(d).is_ok() { ..section.. } else { skip }` reads as "skip when
+/// this filesystem has no directories", but what it means is "skip on **any**
+/// failure" — a permission gate refusing the `mkdir`, a full disk, a bug in
+/// the directory code itself.  The worse the code under test gets, the more
+/// sections switch themselves off, and the suite goes green.  Splitting the
+/// failure is what stops that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setup {
+    /// The step succeeded; run the section.
+    Ready,
+    /// This system does not implement the operation.  A legitimate reason to
+    /// skip the section — and to say so.
+    Unsupported(crate::error::KernelError),
+    /// The step failed for a reason that is not a missing feature.  That is a
+    /// defect, and the section must fail rather than quietly not run.
+    Failed(crate::error::KernelError),
+}
+
+/// Classify a setup step's result.
+///
+/// Only three errors mean "this system cannot do that":
+/// - `NotSupported` — the filesystem or driver does not implement it,
+/// - `ReadOnlyFilesystem` — it could, but this mount forbids writes,
+/// - `NoSuchDevice` — the hardware the section drives is not present.
+///
+/// Everything else, `PermissionDenied` and `IoError` above all, describes a
+/// system that was *asked* and *refused*, which is the answer a test exists to
+/// notice.
+#[must_use]
+pub fn classify<T>(r: crate::error::KernelResult<T>) -> Setup {
+    use crate::error::KernelError;
+    match r {
+        Ok(_) => Setup::Ready,
+        Err(
+            e @ (KernelError::NotSupported
+            | KernelError::ReadOnlyFilesystem
+            | KernelError::NoSuchDevice),
+        ) => Setup::Unsupported(e),
+        Err(e) => Setup::Failed(e),
+    }
+}
+
+/// Run a section's setup steps, then say whether the section may run.
+///
+/// Evaluates each step in order and stops at the first failure:
+/// - every step `Ok` → `true`, and the section runs;
+/// - the first failure is an environment limit → the skip is recorded on
+///   `$skips` and this evaluates to `false`;
+/// - any other failure → prints it and **returns** `Err` from the enclosing
+///   function, because a setup step that fails for a reason other than "this
+///   system cannot do that" is exactly the defect the section exists to find.
+///
+/// The enclosing function must therefore return `KernelResult<_>`.
+///
+/// ```ignore
+/// let mut skips = Skips::new();
+/// let ready = selftest_setup!(
+///     skips, "[fs::handle]", "no-follow chown", "no symlink/chown support",
+///     Vfs::write_file(target, b"x"),
+///     Vfs::symlink(link, target),
+///     Vfs::set_owner(target, 1000, 1000),
+/// );
+/// if ready { /* ..the section.. */ }
+/// ```
+#[macro_export]
+macro_rules! selftest_setup {
+    ($skips:expr, $tag:expr, $section:expr, $why:expr, $($step:expr),+ $(,)?) => {{
+        let mut ready = true;
+        $(
+            if ready {
+                match $crate::fs::selftest::classify($step) {
+                    $crate::fs::selftest::Setup::Ready => {}
+                    $crate::fs::selftest::Setup::Unsupported(_) => {
+                        $skips.record($section, $why);
+                        ready = false;
+                    }
+                    $crate::fs::selftest::Setup::Failed(e) => {
+                        $crate::serial_println!(
+                            "{}   FAIL: setup for '{}' failed with {:?} — that is not a \
+                             missing feature, so it is a defect rather than a reason to \
+                             skip the section",
+                            $tag,
+                            $section,
+                            e
+                        );
+                        return Err($crate::error::KernelError::InternalError);
+                    }
+                }
+            }
+        )+
+        ready
+    }};
+}

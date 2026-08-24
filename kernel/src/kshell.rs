@@ -271,6 +271,17 @@ fn dump_if_failed(what: &str, out: &[u8]) {
         what,
         last_exit()
     );
+    dump_lines(out);
+}
+
+/// Print a captured buffer to serial, one indented line at a time.
+fn dump_lines(out: &[u8]) {
+    use crate::serial_println;
+
+    if out.is_empty() {
+        serial_println!("     <no output>");
+        return;
+    }
     for line in out.split(|b| *b == b'\n') {
         if line.is_empty() {
             continue;
@@ -283,6 +294,32 @@ fn dump_if_failed(what: &str, out: &[u8]) {
             Err(_) => serial_println!("     <{} non-UTF-8 bytes>", line.len()),
         }
     }
+}
+
+/// Assert a captured command's output begins with `expected`, and show what it
+/// actually produced when it does not.
+///
+/// The same lesson as [`dump_if_failed`], one layer up. A bare
+/// `assert!(out.starts_with(b"..."))` names only the *expectation*: when it
+/// trips, the panic repeats the message the test author wrote and says nothing
+/// about the bytes that were actually there. On a kernel whose only harness is
+/// a 13-minute QEMU boot, that is an entire cycle spent learning one string —
+/// which is exactly what rung 23's `realpath` assertion cost.
+///
+/// Panics on mismatch, after printing both sides, so the failing boot carries
+/// its own explanation.
+fn assert_output_starts_with(what: &str, out: &[u8], expected: &[u8]) {
+    use crate::serial_println;
+
+    if out.starts_with(expected) {
+        return;
+    }
+    serial_println!("  !! `{}`: output did not start as expected", what);
+    serial_println!("     expected prefix:");
+    dump_lines(expected);
+    serial_println!("     actual output ({} bytes):", out.len());
+    dump_lines(out);
+    panic!("`{}` output did not start with the expected prefix", what);
 }
 
 // ---------------------------------------------------------------------------
@@ -10499,7 +10536,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // corroborate it. `tag` with an unknown subcommand falls through its
         // `_` arm after printing the usage.
         let out = capture_command("tag zzz_no_such_subcommand");
-        assert!(out.starts_with(b"Usage: tag "), "an unknown subcommand");
+        assert_output_starts_with("an unknown subcommand", &out, b"Usage: tag ");
         assert_eq!(last_exit(), 1, "an unknown subcommand is a failure");
 
         // ...and the word must lead the message, not merely appear in it.
@@ -10507,9 +10544,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // and ends on an indented row -- the exact shape of a usage error, and
         // a complete success.
         let out = capture_command("netusage stats");
-        assert!(
-            out.starts_with(b"Network Usage: "),
-            "`netusage stats` prints its report"
+        assert_output_starts_with(
+            "`netusage stats` prints its report",
+            &out,
+            b"Network Usage: ",
         );
         assert_eq!(last_exit(), 0, "a report header is not a usage error");
 
@@ -10536,9 +10574,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // arm, so this fails if the arm ever loses its status again.
     {
         let out = capture_command("cgroup delete 4294967295");
-        assert!(
-            out.starts_with(b"Error: "),
-            "deleting a nonexistent cgroup reports an error"
+        assert_output_starts_with(
+            "deleting a nonexistent cgroup reports an error",
+            &out,
+            b"Error: ",
         );
         assert_eq!(last_exit(), 1, "an operation that failed did not succeed");
 
@@ -10563,9 +10602,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // the failure this rung *can* force: a category that checks nothing.
     {
         let out = capture_command("syshealth");
-        assert!(
-            out.starts_with(b"=== Active System Health Check ==="),
-            "`syshealth` ran its checks"
+        assert_output_starts_with(
+            "`syshealth` ran its checks",
+            &out,
+            b"=== Active System Health Check ===",
         );
         // Echo the report before asserting on it. A bare `left: 1, right: 0`
         // names a number, not a cause: this rung failed once for a real kernel
@@ -10577,9 +10617,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "a checker that passed reports success");
 
         let out = capture_command("invariant");
-        assert!(
-            out.starts_with(b"=== Kernel Invariant Check "),
-            "`invariant` ran every category"
+        assert_output_starts_with(
+            "`invariant` ran every category",
+            &out,
+            b"=== Kernel Invariant Check ",
         );
         dump_if_failed("invariant", &out);
         assert_eq!(last_exit(), 0, "all invariants hold on a healthy kernel");
@@ -10587,9 +10628,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // A misspelled category checks nothing, and nothing checked is not a
         // clean bill of health.
         let out = capture_command("invariant zzz_no_such_category");
-        assert!(
-            out.starts_with(b"No invariants found for category "),
-            "an unknown category is reported"
+        assert_output_starts_with(
+            "an unknown category is reported",
+            &out,
+            b"No invariants found for category ",
         );
         assert_eq!(last_exit(), 1, "a check that checked nothing did not pass");
 
@@ -10619,9 +10661,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     {
         // Named item, absent: a failed lookup.
         let out = capture_command("envvars get zzz_no_such_variable");
-        assert!(
-            out.starts_with(b"zzz_no_such_variable: not set"),
-            "the missing name is reported"
+        assert_output_starts_with(
+            "the missing name is reported",
+            &out,
+            b"zzz_no_such_variable: not set",
         );
         assert_eq!(
             last_exit(),
@@ -10655,23 +10698,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // of the bug: `netspeed test` announces it is unimplemented and then
         // reports success, so `netspeed test || fallback` never falls back.
         let out = capture_command("netspeed test");
-        assert!(
-            out.starts_with(b"Speed testing is not yet implemented."),
-            "`netspeed test` says it cannot do it"
+        assert_output_starts_with(
+            "`netspeed test` says it cannot do it",
+            &out,
+            b"Speed testing is not yet implemented.",
         );
         assert_eq!(last_exit(), 1, "a command that did nothing did not succeed");
 
         // A failed resolution, and the same command succeeding, so the test
         // pins the difference rather than just the failing side.
         let out = capture_command("realpath /zzz_no_such_path");
-        assert!(
-            out.starts_with(b"realpath: '/zzz_no_such_path'"),
-            "the failure names the path"
+        assert_output_starts_with(
+            "the failure names the path",
+            &out,
+            b"realpath: '/zzz_no_such_path'",
         );
         assert_eq!(last_exit(), 1, "a path that does not resolve is an error");
 
         let out = capture_command("realpath /tmp");
-        assert!(out.starts_with(b"/tmp"), "`realpath /tmp` resolved");
+        assert_output_starts_with("`realpath /tmp` resolved", &out, b"/tmp");
         assert_eq!(last_exit(), 0, "and resolving it is a success");
     }
 
@@ -10689,9 +10734,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Vfs::write_file(path, b"\xffPNG\x00\x01\x02")?;
 
         let out = capture_command("cat /tmp/kshell_status_selftest_binary.bin");
-        assert!(
-            out.starts_with(b"(binary file,"),
-            "`cat` refused the bytes and said so"
+        assert_output_starts_with(
+            "`cat` refused the bytes and said so",
+            &out,
+            b"(binary file,",
         );
         assert_eq!(last_exit(), 1, "and refusing is not succeeding");
 

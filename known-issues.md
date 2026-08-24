@@ -66392,8 +66392,9 @@ disagree — which is the whole point of having both.
 orders, which is the textbook way to freeze a machine solid: CPU 1 holds lock
 A and waits for B, CPU 2 holds B and waits for A, and neither ever moves
 again. One of the two orders was on the path of *every single file read and
-write* in the system. It is fixed, and a new checker found 31 more places
-with the same shape, which are being worked through.
+write* in the system. It is fixed; a new checker found 31 more places with
+the same shape, and those are now fixed too. The checker is a build gate, so
+the 32nd will be caught before it ships rather than after.
 
 **Lane A. Found 2026-08-23, by lockdep, during boot batch 32.**
 
@@ -66454,38 +66455,75 @@ never counted twice.
 A side effect worth naming: file I/O no longer serialises the whole system
 behind one global mutex.
 
-### The other 31 — Status: OPEN
+### The other 31 — Status: FIXED, and now gated
 
 `scripts/check-vfs-under-lock.py` (commit `7bc19a853`) enforces the rule
 statically: *do not enter the VFS while holding a module-global lock.* It
-shares `check-recursive-locks.py`'s parser and currently reports 31 further
-sites, every one the same class:
+shares `check-recursive-locks.py`'s parser, and it reported 31 further sites
+when it was written. All 31 are fixed:
 
-| File | Locks held across a VFS call |
-|---|---|
-| `fs/changetrack.rs` | `STATE` × 7 (`init`, and six via `ensure_init`) |
-| `fs/filepicker.rs` | `PICKER` × 4 (via `build_listing`) |
-| `fs/fileselect.rs` | `SETS` × 6 (via `make_item`) |
-| `fs/journal.rs` | `JOURNAL` (`init`) |
-| `fs/mount_ns.rs` | `NAMESPACES` (`init`) |
-| `fs/overlay.rs` | `OVERLAYS` × 2 (`copy_up`, `which_layer`) |
-| `fs/rundialog.rs` | `STATE` (`resolve`) |
-| `fs/sidebar.rs` | `HIDDEN_SECTIONS`, `EXPANDED_STATE` (`build`) |
-| `fs/tags.rs` | `INDEX` × 2 (via `read_tags`) |
-| `logpersist.rs` | `STATE` × 3 (`flush`, `init_with_config`, `prune`) |
-| `net/ssh.rs` | `STATE` (via `process_message`) |
-| `net/tftp.rs` | `SERVER_STATE` (via `handle_rrq`) |
+| File | Locks that were held across a VFS call | Fixed in |
+|---|---|---|
+| `fs/changetrack.rs` | `STATE` × 7 (`init`, and six via `ensure_init`) | `568306227` |
+| `fs/fileselect.rs` | `SETS` × 6 (via `make_item`) | `caaa2dcb3` |
+| `fs/filepicker.rs` | `PICKER` × 4 (via `build_listing`) | `6ac16124d` |
+| `fs/tags.rs` | `INDEX` × 2 (via `read_tags`) | `97f63de75` |
+| `logpersist.rs` | `STATE` × 3 (`flush`, `init_with_config`, `prune`) | `eb843d19d` |
+| `fs/journal.rs`, `fs/mount_ns.rs`, `fs/rundialog.rs` | `JOURNAL`, `NAMESPACES`, `STATE` | `5606ba9bc` |
+| `fs/overlay.rs` | `OVERLAYS` × 2 (`copy_up`, `which_layer`) | `3c157b9be` |
+| `fs/sidebar.rs` | `HIDDEN_SECTIONS`, `EXPANDED_STATE` (`build`) | `ec9c5ff54` |
+| `net/tftp.rs` | `SERVER_STATE` (via `handle_rrq`, and two more) | `d750e2d28` |
+| `net/ssh.rs` | `STATE` (via `process_message`) | `48acb081f` |
 
-Not all are equally live — several are `init` paths that run once at boot
-with nothing racing them — but each is a standing invitation for the next
+Not all were equally live — several were `init` paths that run once at boot
+with nothing racing them — but each was a standing invitation for the next
 caller to be a live one, and the checker cannot tell the difference.
 
-**The checker is deliberately not yet a boot-test gate.** Wiring it in now
-would fail every build for a backlog rather than for a regression. It becomes
-a gate when it reports clean.
+Most took the shape `fs::handle`'s fix did: snapshot under the lock, release,
+call, retake and re-look-up by key. Three did not fit that mould and are
+worth knowing about:
 
-**Proper fix.** Every site takes the same shape as `fs::handle`'s: snapshot
-under the lock, release, call, retake and re-look-up. Where the call is to a
-helper that itself reaches the VFS (`ensure_init`, `build_listing`,
-`make_item`, `read_tags`), the helper should be split so that the VFS work
-happens outside the caller's critical section.
+- **`logpersist.rs`** — its `STATE` was doing two jobs, guarding bookkeeping
+  *and* serialising flushes against each other. Only the first survives being
+  released across the writes, so the second moved to a `flushing` flag with an
+  RAII `FlushGuard`.
+- **`net/tftp.rs`** and **`net/ssh.rs`** — both tick functions held their
+  state lock top to bottom, which was also what stopped two CPUs ticking at
+  once. Same remedy: a `SERVER_TICKING` / `TICKING` flag with an RAII guard.
+  (The rate limiter above each one is *not* a substitute — its
+  load/compare/store is not atomic, so two CPUs can both pass it. That was
+  already true before these changes.)
+- **`net/ssh.rs`** additionally could not take its lock in bursts, because the
+  protocol state machine works through one `&mut Session` for its whole
+  duration. The session is *checked out* instead: `mem::replace`d out of its
+  slot, processed on the tick's stack, then moved back, with a placeholder
+  left behind flagged `checked_out` so `shutdown` does not send a disconnect
+  to its zeroed `tcp_handle` — which is a valid handle belonging to somebody
+  else.
+
+**Now a boot-test gate** (commit `a57da9164`), next to `check_recursive_locks`.
+It was deliberately not one during the sweep, because a gate then would have
+failed every build for a backlog rather than for a regression.
+
+One sharp edge for whoever trips it: the checker reports only the **first**
+VFS call under a given guard. `net/tftp.rs` was named once and had three.
+
+### Two unrelated bugs found in passing
+
+- **`logpersist::prune` deleted the newest log first.** It sorted paths
+  descending and popped, which takes the lexicographically *smallest* — and
+  for `combined.jsonl` plus its rotations that order is
+  `combined.1 < combined.2 < … < combined.jsonl`. So over the storage cap the
+  kernel discarded the most recent rotation and kept the stalest, and the gap
+  it left was the window immediately before the live file: the part anyone
+  diagnosing a crash reads first. String order was wrong a second way, too —
+  `.10` sorts between `.1` and `.2`. Fixed in `4de424aee` by carrying rotation
+  age as an explicit `u32` rather than recovering it from the filename. The
+  pre-existing `Test 6: Prune (empty)` passed just as happily with the order
+  reversed, so `Test 7` was added to actually pin it.
+- **TFTP counted a failed upload as a success.** `server_tick` wrote the
+  received file with `let _ =` and incremented `SERVER_COMPLETED` regardless,
+  so a full disk was indistinguishable from a completed transfer in both the
+  log and the stats. Fixed in `d750e2d28`. The same commit replaced the WRQ
+  existence probe — a full `read_file` whose result was dropped, i.e. a
+  file's worth of kernel heap per *rejected* request — with `Vfs::exists`.

@@ -129,6 +129,13 @@ pub mod screen_capture;
 pub mod security_dialog;
 pub mod session;
 pub mod session_mgr;
+/// The horizontal value slider every settings panel draws, in one place.
+///
+/// Five panels drew it by hand and disagreed about the thumb's colour; one of
+/// them inked it the same accent as the fill underneath it. The thumb is now
+/// `text` — and deliberately *not* derived from the fill, because unlike a
+/// switch knob it overhangs its track.
+pub mod slider;
 pub mod snap;
 pub mod sound_settings;
 pub mod startup_settings;

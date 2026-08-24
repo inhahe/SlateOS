@@ -1247,40 +1247,24 @@ impl DisplaySettingsManager {
         // Track
         let track_x = x + width * 0.45;
         let track_w = width * 0.5;
-        cmds.push(RenderCommand::FillRect {
+        crate::slider::Slider {
             x: track_x,
             y: y + 4.0,
             width: track_w,
             height: 6.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(3.0),
-        });
-
-        // Filled portion
-        let fill_w = if max_val > 0 {
-            track_w * (value as f32 / max_val as f32)
-        } else {
-            0.0
-        };
-        cmds.push(RenderCommand::FillRect {
-            x: track_x,
-            y: y + 4.0,
-            width: fill_w,
-            height: 6.0,
+            frac: if max_val > 0 {
+                value as f32 / max_val as f32
+            } else {
+                0.0
+            },
+            thumb: 12.0,
+            track: p.surface0,
             // How much of the setting is chosen, so: the accent.
-            color: p.accent,
-            corner_radii: CornerRadii::all(3.0),
-        });
-
-        // Thumb
-        cmds.push(RenderCommand::FillRect {
-            x: track_x + fill_w - 6.0,
-            y: y + 1.0,
-            width: 12.0,
-            height: 12.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(6.0),
-        });
+            fill: p.accent,
+            p,
+            alpha: u8::MAX,
+        }
+        .draw(cmds);
     }
 
     fn render_gamma_row(

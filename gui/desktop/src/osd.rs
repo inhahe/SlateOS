@@ -759,39 +759,21 @@ impl OsdManager {
         let track_w = osd_w - padding * 2.0;
         let track_h = 6.0;
 
-        commands.push(RenderCommand::FillRect {
+        crate::slider::Slider {
             x: track_x,
             y: track_y,
             width: track_w,
             height: track_h,
-            color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, text_alpha),
-            corner_radii: CornerRadii::all(3.0),
-        });
-
-        // Filled portion.
-        let fill_w = track_w * (level.min(100) as f32 / 100.0);
-        if fill_w > 0.0 {
-            commands.push(RenderCommand::FillRect {
-                x: track_x,
-                y: track_y,
-                width: fill_w,
-                height: track_h,
-                color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),
-                corner_radii: CornerRadii::all(3.0),
-            });
+            frac: level.min(100) as f32 / 100.0,
+            thumb: 10.0,
+            track: p.surface0,
+            fill: accent,
+            p,
+            // The overlay fades in and out as one thing, so the slider takes
+            // the same opacity as the label above it.
+            alpha: text_alpha,
         }
-
-        // Knob.
-        let knob_x = track_x + fill_w - 5.0;
-        let knob_y = track_y - 2.0;
-        commands.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: knob_y,
-            width: 10.0,
-            height: 10.0,
-            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),
-            corner_radii: CornerRadii::all(5.0),
-        });
+        .draw(commands);
     }
 
     /// Render a media track OSD with title/artist/album.

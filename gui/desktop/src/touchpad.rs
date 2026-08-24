@@ -1288,39 +1288,19 @@ impl TouchpadSettingsUI {
         // Slider track.
         let track_x = x + 250.0;
         let track_w = 150.0;
-        cmds.push(RenderCommand::FillRect {
+        crate::slider::Slider {
             x: track_x,
             y: y + 8.0,
             width: track_w,
             height: 4.0,
-            color: p.surface1,
-            corner_radii: CornerRadii::all(2.0),
-        });
-        // Filled portion. A slider sitting on its floor has nothing to fill,
-        // and a zero-width rectangle is a command the compositor has to carry
-        // and cannot draw — on every frame, for as long as the value stays
-        // there. Emit it only when it covers something.
-        let frac = (value - min) / (max - min);
-        let fill_w = track_w * frac.clamp(0.0, 1.0);
-        if fill_w > 0.0 {
-            cmds.push(RenderCommand::FillRect {
-                x: track_x,
-                y: y + 8.0,
-                width: fill_w,
-                height: 4.0,
-                color: p.accent,
-                corner_radii: CornerRadii::all(2.0),
-            });
+            frac: (value - min) / (max - min),
+            thumb: 12.0,
+            track: p.surface1,
+            fill: p.accent,
+            p,
+            alpha: u8::MAX,
         }
-        // Knob.
-        cmds.push(RenderCommand::FillRect {
-            x: track_x + fill_w - 6.0,
-            y: y + 4.0,
-            width: 12.0,
-            height: 12.0,
-            color: p.accent,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        .draw(cmds);
         // Value text.
         cmds.push(RenderCommand::Text {
             x: track_x + track_w + 10.0,
@@ -2436,14 +2416,21 @@ mod tests {
 
     // ---- What follows the accent -------------------------------------------
 
-    /// The four things that follow the accent, one assertion per source site.
+    /// The three things that follow the accent, one assertion per source site.
     ///
     /// The sites are the selected section's pill, a slider's filled portion,
-    /// that slider's knob, and the on side of a toggle. Each is a position or
-    /// an invitation, which is what the accent is for. The toggles are *drawn*
-    /// from as many as three places on one section but *written* once, so they
-    /// are one assertion with a count beside it — a loop cannot disagree with
-    /// itself.
+    /// and the on side of a toggle. Each is a position or an invitation, which
+    /// is what the accent is for. The toggles are *drawn* from as many as three
+    /// places on one section but *written* once, so they are one assertion with
+    /// a count beside it — a loop cannot disagree with itself.
+    ///
+    /// A slider's **knob** used to be a fourth site, and that was the bug:
+    /// pinning it to the accent pinned it to the colour of the fill directly
+    /// underneath it, so on the left half of its travel the handle and the
+    /// filled track were one accent-coloured blob at 1.00:1. It is now `text`
+    /// (see [`crate::slider`]), and the assertion below is that it does *not*
+    /// follow the accent — which is the only site on this panel where standing
+    /// still is the correct behaviour.
     ///
     /// Each site is pinned by equality with the accent, never by inequality
     /// with the literal it used to be. Equality over eight accents is the
@@ -2474,8 +2461,8 @@ mod tests {
                     }
                 }
 
-                // 2 & 3. a slider's filled portion and its knob. General draws
-                // exactly one slider, so the pair is unambiguous there.
+                // 2. a slider's filled portion. General draws exactly one
+                // slider, so it is unambiguous there.
                 let cmds = draw(&on(TouchpadSettingsSection::General), &mgr_all_on(), &p);
                 let halves = slider_track_and_fill(&cmds);
                 assert_eq!(halves.len(), 2, "one slider, two halves ({ctx})");
@@ -2483,11 +2470,17 @@ mod tests {
                     halves[1], p.accent,
                     "the filled portion of a slider is the accent ({ctx})"
                 );
+                // ...and its knob, which must *not*. The handle sits on top of
+                // that fill; taking the same colour makes it disappear into it.
                 let knobs = slider_knobs(&cmds);
                 assert_eq!(knobs.len(), 1, "one slider, one knob ({ctx})");
-                assert_eq!(knobs[0], p.accent, "a slider's knob is the accent ({ctx})");
+                assert_eq!(knobs[0], p.text, "a slider's knob is the ink ({ctx})");
+                assert_ne!(
+                    knobs[0], halves[1],
+                    "the knob is the same colour as the fill it sits on ({ctx})"
+                );
 
-                // 4. the on side of a toggle, both arms.
+                // 3. the on side of a toggle, both arms.
                 let on_cmds = draw(&on(TouchpadSettingsSection::Taps), &mgr_all_on(), &p);
                 let on_tracks = toggle_tracks(&on_cmds);
                 assert_eq!(on_tracks.len(), 3, "three toggles on Taps ({ctx})");

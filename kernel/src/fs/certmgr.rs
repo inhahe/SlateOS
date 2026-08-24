@@ -737,10 +737,25 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("certmgr::self_test 5: renewal");
     set_status(c1, CertStatus::Valid)?;
     set_auto_renew(c1, true)?;
+    // Bracket the renewal so the timestamp is checked against the clock it is
+    // supposed to come from. `> 0` passed for any non-zero constant, for a
+    // value written at construction, and for a reading of the wrong clock.
+    let before = crate::hpet::elapsed_ns();
     renew_cert(c1)?;
+    let after = crate::hpet::elapsed_ns();
     let cert = get_cert(c1)?;
     assert_eq!(cert.renewal_count, 1);
-    assert!(cert.last_renewal_ns > 0);
+    assert!(
+        cert.last_renewal_ns >= before && cert.last_renewal_ns <= after,
+        "last_renewal_ns {} outside the renewal window [{}, {}]",
+        cert.last_renewal_ns,
+        before,
+        after
+    );
+    // The validity window is stamped from the same reading, so it is bracketed
+    // by the same bounds; not_after is 90 days later.
+    assert!(cert.not_before_ns >= before && cert.not_before_ns <= after);
+    assert!(cert.not_after_ns > cert.not_before_ns);
 
     // Test 6: ACME request.
     serial_println!("certmgr::self_test 6: ACME request");

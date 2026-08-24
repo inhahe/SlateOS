@@ -75,7 +75,15 @@ struct Settings {
     first_text: usize,
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     // Presence, not value: upstream is `!!getenv ("POSIXLY_CORRECT")`, so

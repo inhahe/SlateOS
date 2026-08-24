@@ -22,14 +22,36 @@
 //!   - Logical operators: && and ||
 //!   - Script execution: source / .
 
+use coreutils::diag;
 use coreutils::quote::quotef_os;
+use coreutils::stdfd;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
+use std::process::ExitCode;
 use std::process::{self, Command, Stdio};
 
-fn main() {
+/// The byte of `code` that reaches `$?`.
+///
+/// Statuses are `i32` throughout this file because that is what the `exit`
+/// builtin's operand and `ExitStatus::code` deal in, but a wait status carries
+/// one byte — which is why `exit 256` is a *success* and `exit -1` is 255.
+/// Truncating here rather than at each exit keeps every path telling the same
+/// story.
+fn status_byte(code: i32) -> u8 {
+    u8::try_from(code & 0xff).unwrap_or(0)
+}
+
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     let argv0 = args.first().cloned().unwrap_or_default();
     let mut state = ShellState::new();
@@ -45,7 +67,7 @@ fn main() {
         }) => {
             set_positionals(&mut state, &cmd_args);
             let exit_code = execute_script(&script, &mut state);
-            process::exit(exit_code);
+            return ExitCode::from(status_byte(exit_code));
         }
         Ok(ShMode::Script {
             path,
@@ -55,17 +77,17 @@ fn main() {
             match fs::read_to_string(&path) {
                 Ok(content) => {
                     let exit_code = execute_script(&content, &mut state);
-                    process::exit(exit_code);
+                    return ExitCode::from(status_byte(exit_code));
                 }
                 Err(e) => {
-                    eprintln!("sh: {}: {e}", quotef_os(path));
-                    process::exit(127);
+                    diag!("sh: {}: {e}", quotef_os(path));
+                    return ExitCode::from(127);
                 }
             }
         }
         Err(msg) => {
-            eprintln!("sh: {msg}");
-            process::exit(2);
+            diag!("sh: {msg}");
+            return ExitCode::from(2);
         }
     }
 
@@ -101,7 +123,7 @@ fn main() {
         execute_script(line, &mut state);
     }
 
-    process::exit(state.last_exit_code);
+    ExitCode::from(status_byte(state.last_exit_code))
 }
 
 /// Modes the shell can be invoked in, determined from argv.
@@ -319,7 +341,15 @@ fn execute_command(cmd: &str, state: &mut ShellState) -> i32 {
     match words[0].as_str() {
         "exit" => {
             let code: i32 = words.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            process::exit(code);
+            // The one place in this crate that leaves through
+            // `stdfd::exit_now` rather than returning: `exit` means "terminate
+            // now" from whatever depth of `if`/`while`/function it was written
+            // in, and there is nothing to unwind on the way — no traps, no job
+            // control. Real shells do not thread it either; dash raises
+            // `EXEXIT` through `longjmp`. The call still takes the funnel's
+            // decision, so `sh -c 'exit 0' 2>&-` reports 1 like GNU rather
+            // than 0 like a bare `process::exit`.
+            stdfd::exit_now(status_byte(code), 1);
         }
         "cd" => {
             let dir = words
@@ -329,7 +359,7 @@ fn execute_command(cmd: &str, state: &mut ShellState) -> i32 {
             match env::set_current_dir(dir) {
                 Ok(()) => 0,
                 Err(e) => {
-                    eprintln!("sh: cd: {dir}: {e}");
+                    diag!("sh: cd: {dir}: {e}");
                     1
                 }
             }
@@ -380,7 +410,7 @@ fn execute_command(cmd: &str, state: &mut ShellState) -> i32 {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
             if n > argc {
-                eprintln!("sh: shift: count exceeds positional parameters");
+                diag!("sh: shift: count exceeds positional parameters");
                 return 1;
             }
             for i in 1..=(argc - n) {
@@ -402,12 +432,12 @@ fn execute_command(cmd: &str, state: &mut ShellState) -> i32 {
                 match fs::read_to_string(path) {
                     Ok(content) => execute_script(&content, state),
                     Err(e) => {
-                        eprintln!("sh: {}: {e}", quotef_os(path));
+                        diag!("sh: {}: {e}", quotef_os(path));
                         1
                     }
                 }
             } else {
-                eprintln!("sh: source: filename argument required");
+                diag!("sh: source: filename argument required");
                 2
             }
         }
@@ -457,7 +487,7 @@ fn execute_external(words: &[String], redirects: &[(String, String)]) -> i32 {
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(126),
         Err(e) => {
-            eprintln!("sh: {}: {e}", words[0]);
+            diag!("sh: {}: {e}", words[0]);
             127
         }
     }
@@ -506,7 +536,7 @@ fn execute_pipeline(cmd: &str, state: &mut ShellState) -> i32 {
                 }
             }
             Err(e) => {
-                eprintln!("sh: {}: {e}", words[0]);
+                diag!("sh: {}: {e}", words[0]);
                 last_status = 127;
             }
         }

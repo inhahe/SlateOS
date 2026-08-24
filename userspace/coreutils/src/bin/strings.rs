@@ -4,6 +4,7 @@
 //!   -n MIN   minimum string length (default: 4)
 //!   Prints all sequences of printable characters of length >= MIN.
 
+use coreutils::diag;
 use coreutils::quote::quotef_os;
 use std::env;
 use std::fs::File;
@@ -33,7 +34,7 @@ fn main() {
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("strings: {}: {e}", quotef_os(path));
+                    diag!("strings: {}: {e}", quotef_os(path));
                     continue;
                 }
             }
@@ -41,7 +42,7 @@ fn main() {
 
         let mut data = Vec::new();
         if reader.read_to_end(&mut data).is_err() {
-            eprintln!("strings: {}: read error", quotef_os(path));
+            diag!("strings: {}: read error", quotef_os(path));
             continue;
         }
 

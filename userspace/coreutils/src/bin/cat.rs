@@ -229,7 +229,7 @@ fn run_main() -> ExitCode {
         // `error (EXIT_FAILURE, …)` does by exiting on the spot.
         let _ = out.flush(); // never returns `Err`; the verdict is `out.error()`
         if let Some(e) = out.error() {
-            stdfd::write_error("cat", e);
+            stdfd::write_error("cat", &e);
             return ExitCode::FAILURE;
         }
         if let Err(e) = result {

@@ -87,6 +87,9 @@ use crate::diag;
 use crate::errmsg::strerror;
 use crate::getopt::{self, Opt, Program, Takes};
 use crate::quote::{os_bytes, os_from_bytes, quotef};
+// Imported as a module rather than by item: this file already has a `Stream`,
+// the hash trait, so `stdfd::Stream` has to stay spelled out.
+use crate::stdfd;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
@@ -684,15 +687,20 @@ pub fn main(algo: &Algorithm) -> ExitCode {
     // Upstream registers `close_stdout` with `atexit`, so its verdict is
     // reached on every exit path, not just the last statement of `main`. One
     // value leaves this function; funnelling it here is the same guarantee.
-    crate::stdfd::close_stderr(run_main(algo), 1)
+    stdfd::close_stderr(run_main(algo), 1)
 }
 
 /// Everything the utility does, so that [`main`] is only the exit path --
 /// upstream's `main` minus the `atexit` handler it registers.
 fn run_main(algo: &Algorithm) -> ExitCode {
+    stdfd::restore();
+
     let program = Program::new(algo.program, 1);
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
+    // Decided before the stream exists, because upstream reaches `close_stdout`
+    // from here with nothing buffered: a usage error writes only to stderr, so
+    // there is no output whose fate could change the status.
     let request = match parse_args(program, &args) {
         Ok(r) => r,
         Err(e) => {
@@ -700,14 +708,16 @@ fn run_main(algo: &Algorithm) -> ExitCode {
             return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
     };
+    // `--help` and `--version` are output like any other, and so are subject to
+    // the same verdict: `md5sum --help >&-` is a failed write, which upstream
+    // reports and exits 1 for rather than treating as a successful run.
     let mut set = match request {
-        Request::Help => {
-            print!("{}", help_text(algo));
-            return ExitCode::SUCCESS;
-        }
+        Request::Help => return say(algo, &help_text(algo)),
         Request::Version => {
-            println!("{} (SlateOS coreutils) 0.1.0", algo.program);
-            return ExitCode::SUCCESS;
+            return say(
+                algo,
+                &format!("{} (SlateOS coreutils) 0.1.0\n", algo.program),
+            );
         }
         Request::Run(set) => set,
     };
@@ -726,8 +736,7 @@ fn run_main(algo: &Algorithm) -> ExitCode {
         set.files.push(OsString::from("-"));
     }
 
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+    let mut out = stdfd::Stream::stdout();
     let mut ok = true;
     let mut read_stdin = false;
 
@@ -741,13 +750,11 @@ fn run_main(algo: &Algorithm) -> ExitCode {
             match hash_file(algo, &name, false, &mut read_stdin) {
                 Hashed::Ok(digest) => {
                     let line = render(algo, &name, binary, &digest, set.tag, set.zero);
-                    if out.write_all(&line).and_then(|()| out.flush()).is_err() {
-                        // A write error here is upstream's `close_stdout`, which
-                        // reports and exits 1 rather than continuing to a file
-                        // whose checksum nobody will see.
-                        diag!("{}: write error", algo.program);
-                        return ExitCode::from(1);
-                    }
+                    // Cannot fail: a [`Stream`] latches its failure instead of
+                    // returning it, and `close_stdout` below is what reads the
+                    // verdict — in upstream's words rather than the bare
+                    // `write error` this line used to print without an errno.
+                    let _ = out.write_all(&line);
                 }
                 Hashed::Missing | Hashed::Failed => ok = false,
             }
@@ -759,11 +766,20 @@ fn run_main(algo: &Algorithm) -> ExitCode {
     // not yet reported — is already reported by `hash_file`.
     let _ = read_stdin;
 
-    if ok {
+    let earned = if ok {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
-    }
+    };
+    stdfd::close_stdout(algo.program, out, earned)
+}
+
+/// `--help` and `--version`: the whole of the program's output, and then the
+/// verdict on whether it arrived.
+fn say(algo: &Algorithm, text: &str) -> ExitCode {
+    let mut out = stdfd::Stream::stdout();
+    let _ = out.write_all(text.as_bytes());
+    stdfd::close_stdout(algo.program, out, ExitCode::SUCCESS)
 }
 
 /// One output record: `output_file`, both layouts.

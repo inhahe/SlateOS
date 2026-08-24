@@ -18,6 +18,7 @@
 //!   1  some hunks failed
 //!   2  error (cannot read patch, etc.)
 
+use coreutils::diag;
 use coreutils::quote::quotef_os;
 use std::env;
 use std::fs;
@@ -371,7 +372,7 @@ fn main() {
     let opts = match parse_args(&args) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("patch: {e}");
+            diag!("patch: {e}");
             process::exit(2);
         }
     };
@@ -381,14 +382,14 @@ fn main() {
         match fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("patch: {}: {e}", quotef_os(path));
+                diag!("patch: {}: {e}", quotef_os(path));
                 process::exit(2);
             }
         }
     } else {
         let mut buf = String::new();
         if io::stdin().read_to_string(&mut buf).is_err() {
-            eprintln!("patch: error reading stdin");
+            diag!("patch: error reading stdin");
             process::exit(2);
         }
         buf
@@ -397,7 +398,7 @@ fn main() {
     let file_patches = parse_patch(&patch_input);
 
     if file_patches.is_empty() {
-        eprintln!("patch: no valid patches found in input");
+        diag!("patch: no valid patches found in input");
         process::exit(2);
     }
 
@@ -425,9 +426,9 @@ fn main() {
 
         if !opts.silent {
             if opts.dry_run {
-                eprintln!("checking file {file_path}...");
+                diag!("checking file {file_path}...");
             } else {
-                eprintln!("patching file {file_path}");
+                diag!("patching file {file_path}");
             }
         }
 
@@ -441,7 +442,7 @@ fn main() {
                     if fp.old_path == "/dev/null" {
                         String::new()
                     } else {
-                        eprintln!("patch: can't open file {file_path}: {e}");
+                        diag!("patch: can't open file {file_path}: {e}");
                         any_failed = true;
                         continue;
                     }
@@ -470,7 +471,7 @@ fn main() {
                 None => {
                     hunks_failed += 1;
                     if !opts.silent {
-                        eprintln!(
+                        diag!(
                             "patch: Hunk #{} FAILED at line {}",
                             hunk_idx + 1,
                             hunk.old_start
@@ -483,7 +484,7 @@ fn main() {
         if hunks_failed > 0 {
             any_failed = true;
             if !opts.silent {
-                eprintln!(
+                diag!(
                     "patch: {hunks_failed} out of {} hunks FAILED for {file_path}",
                     hunks_applied + hunks_failed
                 );
@@ -495,7 +496,7 @@ fn main() {
             if opts.backup && Path::new(&file_path).exists() {
                 let backup_path = format!("{file_path}.orig");
                 if let Err(e) = fs::copy(&file_path, &backup_path) {
-                    eprintln!("patch: cannot create backup {backup_path}: {e}");
+                    diag!("patch: cannot create backup {backup_path}: {e}");
                 }
             }
 
@@ -514,7 +515,7 @@ fn main() {
             }
 
             if let Err(e) = fs::write(&file_path, &output) {
-                eprintln!("patch: cannot write {file_path}: {e}");
+                diag!("patch: cannot write {file_path}: {e}");
                 any_failed = true;
             }
         }

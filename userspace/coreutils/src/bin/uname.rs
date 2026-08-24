@@ -48,11 +48,13 @@
 //! name: it contains a space, and `uname -a` is routinely split on whitespace.
 //! One field that is two words silently shifts every field after it.
 
+use coreutils::diag;
+use coreutils::stdfd;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, ErrorKind, Write};
-use std::process;
+use std::process::ExitCode;
 
 use coreutils::errmsg::strerror;
 use coreutils::quote::{os_bytes, quote};
@@ -363,7 +365,7 @@ fn render(system: &System, selection: Selection) -> Vec<u8> {
 /// `println!` panics when stdout cannot be written, so `uname -a | head -1`
 /// could end in a panic message. A closed pipe is the one write error that
 /// means success.
-fn write_line(bytes: &[u8]) -> i32 {
+fn write_line(bytes: &[u8]) -> u8 {
     let mut out = io::stdout().lock();
     let result = out
         .write_all(bytes)
@@ -373,7 +375,7 @@ fn write_line(bytes: &[u8]) -> i32 {
         Ok(()) => 0,
         Err(e) if e.kind() == ErrorKind::BrokenPipe => 0,
         Err(e) => {
-            eprintln!("uname: write error: {}", strerror(&e));
+            diag!("uname: write error: {}", strerror(&e));
             1
         }
     }
@@ -400,7 +402,15 @@ fn usage() -> &'static str {
      /proc/sys/kernel, so they always match uname(2)."
 }
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     // `args_os`, not `args`: `env::args()` unwraps `into_string()` and so
     // panics outright on an argument that is not UTF-8. An unusable option is
     // worth a diagnostic, not a crash.
@@ -409,8 +419,8 @@ fn main() {
     let request = match parse_args(&args) {
         Ok(request) => request,
         Err(message) => {
-            eprintln!("uname: {message}");
-            process::exit(1);
+            diag!("uname: {message}");
+            return ExitCode::from(1);
         }
     };
 
@@ -419,7 +429,7 @@ fn main() {
         Request::Version => write_line(b"uname (SlateOS coreutils) 0.1.0"),
         Request::Print(selection) => write_line(&render(&read_system(), selection)),
     };
-    process::exit(status);
+    ExitCode::from(status)
 }
 
 #[cfg(test)]

@@ -47,9 +47,11 @@
 //! `cut` on this host's `PATH`, which is MSYS2's. `scripts/cut-diff.sh` is the
 //! executable form of every claim in this file.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{os_bytes, quote, quotef};
+use coreutils::stdfd;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Write};
@@ -140,7 +142,15 @@ struct Draft {
     line_delim: Option<u8>,
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         Ok(Request::Help) => {
@@ -156,7 +166,7 @@ fn main() -> ExitCode {
             // The referral, when there is one, is part of the message, and only
             // the first line carries the `cut: ` prefix — which is what GNU
             // prints, including for the two-line `-s` diagnostic.
-            eprintln!("cut: {e}");
+            diag!("cut: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }
@@ -1023,7 +1033,7 @@ fn cut_stream<R: Read, W: Write>(
 fn cut_file<W: Write>(name: &OsString, options: &Options, out: &mut W) -> io::Result<bool> {
     let bytes = arg_bytes(name);
     let read_error = |e: &io::Error| {
-        eprintln!("cut: {}: {}", quotef(&bytes), strerror(e));
+        diag!("cut: {}: {}", quotef(&bytes), strerror(e));
     };
 
     if bytes == b"-" {
@@ -1039,7 +1049,7 @@ fn cut_file<W: Write>(name: &OsString, options: &Options, out: &mut W) -> io::Re
     let file = match File::open(name) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("cut: {}: {}", quotef(&bytes), strerror(&e));
+            diag!("cut: {}: {}", quotef(&bytes), strerror(&e));
             return Ok(false);
         }
     };
@@ -1084,7 +1094,7 @@ fn write_failure(e: &io::Error, ok: bool) -> ExitCode {
     if e.kind() == ErrorKind::BrokenPipe {
         return ExitCode::from(u8::from(!ok));
     }
-    eprintln!("cut: write error: {}", strerror(e));
+    diag!("cut: write error: {}", strerror(e));
     ExitCode::from(1)
 }
 

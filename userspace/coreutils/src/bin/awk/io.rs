@@ -294,7 +294,15 @@ impl Outputs {
             Some(Sink::Stderr) => {
                 // stderr is unbuffered, as C's is, so a diagnostic appears when
                 // it is written rather than when awk exits.
-                io::stderr().write_all(bytes)
+                //
+                // The raw `write(2)` and not `io::stderr()`, which answers `Ok`
+                // to a write that never happened: the runtime maps `EBADF` on a
+                // standard descriptor to success, so `print > "/dev/stderr"`
+                // with descriptor 2 closed would look like it had worked. The
+                // error is returned rather than recorded because this is awk's
+                // *output* and the caller already reports it — measured,
+                // `gawk '{print > "/dev/stderr"}' f 2>/dev/full` is status 2.
+                coreutils::stdfd::write_all(2, bytes)
             }
             None => Ok(()),
         }

@@ -22,11 +22,13 @@
 //! the output is truncated only when `seek=` is absent, and every seek, skip,
 //! write and flush failure is fatal rather than ignored.
 
+use coreutils::diag;
 use coreutils::quote::quoteaf_os;
+use coreutils::stdfd;
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::process;
+use std::process::ExitCode;
 use std::time::Instant;
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -52,19 +54,33 @@ impl Default for DdOperands {
     }
 }
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let ops = match parse_operands(&args) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("dd: {e}");
-            process::exit(1);
+            diag!("dd: {e}");
+            return ExitCode::from(1);
         }
     };
 
     let bs = ops.bs;
-    let mut reader = open_input(&ops, bs);
-    let mut writer = open_output(&ops, bs);
+    // `None` from either means the failure has already been reported in full;
+    // all that is left for the caller is the status.
+    let Some(mut reader) = open_input(&ops, bs) else {
+        return ExitCode::from(1);
+    };
+    let Some(mut writer) = open_output(&ops, bs) else {
+        return ExitCode::from(1);
+    };
 
     let start = Instant::now();
     let mut buf = vec![0u8; bs];
@@ -85,8 +101,8 @@ fn main() {
             Ok(0) => break,
             Ok(n) => n,
             Err(e) => {
-                eprintln!("dd: read error: {e}");
-                process::exit(1);
+                diag!("dd: read error: {e}");
+                return ExitCode::from(1);
             }
         };
 
@@ -106,8 +122,8 @@ fn main() {
                 total_bytes = total_bytes.saturating_add(n as u64);
             }
             Err(e) => {
-                eprintln!("dd: write error: {e}");
-                process::exit(1);
+                diag!("dd: write error: {e}");
+                return ExitCode::from(1);
             }
         }
     }
@@ -115,15 +131,17 @@ fn main() {
     // A failed flush loses the tail of the copy. Reporting success after that
     // is how a truncated file gets treated as a good one by whatever runs next.
     if let Err(e) = writer.flush() {
-        eprintln!("dd: write error: {e}");
-        process::exit(1);
+        diag!("dd: write error: {e}");
+        return ExitCode::from(1);
     }
     let elapsed = start.elapsed();
     let secs = elapsed.as_secs_f64();
 
-    eprintln!("{blocks_in}+{partial_in} records in");
-    eprintln!("{blocks_out}+{partial_out} records out");
-    eprintln!("{}", format_rate_line(total_bytes, secs));
+    diag!("{blocks_in}+{partial_in} records in");
+    diag!("{blocks_out}+{partial_out} records out");
+    diag!("{}", format_rate_line(total_bytes, secs));
+
+    ExitCode::SUCCESS
 }
 
 /// Open the input and position it past `skip=` blocks.
@@ -131,7 +149,12 @@ fn main() {
 /// A failure to skip is fatal. It used to be ignored — the code fell back to
 /// the unskipped reader — which meant `skip=` silently copied from offset 0,
 /// producing a file that is the wrong contents rather than an error.
-fn open_input(ops: &DdOperands, bs: usize) -> Box<dyn Read> {
+///
+/// `None` is that fatal failure, already reported. It is returned rather than
+/// exited on so that every one of `dd`'s exits leaves through `main` and is
+/// seen by [`stdfd::close_stderr`]: a `dd if=/nonexistent 2>&-` has to report
+/// GNU's 1 for the lost diagnostic just as much as for the missing file.
+fn open_input(ops: &DdOperands, bs: usize) -> Option<Box<dyn Read>> {
     let skip_bytes = (ops.skip as u64).saturating_mul(bs as u64);
 
     let Some(path) = &ops.input_file else {
@@ -152,31 +175,31 @@ fn open_input(ops: &DdOperands, bs: usize) -> Box<dyn Read> {
                 Ok(0) => break,
                 Ok(n) => discarded = discarded.saturating_add(n as u64),
                 Err(e) => {
-                    eprintln!("dd: read error while skipping: {e}");
-                    process::exit(1);
+                    diag!("dd: read error while skipping: {e}");
+                    return None;
                 }
             }
         }
-        return Box::new(stdin);
+        return Some(Box::new(stdin));
     };
 
     let mut fh = match File::open(path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("dd: failed to open {}: {e}", quoteaf_os(path));
-            process::exit(1);
+            diag!("dd: failed to open {}: {e}", quoteaf_os(path));
+            return None;
         }
     };
     if skip_bytes > 0
         && let Err(e) = fh.seek(SeekFrom::Start(skip_bytes))
     {
-        eprintln!(
+        diag!(
             "dd: cannot skip to offset {skip_bytes} in {}: {e}",
             quoteaf_os(path)
         );
-        process::exit(1);
+        return None;
     }
-    Box::new(fh)
+    Some(Box::new(fh))
 }
 
 /// Open the output and position it past `seek=` blocks.
@@ -188,11 +211,11 @@ fn open_input(ops: &DdOperands, bs: usize) -> Box<dyn Read> {
 /// `disk.img` before writing at the offset. GNU passes `O_TRUNC` only when
 /// `seek=` is absent (and `conv=notrunc` is not given), which is what the
 /// `ops.seek == 0` below reproduces.
-fn open_output(ops: &DdOperands, bs: usize) -> Box<dyn Write> {
+fn open_output(ops: &DdOperands, bs: usize) -> Option<Box<dyn Write>> {
     let seek_bytes = (ops.seek as u64).saturating_mul(bs as u64);
 
     let Some(path) = &ops.output_file else {
-        return Box::new(io::stdout());
+        return Some(Box::new(io::stdout()));
     };
 
     let mut fh = match OpenOptions::new()
@@ -203,8 +226,8 @@ fn open_output(ops: &DdOperands, bs: usize) -> Box<dyn Write> {
     {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("dd: failed to open {}: {e}", quoteaf_os(path));
-            process::exit(1);
+            diag!("dd: failed to open {}: {e}", quoteaf_os(path));
+            return None;
         }
     };
     if seek_bytes > 0
@@ -212,13 +235,13 @@ fn open_output(ops: &DdOperands, bs: usize) -> Box<dyn Write> {
     {
         // Also previously ignored, which wrote the payload at offset 0 — over
         // the very data `seek=` was there to preserve.
-        eprintln!(
+        diag!(
             "dd: cannot seek to offset {seek_bytes} in {}: {e}",
             quoteaf_os(path)
         );
-        process::exit(1);
+        return None;
     }
-    Box::new(fh)
+    Some(Box::new(fh))
 }
 
 /// Parse dd's `key=value` operands.

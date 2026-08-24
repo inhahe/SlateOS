@@ -101,6 +101,7 @@
 //! count changes what an operator *means*, so a wrong count rule hides every
 //! operator bug behind it.
 
+use coreutils::diag;
 use coreutils::quote::{os_bytes, quote};
 use std::cmp::Ordering;
 use std::ffi::OsString;
@@ -192,7 +193,7 @@ fn main() -> ExitCode {
 /// does not masquerade as a behavioural difference.
 fn fail(bracket: bool, e: &Fail) -> ExitCode {
     let prog = if bracket { "[" } else { "test" };
-    eprintln!("{prog}: {}", e.0);
+    diag!("{prog}: {}", e.0);
     ExitCode::from(SYNTAX)
 }
 

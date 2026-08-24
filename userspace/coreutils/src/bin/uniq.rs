@@ -60,9 +60,11 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{os_bytes, quote, quoteaf_os, quotef_os};
+use coreutils::stdfd;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, ErrorKind, Read, Write};
@@ -313,7 +315,15 @@ fn strtol(bytes: &[u8]) -> Option<i64> {
     })
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args, Env::from_process()) {
         Ok(Request::Help) => {
@@ -328,7 +338,7 @@ fn main() -> ExitCode {
         Err(e) => {
             // Only the first line carries the `uniq: ` prefix, and the referral
             // — when there is one — is already part of the message.
-            eprintln!("uniq: {e}");
+            diag!("uniq: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }
@@ -1076,7 +1086,7 @@ fn run(options: &Options, input: &OsString, output: &OsString) -> ExitCode {
         match File::open(input) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("uniq: {}: {}", quotef_os(input), strerror(&e));
+                diag!("uniq: {}: {}", quotef_os(input), strerror(&e));
                 return ExitCode::from(1);
             }
         }
@@ -1087,7 +1097,7 @@ fn run(options: &Options, input: &OsString, output: &OsString) -> ExitCode {
         match File::create(output) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("uniq: {}: {}", quotef_os(output), strerror(&e));
+                diag!("uniq: {}: {}", quotef_os(output), strerror(&e));
                 return ExitCode::from(1);
             }
         }
@@ -1107,7 +1117,7 @@ fn run(options: &Options, input: &OsString, output: &OsString) -> ExitCode {
     if let Some(e) = reader.error.as_ref() {
         // `quoteaf` — always quoted — where the open failure above uses
         // `quotef`, which elides the quotes when the name needs none.
-        eprintln!("uniq: error reading {}: {}", quoteaf_os(input), strerror(e));
+        diag!("uniq: error reading {}: {}", quoteaf_os(input), strerror(e));
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS
@@ -1121,7 +1131,7 @@ fn write_failure(e: &io::Error) -> ExitCode {
     if e.kind() == ErrorKind::BrokenPipe {
         return ExitCode::SUCCESS;
     }
-    eprintln!("uniq: write error: {}", strerror(e));
+    diag!("uniq: write error: {}", strerror(e));
     ExitCode::from(1)
 }
 

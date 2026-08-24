@@ -102,9 +102,11 @@
 //! not needed.
 
 use coreutils::canon::{self, Fs, Links, Mode, RealFs};
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quoteaf, quotef};
+use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -173,7 +175,15 @@ enum Request {
     Run(Flags, Vec<OsString>),
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         Ok(Request::Help) => {
@@ -186,7 +196,9 @@ fn main() -> ExitCode {
         }
         Ok(Request::Run(flags, files)) => {
             let mut out = io::stdout().lock();
-            let mut err = io::stderr().lock();
+            // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
+            // diagnostic that never arrived has to reach `close_stderr`'s flag.
+            let mut err = Stream::stderr();
             let ok = run(&flags, &files, &RealFs, &mut out, &mut err);
             // A closed stdout must not be reported as success: `-z` output is
             // usually piped into `xargs -0`, and a pipe that goes away mid-list
@@ -199,7 +211,7 @@ fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("realpath: {e}");
+            diag!("realpath: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }

@@ -32,6 +32,7 @@
 //! archive that could not be written, or extracting a member that could not
 //! be created, exits 2 (GNU's fatal-error status), not 0.
 
+use coreutils::diag;
 use coreutils::quote::{quoteaf, quotef_os};
 use std::env;
 use std::fs::{self, File};
@@ -110,7 +111,7 @@ fn main() {
     let parsed = match parse_args(&args) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("tar: {e}");
+            diag!("tar: {e}");
             process::exit(1);
         }
     };
@@ -126,7 +127,7 @@ fn main() {
         }
         #[cfg(not(unix))]
         {
-            eprintln!("tar: create mode is unix-only on this build");
+            diag!("tar: create mode is unix-only on this build");
             EXIT_FATAL
         }
     } else if parsed.extract {
@@ -138,7 +139,7 @@ fn main() {
     } else if parsed.list {
         do_list_main(&parsed.archive_file)
     } else {
-        eprintln!("tar: must specify -c, -x, or -t");
+        diag!("tar: must specify -c, -x, or -t");
         1
     };
 
@@ -309,7 +310,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
         Some(path) => match File::create(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("tar: {}: {e}", quotef_os(path));
+                diag!("tar: {}: {e}", quotef_os(path));
                 return EXIT_FATAL;
             }
         },
@@ -323,7 +324,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
         match out.write_all(buf) {
             Ok(()) => true,
             Err(e) => {
-                eprintln!("tar: write error: {e}");
+                diag!("tar: write error: {e}");
                 *status = EXIT_FATAL;
                 false
             }
@@ -335,7 +336,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
         let meta = match fs::metadata(path) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("tar: {}: {e}", quotef_os(name));
+                diag!("tar: {}: {e}", quotef_os(name));
                 *status = EXIT_FATAL;
                 return;
             }
@@ -351,7 +352,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
         let mut f = match File::open(path) {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("tar: {}: {e}", quotef_os(name));
+                diag!("tar: {}: {e}", quotef_os(name));
                 *status = EXIT_FATAL;
                 return;
             }
@@ -373,7 +374,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
         }
 
         if verbose {
-            eprintln!("{name}");
+            diag!("{name}");
         }
 
         let mut remaining = declared;
@@ -394,7 +395,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
                     Ok(n) => filled = filled.saturating_add(n),
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                     Err(e) => {
-                        eprintln!("tar: {}: {e}", quotef_os(name));
+                        diag!("tar: {}: {e}", quotef_os(name));
                         *status = EXIT_FATAL;
                         short = true;
                     }
@@ -412,7 +413,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
             // The file shrank between `metadata` and the read, or never had
             // the length it claimed. The archive stays well-formed because the
             // remaining blocks were padded, but it no longer holds the file.
-            eprintln!(
+            diag!(
                 "tar: {}: file shorter than expected; padded with zeros",
                 quotef_os(name)
             );
@@ -444,7 +445,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
         }
 
         if verbose {
-            eprintln!("{name}");
+            diag!("{name}");
         }
 
         let entries = match fs::read_dir(dir) {
@@ -452,7 +453,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
             Err(e) => {
                 // Previously `if let Ok(entries)`, so an unreadable directory
                 // produced an archive silently missing its whole subtree.
-                eprintln!("tar: {}: {e}", quotef_os(prefix));
+                diag!("tar: {}: {e}", quotef_os(prefix));
                 *status = EXIT_FATAL;
                 return;
             }
@@ -464,7 +465,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
             match entry {
                 Ok(e) => children.push((e.file_name().to_string_lossy().into_owned(), e.path())),
                 Err(e) => {
-                    eprintln!("tar: {}: {e}", quotef_os(prefix));
+                    diag!("tar: {}: {e}", quotef_os(prefix));
                     *status = EXIT_FATAL;
                 }
             }
@@ -496,7 +497,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> 
     // The end-of-archive marker is the last thing written, so a flush that
     // fails here loses precisely the bytes that make the file a valid archive.
     if let Err(e) = out.flush() {
-        eprintln!("tar: write error: {e}");
+        diag!("tar: write error: {e}");
         status = EXIT_FATAL;
     }
     status
@@ -527,7 +528,7 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("tar: {}: {e}", quotef_os(path));
+                diag!("tar: {}: {e}", quotef_os(path));
                 return EXIT_FATAL;
             }
         },
@@ -537,7 +538,7 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
     if let Some(dir) = directory
         && let Err(e) = env::set_current_dir(dir)
     {
-        eprintln!("tar: {}: {e}", quotef_os(dir));
+        diag!("tar: {}: {e}", quotef_os(dir));
         return EXIT_FATAL;
     }
 
@@ -564,7 +565,7 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
 
         // GNU prints this once, not once per member, and only when it applies.
         if raw_name.starts_with('/') && !warned_absolute {
-            eprintln!("tar: Removing leading '/' from member names");
+            diag!("tar: Removing leading '/' from member names");
             warned_absolute = true;
         }
 
@@ -572,7 +573,7 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
         let name = match sanitize_member_name(&raw_name) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("tar: {e}");
+                diag!("tar: {e}");
                 status = EXIT_FATAL;
                 if !skip_data(input.as_mut(), size) {
                     break;
@@ -582,13 +583,13 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
         };
 
         if verbose {
-            eprintln!("{name}");
+            diag!("{name}");
         }
 
         match typeflag {
             b'5' | b'\0' if raw_name.ends_with('/') => {
                 if let Err(e) = fs::create_dir_all(&name) {
-                    eprintln!("tar: {}: {e}", quotef_os(&name));
+                    diag!("tar: {}: {e}", quotef_os(&name));
                     status = EXIT_FATAL;
                 }
             }
@@ -607,7 +608,7 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
                 // is already quoted. `char::from(b'\n')` printed a raw
                 // newline, so a crafted archive could forge a line of `tar`'s
                 // stderr; `quoteaf` renders that byte as `''$'\n'`.
-                eprintln!(
+                diag!(
                     "tar: {}: unsupported entry type {}; skipped",
                     quotef_os(&name),
                     quoteaf(&[other])
@@ -635,7 +636,7 @@ fn extract_regular_file(input: &mut dyn Read, name: &str, size: u64, status: &mu
         && !parent.as_os_str().is_empty()
         && let Err(e) = fs::create_dir_all(parent)
     {
-        eprintln!("tar: {}: {e}", quotef_os(parent));
+        diag!("tar: {}: {e}", quotef_os(parent));
         *status = EXIT_FATAL;
         return skip_data(input, size);
     }
@@ -645,7 +646,7 @@ fn extract_regular_file(input: &mut dyn Read, name: &str, size: u64, status: &mu
         Err(e) => {
             // Still consume the data: the archive may hold members after this
             // one, and abandoning the stream would lose them too.
-            eprintln!("tar: {}: {e}", quotef_os(name));
+            diag!("tar: {}: {e}", quotef_os(name));
             *status = EXIT_FATAL;
             None
         }
@@ -655,7 +656,7 @@ fn extract_regular_file(input: &mut dyn Read, name: &str, size: u64, status: &mu
     let mut block = [0u8; BLOCK_SIZE];
     for _ in 0..data_blocks(size) {
         if input.read_exact(&mut block).is_err() {
-            eprintln!("tar: {}: unexpected end of archive", quotef_os(name));
+            diag!("tar: {}: unexpected end of archive", quotef_os(name));
             *status = EXIT_FATAL;
             return false;
         }
@@ -666,7 +667,7 @@ fn extract_regular_file(input: &mut dyn Read, name: &str, size: u64, status: &mu
         if let Some(f) = file.as_mut()
             && let Err(e) = f.write_all(block.get(..take).unwrap_or(&[]))
         {
-            eprintln!("tar: {}: {e}", quotef_os(name));
+            diag!("tar: {}: {e}", quotef_os(name));
             *status = EXIT_FATAL;
             // Drop the handle so the rest of the member is only skipped, but
             // keep reading so the following headers stay aligned.
@@ -679,7 +680,7 @@ fn extract_regular_file(input: &mut dyn Read, name: &str, size: u64, status: &mu
     if let Some(mut f) = file
         && let Err(e) = f.flush()
     {
-        eprintln!("tar: {}: {e}", quotef_os(name));
+        diag!("tar: {}: {e}", quotef_os(name));
         *status = EXIT_FATAL;
     }
     true
@@ -690,7 +691,7 @@ fn do_list_main(archive_file: &Option<String>) -> i32 {
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("tar: {}: {e}", quotef_os(path));
+                diag!("tar: {}: {e}", quotef_os(path));
                 return EXIT_FATAL;
             }
         },
@@ -705,7 +706,7 @@ fn do_list_main(archive_file: &Option<String>) -> i32 {
         if e.kind() == io::ErrorKind::BrokenPipe {
             return 0;
         }
-        eprintln!("tar: 'standard output': {e}");
+        diag!("tar: 'standard output': {e}");
         return EXIT_FATAL;
     }
     0

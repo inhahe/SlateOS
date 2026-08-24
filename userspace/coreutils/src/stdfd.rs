@@ -275,6 +275,16 @@ mod imp {
         Ok(())
     }
 
+    /// The one place `io::stdout()`/`io::stderr()` are still used on purpose.
+    ///
+    /// Everywhere else in the crate they are a bug, because the runtime maps
+    /// `EBADF` on a standard descriptor to `Ok(buf.len())` and a diagnostic
+    /// that never arrived then looks delivered. Here there is no alternative:
+    /// this arm is the build without libc, so there is no `write(2)` to call
+    /// and no descriptor to call it on — only the runtime's own handles. The
+    /// lie is therefore still present on this target, which is the Windows host
+    /// build used to run the unit tests; the descriptor behaviour those tests
+    /// check lives on the Linux and x86_64-slateos arms above.
     pub fn write_all(fd: i32, bytes: &[u8]) -> io::Result<()> {
         match fd {
             1 => io::stdout().write_all(bytes),

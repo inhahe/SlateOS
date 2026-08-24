@@ -72,6 +72,7 @@ mod keydef;
 mod order;
 
 use coreutils::diag;
+use coreutils::stdfd::Stream;
 use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::fs::File;
@@ -328,7 +329,9 @@ fn check(cfg: &Config, lines: &[&[u8]], mode: Check) -> i32 {
         };
         if disordered {
             if mode == Check::Diagnose {
-                let mut err = io::stderr().lock();
+                // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
+                // diagnostic that never arrived has to reach `close_stderr`'s flag.
+                let mut err = Stream::stderr();
                 // The offending line goes out as bytes: it is not necessarily
                 // text, and a diagnostic is not a reason to mangle it.
                 let _ = write!(err, "sort: {name}:{}: disorder: ", index.saturating_add(1));

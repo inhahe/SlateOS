@@ -71969,12 +71969,50 @@ routed through `diag!` now; the distinction that matters is not
 diagnostic-vs-output but whether the bytes were *the program's* at all, and
 `more`'s prompt is echo to a terminal rather than output.
 
+### Done, 2026-08-24 — the `io::stderr()` substitutions
+
+All twenty of them, in `awk`, `cp`, `du`, `find` ×2, `ln`, `ls`, `mkdir`,
+`mkfifo`, `mv`, `od` ×2, `readlink`, `realpath`, `rm`, `rmdir`, `sed`, `sort`
+and `touch`. Three named `io::stderr()` sites remain in the crate and are all
+correct: two are `is_terminal` queries, which ask rather than write, and the
+third is `stdfd`'s own non-libc fallback, where there is no `write(2)` to call
+— now commented as the one deliberate use.
+
+They did not all want the same replacement, and which one they wanted turned on
+a question the code could not answer:
+
+| shape | replacement | why |
+|---|---|---|
+| `let mut err = io::stderr()`, threaded as `&mut impl Write` (15 sites) | `Stream::stderr()` | `Stream` implements `Write`, so the threading is untouched, and its `record` sets the flag |
+| a `/dev/stderr` **sink** the program writes its output to, returning `io::Result` (`awk`, `find -fprint`, `sed w`) | `stdfd::write_all(2, …)` | the caller already reports the error and maps it to a status; it only needed to *see* one |
+| a raw-byte diagnostic with a `let _ =` (`od` ×2) | `stdfd::diag_bytes` | nowhere left to report to, so record it and let `close_stderr` speak |
+
+**`find`'s `-ok` prompt was the interesting one**, because it looks exactly
+like `more`'s `--More--` and behaves oppositely. Both are prompts rather than
+complaints, and the standing comment in `find` said the write error was
+"dropped deliberately". Measured:
+
+```
+find q.txt -maxdepth 0 -ok true {} \; </dev/null 2>/dev/full → 1
+find q.txt -maxdepth 0 -ok true {} \; </dev/null 2>/dev/null → 0
+```
+
+So GNU does fold the lost prompt into the status — `close_stdout` runs from
+`atexit` and does not care that the unwritable bytes were a question. It goes
+through `diag_bytes`. `more` keeps `write_all` because it is not a GNU utility
+and registers nothing; that is the difference, not prompt-versus-diagnostic.
+
+Three sinks were also assembled into one buffer and written once, instead of
+two-to-five `write(2)` calls: `find`'s prompt, `sed`'s `w /dev/stderr` line and
+its newline, matching upstream's single `fprintf`. Separate calls let another
+process's output land in the middle of a line on a shared terminal.
+
 **Still open**, and re-scoped to the closed-descriptor sweep rather than to
-this entry: the `io::stderr()` substitutions listed above, the `close_stderr`
-funnel for the ~65 bins that still lack one, and step 2's hand-written tails in
-`env`, `ls` and `sort` (`tty`'s is done). Until a bin has the funnel its flag
-is set and never read, so the sweep so far converts a 134 into the *old* status
-rather than into GNU's — an improvement with no regression, but not yet parity.
+this entry: the `close_stderr` funnel for the ~65 bins that still lack one, and
+step 2's hand-written tails in `env`, `ls` and `sort` (`tty`'s is done). Until a
+bin has the funnel its flag is set and never read, so the work so far converts a
+134 into the *old* status rather than into GNU's — an improvement with no
+regression, but not yet parity.
 
 **Found on the way, and not the same bug.** `wc >/dev/full` exits **0**
 silently — it never checks the write at all. `head >/dev/full` reports the

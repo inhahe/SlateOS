@@ -72,6 +72,8 @@ use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::human::{Opts, default_block_size, human_readable};
 use coreutils::pathname::{base_len, last_component, last_component_offset};
 use coreutils::quote::{Mb, Style, next_mb, os_bytes, quote, quoteaf, quotef};
+#[cfg(unix)]
+use coreutils::stdfd::Stream;
 use coreutils::vercmp::version;
 use coreutils::xnum::{self, Status, strtol_fatal};
 use modechange::{
@@ -5285,7 +5287,9 @@ fn main() -> ExitCode {
         ),
     };
 
-    let mut err = std::io::stderr();
+    // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
+    // diagnostic that never arrived has to reach `close_stderr`'s flag.
+    let mut err = Stream::stderr();
     let request = match parse_args(&argv, &env, &mut err) {
         Ok(request) => request,
         Err(refusal) => {

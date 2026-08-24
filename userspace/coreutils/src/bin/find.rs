@@ -84,6 +84,7 @@ use coreutils::errmsg::{self, strerror};
 #[cfg(unix)]
 use coreutils::quote::os_bytes;
 use coreutils::quote::{self, os_from_bytes, quote};
+use coreutils::stdfd;
 use coreutils::{cfmt, extfloat, fnmatch, pathname};
 #[cfg(unix)]
 use std::collections::HashMap;
@@ -3929,7 +3930,12 @@ impl Ctx<'_> {
                 Some(Sink::Stdout) => io::stdout()
                     .write_all(buf)
                     .and_then(|()| io::stdout().flush()),
-                Some(Sink::Stderr) => io::stderr().write_all(buf),
+                // The raw `write(2)` and not `io::stderr()`, whose `EBADF` the
+                // runtime turns into success: `-fprint /dev/stderr` would then
+                // report nothing and exit 0. The error is returned rather than
+                // recorded because the arm below already turns it into the
+                // status 1 that `find … -fprint /dev/stderr 2>/dev/full` gives.
+                Some(Sink::Stderr) => stdfd::write_all(2, buf),
                 Some(Sink::File(f)) => f.write_all(buf).and_then(|()| f.flush()),
                 // Accumulates rather than drains: the point of it is that the
                 // bytes are still there when the walk has finished.
@@ -4102,17 +4108,26 @@ impl Ctx<'_> {
             // *different* path from the one about to be handed to the command
             // would be asking them to confirm the wrong thing.
             //
-            // `write_all` errors are dropped deliberately: the answer to a
-            // failed write on stderr is not a second write to stderr, and the
-            // read that follows is what actually decides whether to run.
-            let mut e = io::stderr().lock();
-            let _ = e.write_all(b"< ");
-            let _ = e.write_all(&prog);
-            let _ = e.write_all(b" ... ");
-            let _ = e.write_all(&it.path);
-            let _ = e.write_all(b" > ? ");
-            let _ = e.flush();
-            drop(e);
+            // Assembled and written once, as upstream's single `fprintf` is:
+            // five separate `write(2)` calls can have another process's output
+            // land in the middle of the question being asked.
+            //
+            // Nothing is done with the failure *here* — the answer to a failed
+            // write on stderr is not a second write to stderr, and the read
+            // that follows is what actually decides whether to run. It is not
+            // dropped either, though: `diag_bytes` records it, and a lost
+            // prompt does change the status upstream. Measured, `find f -ok
+            // true {} \; </dev/null 2>/dev/full` is 1 where the same run with a
+            // writable stderr is 0 — `close_stdout` runs from `atexit` and does
+            // not care that the unwritable bytes were a prompt rather than a
+            // complaint.
+            let mut prompt = Vec::new();
+            prompt.extend_from_slice(b"< ");
+            prompt.extend_from_slice(&prog);
+            prompt.extend_from_slice(b" ... ");
+            prompt.extend_from_slice(&it.path);
+            prompt.extend_from_slice(b" > ? ");
+            stdfd::diag_bytes(&prompt);
             if !self.tree.confirm() {
                 return false;
             }

@@ -57,6 +57,8 @@ use coreutils::fnmatch::{Flags, fnmatch};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::human::{Opts, default_block_size, human_readable};
 use coreutils::quote::{os_bytes, quote, quoteaf, quotef};
+#[cfg(unix)]
+use coreutils::stdfd::Stream;
 // Only [`RealTree`] turns a byte path back into an `OsString`, and it is the
 // half of this file that the Windows development host does not compile — so
 // importing this unconditionally is an unused import there and a needed one on
@@ -1120,7 +1122,9 @@ fn main() -> ExitCode {
     let request = match parse_args(&argv, &env, &slurp) {
         Ok(request) => request,
         Err(refusal) => {
-            refusal.print(&mut io::stderr());
+            // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
+            // diagnostic that never arrived has to reach `close_stderr`'s flag.
+            refusal.print(&mut Stream::stderr());
             return ExitCode::from(u8::try_from(refusal.status).unwrap_or(1));
         }
     };
@@ -1139,7 +1143,9 @@ fn main() -> ExitCode {
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    let mut err = io::stderr();
+    // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
+    // diagnostic that never arrived has to reach `close_stderr`'s flag.
+    let mut err = Stream::stderr();
 
     let (roots, list) = match source {
         Source::Operands(names) => (names, None),

@@ -1242,9 +1242,18 @@ impl Exec {
             return out.line(bytes, true);
         }
         if w.path == "/dev/stderr" {
-            let mut e = io::stderr();
-            e.write_all(bytes)?;
-            return e.write_all(b"\n");
+            // Assembled and written once, because `write_all` here is one
+            // `write(2)` per call and a line torn into two of them can have
+            // another process's output land between the text and its newline.
+            //
+            // The raw `write(2)` and not `io::stderr()`, whose `EBADF` the
+            // runtime reports back as success: upstream gives status 4 for
+            // `sed 'w /dev/stderr' f 2>&-` and for `2>/dev/full`, and it can
+            // only be 4 here if the failure is visible to the `?` below.
+            let mut line = Vec::with_capacity(bytes.len().saturating_add(1));
+            line.extend_from_slice(bytes);
+            line.push(b'\n');
+            return coreutils::stdfd::write_all(2, &line);
         }
         if w.failed {
             return Ok(());

@@ -71,6 +71,7 @@ use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quoteaf_os};
+use coreutils::stdfd::Stream;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -149,7 +150,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Request::Run(flags, names)) => {
-            let mut err = io::stderr().lock();
+            // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
+            // diagnostic that never arrived has to reach `close_stderr`'s flag.
+            let mut err = Stream::stderr();
             if make_all(&flags, &names, &mut err) {
                 ExitCode::SUCCESS
             } else {

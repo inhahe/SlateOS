@@ -162,6 +162,7 @@ use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quoteaf_os};
+use coreutils::stdfd::Stream;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::{self, Write};
@@ -359,7 +360,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Request::Run(flags, files)) => {
-            let mut err = io::stderr().lock();
+            // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
+            // diagnostic that never arrived has to reach `close_stderr`'s flag.
+            let mut err = Stream::stderr();
             if touch_all(&flags, &files, &mut err) {
                 ExitCode::SUCCESS
             } else {

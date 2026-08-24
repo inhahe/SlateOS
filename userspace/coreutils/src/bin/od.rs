@@ -167,8 +167,13 @@ fn diagnose(body: &[u8]) {
     line.extend_from_slice(b"od: ");
     line.extend_from_slice(body);
     line.push(b'\n');
-    // A failed write to stderr has nowhere left to be reported.
-    let _ = io::stderr().write_all(&line);
+    // A failed write to stderr has nowhere left to be reported, and upstream
+    // does not report it either: `error()` checks nothing. It is not
+    // *forgotten*, though — `diag_bytes` records it, and `close_stderr` turns
+    // it into the status, which is all upstream's `fclose (stderr)` does with
+    // it. `io::stderr()` could do neither: the runtime maps its `EBADF` to
+    // success, so the diagnostic would look delivered when it was not.
+    coreutils::stdfd::diag_bytes(&line);
 }
 
 fn diagnose_str(s: &str) {
@@ -1844,7 +1849,10 @@ fn main() -> ExitCode {
                 diagnose(message);
             }
             if fail.referral {
-                let _ = io::stderr().write_all(b"Try 'od --help' for more information.\n");
+                // Through `diag_bytes` for the same reason `diagnose` is: this
+                // is half of the refusal, and losing it has to count the same
+                // way losing the other half does.
+                coreutils::stdfd::diag_bytes(b"Try 'od --help' for more information.\n");
             }
             ExitCode::from(u8::try_from(fail.status).unwrap_or(1))
         }

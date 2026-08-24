@@ -73440,3 +73440,50 @@ three moved from 1 to 2 as part of it, for the same reason — inside them, 1 is
 spent. Everywhere else in the shell a usage error is still 1, and the 17
 `"Syntax error: …"` sites remain queued for flat `set_exit(1)` exactly as
 originally planned.
+
+### 2026-08-24 — `gunzip FILE` compresses a file that isn't gzip, instead of refusing
+
+**In short:** typing `gunzip notes.txt` does not report "that isn't a gzip
+file". It *compresses* `notes.txt` and writes `notes.txt.gz` — the exact
+opposite of what was asked. The command cannot tell which name it was invoked
+as, so it guesses from the file's contents, and guesses wrong in the one case
+where the user was most explicit.
+
+**Where.** `kernel/src/kshell.rs`, `cmd_gunzip` (the mode test is the
+`if compress_mode || (!is_gzip && !test_only && !list_mode)` at the top of the
+decompress path), and the dispatch entry `"gunzip" | "gzip" => cmd_gunzip(args)`.
+
+**Root cause.** One function serves both commands, and `dispatch` passes only
+the arguments — argv[0] is discarded before the function runs. Lacking the name,
+`cmd_gunzip` infers the mode from the file's magic bytes: gzip magic means
+decompress, anything else means compress. That inference is right for `gzip`
+and backwards for `gunzip`, and no amount of care inside the function can fix
+it, because the information it needs was thrown away by the caller.
+
+Two consequences beyond the obvious one:
+
+* `gunzip -d FILE` does not help. `-d` is parsed and then ignored (`"-d" => {}`,
+  commented "no-op, default for gunzip"), so the magic-byte guess still runs.
+  Only `-t` and `-l` suppress it, because they are checked in the same
+  condition — which is why self-test rung 29 has to spell `gunzip -t` to reach
+  the `not in gzip format` diagnostic at all.
+* The same shape is worth checking in the sibling pairs. `bunzip2`/`bzip2`,
+  `unxz`/`xz`, `unzstd`/`zstd` and `unlz4`/`lz4` are separate `cmd_*` functions,
+  so they are probably fine, but that has not been verified.
+
+**Proper fix.** Pass the invoked name down: `"gunzip" => cmd_gunzip(args, Mode::Decompress)`,
+`"gzip" => cmd_gunzip(args, Mode::Compress)`, with `-d` and `-c` overriding it
+and the magic-byte sniff kept only as the tie-break for `gzip` with no flags
+(where it is genuinely useful — `gzip file.gz` should not double-compress).
+Then `gunzip` on a non-gzip file reports `gunzip: 'FILE': not in gzip format`
+and exits 1, which is what real gunzip does and what the site already says when
+it is reachable.
+
+**Why it wasn't fixed on the spot.** Found while writing rung 29's assertions
+for the 111-site statusless-bail sweep, which is a mechanical change across
+dozens of commands; folding a behavioural change to the gzip family into that
+commit would make both harder to review and to revert. Queued as the next task.
+
+**Severity.** Data-affecting but not destructive: the original file is not
+removed, so the outcome is a spurious `.gz` alongside it and a command that
+reported success for doing the reverse of its name.

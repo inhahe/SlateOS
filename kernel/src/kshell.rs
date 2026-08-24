@@ -87621,7 +87621,10 @@ fn cmd_cap_groups(args: &str) {
 ///   captags add PATH GROUP     — tag a path with a capability group
 ///   captags remove PATH GROUP  — remove a tag from a path
 ///   captags clear PATH         — remove all tags from a path
-///   captags check PATH UID GID — test access for a uid/gid combo
+///   captags check PATH UID GID [r|w|x|m] — ask the kernel's permission gate
+///       whether that uid/gid may access PATH for the given class (default
+///       read). This is the *whole* verdict, tags and ACLs both, not the tag
+///       layer alone.
 fn cmd_cap_tags(args: &str) {
     use crate::cap::file_tags;
     use crate::cap::groups;
@@ -87735,31 +87738,74 @@ fn cmd_cap_tags(args: &str) {
             }
         }
         "check" => {
-            // captags check <path> <uid> <gid>
+            // captags check <path> <uid> <gid> [r|w|x|m]
+            //
+            // This asks `path_access_verdict` -- the kernel's single permission
+            // gate -- rather than `file_tags::check_access` directly. Querying
+            // the tag layer alone made this command disagree with the kernel it
+            // is meant to report on: a path that tags allow but an ACL denies
+            // printed "ACCESS ALLOWED" for an access that would in fact fail.
+            // A diagnostic that can contradict the thing it diagnoses is worse
+            // than no diagnostic, because it is believed.
+            //
+            // It is also why `check-vfs-permission-gate` insists the tag check
+            // have exactly one caller: a second caller is a second policy that
+            // drifts from the first, and this one already had.
             if parts.len() >= 4 {
                 let path = parts[1];
-                let uid: u32 = parts[2].parse().unwrap_or(u32::MAX);
-                let gid: u32 = parts[3].parse().unwrap_or(u32::MAX);
-                if uid == u32::MAX || gid == u32::MAX {
-                    crate::console_println!("Usage: captags check <path> <uid> <gid>");
+                let Ok(uid) = parts[2].parse::<u32>() else {
+                    crate::console_println!("captags: bad uid '{}'", parts[2]);
+                    set_exit(1);
                     return;
-                }
-                match file_tags::check_access(uid, gid, &[], path) {
+                };
+                let Ok(gid) = parts[3].parse::<u32>() else {
+                    crate::console_println!("captags: bad gid '{}'", parts[3]);
+                    set_exit(1);
+                    return;
+                };
+                // The access class matters to the ACL half, which grants read,
+                // write and execute independently; tags are mandatory and
+                // ignore it. Read is the default because it is the question
+                // being asked in nearly every case.
+                let want_arg = parts.get(4).copied().unwrap_or("r");
+                let want = match want_arg {
+                    "r" | "read" => crate::fs::vfs::PathAccess::Read,
+                    "w" | "write" => crate::fs::vfs::PathAccess::Write,
+                    "x" | "exec" | "execute" => crate::fs::vfs::PathAccess::Execute,
+                    "m" | "meta" | "metadata" => crate::fs::vfs::PathAccess::Metadata,
+                    other => {
+                        crate::console_println!(
+                            "captags: unknown access class '{}' (want r, w, x or m)",
+                            other
+                        );
+                        set_exit(1);
+                        return;
+                    }
+                };
+                let resolved = resolve_path(path);
+                match crate::fs::vfs::path_access_verdict(&resolved, uid, gid, &[], want) {
                     Ok(()) => crate::console_println!(
-                        "ACCESS ALLOWED for uid={} gid={} on '{}'",
+                        "ACCESS ALLOWED ({}) for uid={} gid={} on '{}'",
+                        want_arg,
                         uid,
                         gid,
-                        path
+                        resolved.display()
                     ),
-                    Err(_) => crate::console_println!(
-                        "ACCESS DENIED for uid={} gid={} on '{}'",
-                        uid,
-                        gid,
-                        path
-                    ),
+                    Err(e) => {
+                        crate::console_println!(
+                            "ACCESS DENIED ({}) for uid={} gid={} on '{}': {}",
+                            want_arg,
+                            uid,
+                            gid,
+                            resolved.display(),
+                            e
+                        );
+                        set_exit(1);
+                    }
                 }
             } else {
-                crate::console_println!("Usage: captags check <path> <uid> <gid>");
+                crate::console_println!("Usage: captags check <path> <uid> <gid> [r|w|x|m]");
+                set_exit(1);
             }
         }
         _ => {

@@ -3494,9 +3494,14 @@ rm -f "$PIDFILE"
 # the in-guest canary cannot reach.  Two boots of one binary minutes apart read
 # 160s and 365s while the canary called the 365s run its cleanest ever.
 #
-# A separate epoch stamp rather than reusing ELAPSED: ELAPSED counts `sleep 1`
-# iterations plus the loop body's own work, so it drifts upward on exactly the
-# busy hosts whose measurement matters most.
+# A separate epoch stamp rather than reusing ELAPSED.  When this was written
+# that was because ELAPSED counted `sleep 1` iterations plus the loop body's own
+# work, so it drifted on exactly the busy hosts whose measurement matters most.
+# ELAPSED is wall-clock as of 2026-08-24 (see the wait loop below), so the two
+# would now agree -- but they are still kept apart, because they start at
+# different instants: this one is stamped before QEMU is launched, ELAPSED's
+# after, and the launch itself is not free.  Fixing ELAPSED does not make this
+# redundant; it makes the pair consistent.
 QEMU_START_EPOCH=$(date +%s)
 #
 # `-device ati-vga,model=rv100` presents a Radeon 7000 (PCI 1002:5159) whose
@@ -3665,10 +3670,57 @@ trap 'on_boot_exit "$?" signal' INT TERM
 trap 'on_boot_exit "$?" exit' EXIT
 
 # Wait for BOOT_OK or timeout
+#
+# ELAPSED IS WALL-CLOCK SECONDS, NOT ITERATIONS, AND THE DIFFERENCE DECIDES
+# PASS/FAIL.  Until 2026-08-24 this loop counted its own iterations
+# (`ELAPSED=$((ELAPSED + 1))` after a `sleep 1`).  An iteration is not a second:
+# it is `sleep 1` *plus* a `grep -q` over a serial log that reaches 2.7 MB, plus
+# the stall-tracking `stat`.  Measured against this script's own epoch stamps,
+# the counter ran 22-26% slow on an **idle** host and worse on a loaded one:
+#
+#   | boot    | host   | ELAPSED at BOOT_OK | guest armed+arm | real QEMU wall |
+#   |---------|--------|--------------------|-----------------|----------------|
+#   | batch40 | loaded | 665 s              | ~890 s          | 903 s          |
+#   | batch41 | idle   | 349 s              | ~472 s          | 465 s          |
+#   | batch42 | idle   | 439 s              |  549 s          | 563 s          |
+#
+# The guest's own clock tracks real time to within ~2.5%; the drift was all
+# here.  Three things were wrong as a result:
+#
+#  1. **`$TIMEOUT` did not bound wall time.**  batch40's "900 s timeout" let
+#     QEMU run 903 s and would have let it reach ~1200 s.  The overrun scales
+#     with host load, so the kill under-fires exactly when a run is most likely
+#     to need it.
+#  2. **`"$WAIT_MARKER detected after Ns"` was systematically low**, and it is
+#     the number a reader quotes when comparing boots.
+#  3. **The kernel's liveness watchdog and this timeout were in different
+#     units.**  The harness passes `$TIMEOUT` to the guest as
+#     `sched.boot_deadline_ms`, and `liveness_arm` derives
+#     `deadline = timeout - 45 s - now_at_arm` measured in *real* monotonic
+#     nanoseconds.  With `$TIMEOUT` denominated in slow iterations, the guest's
+#     deadline landed hundreds of seconds before the harness's kill instead of
+#     the 45 s the design intends -- so a healthy-but-slow boot tripped the
+#     watchdog while the harness still thought it had a quarter of its budget
+#     left.  That is the mechanism behind
+#     known-issues.md -> TD-A-BOOT-TEST-IS-NOT-ISOLATED-FROM-HOST-LOAD, which
+#     was filed as "host contention breaks an assumption" when it is really a
+#     unit mismatch between two clocks that are supposed to be the same one.
+#
+# This does *not* make a loaded host's boot pass -- batch40 genuinely needed
+# 903 s of a 855 s allowance, and no clock change invents time.  What it buys is
+# that both sides now measure the same thing, so the verdict says "this boot
+# exceeded its wall-clock budget", which is true and actionable, instead of a
+# watchdog report that reads as a hang.
+#
+# `date +%s` per iteration rather than bash's `SECONDS`: SECONDS counts from
+# shell start, which includes the gates, the build and staging.
+WAIT_START_EPOCH="$(date +%s)"
 ELAPSED=0
 # Serial-stall tracking.  We remember the serial log's last observed size and
 # the elapsed time at which it last grew; if (ELAPSED - last-growth) reaches
-# STALL_SECS the kernel has gone silent.
+# STALL_SECS the kernel has gone silent.  Both are wall-clock seconds now, so
+# STALL_SECS means what its name says on a busy host too -- previously a stall
+# had to last ~1.3x STALL_SECS of real time before it was called one.
 #
 # The *tracking* is unconditional even though the stall verdict is opt-in
 # (STALL_SECS > 0), because "was the guest still producing output when the
@@ -3680,7 +3732,7 @@ STALL_LAST_SIZE=-1
 STALL_LAST_GROWTH=0
 while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     sleep 1
-    ELAPSED=$((ELAPSED + 1))
+    ELAPSED=$(( $(date +%s) - WAIT_START_EPOCH ))
 
     # Anchor to line start: the success marker is printed as a standalone line
     # (`serial_println!("BOOT_OK")`).  An UNanchored match also trips on the

@@ -59182,6 +59182,67 @@ the number is right, just unfriendly; printing a guessed name would not be.
 standalone twin so far — `chmod`, `dd`, `tee`, `tar`, `chown`, `stat` — has had
 a silent-wrong-behaviour bug.
 
+### Update 2026-08-23 — rewritten again, against GNU 9.4's `src/stat.c` itself
+
+The 2026-08-22 fix bolted an argument parser onto the existing renderer. That
+closed the headline defect, but opening the file for the `Vec<String>` argv
+conversion (`scripts/argv-utf8.py`) showed the renderer underneath it was still
+an approximation of GNU's, in ways a script can see. It is now a port of
+upstream's `print_it` / `print_stat` / `print_statfs` / `out_*`, read function
+by function, with every expected string measured against real GNU 9.4 before
+being written down. Twelve further defects, all fixed:
+
+1. **`main` collected `Vec<String>`** — the backlog item itself. `stat "$f"`
+   *panicked* on a name holding a non-UTF-8 byte, which is a legal name here.
+   Now `args_os`, with every name and format carried as `&[u8]`/`Vec<u8>`.
+2. **No option clustering and no attached values.** The hand-rolled parser
+   matched whole words, so `stat -c%s f`, `stat -Lt f` and `stat -tc %s f` all
+   failed — and `-c%s` is how the option is nearly always written. Now
+   `coreutils::getopt` with GNU's own `"c:fLt"`.
+3. **No `--help`, no `--version`, no `--cached=MODE`.**
+4. **A format could not hold a non-UTF-8 byte** (it was a `&str`). GNU passes
+   such a format through unchanged.
+5. **`%U`/`%G` printed the number** — the `TD-B-ID-AND-STAT-…` entry below.
+6. **An unknown specifier passed through as itself** (`%Q` printed `%Q`); GNU
+   prints `?`, and a format with a typo in it should not silently look like a
+   literal.
+7. **The width layer implemented `-`, `0` and a width, and nothing else.** GNU
+   has the whole `'-+ #0I` flag set, a width *and* a precision, and filters the
+   flags per specifier — `%+d` prints no sign because `%d` is unsigned
+   upstream, `%#o` on the I/O block size grows no leading zero, `%.3Y` is three
+   digits of fraction, `%10.10A` is how the default block's mode column is
+   built. All of it is now reproduced, including the awkward one: a **negative**
+   epoch with a fraction borrows, so `-1.5s` prints `-1.500` and `-0.5s` prints
+   `-0.500` with a sign on a zero.
+8. **`--printf` knew five escapes.** It now has GNU's full table plus octal,
+   `\xHH` (only when a hex digit follows, so `\xzz` is the *unrecognized escape*
+   `\x`), and the two warnings — `unrecognized escape` and `backslash at end of
+   format` — neither of which changes the exit status, as measured.
+9. **`-` was a file called `-`.** It is standard input, `fstat`ed on fd 0; and
+   in `-f` mode it is the specific error GNU gives for it.
+10. **`%m`, `%r`, `%R`, `%Hd`, `%Ld`, `%Hr`, `%Lr` and `%C` did not exist.**
+    `%m` is a parent-directory walk on `st_dev` (there is no mount table),
+    checked against GNU's answers for `/tmp/x`, `/proc/1/cmdline` and
+    `/dev/null`.
+11. **The default block was the pre-9.x shape** (`Device: %Dh/%dd`,
+    `Size: %-15s`). It is now 9.x's, byte for byte, including the wider variant
+    with `Device type:` that a block or character device selects.
+12. **Times were hard-coded to UTC** with a literal `+0000`, on the reasoning
+    that no timezone database existed. `userspace/localtime` had existed for
+    some time and `ls -l` was already using it; `stat` now renders through the
+    same `%Y-%m-%d %H:%M:%S.%N %z` template upstream hands `nstrftime`.
+
+Two deliberate divergences, both recorded in `design-decisions.md` §371–§372:
+`%N` is **always** quoted (upstream only consults `QUOTING_STYLE` when the user
+wrote the literal two characters `%N`, which is why GNU's own `File:` line
+prints a raw newline for a name containing one — and why GNU's `%.3N` is
+*unquoted*, measured); and `%C` prints a silent `?` rather than reporting a
+failed security-context lookup on a system that has no such concept.
+
+40 host tests, clippy clean on `x86_64-pc-windows-gnu` and
+`x86_64-unknown-linux-gnu`. Still not verified end-to-end — same QEMU gap as
+above.
+
 ---
 
 ## B-kill-CANNOT-SIGNAL-A-PROCESS-GROUP (lane B, 2026-08-22) — FIXED 2026-08-22
@@ -67827,7 +67888,7 @@ actually applied, and so on. `estimated_bytes` should become the result
 of a dry-run walk rather than a constant, so that estimate and result can
 disagree — which is the whole point of having both.
 
-### TD-B-ID-AND-STAT-STILL-CLAIM-ACCOUNT-NAME-LOOKUP-IS-UNBUILT -- HALF FIXED (`id` done, `stat` OPEN), user-visible (lane B, 2026-08-23)
+### TD-B-ID-AND-STAT-STILL-CLAIM-ACCOUNT-NAME-LOOKUP-IS-UNBUILT -- ✅ FIXED 2026-08-23 (`id` and `stat` both done), user-visible (lane B, 2026-08-23)
 
 **What.** `id -n` and `stat`'s `%U`/`%G` print numbers where every other system
 prints names, and each says in a comment that the lookup is not available yet:
@@ -67892,6 +67953,18 @@ granted; gnulib takes the same view, synthesising a list only when `getgroups`
 fails with `ENOSYS`. The real fix is in `getgroups`, not in `id`.
 
 `stat`'s `%U`/`%G` are untouched and this entry stays open for them.
+
+**Update 2026-08-23 (later) -- the `stat` half is fixed; the entry is closed.**
+`stat` was rewritten against GNU 9.4's `src/stat.c` during its own argv
+conversion, and `%U`/`%G` now resolve through `pwdb::Db` — loaded **lazily**,
+only for a format that actually contains one of the two, so `stat -c %s` over a
+thousand files still never opens `/etc/passwd`. An id the database does not
+know prints `UNKNOWN`, which is upstream's word and the one a script greps for,
+rather than the digits: `%u` and `%g` are right there for the number, so
+falling back to it in the *name* field would make the two columns
+indistinguishable. The stale `/etc/users.yaml` (§353) comment is gone rather
+than edited, as this entry prescribed. Eleven further defects came out of that
+file with it — see `B-stat-HAS-NO-OPTIONS-AND-CANNOT-READ-A-CLOCK` above.
 
 ### B-WHOAMI-AND-LOGNAME-TRUST-THE-ENVIRONMENT -- OPEN, security-relevant (lane B, 2026-08-23)
 

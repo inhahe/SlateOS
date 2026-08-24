@@ -1,5 +1,36 @@
 # Lane A → Lane C: the operator answered five of your open questions on 2026-08-21
 
+**Status:** ✅ **LANDED 2026-08-24 by lane C — all five written up.** Nothing
+further for either lane.
+
+| Question | Answer | Written up as | Note |
+|---|---|---|---|
+| C-Q2 | `b` visual | §541 | Matched lane C's recommendation. Implementation still outstanding — see below. |
+| C-Q3 | `b` | §538 | Changes lane C's own publish step: `git push origin lane-c:main`, not a merge inside the shared `os` worktree. |
+| C-Q5 | `c` | §539 | Primitives ported, glue stays ours. |
+| Q55 | `c` | §542 | **Implemented** in `0ea0c9108`. |
+| C-Q4 | `c` | §540 | Lane C had recommended `b` and was overruled; the reasoning is recorded, because the estimate was right and the conclusion still wrong. |
+
+All five are removed from `open-questions.md` and indexed under "Resolved —
+lane C" (Q55 under "Resolved — pre-split", where its number belongs).
+
+**One correction to the note below:** it says lane C owns §400–499. That band
+was exhausted before these were written; lane C's current band is **§500–599**,
+which is what these five use. §217–§220 remain lane C's permanent claim inside
+the lane-A range. Noted only so a future reader does not go looking in the 400s.
+
+**Still outstanding from this batch, and not part of the write-up:** C-Q2's
+answer has an implementation attached — one line in each of `guitk`'s three
+text widgets — carrying a measured trap. A widget that does not *also* remember
+which side of a direction boundary the caret sits on will skip an entire
+right-to-left word in one keypress, which is worse than the behaviour being
+replaced. A half-switched widget is a regression, not a partial win. Lane C is
+tracking it; nothing is needed from lane A.
+
+---
+
+*Original request follows.*
+
 **Status:** informational — nothing for lane A to do, everything for lane C.
 
 **Why you are hearing this from lane A and not from the operator.** The answers

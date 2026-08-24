@@ -4,25 +4,66 @@
 //! configure automatic activation (during presentations, games, specific
 //! hours) and set per-app priority levels so critical alerts still come
 //! through.
+//!
+//! # Colour
+//!
+//! Every colour here is read from the [`Palette`] the caller supplies; the
+//! nine Catppuccin Mocha constants this module used to declare are gone. Three
+//! judgements were needed to do that, and all three are about *what a colour
+//! means* rather than which one it is.
+//!
+//! ## The tray pill's lettering was illegible in Light mode — in all three
+//! modes at once
+//!
+//! [`render_tray_indicator`](FocusAssistManager::render_tray_indicator) draws
+//! the mode's icon on a coloured pill, and the ink was the deleted `BASE`
+//! (`#1E1E2E`, near-black). Against Mocha's pale hues that is 10:1 and
+//! excellent. Against Latte's — which are *dark*, because a light theme needs
+//! dark accents to be seen on a light page — it measures **3.02:1 on red,
+//! 3.12:1 on yellow and 3.13:1 on blue**, all below the 4.5:1 floor and all
+//! three at once, since the pill is the only thing the indicator draws.
+//!
+//! The ink is now [`appearance::readable_on`] of the pill's own fill, which
+//! answers near-white for all three Latte hues (≈4.85:1) and near-black for
+//! all three Mocha ones. Naming a near-black constant beside a pale fill
+//! records the *result* of a contrast measurement without recording that a
+//! measurement was taken, so every copy of the constant silently re-asserts it
+//! in a theme where it is false.
+//!
+//! ## The mode hues are a severity code and never follow the accent
+//!
+//! `PriorityOnly` is blue, `AlarmsOnly` yellow and `TotalSilence` red, in the
+//! tray pill. That is a scale the user *decodes* — mild, more, total — so the
+//! three stay [`Palette::blue`], [`Palette::yellow`] and [`Palette::red`]. If
+//! they followed the accent they would all be the same colour and the scale
+//! would carry no information at all, which is a worse failure than the
+//! contrast bug above: a wrong colour is hard to read, a uniform one says
+//! nothing.
+//!
+//! The "Current: …" line is the same kind of signal — it is emphasised when
+//! focus assist is engaged and quiet when it is off — so it too stays a hue
+//! role (`p.blue`) rather than becoming the accent.
+//!
+//! ## …but the mode *picker* does follow the accent
+//!
+//! In [`render_settings`](FocusAssistManager::render_settings) the same
+//! deleted `BLUE` also lit the selected row's icon, where it means "this is
+//! the row you chose" — which is exactly what the accent is for, so that site
+//! becomes [`Palette::accent`]. One deleted constant, two meanings, and the
+//! stock accent being blue is what kept them looking identical: the merge is
+//! invisible for precisely as long as nobody changes the accent.
+//!
+//! Colouring the picker's icons with each mode's own severity hue instead was
+//! considered, since it would teach the tray's code on the page where the user
+//! is already looking at all four modes. It is rejected because the row is a
+//! *picker*: the accent is how "chosen" is spelled everywhere else in the
+//! shell, and a page that spelled it differently would be the odd one out.
 
+use appearance::{Palette, readable_on};
 use guitk::color::Color;
 use guitk::daywindow::DailyWindow;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
-
-// ============================================================================
-// Catppuccin Mocha palette
-// ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
 // Types
@@ -42,6 +83,21 @@ pub enum FocusMode {
 }
 
 impl FocusMode {
+    /// The four modes, in the order the settings page offers them.
+    ///
+    /// A constant rather than an array built inside the renderer, so a test
+    /// can walk the same list the picker walks. Note the limit of that: a
+    /// test that *also* takes its expected order from here cannot see this
+    /// list being reordered, because its expectation is permuted along with
+    /// the render. Pinning the order needs an expectation written out
+    /// independently — see `every_site_draws_the_role_it_claims`.
+    pub const ALL: [Self; 4] = [
+        Self::Off,
+        Self::PriorityOnly,
+        Self::AlarmsOnly,
+        Self::TotalSilence,
+    ];
+
     pub fn label(&self) -> &str {
         match self {
             Self::Off => "Off",
@@ -66,6 +122,24 @@ impl FocusMode {
             Self::PriorityOnly => "Only priority app notifications are shown",
             Self::AlarmsOnly => "Only alarms come through",
             Self::TotalSilence => "No notifications at all",
+        }
+    }
+
+    /// The hue that codes how much this mode silences — `None` for `Off`.
+    ///
+    /// Blue, yellow, red: mild, more, total. This is a scale the user
+    /// *decodes*, so it is a function of the mode and never of the accent —
+    /// four accent-coloured modes would be one colour saying four things.
+    ///
+    /// It lives here rather than inside the renderer because the tray is not
+    /// the only place that could want it, and a code spelled out at each site
+    /// is a code that drifts apart between sites.
+    pub fn hue(&self, p: &Palette) -> Option<Color> {
+        match self {
+            Self::Off => None,
+            Self::PriorityOnly => Some(p.blue),
+            Self::AlarmsOnly => Some(p.yellow),
+            Self::TotalSilence => Some(p.red),
         }
     }
 }
@@ -386,23 +460,20 @@ impl FocusAssistManager {
     }
 
     /// Render the tray indicator for focus assist.
-    pub fn render_tray_indicator(&self, x: f32, y: f32) -> Vec<RenderCommand> {
+    pub fn render_tray_indicator(&self, p: &Palette, x: f32, y: f32) -> Vec<RenderCommand> {
         let mut commands = Vec::new();
         let mode = self.effective_mode();
 
-        if mode == FocusMode::Off {
+        // `hue` answering `None` *is* the "Off draws nothing" rule, so the
+        // early return reads it rather than re-deciding it. Two places that
+        // both decide when the indicator is hidden is one place too many.
+        let Some(color) = mode.hue(p) else {
             return commands;
-        }
+        };
 
         // Background pill.
         let pill_w = 24.0;
         let pill_h = 16.0;
-        let color = match mode {
-            FocusMode::Off => return commands,
-            FocusMode::PriorityOnly => BLUE,
-            FocusMode::AlarmsOnly => YELLOW,
-            FocusMode::TotalSilence => RED,
-        };
 
         commands.push(RenderCommand::FillRect {
             x,
@@ -413,13 +484,14 @@ impl FocusAssistManager {
             corner_radii: CornerRadii::all(pill_h / 2.0),
         });
 
-        // Moon/bell icon.
+        // Moon/bell icon, inked for the pill it sits on rather than for the
+        // theme the pill was first drawn in — see this module's `# Colour`.
         commands.push(RenderCommand::Text {
             x: x + 5.0,
             y: y + 1.0,
             text: mode.icon().to_string(),
             font_size: 10.0,
-            color: BASE,
+            color: readable_on(color),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -429,7 +501,7 @@ impl FocusAssistManager {
     }
 
     /// Render the focus assist settings panel.
-    pub fn render_settings(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render_settings(&self, p: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut commands = Vec::new();
         let padding = 12.0;
         let mut cy = y + padding;
@@ -440,7 +512,7 @@ impl FocusAssistManager {
             y: cy,
             text: "Focus Assist".to_string(),
             font_size: 18.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -454,10 +526,12 @@ impl FocusAssistManager {
             y: cy,
             text: format!("Current: {}", mode.label()),
             font_size: 14.0,
+            // Engaged or not is *state*, so this is a hue role and not the
+            // accent — the accent is reserved for "you chose this".
             color: if mode == FocusMode::Off {
-                SUBTEXT0
+                p.subtext0
             } else {
-                BLUE
+                p.blue
             },
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -471,7 +545,7 @@ impl FocusAssistManager {
                 y: cy,
                 text: format!("{} notifications suppressed", self.suppressed_count),
                 font_size: 12.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -481,15 +555,9 @@ impl FocusAssistManager {
         cy += 8.0;
 
         // Mode selector.
-        let modes = [
-            FocusMode::Off,
-            FocusMode::PriorityOnly,
-            FocusMode::AlarmsOnly,
-            FocusMode::TotalSilence,
-        ];
-        for m in &modes {
+        for m in &FocusMode::ALL {
             let selected = self.manual_mode == *m;
-            let bg = if selected { SURFACE0 } else { MANTLE };
+            let bg = if selected { p.surface0 } else { p.mantle };
             commands.push(RenderCommand::FillRect {
                 x: x + padding,
                 y: cy,
@@ -503,7 +571,9 @@ impl FocusAssistManager {
                 y: cy + 4.0,
                 text: m.icon().to_string(),
                 font_size: 16.0,
-                color: if selected { BLUE } else { SUBTEXT0 },
+                // Here `BLUE` meant "chosen", not "this much silence" — the
+                // picker's only accent site.
+                color: if selected { p.accent } else { p.subtext0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -513,7 +583,7 @@ impl FocusAssistManager {
                 y: cy + 4.0,
                 text: m.label().to_string(),
                 font_size: 13.0,
-                color: if selected { TEXT } else { SUBTEXT0 },
+                color: if selected { p.text } else { p.subtext0 },
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -523,7 +593,7 @@ impl FocusAssistManager {
                 y: cy + 22.0,
                 text: m.description().to_string(),
                 font_size: 10.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - padding * 2.0 - 48.0),
                 overflow: TextOverflow::Ellipsis,
@@ -538,7 +608,7 @@ impl FocusAssistManager {
             y: cy,
             text: "Automatic Rules".to_string(),
             font_size: 14.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -551,7 +621,7 @@ impl FocusAssistManager {
                 y: cy,
                 text: "No automatic rules configured".to_string(),
                 font_size: 12.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -563,7 +633,7 @@ impl FocusAssistManager {
                     y: cy,
                     width: width - padding * 2.0,
                     height: 28.0,
-                    color: SURFACE0,
+                    color: p.surface0,
                     corner_radii: CornerRadii::all(6.0),
                 });
                 commands.push(RenderCommand::Text {
@@ -571,7 +641,7 @@ impl FocusAssistManager {
                     y: cy + 6.0,
                     text: rule.label(),
                     font_size: 12.0,
-                    color: TEXT,
+                    color: p.text,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -581,7 +651,7 @@ impl FocusAssistManager {
                     y: cy + 7.0,
                     text: rule.mode().label().to_string(),
                     font_size: 10.0,
-                    color: OVERLAY0,
+                    color: p.overlay0,
                     font_weight: FontWeightHint::Light,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -629,9 +699,109 @@ mod tests {
     )]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
+    use appearance::AccentColor;
 
     fn make_mgr() -> FocusAssistManager {
         FocusAssistManager::new()
+    }
+
+    // ---- Colour fixtures ----
+
+    /// A palette wearing an accent that is in no palette.
+    ///
+    /// The whole point of a conversion test is to tell "read the accent" apart
+    /// from "drew the colour the accent happens to be", and the stock accent
+    /// *is* blue — which is also this module's `PriorityOnly` hue. With the
+    /// stock accent the picker's chosen row and the mild-silence pill are the
+    /// same pixels, so a test could not tell a severity code from a selection
+    /// marker. Magenta is in neither palette and is not a mode hue.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0x00FF_00FF);
+        assert!(
+            !p.roles()
+                .iter()
+                .any(|(n, r)| *n != "accent" && *r == p.accent),
+            "the fixture accent collided with a role, so 'this is the accent' \
+             and 'this is that role' stopped being distinguishable"
+        );
+        for m in FocusMode::ALL {
+            assert_ne!(
+                m.hue(&p),
+                Some(p.accent),
+                "the fixture accent is also a mode hue, so the severity code \
+                 and the selection marker are indistinguishable"
+            );
+        }
+        p
+    }
+
+    /// Every colour a command will put on screen, in render order.
+    fn colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The four mode rows as `(background, icon, label)`.
+    ///
+    /// Found by shape — a 40-pixel-high fill and the two `Text` runs that
+    /// follow it — rather than by index, because an index into a render is a
+    /// claim about layout and this module is not about layout. The rule rows
+    /// later in the page are 28 high, so they cannot be mistaken for these.
+    fn rows(cmds: &[RenderCommand]) -> Vec<(Color, Color, Color)> {
+        let mut out = Vec::new();
+        for (i, c) in cmds.iter().enumerate() {
+            let RenderCommand::FillRect { height, color, .. } = c else {
+                continue;
+            };
+            if (*height - 40.0).abs() > f32::EPSILON {
+                continue;
+            }
+            let inks: Vec<Color> = cmds[i + 1..]
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .take(2)
+                .collect();
+            assert_eq!(inks.len(), 2, "a mode row lost its icon or its label");
+            out.push((*color, inks[0], inks[1]));
+        }
+        assert_eq!(out.len(), 4, "the picker stopped offering four modes");
+        out
+    }
+
+    /// A palette wearing one of the accents the appearance page actually
+    /// offers, which — unlike the magenta fixture — differs between modes.
+    fn wearing(light: bool, accent: AccentColor) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = if light {
+            accent.color_light()
+        } else {
+            accent.color()
+        };
+        p
+    }
+
+    /// A manager with something to say: a mode set, a suppressed notification
+    /// and a rule. A manager at defaults leaves three of the page's sites
+    /// unrendered, and an unrendered site is an unchecked one.
+    fn busy() -> FocusAssistManager {
+        let mut mgr = FocusAssistManager::new();
+        mgr.set_mode(FocusMode::AlarmsOnly);
+        mgr.record_suppressed();
+        mgr.add_auto_rule(AutoRule::Fullscreen {
+            mode: FocusMode::TotalSilence,
+        });
+        mgr
     }
 
     // ---- FocusMode ----
@@ -917,7 +1087,7 @@ mod tests {
     #[test]
     fn tray_indicator_hidden_when_off() {
         let mgr = make_mgr();
-        let cmds = mgr.render_tray_indicator(0.0, 0.0);
+        let cmds = mgr.render_tray_indicator(&accented(false), 0.0, 0.0);
         assert!(cmds.is_empty());
     }
 
@@ -925,14 +1095,14 @@ mod tests {
     fn tray_indicator_shown_when_active() {
         let mut mgr = make_mgr();
         mgr.set_mode(FocusMode::PriorityOnly);
-        let cmds = mgr.render_tray_indicator(0.0, 0.0);
+        let cmds = mgr.render_tray_indicator(&accented(false), 0.0, 0.0);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn settings_render_not_empty() {
         let mgr = make_mgr();
-        let cmds = mgr.render_settings(0.0, 0.0, 400.0);
+        let cmds = mgr.render_settings(&accented(false), 0.0, 0.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -947,8 +1117,300 @@ mod tests {
             days: vec![],
             mode: FocusMode::AlarmsOnly,
         });
-        let cmds = mgr.render_settings(0.0, 0.0, 400.0);
+        let cmds = mgr.render_settings(&accented(false), 0.0, 0.0, 400.0);
         assert!(cmds.len() > 10);
+    }
+
+    // ---- Colour: the conversion off this module's own palette ----
+
+    /// Nothing either renderer draws is outside the palette it was handed.
+    ///
+    /// Rendered in *both* modes, because a leftover Mocha constant is a legal
+    /// colour in the dark render and only names itself in the light one.
+    #[test]
+    fn every_colour_the_module_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+            for m in FocusMode::ALL {
+                let mut mgr = busy();
+                mgr.set_mode(m);
+                assert_drawn_from(&p, &mgr.render_tray_indicator(&p, 0.0, 0.0), &[], "tray");
+                assert_drawn_from(
+                    &p,
+                    &mgr.render_settings(&p, 0.0, 0.0, 400.0),
+                    &[],
+                    "focus assist settings",
+                );
+            }
+            // Again with no rules, which is the only way to reach the
+            // empty-state line.
+            assert_drawn_from(
+                &p,
+                &make_mgr().render_settings(&p, 0.0, 0.0, 400.0),
+                &[],
+                "focus assist settings, no rules",
+            );
+        }
+    }
+
+    /// None of the nine deleted constants is still drawn.
+    ///
+    /// The membership sweep above cannot catch these on its own: in the *dark*
+    /// render every one of them is a legitimate role, so only the light render
+    /// can say a Mocha value survived. This table is the half of the proof the
+    /// sweep is structurally unable to do — and unlike most modules there is no
+    /// hole in it, because this module inks nothing with `crust`.
+    #[test]
+    fn none_of_the_nine_deleted_constants_is_still_drawn() {
+        const DELETED: [(u32, &str); 9] = [
+            (0x001E_1E2E, "BASE"),
+            (0x0018_1825, "MANTLE"),
+            (0x0031_3244, "SURFACE0"),
+            (0x00CD_D6F4, "TEXT"),
+            (0x00A6_ADC8, "SUBTEXT0"),
+            (0x0089_B4FA, "BLUE"),
+            (0x00F3_8BA8, "RED"),
+            (0x00F9_E2AF, "YELLOW"),
+            (0x006C_7086, "OVERLAY0"),
+        ];
+        let p = accented(true);
+        for m in FocusMode::ALL {
+            let mut mgr = busy();
+            mgr.set_mode(m);
+            let mut cmds = mgr.render_tray_indicator(&p, 0.0, 0.0);
+            cmds.extend(mgr.render_settings(&p, 0.0, 0.0, 400.0));
+            cmds.extend(make_mgr().render_settings(&p, 0.0, 0.0, 400.0));
+            for c in colors(&cmds) {
+                let rgb = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+                for (value, name) in DELETED {
+                    assert_ne!(
+                        rgb, value,
+                        "with {m:?} chosen, the light render still draws the \
+                         deleted Mocha `{name}` — a constant survived the \
+                         conversion"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every colour of the settings page, in order, is the role it claims.
+    ///
+    /// The expected order is written out here rather than derived from
+    /// [`FocusMode::ALL`], which is what lets it see the picker being
+    /// reordered — a test that walked `ALL` to build its expectation would
+    /// have the expectation permuted along with the render.
+    #[test]
+    fn every_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+            let mgr = busy(); // AlarmsOnly chosen: the third row.
+            let mut want = vec![p.text, p.blue, p.overlay0];
+            for chosen in [false, false, true, false] {
+                want.push(if chosen { p.surface0 } else { p.mantle });
+                want.push(if chosen { p.accent } else { p.subtext0 });
+                want.push(if chosen { p.text } else { p.subtext0 });
+                want.push(p.overlay0);
+            }
+            want.extend([p.text, p.surface0, p.text, p.overlay0]);
+            assert_eq!(
+                colors(&mgr.render_settings(&p, 0.0, 0.0, 400.0)),
+                want,
+                "the settings page's colours are not the roles it claims, in \
+                 order (light = {light})"
+            );
+            assert_eq!(
+                colors(&mgr.render_tray_indicator(&p, 0.0, 0.0)),
+                vec![p.yellow, readable_on(p.yellow)],
+                "the Alarms Only tray pill is not its own hue lettered for \
+                 itself (light = {light})"
+            );
+
+            // The page a *fresh* manager draws, which is a different page:
+            // Off is chosen, nothing has been suppressed, and no rule exists,
+            // so this is the only render that reaches the empty-state line.
+            // A site nothing renders is a site nothing checks.
+            let mut want = vec![p.text, p.subtext0];
+            for chosen in [true, false, false, false] {
+                want.push(if chosen { p.surface0 } else { p.mantle });
+                want.push(if chosen { p.accent } else { p.subtext0 });
+                want.push(if chosen { p.text } else { p.subtext0 });
+                want.push(p.overlay0);
+            }
+            want.extend([p.text, p.overlay0]);
+            assert_eq!(
+                colors(&make_mgr().render_settings(&p, 0.0, 0.0, 400.0)),
+                want,
+                "the empty page's colours are not the roles it claims, in \
+                 order (light = {light})"
+            );
+        }
+    }
+
+    /// The tray icon is legible on the pill it sits on, in every mode.
+    ///
+    /// This is the module's real bug fix. The deleted `BASE` measured 3.02:1
+    /// on Latte red, 3.12:1 on Latte yellow and 3.13:1 on Latte blue — every
+    /// active mode below the 4.5:1 floor at once. `readable_on` is a *step*
+    /// function of the fill's brightness, so a test that sampled one mode in
+    /// one theme would still pass with a hard-coded ink; the assertion at the
+    /// end is what makes this a claim about the function rather than about a
+    /// sample.
+    #[test]
+    fn the_tray_icon_is_inked_for_its_own_pill() {
+        let mut saw_dark_ink = false;
+        let mut saw_light_ink = false;
+        for light in [false, true] {
+            let p = accented(light);
+            for m in FocusMode::ALL {
+                let mut mgr = make_mgr();
+                mgr.set_mode(m);
+                let cmds = mgr.render_tray_indicator(&p, 0.0, 0.0);
+                let Some(fill) = m.hue(&p) else {
+                    assert!(cmds.is_empty(), "Off drew a tray pill");
+                    continue;
+                };
+                let got = colors(&cmds);
+                assert_eq!(got, vec![fill, readable_on(fill)], "{m:?} tray ink");
+                if got[1] == Color::from_hex(0x0011_111B) {
+                    saw_dark_ink = true;
+                } else {
+                    saw_light_ink = true;
+                }
+            }
+        }
+        assert!(
+            saw_dark_ink && saw_light_ink,
+            "the three mode hues produced only one of readable_on's two \
+             answers, so this test would still pass if the ink were a \
+             constant — the fixture set, not the code, needs widening"
+        );
+    }
+
+    /// The mode hues are a severity code: three different colours, none of
+    /// them the accent.
+    ///
+    /// If they followed the accent they would be one colour saying three
+    /// things, and the tray would stop telling the user *how* silent they are.
+    #[test]
+    fn the_mode_hues_are_a_severity_code_and_never_the_accent() {
+        for light in [false, true] {
+            let p = accented(light);
+            let hues: Vec<Color> = FocusMode::ALL.iter().filter_map(|m| m.hue(&p)).collect();
+            assert_eq!(hues, vec![p.blue, p.yellow, p.red], "the severity scale");
+            for (i, a) in hues.iter().enumerate() {
+                assert_ne!(*a, p.accent, "mode hue {i} followed the accent");
+                for b in &hues[i + 1..] {
+                    assert_ne!(
+                        a, b,
+                        "two modes share a hue, so the scale has a rung missing"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The picker marks exactly one row with the accent, and it is the chosen
+    /// one — while the *unchosen* rows never wear it.
+    #[test]
+    fn the_picker_marks_the_chosen_row_with_the_accent() {
+        for light in [false, true] {
+            let p = accented(light);
+            for (i, &m) in FocusMode::ALL.iter().enumerate() {
+                let mut mgr = busy();
+                mgr.set_mode(m);
+                let bar = rows(&mgr.render_settings(&p, 0.0, 0.0, 400.0));
+                let lit: Vec<usize> = bar
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, icon, _))| *icon == p.accent)
+                    .map(|(j, _)| j)
+                    .collect();
+                assert_eq!(
+                    lit,
+                    vec![i],
+                    "with {m:?} chosen, accented rows were {lit:?}"
+                );
+                for (j, (bg, icon, label)) in bar.iter().enumerate() {
+                    let chosen = j == i;
+                    assert_eq!(
+                        *bg,
+                        if chosen { p.surface0 } else { p.mantle },
+                        "row {j} bg"
+                    );
+                    if !chosen {
+                        assert_eq!(*icon, p.subtext0, "unchosen row {j} icon");
+                        assert_eq!(*label, p.subtext0, "unchosen row {j} label");
+                    }
+                }
+            }
+        }
+    }
+
+    /// "Current:" is quiet when focus assist is off and speaks when it is on —
+    /// and what it speaks is a hue role, not the accent.
+    #[test]
+    fn the_current_line_is_quiet_when_off_and_never_the_accent() {
+        for light in [false, true] {
+            let p = accented(light);
+            for m in FocusMode::ALL {
+                let mut mgr = make_mgr();
+                mgr.set_mode(m);
+                // Second colour of the page: the title, then this line.
+                let got = colors(&mgr.render_settings(&p, 0.0, 0.0, 400.0))[1];
+                let want = if m == FocusMode::Off {
+                    p.subtext0
+                } else {
+                    p.blue
+                };
+                assert_eq!(got, want, "the Current line with {m:?} chosen");
+                assert_ne!(got, p.accent, "the Current line followed the accent");
+            }
+        }
+    }
+
+    /// The suppressed-notification line exists only when there is one to
+    /// report, so a test that never suppressed anything checks nothing.
+    #[test]
+    fn the_suppressed_line_is_overlay_and_only_drawn_when_there_is_one() {
+        let p = accented(false);
+        let mut mgr = make_mgr();
+        mgr.set_mode(FocusMode::TotalSilence);
+        let quiet = colors(&mgr.render_settings(&p, 0.0, 0.0, 400.0));
+        mgr.record_suppressed();
+        let loud = colors(&mgr.render_settings(&p, 0.0, 0.0, 400.0));
+        assert_eq!(
+            loud.len(),
+            quiet.len() + 1,
+            "suppressing a notification did not add the line that reports it"
+        );
+        assert_eq!(
+            loud[2], p.overlay0,
+            "the suppressed-count line is not overlay0"
+        );
+    }
+
+    /// Changing the mode changes what is drawn — at every site, not most.
+    ///
+    /// The accent has to move too, or the picker's chosen icon would be the
+    /// one site that legitimately stayed put and would hide a site that did
+    /// not follow the palette at all.
+    #[test]
+    fn every_site_changes_when_the_mode_does() {
+        let dark = wearing(false, AccentColor::Mauve);
+        let light = wearing(true, AccentColor::Mauve);
+        let mgr = busy();
+        let a = colors(&mgr.render_settings(&dark, 0.0, 0.0, 400.0));
+        let b = colors(&mgr.render_settings(&light, 0.0, 0.0, 400.0));
+        assert_eq!(a.len(), b.len(), "the two modes drew different pages");
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert_ne!(x, y, "colour {i} is the same in both modes");
+        }
+        let t = colors(&mgr.render_tray_indicator(&dark, 0.0, 0.0));
+        let u = colors(&mgr.render_tray_indicator(&light, 0.0, 0.0));
+        for (i, (x, y)) in t.iter().zip(u.iter()).enumerate() {
+            assert_ne!(x, y, "tray colour {i} is the same in both modes");
+        }
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are fourteen so far. Three are about the interface these programs share
+//! There are sixteen so far. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -208,6 +208,44 @@
 //!   `strtoul` rather than `str::parse`, which accepts `" +007"` and rejects
 //!   `4294967295` because that one is the kernel's "leave this field alone".
 //!
+//! The fifteenth is [`userspec`]'s shape exactly — one ordering, offered by
+//! two utilities under two different option letters:
+//!
+//! - [`vercmp`] — gnulib's `filevercmp`, behind `sort -V` and `ls -v`. A user
+//!   reaches for both in the same breath, so a disagreement is `ls -v` showing
+//!   `1.9` above `1.10` while `sort -V` shows the reverse, from one directory,
+//!   in one terminal. It is a *file name* comparison rather than a
+//!   version-string one, and the rule that makes that matter is the suffix
+//!   rule: an extension is cut off before the comparison and only restored if
+//!   the stems tie, without which a directory of tarballs sorts by extension
+//!   before it sorts by version.
+//!
+//! The sixteenth is the strongest form of the argument in this file, because
+//! the two sides that must agree are not two utilities but one utility and
+//! *itself*:
+//!
+//! - [`digest`] — the `md5sum`/`sha256sum` family: the whole of upstream's
+//!   `digest.c` apart from the hash. `--check` is a parser for output this
+//!   same program wrote, so a checksum file is a format with two independent
+//!   implementations inside one binary, and any drift between them shows up
+//!   as a file that verifies as `FAILED` on the machine that produced it.
+//!   Sharing the module also makes the family's *other* half free: eight
+//!   utilities upstream are one file compiled eight times, differing only in
+//!   `HASH_ALGO_*`, so the next `sha1sum` or `b2sum` is a [`digest::Algorithm`]
+//!   constant rather than another copy of the option table.
+//!
+//!   The parts that would not survive being written twice are the ones a
+//!   reasonable person would not think to write once. A checksum file may be
+//!   in `<hex>  NAME` form or in BSD-reversed `<hex> NAME` form, and the two
+//!   may not be *mixed within one file* — a rule that reads as tidiness and is
+//!   in fact a security rule, since a reversed line whose name begins with a
+//!   space or `*` parses cleanly as a standard line naming a different file.
+//!   Names are escaped (`\n`, `\r`, `\\`) with a single leading backslash on
+//!   the record to announce it, and `-z` turns escaping off entirely because
+//!   a NUL-terminated record cannot be confused by a newline. And the exit
+//!   status distinguishes four failure kinds that a hand-written second copy
+//!   would flatten into one.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -215,6 +253,7 @@
 mod bignat;
 pub mod canon;
 pub mod cfmt;
+pub mod digest;
 pub mod errmsg;
 pub mod extfloat;
 pub mod filekind;

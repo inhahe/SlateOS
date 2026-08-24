@@ -1,112 +1,158 @@
-//! md5sum — compute and check MD5 message digest.
+//! `md5sum` — print or check MD5 (128-bit) checksums.
 //!
-//! Usage: md5sum [FILE...]
-//!   Prints the MD5 hash of each file (or stdin if no files given).
+//! Everything except the hash itself lives in [`coreutils::digest`], which is
+//! upstream's `src/digest.c`: the option table, the three checksum-file
+//! formats, `--check`, the name escaping and the exit statuses. Upstream
+//! compiles that one file eight times with a different `HASH_ALGO_*`; here the
+//! same effect is a single [`Algorithm`] constant, so this file is the RFC 1321
+//! transform and nothing else.
 //!
-//! Note: MD5 is implemented inline since we're in a freestanding
-//! environment without access to external crypto crates.
+//! # Why the hash is streaming and not `fn(&[u8]) -> [u8; 16]`
+//!
+//! The version this replaced read the whole file into a `Vec` and then hashed
+//! it. `md5sum` on a disk image is an ordinary thing to do and that shape
+//! answers it with an allocation the size of the input — which on a large
+//! enough file is not a slow answer but no answer at all. [`Md5`] therefore
+//! keeps the 64-byte block buffer that the algorithm already implies, and
+//! [`coreutils::digest`] feeds it in 64 KiB reads.
+//!
+//! # Why MD5 is here rather than in a crate of its own
+//!
+//! `sha256sum` delegates to `userspace/sha2` because two things need SHA-256 —
+//! the package manager verifies store paths with it, and a checksum utility
+//! carrying a second copy of a hash whose whole purpose is that two machines
+//! agree is the least defensible duplication in the tree. MD5 has exactly one
+//! consumer. It stays local until it has two, at which point it moves out for
+//! the same reason SHA-256 did.
 
-use coreutils::quote::quotef_os;
-use std::env;
-use std::fs::File;
-use std::io::{self, Read, Write};
+use coreutils::digest::{Algorithm, Stream};
+use std::process::ExitCode;
 
-fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+/// The `#if HASH_ALGO_MD5` block of upstream's `digest.c`, as data.
+static MD5: Algorithm = Algorithm {
+    program: "md5sum",
+    tag: "MD5",
+    bits: 128,
+    reference: "RFC 1321",
+    new: || Box::new(Md5::new()),
+};
 
-    if args.is_empty() {
-        let mut data = Vec::new();
-        if io::stdin().read_to_end(&mut data).is_ok() {
-            let hash = md5(&data);
-            let _ = writeln!(out, "{}  -", hex(&hash));
-        }
-        return;
-    }
-
-    for path in &args {
-        match File::open(path) {
-            Ok(mut f) => {
-                let mut data = Vec::new();
-                if f.read_to_end(&mut data).is_ok() {
-                    let hash = md5(&data);
-                    let _ = writeln!(out, "{}  {path}", hex(&hash));
-                } else {
-                    eprintln!("md5sum: {}: read error", quotef_os(path));
-                }
-            }
-            Err(e) => {
-                eprintln!("md5sum: {}: {e}", quotef_os(path));
-            }
-        }
-    }
+fn main() -> ExitCode {
+    coreutils::digest::main(&MD5)
 }
 
-fn hex(bytes: &[u8; 16]) -> String {
-    let mut s = String::with_capacity(32);
-    for &b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
+// ------------------------------------------------------------------ the hash ---
+
+/// Per-round left-rotate amounts.
+const S: [u32; 64] = [
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9,
+    14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15,
+    21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+];
+
+/// `floor(2^32 * |sin(i + 1)|)`.
+const K: [u32; 64] = [
+    0xd76a_a478,
+    0xe8c7_b756,
+    0x2420_70db,
+    0xc1bd_ceee,
+    0xf57c_0faf,
+    0x4787_c62a,
+    0xa830_4613,
+    0xfd46_9501,
+    0x6980_98d8,
+    0x8b44_f7af,
+    0xffff_5bb1,
+    0x895c_d7be,
+    0x6b90_1122,
+    0xfd98_7193,
+    0xa679_438e,
+    0x49b4_0821,
+    0xf61e_2562,
+    0xc040_b340,
+    0x265e_5a51,
+    0xe9b6_c7aa,
+    0xd62f_105d,
+    0x0244_1453,
+    0xd8a1_e681,
+    0xe7d3_fbc8,
+    0x21e1_cde6,
+    0xc337_07d6,
+    0xf4d5_0d87,
+    0x455a_14ed,
+    0xa9e3_e905,
+    0xfcef_a3f8,
+    0x676f_02d9,
+    0x8d2a_4c8a,
+    0xfffa_3942,
+    0x8771_f681,
+    0x6d9d_6122,
+    0xfde5_380c,
+    0xa4be_ea44,
+    0x4bde_cfa9,
+    0xf6bb_4b60,
+    0xbebf_bc70,
+    0x289b_7ec6,
+    0xeaa1_27fa,
+    0xd4ef_3085,
+    0x0488_1d05,
+    0xd9d4_d039,
+    0xe6db_99e5,
+    0x1fa2_7cf8,
+    0xc4ac_5665,
+    0xf429_2244,
+    0x432a_ff97,
+    0xab94_23a7,
+    0xfc93_a039,
+    0x655b_59c3,
+    0x8f0c_cc92,
+    0xffef_f47d,
+    0x8584_5dd1,
+    0x6fa8_7e4f,
+    0xfe2c_e6e0,
+    0xa301_4314,
+    0x4e08_11a1,
+    0xf753_7e82,
+    0xbd3a_f235,
+    0x2ad7_d2bb,
+    0xeb86_d391,
+];
+
+/// MD5 (RFC 1321), incremental.
+struct Md5 {
+    /// `A`, `B`, `C`, `D`.
+    state: [u32; 4],
+    /// Bytes accepted so far. Wraps at 2^64 bits, which is the format's own
+    /// limit — the length field is 64 bits — so wrapping here is the specified
+    /// behaviour past 2 EiB rather than a defect.
+    len: u64,
+    /// The partial block. Only the first `used` bytes are meaningful.
+    block: [u8; 64],
+    used: usize,
 }
 
-/// MD5 hash implementation (RFC 1321).
-fn md5(data: &[u8]) -> [u8; 16] {
-    // Initial hash values
-    let mut a0: u32 = 0x67452301;
-    let mut b0: u32 = 0xefcdab89;
-    let mut c0: u32 = 0x98badcfe;
-    let mut d0: u32 = 0x10325476;
-
-    // Pre-processing: add padding
-    let orig_len_bits = (data.len() as u64) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
+impl Md5 {
+    const fn new() -> Self {
+        Md5 {
+            state: [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476],
+            len: 0,
+            block: [0u8; 64],
+            used: 0,
+        }
     }
-    msg.extend_from_slice(&orig_len_bits.to_le_bytes());
 
-    // Per-round shift amounts
-    const S: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
-        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
-        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
-    ];
-
-    // Pre-computed constants: floor(2^32 * |sin(i+1)|)
-    const K: [u32; 64] = [
-        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
-        0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
-        0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
-        0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
-        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
-        0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
-        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
-        0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
-        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
-        0xeb86d391,
-    ];
-
-    // Process each 512-bit (64-byte) chunk
-    for chunk in msg.chunks(64) {
+    /// One 64-byte round, on a full block.
+    fn compress(state: &mut [u32; 4], block: &[u8; 64]) {
         let mut m = [0u32; 16];
-        for (j, word) in m.iter_mut().enumerate() {
-            *word = u32::from_le_bytes([
-                chunk[j * 4],
-                chunk[j * 4 + 1],
-                chunk[j * 4 + 2],
-                chunk[j * 4 + 3],
-            ]);
+        for (word, chunk) in m.iter_mut().zip(block.chunks_exact(4)) {
+            // `chunks_exact(4)` yields exactly four bytes, so the conversion
+            // cannot fail; `unwrap_or` keeps the function panic-free anyway.
+            *word = u32::from_le_bytes(chunk.try_into().unwrap_or([0; 4]));
         }
 
-        let mut a = a0;
-        let mut b = b0;
-        let mut c = c0;
-        let mut d = d0;
+        let [mut a, mut b, mut c, mut d] = *state;
 
-        for i in 0..64 {
+        for i in 0..64usize {
             let (f, g) = match i {
                 0..=15 => ((b & c) | ((!b) & d), i),
                 16..=31 => ((d & b) | ((!d) & c), (5 * i + 1) % 16),
@@ -114,60 +160,128 @@ fn md5(data: &[u8]) -> [u8; 16] {
                 _ => (c ^ (b | (!d)), (7 * i) % 16),
             };
 
-            let f = f.wrapping_add(a).wrapping_add(K[i]).wrapping_add(m[g]);
+            // `i < 64` and `g < 16` by construction, but the crate denies
+            // `indexing_slicing` and this loop is the hot path of a program
+            // that runs on untrusted input, so read them fallibly.
+            let k = K.get(i).copied().unwrap_or(0);
+            let s = S.get(i).copied().unwrap_or(0);
+            let mg = m.get(g).copied().unwrap_or(0);
+
+            let f = f.wrapping_add(a).wrapping_add(k).wrapping_add(mg);
             a = d;
             d = c;
             c = b;
-            b = b.wrapping_add(f.rotate_left(S[i]));
+            b = b.wrapping_add(f.rotate_left(s));
         }
 
-        a0 = a0.wrapping_add(a);
-        b0 = b0.wrapping_add(b);
-        c0 = c0.wrapping_add(c);
-        d0 = d0.wrapping_add(d);
+        for (slot, add) in state.iter_mut().zip([a, b, c, d]) {
+            *slot = slot.wrapping_add(add);
+        }
     }
 
-    let mut result = [0u8; 16];
-    result[0..4].copy_from_slice(&a0.to_le_bytes());
-    result[4..8].copy_from_slice(&b0.to_le_bytes());
-    result[8..12].copy_from_slice(&c0.to_le_bytes());
-    result[12..16].copy_from_slice(&d0.to_le_bytes());
-    result
+    /// Absorb `data`, compressing every complete block it completes or contains.
+    fn absorb(&mut self, mut data: &[u8]) {
+        self.len = self.len.wrapping_add(data.len() as u64);
+
+        // Top up a partial block first: until it is full nothing can be
+        // compressed, and once it is, the rest is block-aligned.
+        if self.used > 0 {
+            let want = 64usize.saturating_sub(self.used);
+            let take = want.min(data.len());
+            let end = self.used.saturating_add(take);
+            if let (Some(dst), Some(src)) = (self.block.get_mut(self.used..end), data.get(..take)) {
+                dst.copy_from_slice(src);
+            }
+            self.used = end;
+            data = data.get(take..).unwrap_or(&[]);
+            if self.used < 64 {
+                // `data` is necessarily empty here — `take` was all of it —
+                // so the block is still partial and there is nothing further
+                // to do. Returning early is not an optimisation: falling
+                // through would reach the tail below, which assigns `used`
+                // from the *remainder* and so would throw the partial block
+                // away. That is not a hypothetical; it made `squeeze`'s
+                // "pad until `used == 56`" loop run forever, which is what
+                // `byte_at_a_time_agrees_with_one_shot` caught.
+                return;
+            }
+            let full = self.block;
+            Self::compress(&mut self.state, &full);
+            self.used = 0;
+        }
+
+        // `used == 0` from here on, so the tail may assign it outright.
+        let mut it = data.chunks_exact(64);
+        for chunk in it.by_ref() {
+            let mut full = [0u8; 64];
+            full.copy_from_slice(chunk);
+            Self::compress(&mut self.state, &full);
+        }
+
+        let rest = it.remainder();
+        if let Some(dst) = self.block.get_mut(..rest.len()) {
+            dst.copy_from_slice(rest);
+        }
+        self.used = rest.len();
+    }
+
+    /// Pad and emit. RFC 1321 §3.1–3.2: a `0x80`, zeroes up to 56 mod 64, then
+    /// the message length in bits as a little-endian `u64`.
+    fn squeeze(mut self) -> [u8; 16] {
+        // Read the length *before* padding, since padding goes through
+        // `absorb` and so counts itself.
+        let bits = self.len.wrapping_mul(8);
+        self.absorb(&[0x80]);
+        while self.used != 56 {
+            self.absorb(&[0]);
+        }
+        self.absorb(&bits.to_le_bytes());
+
+        let mut out = [0u8; 16];
+        for (dst, word) in out.chunks_exact_mut(4).zip(self.state) {
+            dst.copy_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+}
+
+impl Stream for Md5 {
+    fn update(&mut self, data: &[u8]) {
+        self.absorb(data);
+    }
+
+    fn finish(self: Box<Self>) -> Vec<u8> {
+        (*self).squeeze().to_vec()
+    }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
+    fn hex(digest: &[u8]) -> String {
+        digest.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
     fn md5_hex(data: &[u8]) -> String {
-        hex(&md5(data))
+        let mut h = Md5::new();
+        h.update(data);
+        hex(&Box::new(h).finish())
     }
 
-    // ---------------- hex ----------------
+    // ------------- the constant the shared module cannot check for itself -------------
 
     #[test]
-    fn hex_zero_bytes() {
-        let bytes = [0u8; 16];
-        assert_eq!(hex(&bytes), "00000000000000000000000000000000");
+    fn digest_length_matches_the_declared_bits() {
+        // `Algorithm::bits` drives `hex_len`, which decides which check lines
+        // parse at all. Upstream gets this consistency from the preprocessor;
+        // here they are two independent statements and so need asserting.
+        assert_eq!((MD5.new)().finish().len() * 8, MD5.bits);
+        assert_eq!(MD5.hex_len(), 32);
     }
 
-    #[test]
-    fn hex_one_to_sixteen() {
-        let mut bytes = [0u8; 16];
-        for (i, b) in bytes.iter_mut().enumerate() {
-            *b = (i + 1) as u8;
-        }
-        assert_eq!(hex(&bytes), "0102030405060708090a0b0c0d0e0f10");
-    }
-
-    #[test]
-    fn hex_high_bytes() {
-        let bytes = [0xffu8; 16];
-        assert_eq!(hex(&bytes), "ffffffffffffffffffffffffffffffff");
-    }
-
-    // ---------------- md5: RFC 1321 test vectors ----------------
+    // ---------------- RFC 1321 test vectors ----------------
 
     #[test]
     fn md5_empty() {
@@ -210,7 +324,7 @@ mod tests {
 
     #[test]
     fn md5_eight_digit_groups() {
-        // Tests that we cross multiple 64-byte blocks correctly.
+        // Crosses multiple 64-byte blocks.
         assert_eq!(
             md5_hex(
                 b"12345678901234567890123456789012345678901234567890123456789012345678901234567890"
@@ -219,30 +333,29 @@ mod tests {
         );
     }
 
+    // ---------------- padding boundaries ----------------
+
+    #[test]
+    fn md5_exactly_55_bytes() {
+        // The last length at which padding still fits in the same block.
+        assert_eq!(md5_hex(&[b'a'; 55]), "ef1772b6dff9a122358552954ad0df65");
+    }
+
     #[test]
     fn md5_exactly_56_bytes() {
-        // 56-byte input: padding must spill into a second block.
-        let data = vec![b'a'; 56];
-        assert_eq!(md5_hex(&data), "3b0c8ac703f828b04c6c197006d17218");
+        // One over: padding must spill into a second block.
+        assert_eq!(md5_hex(&[b'a'; 56]), "3b0c8ac703f828b04c6c197006d17218");
     }
 
     #[test]
     fn md5_exactly_64_bytes() {
-        // One full block exactly; padding requires a second block.
-        let data = vec![b'a'; 64];
-        assert_eq!(md5_hex(&data), "014842d480b571495a4a0363793f7367");
-    }
-
-    #[test]
-    fn md5_exactly_55_bytes() {
-        // 55-byte input: padding fits in one block (boundary case for padding).
-        let data = vec![b'a'; 55];
-        assert_eq!(md5_hex(&data), "ef1772b6dff9a122358552954ad0df65");
+        // One full block; padding still needs a second.
+        assert_eq!(md5_hex(&[b'a'; 64]), "014842d480b571495a4a0363793f7367");
     }
 
     #[test]
     fn md5_high_bit_bytes() {
-        // Non-ASCII bytes — MD5 is byte-oriented.
+        // Byte-oriented, not text: 0xff is data.
         assert_eq!(md5_hex(&[0xffu8; 16]), "8d79cbc9a4ecdde112fc91ba625b13c2");
     }
 
@@ -251,10 +364,61 @@ mod tests {
         assert_eq!(md5_hex(&[0u8]), "93b885adfe0da089cdf634904fd59f71");
     }
 
+    // ---------------- streaming ----------------
+
+    /// The property the whole rewrite rests on: how the message is *divided*
+    /// across `update` calls must not change the answer. A one-shot hash
+    /// cannot get this wrong; an incremental one gets it wrong at exactly the
+    /// splits that straddle a 64-byte block, so every split is tried.
     #[test]
-    fn md5_length_matches() {
-        // Output should always be exactly 16 bytes.
-        let hash = md5(b"anything");
-        assert_eq!(hash.len(), 16);
+    fn every_split_of_a_multi_block_message_agrees() {
+        let msg: Vec<u8> = (0u16..200).map(|i| (i % 251) as u8).collect();
+        let want = md5_hex(&msg);
+        for cut in 0..=msg.len() {
+            let mut h = Md5::new();
+            h.update(&msg[..cut]);
+            h.update(&msg[cut..]);
+            assert_eq!(hex(&Box::new(h).finish()), want, "split at {cut} disagreed");
+        }
+    }
+
+    /// One byte at a time is the pathological case for the top-up path:
+    /// `used` walks every value from 0 to 63 and back.
+    #[test]
+    fn byte_at_a_time_agrees_with_one_shot() {
+        let msg = b"The quick brown fox jumps over the lazy dog, twice, and then some more.";
+        let mut h = Md5::new();
+        for b in msg {
+            h.update(&[*b]);
+        }
+        assert_eq!(hex(&Box::new(h).finish()), md5_hex(msg));
+    }
+
+    /// An empty `update` must be a no-op rather than anything at all — the
+    /// shared module can issue one for a zero-length read.
+    #[test]
+    fn empty_updates_are_ignored() {
+        let mut h = Md5::new();
+        h.update(b"");
+        h.update(b"abc");
+        h.update(b"");
+        assert_eq!(
+            hex(&Box::new(h).finish()),
+            "900150983cd24fb0d6963f7d28e17f72"
+        );
+    }
+
+    /// A message far larger than one block, fed in chunks that are neither
+    /// block-aligned nor block-sized, to exercise the bulk path and the
+    /// top-up path alternately.
+    #[test]
+    fn a_large_message_hashes_the_same_however_it_is_chunked() {
+        let msg = vec![b'z'; 100_000];
+        let want = md5_hex(&msg);
+        let mut h = Md5::new();
+        for part in msg.chunks(4093) {
+            h.update(part);
+        }
+        assert_eq!(hex(&Box::new(h).finish()), want);
     }
 }

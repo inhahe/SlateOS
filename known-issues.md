@@ -54392,7 +54392,7 @@ with no test able to state that they should match because there is no single
 place where the rule lives.
 ---
 
-### TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL — 2026-08-22 — OPEN
+### TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL — 2026-08-22 — FIXED 2026-08-24 (`66ec4d983`)
 
 **In short.** Every on/off switch in the desktop settings panels draws a small
 round knob on a coloured pill. When the switch is **on**, the pill is the
@@ -54442,6 +54442,37 @@ theme and get worse on a pale accent (Yellow, Peach, Rosewater), where knob
 and pill converge further. Nothing breaks; the settings pages are just harder
 to read at a glance than they should be, and the defect is duplicated once
 more every time a new panel is written.
+
+**How it was fixed (2026-08-24, `66ec4d983`).** Not by substituting
+`readable_on(toggle_bg)` at each site, which is what this entry proposed, but
+by *removing the sites*: `gui/desktop/src/switch.rs` now draws the control and
+derives the knob, and seventeen modules call it. The substitution would have
+fixed the seventeen copies that existed and left the shape open for the
+eighteenth panel; the trigger note above ("one sweep with one test") already
+implied the sweep would have to be repeated by hand for every new panel.
+
+Two corrections to the scope recorded above, both found by measuring rather
+than grepping for `toggle_bg`:
+
+- It was **seventeen** modules, not "`network_settings.rs` alone has four."
+  Several panels use `p.green` rather than `p.accent` for *on*, so a grep for
+  the accent missed them, and they had the identical defect: `p.text` on
+  `green` is no better than `p.text` on `blue`.
+- The proposed shared test — "every knob equals `readable_on` of the pill in
+  both modes and under every accent" — is now `switch.rs`'s
+  `the_knob_is_legible_on_every_track_a_panel_can_choose`, but it could not be
+  written as a floor over *every role*: `readable_on` picks between exactly two
+  inks, and on a mid-grey (`overlay0`, `#6C7086`) the better of the two is
+  4.32:1, so 4.5 is unreachable without a third ink. The floor is asserted over
+  the colours a switch track can actually be, and a separate test asserts the
+  weaker but universal claim (the choice between the two inks is the right way
+  round) on all 42 role-mode pairs.
+
+**The measured headroom is nine hundredths.** The tightest switch track in the
+shell is light-mode `Maroon` at **4.60:1**. An accent added to
+`AccentColor::presets()` that is a shade paler fails that test. That is the
+intended behaviour — the accent is the thing to change, not the threshold —
+but it is worth knowing before adding a hue.
 ---
 
 ### TD-C-THE-TOOLKIT-HOLDS-A-THIRD-COPY-OF-THE-PALETTE-AND-DISAGREES-WITH-ITSELF-ABOUT-IT — 2026-08-22 — OPEN
@@ -71534,3 +71565,179 @@ is such an errno, so the first thing the new code printed was
 and no utility this crate imitates has ever printed it — so *any* unnamed
 errno would have given the port away. `errmsg::host_text` now strips it,
 which fixes the whole family rather than `EBADF` alone.
+
+---
+
+### TD-C-A-SLIDER-THUMB-WAS-THE-SAME-COLOUR-AS-ITS-OWN-FILL — 2026-08-24 — FIXED same day (`a03536528`)
+
+**In short.** The touchpad settings page draws sliders (a horizontal bar you
+drag a round handle along to set a number). The bar's left-hand portion — the
+part showing how far along you are — was painted in the user's accent colour,
+and so was the handle. Identical colours: 1.00:1 contrast, which means *no
+visible difference at all*. For the whole left half of the slider's travel the
+handle sat entirely on top of that fill and simply was not there; what the user
+saw was one accent-coloured blob whose ragged right edge happened to be where
+the value was. Fixed the day it was found.
+
+**Where:** `gui/desktop/src/touchpad.rs`, the slider row's knob. Four other
+modules drew the same control by hand — `display_settings.rs`, `notif_pane.rs`,
+`osd.rs`, `mouse_settings.rs` — and disagreed about the handle's colour three
+ways: three used `p.text`, `mouse_settings` used `appearance::emphasized` of
+the fill, `touchpad` used the fill itself.
+
+**How it was fixed.** `gui/desktop/src/slider.rs` now draws the control, and
+all five call it. Same remedy as
+`TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`, for the same reason: five
+hand-drawn copies with a correct answer in one of them is the defect, and
+correcting the one broken copy would have left five copies and three opinions.
+
+**The interesting part: the fix is the *opposite* of the switch fix, and that
+is not an inconsistency.** A switch knob is `readable_on` its own track,
+because it is inset two pixels inside the track and the track is therefore the
+only thing behind it. A slider thumb is **larger than its track** — a 10-to-14
+pixel disc on a track 4 or 6 pixels tall — so most of it hangs over the card
+behind the control, and its round outline (the thing that says *this is the
+handle*) is read against that card, not against the fill. Applying the switch
+rule here would give `readable_on(accent)` = `#11111B`, which on the stock dark
+theme is 1.1:1 against a `base` card: an invisible handle with a crisp interior
+nobody can see. So the thumb is `text`: 11.34:1 against the card, 1.46:1
+against the fill, and the weak number is the one that costs nothing because the
+fill only ever touches the thumb's *interior*.
+
+The rule to carry forward: **ink is chosen for the background the shape's
+outline is read against, and containment is what decides which background that
+is.** `slider.rs` asserts the containment premise directly
+(`the_thumb_overhangs_the_track_on_every_shape_the_shell_draws`) so that a
+shape whose thumb fitted *inside* its track would fail rather than silently
+inherit reasoning that no longer applies to it.
+
+**This superseded a documented judgement**, `mouse_settings.rs` judgement 3
+("the slider thumb is derived from its fill"), which was recorded when that
+module was converted. Its instinct was right — the thumb had been a `LAVENDER`
+constant named beside a `BLUE` fill, free to drift — and its background was
+wrong. Both the module docs and its test now record the revision rather than
+overwrite it, because the claim that outlived the change (the thumb is not a
+constant chosen beside the fill) is the one worth keeping.
+
+---
+
+### TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES-IS-BELOW-THE-CONTRAST-FLOOR — 2026-08-24 — OPEN
+
+**In short.** The desktop's light theme has six background shades a card or
+panel can be painted. On the two palest of them, ordinary text is below the
+4.5:1 contrast ratio that readable body text is supposed to reach. (Contrast
+ratio: how far apart two colours are in lightness; 1:1 is invisible, 4.5:1 is
+the standard floor for text.) Nothing is unreadable, but text on those two
+surfaces is measurably harder to read than the theme claims. The dark theme
+does not have the problem.
+
+**Where:** `gui/appearance/src/lib.rs`, the Latte (light) role table. Measured
+2026-08-24, `text` against each card colour:
+
+| card | dark | light |
+|---|---|---|
+| `base` | 11.34 | 7.06 |
+| `mantle` | 12.14 | 6.57 |
+| `crust` | 12.97 | 6.04 |
+| `surface0` | 8.69 | 5.17 |
+| `surface1` | 6.31 | **4.39** |
+| `surface2` | 4.62 | **3.69** |
+
+**Found by:** `gui/desktop/src/slider.rs`'s
+`the_thumb_is_legible_against_every_card_it_can_sit_on`, which was originally
+written with a 4.5 floor and failed on light `surface2` at 3.69:1. The slider
+test now asserts 3:1, which is the criterion that actually applies to it (WCAG
+SC 1.4.11 *Non-text Contrast*, for a graphical object that identifies a
+control, as opposed to SC 1.4.3's 4.5:1 for text). That is the right floor for
+a 12-pixel disc and the *wrong* floor for a label, so the finding is logged
+here rather than absorbed into the slider's test.
+
+**The proper fix** is to darken Latte's `text` (`#4C4F69`) until it clears
+4.5:1 on `surface2` (`#ACB0BE`) — roughly `#3C3F55` or darker — or to rule that
+`surface1`/`surface2` are not permitted as card backgrounds in light mode and
+enforce that. The first is a change to a published palette that the whole shell
+and every ported app reads; the second is a rule with no mechanism behind it
+today. Both are wider than one module, which is why this is logged rather than
+done.
+
+**Whether anything actually draws text on those surfaces has not been
+surveyed.** That survey is the first step of any fix, and it may show the
+answer is "nothing does," in which case this becomes a latent hazard rather
+than a live defect. Do not assume either way from this entry.
+
+**If never fixed:** light-mode users reading a settings row on a `surface1` or
+`surface2` card get slightly-too-low contrast. It does not get worse over time,
+but it gets *wider* every time a panel picks one of those two surfaces for a
+card, since nothing today stops it.
+
+---
+
+### TD-C-THE-PANEL-THAT-CHOOSES-THE-THEME-IS-THE-ONE-PANEL-THAT-DOES-NOT-FOLLOW-IT — 2026-08-24 — OPEN
+
+**In short.** `appearance_settings.rs` is the settings page where the user
+picks their theme and accent colour. It is the only shell module of the fifty
+that never receives a `Palette` — the object holding the colours the user just
+chose — and instead draws itself from hardcoded colour constants. So the page
+that chooses the theme is the one page that ignores it: switch to a light theme
+or a different accent and that page keeps rendering in the stock dark one. It
+is the last unconverted module of the 49-module palette conversion, and it is
+unconverted precisely because it is the awkward one.
+
+**Where:** `gui/desktop/src/appearance_settings.rs`. Verified 2026-08-24: zero
+occurrences of `Palette` and zero `p.<role>` references in the file; 34 draw
+sites reference hardcoded role constants (`TEXT`, `GREEN`, `SURFACE2` and
+friends) imported from `appearance`.
+
+**Why it is awkward rather than merely last.** This panel legitimately needs to
+draw colours that are *not* the current theme — the swatch grid previewing the
+fourteen accents, and the light/dark preview tiles, must show colours the user
+has not chosen yet. So a mechanical substitution of `CONST` to `p.role` is
+wrong here in a way it was not for the other 48: some of these constants are
+the panel's *subject matter* and must stay literal, while the rest are its
+chrome and must follow the theme. Telling the two apart is a judgement per
+site, not a sweep.
+
+**The proper fix:** thread `&Palette` into the panel's render, convert the 34
+sites one at a time deciding subject-vs-chrome for each, and add the standard
+`assert_drawn_from` sweep with the preview swatches declared as the exemption
+(the same escape hatch `mouse_settings` uses for a derived colour, used here
+for a deliberately-foreign one). The panel's *own* switches were already
+converted to `crate::switch` in `66ec4d983`; they pass hardcoded `GREEN` and
+`SURFACE2` as the track and are commented as the one remaining site that will
+need revisiting when the panel is converted.
+
+**If never fixed:** a user who picks a light theme sees every settings page
+respect it except the one they picked it on, which reads as the setting not
+having applied. It is the most visible remaining instance of
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`.
+
+---
+
+### TD-C-THREE-TEST-MODULES-HAND-ROLL-THE-ACCENT-LIST-THAT-A-HELPER-ALREADY-RETURNS — 2026-08-24 — OPEN
+
+**In short.** Small duplication, no user-visible symptom, but it is the exact
+shape of defect that produced the two switch/slider bugs above: a correct
+answer exists in one place, callers did not find it, so they wrote their own
+copy. `appearance::AccentColor::presets()` returns the fourteen accent colours
+the appearance page offers. Three test modules declare their own
+`const OFFERED: [AccentColor; 14]` listing the same fourteen by hand.
+
+**Where:** `gui/desktop/src/accessibility_settings.rs:1177`,
+`gui/desktop/src/display_settings.rs:1390`, `gui/desktop/src/snap.rs:1121`.
+
+**Why it matters despite being test-only.** These lists exist so that a test
+sweeps every accent a user can pick. A fifteenth accent added to `presets()`
+would be covered by every test that calls the helper and silently *not* covered
+by these three, which would keep passing while checking a stale set — a test
+that has quietly stopped testing what its name says. That is worse than a
+compile error.
+
+**The proper fix:** delete all three constants and iterate
+`AccentColor::presets()`. `gui/desktop/src/switch.rs` and
+`gui/desktop/src/slider.rs` already do, and their doc comments state the reason
+("a hue added there is covered here without anyone remembering to"), so the
+pattern to copy exists.
+
+**If never fixed:** nothing breaks today. The cost lands entirely on whoever
+adds the fifteenth accent, in the form of three tests that pass and should not
+have.

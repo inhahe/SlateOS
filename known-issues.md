@@ -67826,8 +67826,11 @@ VFS call under a given guard. `net/tftp.rs` was named once and had three.
 
 ## TD-A-ASSERTIONS-THAT-A-CONSTANT-WOULD-PASS — the weak-proxy sweep (lane A, 2026-08-23)
 
-**Status:** all four known instances FIXED; the class is not closed — the
-*sweep* is what is unfinished, not any listed item.
+**Status:** all four known instances FIXED. Shape 3 (a test that skips itself
+and reports success) is now **CLOSED as a class** — swept tree-wide and held
+shut by a build gate; see the closing note at the end of this entry. Shapes 1,
+2 and 4 remain open as a class: their instances are fixed, but nothing stops a
+new one, because no mechanical check for them exists yet.
 
 A self-test assertion is only worth its line if there is a plausible way for
 the code under test to be wrong and still fail it. Four shapes recur here
@@ -67909,10 +67912,48 @@ and none of them clear that bar:
    passed for a constant, for a value written once at init, and for a reading
    from another clock; only the window shows the stamps came from that call.
 
-**How to find more:** grep the self-tests for `> 0)`, for `is_some()` on a
-field whose *value* is the thing under test, and for `if !x { print skip;
-return Ok }`. The pattern to look for is an assertion whose truth follows
-from the code compiling rather than from the code working.
+**How to find more:** grep the self-tests for `> 0)` and for `is_some()` on a
+field whose *value* is the thing under test. The pattern to look for is an
+assertion whose truth follows from the code compiling rather than from the code
+working. (Shape 3 no longer needs a grep — see below.)
+
+---
+
+**Closing note, 2026-08-23 — shape 3 is swept and gated.**
+
+Shape 3 was the only one of the four with a mechanically checkable form, so it
+was swept to zero rather than left to grep. `scripts/check-selftest-skips.py`
+implements the two rules this entry states — *the precondition must be a fact
+the test looked up, and the skip must reach the line a reader believes* — and
+`scripts/boot-test.sh` now refuses to build on a finding. The final count is
+**802 files, 0 findings**.
+
+The sweep touched 23 files across five commits (`7c28d2395`, `d5b534e1a`,
+`ca7e96f59`, `4a38f346c`, `17a043a8a`/`256e11b30`/`8e873946f`/`9a8b1a817`).
+Three shared helpers now carry the pattern so it is not re-derived per call
+site, all in `kernel/src/fs/selftest.rs`: `Skips` (the ledger, whose `suffix()`
+appends ` — N section(s) SKIPPED` to the summary line), `classify()` (the
+`Ready`/`Unsupported`/`Failed` split — only `NotSupported`,
+`ReadOnlyFilesystem` and `NoSuchDevice` mean "this system cannot"), and
+`is_mounted()`/`is_mounted_rw()` (the commonest looked-up fact). The rationale
+is written up in `design-decisions.md` §270.
+
+Three sites were more than reporting fixes, because removing the skip exposed
+what the skip had been hiding: `fs/mime` now fails when `detect()` errors
+rather than warning, `fs/zip` fails when deflate does not compress rather than
+noting it, and `kernel/src/watchpoint.rs` deleted its skip outright by giving
+the test its own 8-byte-aligned `AtomicU64` — turning a precondition the test
+had to check into one the type system guarantees. `syscall/linux`'s
+`self_test_fallocate_range` had the worst instance found: a second staging step
+that returned `Ok(())` on failure and silently abandoned the remaining
+sub-tests without printing anything at all.
+
+**Known blind spot.** The checker matches `.is_ok()`/`.is_err()` textually, so
+the same defect spelled `if let Err(e) = ..` or `if let Ok(()) = ..` is
+invisible to it; those instances were found by hand during the sweep and a new
+one would not be caught. Extending the checker to the `if let` forms is the
+outstanding work on this shape — it is a matter of teaching
+`check-selftest-skips.py` a second pattern, not of re-doing the sweep.
 
 ---
 

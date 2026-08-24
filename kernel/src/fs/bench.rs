@@ -28,6 +28,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::KernelResult;
+use crate::fs::path::Path;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -134,7 +135,8 @@ fn now_ns() -> u64 {
 ///
 /// Reads an existing file repeatedly to measure read bandwidth.
 /// If the file doesn't exist or is empty, creates a temporary test file.
-pub fn bench_sequential_read(path: &str, iterations: u64) -> KernelResult<BenchResult> {
+pub fn bench_sequential_read(path: impl AsRef<Path>, iterations: u64) -> KernelResult<BenchResult> {
+    let path = path.as_ref();
     use crate::fs::Vfs;
 
     // Ensure we have something to read.
@@ -178,16 +180,15 @@ pub fn bench_sequential_read(path: &str, iterations: u64) -> KernelResult<BenchR
 ///
 /// Writes data of the specified size repeatedly to measure write bandwidth.
 pub fn bench_sequential_write(
-    dir: &str,
+    dir: impl AsRef<Path>,
     size: usize,
     iterations: u64,
 ) -> KernelResult<BenchResult> {
     use crate::fs::Vfs;
-    use alloc::format;
 
     // Generate test data.
     let data: Vec<u8> = (0..size).map(|i| (i & 0xFF) as u8).collect();
-    let path = format!("{}/_bench_write_tmp", dir);
+    let path = dir.as_ref().join("_bench_write_tmp");
 
     let start = now_ns();
     let mut total_bytes: u64 = 0;
@@ -213,13 +214,14 @@ pub fn bench_sequential_write(
 ///
 /// Measures the overhead of filesystem metadata operations without
 /// data transfer.
-pub fn bench_metadata(dir: &str, iterations: u64) -> KernelResult<BenchResult> {
+pub fn bench_metadata(dir: impl AsRef<Path>, iterations: u64) -> KernelResult<BenchResult> {
+    let dir = dir.as_ref();
     use crate::fs::Vfs;
     use alloc::format;
 
     let start = now_ns();
     for i in 0..iterations {
-        let path = format!("{}/_bench_meta_{}", dir, i);
+        let path = dir.join(format!("_bench_meta_{i}"));
         // Create (1-byte file to avoid special-casing empty files).
         Vfs::write_file(&path, &[0x42])?;
         // Stat.
@@ -242,7 +244,8 @@ pub fn bench_metadata(dir: &str, iterations: u64) -> KernelResult<BenchResult> {
 ///
 /// Measures how long it takes to resolve a path through the VFS layer.
 /// This tests the dcache (directory entry cache) effectiveness.
-pub fn bench_path_lookup(path: &str, iterations: u64) -> KernelResult<BenchResult> {
+pub fn bench_path_lookup(path: impl AsRef<Path>, iterations: u64) -> KernelResult<BenchResult> {
+    let path = path.as_ref();
     use crate::fs::Vfs;
 
     // Verify path exists.
@@ -260,7 +263,7 @@ pub fn bench_path_lookup(path: &str, iterations: u64) -> KernelResult<BenchResul
     let elapsed = now_ns().saturating_sub(start);
 
     // Count path components for per-component target.
-    let components = path.split('/').filter(|s| !s.is_empty()).count() as u64;
+    let components = path.components().count() as u64;
     let target = if components > 0 {
         TARGET_PATH_LOOKUP_NS.saturating_mul(components)
     } else {
@@ -279,7 +282,8 @@ pub fn bench_path_lookup(path: &str, iterations: u64) -> KernelResult<BenchResul
 /// Benchmark file open/close cycle.
 ///
 /// Measures handle creation and destruction overhead.
-pub fn bench_open_close(path: &str, iterations: u64) -> KernelResult<BenchResult> {
+pub fn bench_open_close(path: impl AsRef<Path>, iterations: u64) -> KernelResult<BenchResult> {
+    let path = path.as_ref();
     use crate::fs::{Vfs, handle};
 
     // Ensure path exists.
@@ -302,7 +306,8 @@ pub fn bench_open_close(path: &str, iterations: u64) -> KernelResult<BenchResult
 }
 
 /// Benchmark small random reads (4 KiB blocks at random offsets).
-pub fn bench_random_read(path: &str, iterations: u64) -> KernelResult<BenchResult> {
+pub fn bench_random_read(path: impl AsRef<Path>, iterations: u64) -> KernelResult<BenchResult> {
+    let path = path.as_ref();
     use crate::fs::Vfs;
 
     let meta = Vfs::metadata(path)?;
@@ -344,7 +349,8 @@ pub fn bench_random_read(path: &str, iterations: u64) -> KernelResult<BenchResul
 }
 
 /// Benchmark directory listing (readdir).
-pub fn bench_readdir(dir: &str, iterations: u64) -> KernelResult<BenchResult> {
+pub fn bench_readdir(dir: impl AsRef<Path>, iterations: u64) -> KernelResult<BenchResult> {
+    let dir = dir.as_ref();
     use crate::fs::Vfs;
 
     // Verify directory exists.
@@ -368,16 +374,19 @@ pub fn bench_readdir(dir: &str, iterations: u64) -> KernelResult<BenchResult> {
 /// Run the full benchmark suite.
 ///
 /// Creates temporary files in `dir` for testing, then cleans up.
-pub fn run_all(dir: &str) -> KernelResult<BenchReport> {
+pub fn run_all(dir: impl AsRef<Path>) -> KernelResult<BenchReport> {
+    let dir = dir.as_ref();
     use crate::fs::Vfs;
-    use alloc::format;
 
-    serial_println!("[fsbench] Starting full benchmark suite in {}", dir);
+    serial_println!(
+        "[fsbench] Starting full benchmark suite in {}",
+        dir.display()
+    );
     let suite_start = now_ns();
     let mut results = Vec::new();
 
     // Prepare test file for read benchmarks.
-    let test_path = format!("{}/_bench_testfile", dir);
+    let test_path = dir.join("_bench_testfile");
     let test_data: Vec<u8> = (0..16384u32).map(|i| (i & 0xFF) as u8).collect();
     Vfs::write_file(&test_path, &test_data)?;
 
@@ -394,7 +403,7 @@ pub fn run_all(dir: &str) -> KernelResult<BenchReport> {
     }
 
     // 3. Sequential read — small file 4 KiB (500 iterations).
-    let small_path = format!("{}/_bench_small", dir);
+    let small_path = dir.join("_bench_small");
     let small_data: Vec<u8> = (0..4096u32).map(|i| (i & 0xFF) as u8).collect();
     Vfs::write_file(&small_path, &small_data)?;
     match bench_sequential_read(&small_path, 500) {

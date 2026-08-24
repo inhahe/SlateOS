@@ -14351,7 +14351,7 @@ leading 4 preserved (`'A'`) and the grown tail zero-filled.
    `O_APPEND`-doesn't-block-truncate nuance. The append/immutable-flag EPERM
    path is not yet plumbed (same capability-model gap as B-CHOWN1).
 
-### W1. Intermittent boot-test hang recurred once at the OOM self-test — WATCHLIST 2026-06-10
+### W1. Intermittent boot-test hang recurred once at the OOM self-test — ✅ CLOSED 2026-08-24 (lane A), cured incidentally; see the closure at the end
 
 **Where:** boot self-test sequence; serial output (`build/serial-test.txt`)
 truncated mid-line at `[sysctl] mm.oom_pol…` during `mm::oom::self_test()`
@@ -14468,6 +14468,53 @@ stale bookkeeping, not a real count: many dozens of routine boots have passed
 since 2026-06-14 (including a 20/20 pthread soak on 2026-08-13) with no
 recurrence, and the entry's own rule counts routine boots toward the streak.
 
+**Closed 2026-08-24 (lane A) — the 2026-08-14 recommendation, now with the
+count actually taken.**
+
+That analysis recommended retargeting the bar and then did not close the
+entry, so the Status line above has read "clean streak **7**" for ten weeks
+while the real figure was untracked. Rather than assert the streak, it is
+machine-checkable: `bench/boot-history.jsonl` records `ends_mid_line` per
+boot, which is *precisely* this entry's discriminator.
+
+| Query over `bench/boot-history.jsonl` | Result |
+|---|---|
+| Boots recorded (2026-08-16 → 2026-08-24) | **373** |
+| Verdicts | 278 PASS, 50 SELFTEST_FAIL, 37 PANIC, 8 TIMEOUT |
+| Never reached `BOOT_OK` | 45 (37 PANIC + 8 TIMEOUT) |
+| **W1-shaped (`ends_mid_line` AND not `boot_ok`)** | **0** |
+
+The 8 TIMEOUTs are the only candidates that hung rather than reported, and
+**all 8 ended on a line boundary** (`ends_mid_line: false`, from 6 lines to
+38 842). That is the discriminator the mechanism analysis turns on: a CPU
+that wedges for an unrelated reason stops *between* lines, having flushed the
+line in flight; only a CPU that stopped *inside* `_print` holding the `SERIAL`
+mutex cuts mid-token. Zero of 373 boots did that.
+
+Two records do have `ends_mid_line: true` (2026-08-21 SELFTEST_FAIL,
+2026-08-23 PASS) and **neither is W1**: both reached `BOOT_OK`. Their serial
+is cut because capture stops once the marker is seen, which truncates
+wherever the guest happened to be — the artefact of a *successful* run, not a
+wedge. Worth spelling out because `ends_mid_line` alone looks like a hit; it
+is only W1's fingerprint when paired with never reaching the marker.
+
+**Honest limit on this evidence:** the history file begins 2026-08-16, so it
+cannot demonstrate an unbroken streak back to the last recurrence
+(2026-06-12). What it does show is 373 boots inside its own window with zero
+occurrences — on its own **4× the ~90-boot bar** the entry set, without
+needing to count the two months in between.
+
+Closing as **cured incidentally**, same disposition as F6/F7, attributed to
+the three `serial.rs` fixes tabulated above (`cac8d7624`, `1e5c091f4`,
+`58102abca`), all of which postdate every piece of W1 evidence.
+
+**Re-open condition (unchanged from the 2026-08-14 recommendation, and
+narrower than the old bar):** a boot that hangs *and* leaves serial cut
+mid-token *and* produces no diagnostic — i.e. `ends_mid_line: true` with
+`boot_ok: false`. That combination would falsify the mechanism analysis, and
+is worth far more than further blind soaking. The query above is the test;
+re-run it rather than re-deriving it.
+
 Left at WATCHLIST rather than closed unilaterally, since retargeting a closure
 condition an earlier session set deliberately is the operator's call if they
 want it; the analysis above is the argument for doing so.
@@ -14548,6 +14595,69 @@ lookup is filed under before asking what the lookup does.
 ---
 
 ## Fixed Bugs
+
+### B-KSHELL-ECHO-E-MANGLES-NON-ASCII. `echo -e` doubled every byte of every multi-byte character — 2026-08-24 — FIXED 2026-08-24 (lane A, `abeaca2aa`)
+
+**Where:** `interpret_echo_escapes`, `kernel/src/kshell.rs` (~line 8691); one
+caller, `cmd_echo`, on the `-e` path only.
+
+**Symptom.** `echo -e` corrupted any non-ASCII text, while plain `echo` —
+which does not enter this function — printed it correctly.
+
+| input | old output | bytes |
+|---|---|---|
+| `café` | `cafÃ©` | 5 → 7 |
+| `é` | `Ã©` | 2 → 4 |
+| `→` | `â\x86\x92` | 3 → 6 |
+| `🦀` | `ð\x9f¦\x80` | 4 → 8 |
+
+**Cause.** The function walked `s.as_bytes()` and copied each non-escape byte
+through as `result.push(bytes[i] as char)`. For an ASCII byte that is a no-op.
+For a byte ≥ 0x80 it is not: `as char` maps `0x80..=0xFF` to
+`U+0080..=U+00FF`, which `String::push` re-encodes as **two** UTF-8 bytes. So
+each byte of a multi-byte character was expanded into its own two-byte
+sequence — the output is not merely wrong, it grows with the input.
+
+**Why it lasted.** Every test of this function was ASCII, and on ASCII the
+buggy and correct forms agree exactly. This is the same `as char` mistake
+already documented as a *landmine* in `TD-KSHELL-LINE-EDITOR-IS-UTF8` at
+`kshell.rs:3583` — that entry flagged the instance on the **input** path as a
+hazard for whoever widens the editor's `0x20..0x7F` guard, and did not notice
+the identical one on the **output** path, which was not a hazard but a live
+bug.
+
+**Reachability** (it is not blocked by the editor's guard): the line editor
+refuses bytes ≥ 0x80 from the keyboard, but `source` accepts any *valid-UTF-8*
+script — and non-ASCII text is valid UTF-8; `cmd_source` rejects only invalid
+sequences — and command substitution feeds arbitrary command output back into
+the line. So a sourced or substituted `echo -e` on ordinary accented text
+corrupts it.
+
+**Fix.** Iterate `chars()` rather than bytes. `s` is a `&str`, so every
+character is whole and valid by construction and pushing it cannot re-encode;
+all escape *triggers* are ASCII, so a one-character peek is equivalent to the
+old one-byte lookahead.
+
+**Not fixed here, deliberately:** `\xNN` for arbitrary bytes. That needs an
+output path that can carry non-UTF-8 (`shell_write` takes `&str`;
+`SHELL_OUTPUT` is a `String`) and belongs to the byte-clean expanded-word work
+settled as option B in `design-decisions.md` §261.
+
+**Verification.** Changing a parser's iteration model risks silently altering
+the inputs that were already correct — and those are the ASCII ones, where
+every existing test lived, so a regression would have hidden exactly as the
+original bug did. Checked both directions:
+
+- `scripts/echo-escapes-oracle.rs` reproduces the old implementation verbatim
+  and diffs it against the new one over **1204 ASCII inputs** — every string
+  of length 0..=3 over an alphabet covering each character class, plus every
+  ASCII byte alone, backslash-prefixed and embedded. **0 mismatches.** Same
+  host-oracle pattern, and for the same reason, as `scripts/bytestr-oracle.rs`.
+- `kshell::self_test` (new) is wired into the boot battery, since the kernel
+  binary sets `test = false` and `#[cfg(test)]` never runs. It asserts the
+  escape table, unknown/trailing backslashes, and 2-, 3- and 4-byte characters
+  **by byte length** — a `String` that renders correctly can still carry the
+  doubled encoding, so comparing rendered text would not have caught this.
 
 ### B-FONT-SYMBOL-ENCODED-FACES-DRAW-EVERYTHING-AS-BOXES. Wingdings and friends mapped no ASCII at all — 2026-08-14 — FIXED 2026-08-14
 
@@ -14954,6 +15064,99 @@ converts one **data path** end-to-end and so introduces no lossy step.
 A-vs-B is an architectural fork on a large, costly-to-reverse change, and B
 knowingly departs from the plan written above, so it is the operator's call:
 see `open-questions.md` **Q45**. Stage (a) is independently useful either way.
+
+**[A] 2026-08-24 — Q45 is answered (B), and Correction 4's premise for B is
+wrong. Read this before planning stages (b)/(c).**
+
+*Q45 no longer gates this.* The operator resolved it **2026-08-21 as option
+B, the expanded word** (`design-decisions.md` §261): one data path —
+keystroke to syscall — goes byte-clean end to end, while the source line
+stays text, as in bash. The paragraph above has read "the operator's call"
+for three days after the call was made, which is how an unblocked task keeps
+looking blocked.
+
+*But B's stated escape hatch does not exist.* Correction 4 justified B partly
+on letting the user reach arbitrary bytes "through the `$'\xff'` escape the
+shell **already parses** (7 sites)". Checked: **kshell has no ANSI-C quoting
+at all.** Those 7 sites are Rust byte literals — `b'$'` and `push('$')` in the
+expansion code — matched by a grep for `$'`, which is a substring of `b'$'`.
+The file contains no `$'…'` parser, no hex-escape decoder, and no
+`is_ascii_hexdigit`/`from_str_radix` pair anywhere near word expansion. This
+also means **Correction 2 was right** and Correction 4 silently contradicted
+it; two corrections in the same entry, written the same day, disagree, and
+the later and wronger one is the one the chosen option leans on.
+
+Consequence for scope, which is real but bounded: the escape has to be
+**built**, and it needs somewhere to put a non-UTF-8 byte once parsed. The
+only escape decoder in the file today is `interpret_echo_escapes`, which
+serves `echo -e` alone, has no `\xNN` case, and returns a `String` — so it is
+a model for the syntax, not a component to reuse. The output sink is the
+binding constraint: `shell_write` takes `&str` and `SHELL_OUTPUT` is a
+`String`, so command-substitution capture must go byte-clean as part of (b),
+not after it.
+
+*Found while checking the above, fixed separately:* `interpret_echo_escapes`
+corrupted **every non-ASCII character** — it walked bytes into a `String` via
+`bytes[i] as char`, doubling each byte of a multi-byte sequence, so a sourced
+`echo -e "café"` printed `cafÃ©`. Written up under *Fixed Bugs* as
+`B-KSHELL-ECHO-E-MANGLES-NON-ASCII` (`abeaca2aa`). It is the same `as char`
+landmine this entry already documents at `kshell.rs:3583` for the input
+guard — the entry flagged the one on the *input* path and missed the
+identical one on the *output* path, which was already live.
+
+**[A] 2026-08-24 — stage (b), the path pipeline, has LANDED (`961a160a3`).**
+
+`resolve_path` is now `fn resolve_path<P: AsRef<Path>>(P) -> PathBuf`, `CWD`
+is a `Mutex<PathBuf>`, and `TermSession.cwd` is a `PathBuf` — so a 0xFF byte
+survives `cd`, resolution and session switch intact. `fs::bench` (7
+signatures) and the five filesystem `mount` pass-throughs went with it.
+
+*The ~270-call-site figure this entry has quoted since 2026-08-13 never had
+to be paid.* `fs/path.rs` already implements `AsRef<Path>` for `str`,
+`String`, `[u8]`, `Vec<u8>` and `PathBuf`, so making `resolve_path` generic
+left every forwarding caller compiling untouched. The compiler enumerated the
+real cost: **387 errors**, of which **289 (75%)** were the single mechanical
+`PathBuf: !Display` case and only ~98 carried judgment. Driving the edits
+from rustc's own JSON byte spans (rather than a regex) put each one exactly
+on the expression rustc objected to.
+
+**The finding worth carrying forward, because it is a silent-corruption class
+the type system does not catch:** `format!("{}.gz", input.display())`
+type-checks *as a path*, because `String: AsRef<Path>`. It also writes a
+U+FFFD-mangled filename to disk. My own mechanical `.display()` pass
+introduced ten of these (five compressors, five decompressor `.out`
+fallbacks); the compiler caught them only incidentally, because the sibling
+`if` branch happened to be a `PathBuf`. Had both branches been `String`, they
+would have compiled clean and corrupted filenames silently. They are now
+`path_with_suffix`/`decompressed_output_path`, appending via `extend_bytes` —
+not `push`, which inserts a separator. **Anyone extending this conversion
+should grep for `display()` inside path construction, not trust the types.**
+
+Also fixed in passing: `extension_hint` used `rsplit_once('.')`, which
+searches the whole path, so `archive.tar/notes` reported extension
+`tar/notes`. Now `Path::extension`, which stops at the last component.
+
+*Verification:* `self_test` sections 4 and 5 assert 20 normalisation cases
+(`.`, `..`, root escape, repeated/trailing separators, cwd-relative) and 3
+that drive 0xFF through `resolve_path` — the case a `String` return type
+could not represent at all.
+
+**Still open, and deliberately not narrowed:** `fs::pipe` and `fs::templates`
+store paths as `String` internally, and the environment is a `String` map.
+Rather than paper over these with `display()` — which would hand the callee a
+*different path than the user typed* — `path_arg_as_str` refuses loudly at
+`mkfifo` and `template`, and is grep-able as the marker for that follow-up.
+`$PWD` stays lossy on purpose and says so in-code: resolution goes through
+`CWD`, never `$PWD`, so a U+FFFD there cannot redirect a file operation.
+
+**Remaining for (b)/(c):** word expansion → `Vec<u8>`; completion → `PathBuf`
+candidates; the `\xNN` escape (still must be *built* — Correction 2 above is
+the right one); and the output sink (`shell_write` takes `&str`,
+`SHELL_OUTPUT` is a `String`, `capture_command` returns `String`), which per
+the paragraph above must land *with* (b), not after. The editor buffer
+(`line_buf`, `History.entries`) and the 3580 input guard are unchanged — and
+the 3583 `ch as char` landmine is still live, so that guard must not be
+widened before the buffer type changes.
 
 ### D-NETSTACK-RX-DEMUX. The netstack daemon had no shared RX demux — concurrent connections couldn't safely receive at once — FIXED 2026-07-14
 
@@ -50401,7 +50604,7 @@ guarantee, and on Windows the failure mode would be a sharing violation in
 whichever of the two processes lost the race. Wait for `[run-timeout] child
 exited` before running any cargo command against the same target directory.
 
-**Part 2 progress. 44 of 49 modules converted.**
+**Part 2 progress. 47 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -53470,6 +53673,406 @@ exited` before running any cargo command against the same target directory.
       the same site. **A literal and the role it equals in one mode are the
       same defect to any test that runs in that mode**; declarations for the
       two variants of a site should be written as a pair, not independently.
+- [x] `file_drop.rs` — 6 constants over 13 colour sites, done 2026-08-24. 41
+  tests in the module (eleven new), harness defects Ax72–Hx73 (thirty-four).
+  - **The badge ink has to be `base`; `crust`, the reflexive choice, fails all
+    four effect colours in Latte and passes all four in Mocha.** The effect
+    badge is a filled chip whose fill is one of four saturated hues — red
+    forbids, green copies, blue moves, peach links — with a label drawn on top,
+    so the ink is being asked to read on four different backgrounds at once.
+    `crust` measures 8.10 / 12.61 / 8.91 / 10.59 on those four in Mocha and
+    **4.10 / 3.98 / 3.96 / 3.95** in Latte — four failures, none of them
+    visible to a dark-mode review. `base` measures 7.08 / 11.03 / 7.79 / 9.27
+    and **4.80 / 4.66 / 4.63 / 4.62**, clearing the floor on all eight. The
+    margin is thin enough on the Latte side (4.62 against 4.5) that the
+    reasoning is now written into the module header rather than left to be
+    re-derived: the darkest role is not automatically the most readable ink,
+    because Latte's `crust` is a *light* colour and the effect hues are
+    mid-tone.
+  - **No `surface*` or `overlay0` role can be a badge fill in either mode.**
+    The obvious-looking "quiet chip" for the item count is `surface2` with
+    `text` on it, which is **4.62 in Mocha and 3.69 in Latte**; `surface1` is
+    6.31 / **4.39**; `overlay0` fails with every ink there is. Only four
+    pairings in the whole palette work for a chip on the card: `peach`+`base`,
+    `subtext1`+`base`, `text`+`base` and `text`+`crust`. The count chip took
+    `text`+`base` — an inverted chip — which is the only one of the four that
+    is not also an effect colour.
+  - **The item-count chip was `peach`, and so is `DropEffect::Link`.** Both
+    were the same hardcoded `MOCHA_PEACH`, so a twelve-file *copy* drag drew a
+    green badge next to a peach chip that means "link" everywhere else in the
+    same overlay. This is a meaning collision rather than a contrast failure,
+    and no contrast or membership test can see it: peach is a legal member and
+    reads fine on the card. `the_item_count_chip_is_never_an_effect_colour`
+    asserts the disjointness directly, against all four effects in both modes.
+  - **The contrast test changed shape — it now reads the pairing out of the
+    rendered commands — and stopped being a structural zero.** The previous
+    four modules each had a contrast test that compared palette values against
+    a *hand-written* pairing table and never called the renderer; each caught
+    exactly nothing in its own file, because a table of pairings is a claim
+    about the palette, and no defect in the module under test can falsify it.
+    Here the walk takes `cmds.windows(2)`, pairs every `FillRect` with the
+    `Text` that follows it, and asserts 4.5:1 on whatever it finds. It caught
+    **14 of 34**, second only to the ordered site table. It is not an echo
+    (lesson 22) because nothing it asserts comes from the code under test: the
+    4.5:1 floor comes from WCAG, and the required pair count (24 on the card,
+    8 on the tooltip) is written out by hand, so a site that stops being drawn
+    fails the count rather than silently passing an empty walk. **A contrast
+    test should read its pairings from the rendered output; a hand-written
+    pairing table can only catch a role moving underneath it.**
+  - **…and it is still blind to a *transposition*, because contrast is
+    symmetric.** `X×72` swaps the tooltip's fill and its ink, and the walk
+    computes `contrast(fill, ink)` — a symmetric function — so it returns
+    exactly the ratio it returned before. The declaration was wrong, not the
+    test: legibility genuinely survives a transposition and the design
+    genuinely does not, which is the ordered site table's job. Fixed by
+    dropping the declaration and writing the reason into the test's doc
+    comment. **Lesson: a contrast check cannot see its two operands exchanged.**
+  - **A `zip` between an expectation table and a drawn list truncates, and that
+    was a real hole in two tests, not a bad declaration.** `F×73` stops drawing
+    the tooltip entirely. Both
+    `every_site_the_drop_highlight_draws_moves_with_the_mode` and its drag-card
+    twin asserted only that the two modes drew *the same number* of colours —
+    which a vanished site satisfies, since it vanishes from both — and then
+    zipped the three-entry site table onto a one-entry drawn list, so the two
+    missing sites fell off the end of the zip and were never asked whether they
+    move. The role tests already pinned their length against the table; the
+    mode tests now do too. This is lesson 24's shape once more (*a site nothing
+    renders is a site nothing checks*) arriving through a new door: not a
+    branch nobody exercised, but a `zip` quietly shortening the question.
+  - **The colour extractor flattens alpha, so every colour test in the module
+    was blind to the deliberate translucency.** `colors()` forces alpha to 255
+    so that a role comparison is not defeated by a card drawn at 220. That is
+    right for the role tests and wrong as a total picture: the drag card is
+    220/255 and the drop tooltip 200/255 on purpose — a drag decoration must
+    not hide what is being dragged *onto* — and nothing asserted it.
+    `only_the_card_and_the_tooltip_are_translucent` pins both alpha vectors
+    exactly, and is the sole catcher of the two defects that make them opaque.
+    The alphas are also deliberately *not* `p.panel_alpha`: a drag decoration
+    is not a panel, and tying it to the panel setting would let a user who
+    likes opaque panels lose the drag preview.
+  - **A geometry test must locate by geometry.**
+    `a_multi_item_description_stops_before_the_count_badge` is a *layout* test,
+    and it found the count badge as "the only peach fill on the card". That
+    made it silently assert the badge's colour as well, and it would have
+    stopped working the instant the role changed — reporting a colour defect in
+    the vocabulary of overlap. It now locates the badge by the only thing that
+    is actually about geometry: `width == COUNT_BADGE_W`, a named constant
+    introduced for the purpose.
+  - **Sweep: 34 caught, 0 escaped, 0 never asked, 2 under-caught, 5
+    under-declared**, on a preflight of `34 build, 0 do not, 0 not applied`.
+    Both under-catches were genuine findings rather than noise — one a wrong
+    declaration (the symmetric contrast test), one a real hole in two tests
+    (the truncating zip) — and both were re-run to green after the fix. Every
+    run ended `restored: all files match their recorded SHA-256`.
+  - Catcher census (34 defects):
+
+    | Test | Caught | Sole catcher |
+    |---|---|---|
+    | `every_drag_overlay_site_draws_the_role_it_claims` | 17 | 3 |
+    | `every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on` | 14 | 0 |
+    | `every_drop_highlight_site_draws_the_role_it_claims` | 8 | 1 |
+    | `every_site_the_drag_overlay_draws_moves_with_the_mode` | 7 | 0 |
+    | `every_colour_the_drag_overlay_draws_comes_from_its_palette` | 6 | 0 |
+    | `an_unlabelled_target_draws_no_tooltip` | 6 | 1 |
+    | `each_drop_effect_wears_its_own_role` | 5 | 1 |
+    | `the_drop_tooltips_label_is_readable_on_its_fill` | 5 | 0 |
+    | `only_the_card_and_the_tooltip_are_translucent` | 4 | 2 |
+    | `the_item_count_chip_is_never_an_effect_colour` | 3 | 0 |
+    | `every_colour_the_drop_highlight_draws_comes_from_its_palette` | 3 | 0 |
+    | `every_site_the_drop_highlight_draws_moves_with_the_mode` | 3 | 0 |
+    | `a_single_item_drag_draws_no_count_chip` | 1 | 1 |
+    | `a_multi_item_description_stops_before_the_count_badge` | 1 | 0 |
+
+    Counts are after the two fixes below; the two `moves_with_the_mode` rows
+    each gained one catch when the truncating `zip` was closed.
+
+    - **The ordered pin's share fell to 17 of 34 — the lowest in the series —
+      and that is the point.** Its share was 33/37 in `session_mgr` because
+      that module is one renderer with one scene. `file_drop` has two
+      renderers, a four-way semantic mapping, two conditional branches and two
+      deliberate alpha values, and the census shows each of those needing its
+      own test: the mapping is caught only by the pinned effect vector, the
+      branches only by the two absence tests, the alphas only by the
+      translucency test. A falling sole-catcher count on a rising defect count
+      is what a well-decomposed suite looks like.
+    - **All five under-declarations are one test: `an_unlabelled_target_draws_no_tooltip`.**
+      It asserts that an empty label draws exactly one command, and then — to
+      confirm the survivor is the border rather than a stray fill — that its
+      colour is `p.green`. That second clause is an accidental value-keyed
+      locator: every defect that changes what `DropEffect::Copy` resolves to
+      (copy/move transposed, all-blue, all-accent) or that draws the border in
+      some other role trips it, in the vocabulary of tooltip suppression. It is
+      the calendar's variety of accidental locator, and errs only in the
+      stricter direction: it can fail where it was not asked, never pass where
+      it should have failed. **Five modules in, every under-declaration this
+      harness has produced has been an alignment or collision artefact of a
+      test locating its site indirectly.**
+- [x] `input_method.rs` — 5 constants over 7 colour sites, done 2026-08-24. 39
+  tests in the module (twelve new), harness defects Ax74–Hx75 (thirty-four).
+  - **The layout name was `MOCHA_BLUE`, which is the stock accent's value in
+    disguise.** `Palette::for_mode(false).accent` *is* `blue` unless the user
+    has chosen otherwise, so a hardcoded `#89B4FA` title is indistinguishable
+    from `p.accent` on a default install and diverges silently the moment
+    anyone picks a different accent — at which point the pop-up's heading is
+    the only thing in the shell still wearing last month's accent. This is
+    `backup_settings.rs`'s blue/accent collision seen from the other side: there
+    a role-named binding secretly meant the accent, here a literal did.
+  - **It became `p.text`, not `p.accent`, and the negative is pinned.**
+    `focus_assist::render_settings` draws its panel title `p.text` bold and
+    states the rule the shell follows: the accent is reserved for "you chose
+    this" — a selected item, an active toggle — and a heading that is merely
+    *present* has not been chosen. A layout preview is a description of the
+    keyboard, so nothing in it is a choice. `no_site_in_this_module_wears_the_accent`
+    asserts that against an off-palette accent in both modes, which makes the
+    decision a test rather than a comment.
+  - **The role-shaped return of that bug is invisible to every test except the
+    ordered one.** `N×74` sets the title to `p.accent`. On the stock palette
+    that draws the same bytes as `p.blue`, so a membership sweep sees a legal
+    role, the contrast walk sees 7.79:1 on `base` and passes, and the mode test
+    sees a value that moves correctly between Mocha and Latte. Only the ordered
+    site table, which says *this site is `text`*, can tell the difference. This
+    is lesson 9's shape (a set cannot see a permutation) applied to a single
+    site: **a membership test cannot distinguish two roles that are equal.**
+  - **Three fills that have to stay three, and contrast has nothing to say
+    about any of the pairings.** The pop-up is `base`, its border `surface1`,
+    its key caps `surface0` — three neighbouring neutrals, so a defect that
+    collapses any two produces a picture with no border, or caps that dissolve
+    into the pop-up, while every ink on top stays perfectly readable. Contrast
+    is a property of *ink on fill*; `surface0` on `base` is 1.32:1 in Mocha and
+    the design is fine, so no legibility floor can be asked about it.
+    `the_popup_its_border_and_its_key_caps_are_three_different_values` asserts
+    the construction directly — all three pairings, both modes — which is the
+    "assert the construction, not the consequence" corollary of lesson 24. It
+    was widened to cover `edge != fill` **before** the sweep rather than after,
+    on the reasoning that an invisible border is exactly the defect an ordered
+    table would catch for the wrong reason.
+  - **The §530 contrast walk now pairs an ink with the most recent fill, not
+    the adjacent command.** `file_drop`'s version used `cmds.windows(2)` and
+    paired each `FillRect` with the `Text` immediately after it. That works
+    where every fill is followed by its own label, and breaks here: the pop-up
+    draws background, then border, then title, so a naive adjacency walk would
+    check the title against the *border* colour rather than against the surface
+    it actually sits on. The walk now carries `under: Option<Color>`, updated by
+    every `FillRect` and read by every `Text`, and panics if an ink is drawn
+    before any fill. It still counts its pairs (`checked == 12`) so a site that
+    stops being drawn fails the count rather than passing an empty walk.
+  - **A real layout bug: a key label could paint 2px onto the neighbouring
+    cap.** The label starts 6px inside its cap, so its clip width has to be
+    `key_size` less *both* insets; it was `key_size - 4.0`, which is neither
+    inset subtracted properly and leaves a wide glyph overhanging. Now
+    `key_size - 12.0`, with the arithmetic spelled out in a comment.
+    `a_key_label_is_clipped_inside_its_own_cap` measures it, and — carrying
+    module 45's lesson — finds each cap by `width == KEY_SIZE` rather than by
+    its colour, which required promoting the cap size to a named constant. A
+    geometry test that locates by colour silently asserts a role.
+  - **Both `moves_with_the_mode` tests were born with the table-length pin.**
+    Module 45 found the truncating `zip` the hard way, as an under-catch; here
+    the pin was written in from the start, so `E×75` (the preview stops drawing
+    entirely) had somewhere to fail that was not the absence tests. A lesson
+    is only learned once if it is applied to the next module before the sweep,
+    not after it.
+  - **Two absence tests, because two branches exist.** `render_preview` returns
+    empty when `preview_visible` is false or when there is no active layout,
+    and `render_tray_indicator` draws `"??"` in the latter case rather than
+    nothing. `a_manager_with_no_layouts_draws_no_preview` and
+    `a_manager_with_no_layouts_still_draws_a_tray_chip` cover the branch from
+    both sides — a branch nothing renders is a branch nothing checks
+    (lesson 24), and the second half of that pair is the one that says the tray
+    does *not* silently disappear.
+  - **Sweep: 34 caught, 0 escaped, 0 never asked, 0 under-caught, 0
+    under-declared** — the first fully clean sweep in the series, on a
+    preflight of `34 build, 0 do not, 0 not applied`, ending `restored: all
+    files match their recorded SHA-256`. Six modules in, this is the first with
+    no under-declarations at all, and the reason is worth recording because it
+    is repeatable rather than lucky: every declaration was predicted from
+    *arithmetic* (all eighteen contrast figures computed before any defect was
+    written) rather than from intuition, and the module has no value-keyed
+    locators left — `a_key_label_is_clipped_inside_its_own_cap` finds its cap by
+    `width == KEY_SIZE`, which is what every previous module's stray catches
+    came from.
+  - Catcher census (34 defects, 83 catches, 2.44 per defect):
+
+    | Test | Caught | Sole catcher |
+    |---|---|---|
+    | `every_preview_site_draws_the_role_it_claims` | 20 | 4 |
+    | `every_ink_this_module_draws_is_readable_on_what_it_sits_on` | 16 | 0 |
+    | `every_tray_site_draws_the_role_it_claims` | 9 | 0 |
+    | `a_manager_with_no_layouts_still_draws_a_tray_chip` | 8 | 0 |
+    | `the_popup_its_border_and_its_key_caps_are_three_different_values` | 6 | 0 |
+    | `every_site_the_preview_draws_moves_with_the_mode` | 5 | 0 |
+    | `no_site_in_this_module_wears_the_accent` | 4 | 0 |
+    | `every_colour_the_preview_draws_comes_from_its_palette` | 4 | 0 |
+    | `a_key_label_is_clipped_inside_its_own_cap` | 4 | 3 |
+    | `every_colour_the_tray_draws_comes_from_its_palette` | 2 | 0 |
+    | `every_site_the_tray_draws_moves_with_the_mode` | 2 | 0 |
+    | `test_manager_render_preview_hidden` | 1 | 1 |
+    | `test_manager_render_preview_visible` | 1 | 0 |
+    | `test_empty_manager_tray_label` | 1 | 0 |
+
+    - **The four defects only the ordered table caught are exactly the four
+      predicted to be invisible to everything else**, which is the closest this
+      harness has come to a controlled result. `H×74` makes the pop-up `mantle`
+      — a legal role, 12.14:1 under `text`, correct in both modes. `N×74`
+      returns the title to `blue` — the accent collision this module exists to
+      fix, and on the stock palette *the same bytes* as `p.accent`. `V×74` and
+      `W×74` transpose a cap with its label and the pop-up with its caps —
+      invisible to membership (both values are members), invisible to the mode
+      test (both move), and invisible to contrast, because contrast is
+      symmetric. Module 45 learned that symmetry the hard way as an
+      under-catch; here it was declared correctly in advance, and the sweep
+      agreed.
+    - **The §530 contrast walk caught 16 of 34 (47%), against 14 of 34 (41%) in
+      `file_drop`.** Two modules of evidence now, on either side of a shape
+      change (adjacency → most-recent-fill), both roughly half the defect set —
+      versus the *zero* that four consecutive hand-written pairing tables
+      caught. The walk is never a sole catcher in either module, which is the
+      expected result rather than a disappointment: it is a floor, and a floor
+      is meant to be redundant with the design.
+    - **`no_site_in_this_module_wears_the_accent` caught 4 and was never a sole
+      catcher.** The ordered table catches all four too. It is kept anyway,
+      because the two tests fail in different vocabularies: the table says "the
+      layout name should be `text` and is `accent`", which is a fact, and the
+      accent test says "nothing here is a choice the user made", which is the
+      *reason*. A test whose only job is to make a rule falsifiable is worth
+      its runtime even at zero sole catches.
+    - **The absence test caught 8, the widest breadth of any non-table test,
+      and none of them solely.** `a_manager_with_no_layouts_still_draws_a_tray_chip`
+      renders the `"??"` fallback and then checks its colours, so it is
+      incidentally a second tray-site assertion. That is breadth acquired by
+      accident rather than design — the same shape as the previous modules'
+      under-declarations — but it produced none here, because every tray defect
+      it trips was already declared against the tray table. An accidental
+      locator is only a nuisance when it is also an *undeclared* one.
+    - **Three pre-existing tests earned catches** (`test_manager_render_preview_hidden`,
+      `test_manager_render_preview_visible`, `test_empty_manager_tray_label`),
+      one of them solely. The conversion did not make the old suite redundant;
+      it filled the gaps around it.
+- [x] `blur.rs` — 3 constants over 6 tint sites, done 2026-08-24. 59 tests in
+  the module (eleven new), harness defects Ax76–Fx77 (thirty-two).
+  - **The headline defect here was not a colour at all: the module whose entire
+    job is transparency ignored the transparency setting.** `BlurEffect`'s five
+    presets each hardcoded a tint alpha (160/120/100/140/140), and nothing
+    anywhere read `TransparencyLevel`. A user who set transparency to **Off**
+    got a taskbar that was still 160/255 tint over a blur — about 37%
+    see-through — which is the one end of the scale that is not a matter of
+    taste: *Off* is a promise that nothing shows through, and it was being
+    broken. The conversion is what surfaced it, because threading a `Palette`
+    into the constructors put `panel_alpha` in scope at exactly the six sites
+    that had been ignoring it.
+  - **The fix anchors the existing weights at the end of the scale they were
+    written for.** The five presets' numbers are a designed hierarchy (a menu
+    tints least, the taskbar most), so they are not wrong — they are the
+    *Full*-transparency row of a table with only one row. `scaled_tint(preset,
+    panel_alpha)` interpolates each weight from its designed value at
+    `TINT_ANCHOR = 160` (`TransparencyLevel::Full`) up to fully opaque at 255
+    (`Off`), which keeps every existing look unchanged at the setting it was
+    drawn for and makes the other three settings mean something. The anchor is
+    named rather than inlined precisely so the "these numbers were written for
+    Full" claim is checkable, and
+    `the_tint_weights_are_written_for_the_full_setting` checks it.
+  - **`impl Default for BlurEffect` was deleted rather than fixed.** `Default`
+    takes no arguments, so it structurally cannot see a palette; any body it
+    could have would return a hardcoded colour, which is the defect this whole
+    task exists to remove. Keeping it and "fixing" it would have left a trait
+    impl *guaranteed* to be wrong in light mode while looking like the blessed
+    way to get a blur. Deleting it turned nine silently-wrong call sites into
+    nine compile errors, each resolved to `BlurEffect::standard(p)` at a point
+    where a palette was already in hand. **A trait whose signature cannot
+    accept the context the correct answer depends on is not a trait to
+    implement.**
+  - **Six preset tests existed and not one of them read `tint`.**
+    `test_preset_taskbar` and its siblings asserted radius, opacity, noise and
+    saturation — every field except the colour. That is the same shape as
+    lesson 24 (a delegate is a site): the tests were not weak, they were
+    *aimed elsewhere*, and a field nothing asserts is a field nothing
+    protects. Three of the thirty-two defects (`Dx77`, `Ex77`, `Fx77`) are
+    non-colour drifts kept in the set purely to confirm those six still work
+    as the guard for the fields they *do* cover.
+  - **`palette_check` grew a value-shaped entry point.** Every previous module
+    fed `assert_drawn_from` a `Vec<RenderCommand>`, but `BlurEffect` never
+    renders — its tint is a struct field consumed by the compositor. Rather
+    than have the tests synthesise fake `RenderCommand`s to be allowed through
+    the door, `assert_colours_from(p, &[(label, colour)], derived, what)` takes
+    the values directly; both entry points now delegate to one `assert_one`, so
+    the membership rule (RGB-only, black at any alpha, the two `readable_on`
+    endpoints) has exactly one definition. Two self-tests were added to
+    `palette_check` itself: one proves a leftover Mocha value fails *and names
+    its site*, one sweeps every role at every alpha through the value path.
+  - **A hole was found by predicting catchers, before the sweep rather than
+    after.** The first version of the weights test was an ordering chain
+    (`menu < title < notification < taskbar`), and `standard`'s weight appears
+    nowhere in it — it sits between no two others, so nothing constrained it at
+    all. **A pure ordering assertion cannot constrain a value that sits between
+    no two others** (lesson 25); the fix was a hand-written exact six-entry
+    table, with the ordering clause kept as a statement of *why* those numbers,
+    not as the check. Defects `Tx76` and `Ux76` exist only because that hole
+    was found.
+  - **Sweep: 32 caught, 0 escaped, 0 never asked, 0 under-caught, 0
+    under-declared** — the second fully clean sweep in a row, on a preflight of
+    `32 build, 0 do not, 0 not applied`, ending `restored: all files match
+    their recorded SHA-256`.
+  - Catcher census (32 defects, 46 catches, **1.44 per defect**):
+
+    | Test | Caught | Sole catcher |
+    |---|---|---|
+    | `every_preset_tints_with_the_role_it_claims` | 16 | 9 |
+    | `the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as` | 9 | 9 |
+    | `every_tint_comes_from_its_palette` | 4 | 0 |
+    | `every_tint_moves_with_the_mode` | 4 | 0 |
+    | `no_blur_tint_wears_the_accent` | 3 | 0 |
+    | `less_transparency_is_never_more_see_through` | 3 | 0 |
+    | `transparency_off_leaves_no_blurred_surface_see_through` | 2 | 0 |
+    | `the_tint_weights_are_written_for_the_full_setting` | 1 | 1 |
+    | `a_panel_alpha_below_the_anchor_is_clamped` | 1 | 0 |
+    | `test_preset_taskbar` | 1 | 1 |
+    | `test_preset_none` | 1 | 1 |
+    | `test_default_effect` | 1 | 1 |
+
+    - **1.44 catches per defect against `input_method`'s 2.44, and that drop is
+      the module's shape rather than a weakness.** Twenty-two of thirty-two
+      defects have exactly one catcher. Every previous module rendered, so a
+      defect passed through a membership test, a mode test, a contrast walk and
+      an ordered table on its way out; `blur` produces no `RenderCommand` at
+      all and has no ink-on-fill pair anywhere, so there is no contrast walk to
+      be redundant with, and its entire observable surface is six struct
+      fields. **Redundancy between tests is a property of how many independent
+      views of the output exist, not of how carefully the tests were written** —
+      a module with one view gets one catch per defect however hard you try.
+      The consequence to carry forward is that a module like this has no margin:
+      a single missing test is a defect class that escapes outright, which is
+      exactly what the pre-sweep hole would have been.
+    - **The exact-table test was the sole catcher on all nine of its catches,
+      and three of those nine would have escaped the ordering chain it
+      replaced.** `Bx77` (every tint opaque) and `Cx77` (every preset scaled
+      with the menu's weight) flatten the hierarchy, so the discarded
+      `menu < title < notification < taskbar` chain would have caught them, as
+      it would `Px76`–`Sx76`. But `Tx76` (the standard surface drifts to 200),
+      `Ux76` (the standard surface goes opaque) and `Vx76` (the no-blur
+      fallback is put through the scaling) touch only values the chain never
+      names, and would have gone out clean. Lesson 25 is therefore not a
+      theoretical hazard — it was worth exactly three escapes on the one module
+      where it was checked before the run rather than after.
+    - **All three pre-existing preset tests earned a catch, each solely.**
+      `test_preset_taskbar`, `test_preset_none` and `test_default_effect` cover
+      radius, opacity and noise — the fields the new colour tests deliberately
+      say nothing about — so `Dx77`, `Ex77` and `Fx77` have exactly one catcher
+      each and it is the old one. The eleven new tests did not subsume the old
+      six; the two sets partition the struct, and the sweep shows the partition
+      has no gap in it. `test_default_effect` survives the deletion of `impl
+      Default` because it was rewritten around `BlurEffect::standard(p)` —
+      keeping the test while removing the trait is what turned an unfixable
+      API into a fixed one without losing its coverage.
+    - **`every_preset_tints_with_the_role_it_claims` caught half the set (16 of
+      32) and nine of them solely,** which makes it by a wide margin the most
+      load-bearing test in the module. That is the expected shape for a
+      six-row hand-written role table checked against six constructors: it is
+      the only test that knows *which* role belongs to *which* preset, so every
+      substitution and every transposition lands on it and on nothing else.
+      Note the contrast with modules 42–45, where a hand-written table caught
+      nothing: those tables paired an ink with a fill and asserted a *contrast*,
+      which is a fact about the palette. This one asserts an *identity* —
+      "the taskbar's tint is `base`" — which is a fact about the module, and a
+      fact about the module is the only kind a test of the module can falsify.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -53849,6 +54452,87 @@ warning that they were never saved — which is worse than the feature being
 absent, because the naming UI implies durability. The module doc actively
 misleads the next person to read it into thinking the persistence exists and
 merely needs wiring.
+---
+
+### TD-C-THE-SHELL-KEEPS-FIVE-KEYBOARD-LAYOUTS-THAT-NOTHING-TYPES-WITH — 2026-08-24 — OPEN
+
+**In short.** The shell has a keyboard-layout switcher: a tray chip reading
+`EN`, a pop-up preview of the key caps, five built-in layouts (US QWERTY,
+Dvorak, Colemak, German QWERTZ, French AZERTY), a per-application memory of
+which layout you last used, and a config file. None of it changes what any key
+produces. The thing that actually turns a key-press into a letter is a
+different, hard-coded table in a different crate, and the two have no
+connection at all — so a user who switches to AZERTY sees the tray say `FR`,
+sees the preview redraw with AZERTY caps, and then types QWERTY.
+
+**Where:** `gui/desktop/src/input_method.rs` (the switcher) and
+`gui/compositor/src/keymap.rs` (the table that is actually consulted).
+
+**The two stores, and the gap between them.**
+
+- `InputMethodManager` in `input_method.rs` owns the five `KeyboardLayout`
+  values and the active index. `grep -rn 'InputMethodManager\|input_method' gui
+  apps` finds exactly one hit outside the file: `pub mod input_method;` in
+  `gui/desktop/src/lib.rs:104`. Nothing constructs it, so today it is a
+  switcher nobody has switched.
+- `key_for_scancode` in `gui/compositor/src/keymap.rs` holds one US-QWERTY
+  scan-code table and is the only scancode→character path in the tree. It
+  takes no layout argument and reads nothing the shell owns. That table is
+  already tracked as `TD-ONLY-ONE-KEYBOARD-LAYOUT`; **this** entry is the
+  observation that a *second*, richer layout store now exists on the other side
+  of the process boundary and duplicates the same data in an incompatible
+  shape.
+
+**Which fields are pure decoration.** Four of `KeyboardLayout`'s eight fields
+are written by all five constructors and read by nothing outside the module's
+own unit tests:
+
+| Field | Set by | Read by |
+|---|---|---|
+| `rows_shifted` | all five layouts, 4 rows each | **nothing at all** — not even the preview, which draws `rows_unshifted` only (line 483) |
+| `has_dead_keys` | `true` on German and French | one assertion, `test_german_layout_has_dead_keys` (line 713) |
+| `is_rtl` | `false` on all five | one assertion (line 694) |
+| `language` | all five | nothing |
+
+`is_rtl` is the one that will bite, because it is not merely unread — it is
+unread *and* the code it would have to govern assumes the opposite.
+`render_preview` walks `rows_unshifted` left to right and places cap *n* at
+`x + n * KEY_SIZE` unconditionally (line 483 onward), so an Arabic or Hebrew
+layout would preview with its keys mirrored. Nothing catches this today
+because no RTL layout is offered, which means the field's only current effect
+is to make the module look as though it has been thought about.
+
+**The capability it would need already exists.** `gui/font` has a full bidi
+implementation — `gui/font/src/bidi.rs` resolves paragraph direction and
+`gui/font/src/shape.rs` places runs in visual order, both with their own
+`is_rtl`. So the RTL preview is not blocked on missing machinery; the desktop
+module simply never asks.
+
+**What the proper fix looks like.** Not "make the preview read `is_rtl`" —
+that would polish the decoration. The layouts belong in one place, and by
+§456's own reasoning that place is the compositor, so that one system keymap
+governs every client at once. Concretely: move the five row tables to
+`gui/compositor/src/keymap.rs` (or a crate both can depend on), give
+`key_for_scancode` a layout parameter, and reduce the desktop's
+`InputMethodManager` to a *selector* — it names the active layout and asks the
+compositor to switch, rather than holding a private copy of the data. The
+per-application memory and the config file are worth keeping and are already
+correct; it is only the row tables that must not live in two places.
+`rows_shifted` should be deleted or wired up at that point, and `is_rtl`
+either honoured by the preview or dropped along with `language`.
+
+**Trigger:** sequenced after `TD-ONLY-ONE-KEYBOARD-LAYOUT` step 1 (layout
+selection in the compositor), which is what gives the selector something to
+select. Deleting the four dead fields does not have to wait for that and can
+be done at any time.
+
+**If never fixed:** the switcher is a lie with a UI. It is worse than an
+absent feature, because a non-US user will find it, use it, watch the tray
+label change, and conclude the OS is broken in some deeper way when the
+letters stay wrong — rather than concluding, correctly, that layout switching
+was never implemented. The duplicated row tables also guarantee the two copies
+drift: a fix to the compositor's QWERTY table will not reach the preview, so
+the picture the user is shown will stop matching what they get.
 ---
 
 ### B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS, AND LIBC'S DOC COMMENTS EXPLAIN IT WITH A REASON THAT STOPPED BEING TRUE — 2026-08-21 — OPEN
@@ -69316,6 +70000,27 @@ through the failure filter; then reverted.
 
 **Still not gated:** the `bench/**` crates, also lane A's. Same one-line
 addition if they turn out to be clippy-clean; unmeasured as of this writing.
+
+**Correction, 2026-08-24 — there are no `bench/**` crates, so the gate is
+already complete for lane A's scope.** Checked before extending it: `bench/`
+holds three data files (`baselines.toml`, `boot-history.jsonl`,
+`history.jsonl`) and no `Cargo.toml`, and the workspace `members` list has no
+`bench/*` glob. Benchmarking here is the boot test's own `--bench` mode over
+in-kernel code, which `-p kernel` already covers.
+
+The paragraph above was written from `CLAUDE.md`'s instruction to *put*
+benchmarks in `bench/<subsystem>/` — a statement about where they should go,
+read as one about where they are. Worth noting as a pattern, because it is the
+second time in two days that an entry in this file recorded an unverified
+premise as fact (the first being the fingerprint claim corrected above). Both
+were about a minute's work to check; neither was checked before being written
+down, and both were written *confidently enough to act on* — the fingerprint
+one deferred this gate by a day, and this one would have sent the next reader
+looking for crates that do not exist.
+
+Nothing further to gate. `-p kernel` is the whole of lane A's lintable tree;
+the other lanes' crates are theirs to gate, and a workspace-wide run is not
+lane A's to impose on them.
 
 ---
 

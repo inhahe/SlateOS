@@ -704,10 +704,15 @@ impl FileSystem for BtrfsFs {
 /// # Errors
 ///
 /// Propagates [`BtrfsFs::open`] and [`crate::fs::Vfs::mount`] failures.
-pub fn mount(device: &str, mount_path: &str) -> KernelResult<()> {
+pub fn mount(device: &str, mount_path: impl AsRef<crate::fs::path::Path>) -> KernelResult<()> {
+    let mount_path = mount_path.as_ref();
     let fs = BtrfsFs::open(device)?;
     crate::fs::Vfs::mount(mount_path, Box::new(fs))?;
-    serial_println!("[btrfs] Mounted {} at {} (read-only)", device, mount_path);
+    serial_println!(
+        "[btrfs] Mounted {} at {} (read-only)",
+        device,
+        mount_path.display()
+    );
     Ok(())
 }
 

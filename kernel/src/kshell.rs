@@ -160,7 +160,15 @@ fn last_exit() -> u8 {
 /// The shell's current working directory.
 ///
 /// Used to resolve relative paths.  Changed by `cd`.  Starts as "/".
-static CWD: Mutex<String> = Mutex::new(String::new());
+///
+/// A [`PathBuf`], not a `String`, for the same reason [`resolve_path`] returns
+/// one: our paths admit every byte but `/` and NUL, so a directory whose name
+/// is not valid UTF-8 cannot be held in a `String` without either refusing the
+/// `cd` or corrupting the name. That would then corrupt every relative path
+/// resolved beneath it, which is a wider blast radius than the `cd` itself.
+/// The kernel proper already settled this direction --- `proc::pcb::get_cwd`
+/// hands back `Vec<u8>` --- so this is the shell catching up, not a new policy.
+static CWD: Mutex<PathBuf> = Mutex::new(PathBuf::new());
 
 /// Shadow copy of shell command history for the `history` command.
 ///
@@ -190,11 +198,104 @@ fn join_paths_display(paths: &[PathBuf]) -> String {
     out
 }
 
-/// Get the current working directory as a new String.
-fn get_cwd() -> String {
+/// Strip a literal byte suffix from `path`, returning the remainder.
+///
+/// This is *not* [`Path::extension`]: the archive commands match multi-part
+/// suffixes like `.tar.gz` and `.tbz2`, which the single-extension rule would
+/// split in the wrong place. It is a plain byte comparison, so a suffix is
+/// matched even when the surrounding name is not valid UTF-8 --- which is the
+/// point, since `gunzip` derives the *output* name from it and a lossy
+/// rendering there would write to a different file than the user named.
+fn strip_path_suffix<'a>(path: &'a Path, suffix: &[u8]) -> Option<&'a Path> {
+    let bytes = path.as_bytes();
+    let stem_len = bytes.len().checked_sub(suffix.len())?;
+    let stem = bytes.get(..stem_len)?;
+    if bytes.get(stem_len..)? == suffix {
+        Some(Path::new(stem))
+    } else {
+        None
+    }
+}
+
+/// `path` with `suffix` appended.
+///
+/// `PathBuf::push` inserts a separator, which is right for a path component
+/// and wrong for an extension, so appending goes through `extend_bytes`.
+fn path_with_suffix(path: &Path, suffix: &[u8]) -> PathBuf {
+    let bytes = path.as_bytes();
+    let mut out = PathBuf::with_capacity(bytes.len().saturating_add(suffix.len()));
+    out.extend_bytes(bytes);
+    out.extend_bytes(suffix);
+    out
+}
+
+/// Derive a decompressor's output path from its input path.
+///
+/// `table` is consulted in order and maps a suffix to strip onto one to append
+/// (`.tgz` -> `.tar`, `.gz` -> nothing). When nothing matches, `.out` is
+/// appended, matching what the decompressors did individually before.
+///
+/// Shared by `gunzip`/`bunzip2`/`unxz`/`unzstd`/`unlz4`, which each spelled out
+/// the same `if`/`else if` chain over their own suffixes and each repeated the
+/// `.out` fallback. Collapsing them is not only shorter: every one of those
+/// chains derived the output name by slicing the input as UTF-8 text, so an
+/// archive whose name is not valid UTF-8 would decompress to a *different*,
+/// mangled filename. Deriving it in bytes is what makes that impossible.
+fn decompressed_output_path(input: &Path, table: &[(&[u8], &[u8])]) -> PathBuf {
+    for (suffix, replacement) in table {
+        if let Some(base) = strip_path_suffix(input, suffix) {
+            return path_with_suffix(base, replacement);
+        }
+    }
+    path_with_suffix(input, b".out")
+}
+
+/// Narrow a byte path to `&str` for an API that still stores paths as text.
+///
+/// Returns `None`, after printing a diagnostic, when the path is not valid
+/// UTF-8. Every call site is a marker for a module whose own paths have not
+/// been converted to bytes yet (`fs::pipe` and `fs::templates` both hold
+/// `String`, so converting them means converting their storage and all their
+/// consumers -- separate changes from this one).
+///
+/// The refusal is the point. The alternative available at these call sites is
+/// `Path::display`, which substitutes U+FFFD for undecodable bytes and would
+/// therefore hand the callee a *different path than the user typed*, silently.
+/// Refusing is visible, is not data loss, and disappears on its own as each
+/// module is converted.
+fn path_arg_as_str<'a>(path: &'a Path, cmd: &str) -> Option<&'a str> {
+    let narrowed = path.to_str();
+    if narrowed.is_none() {
+        crate::console_println!(
+            "{}: path is not valid UTF-8, which this command cannot accept yet: {}",
+            cmd,
+            path.display()
+        );
+    }
+    narrowed
+}
+
+/// Replace the shell's working directory.
+///
+/// The companion to [`get_cwd`]. Three callers open-coded `clear()` followed
+/// by `push_str()`, which is an assignment spelled the long way; going through
+/// `extend_bytes` rather than `PathBuf::push` matters because `push` would
+/// interpose a separator when the buffer is non-empty.
+fn set_cwd<P: AsRef<Path>>(path: P) {
+    let mut cwd = CWD.lock();
+    cwd.clear();
+    cwd.extend_bytes(path.as_ref().as_bytes());
+}
+
+/// Get the current working directory as a new [`PathBuf`].
+///
+/// The empty `CWD` means "not yet set" rather than "the empty path", because
+/// the static has to be constructed in a `const` context and so cannot start
+/// out as `/`. Normalising it here keeps every caller from having to know that.
+fn get_cwd() -> PathBuf {
     let guard = CWD.lock();
-    if guard.is_empty() {
-        String::from("/")
+    if guard.as_path().as_bytes().is_empty() {
+        PathBuf::from("/")
     } else {
         guard.clone()
     }
@@ -205,40 +306,55 @@ fn get_cwd() -> String {
 /// - Absolute paths (starting with `/`) are returned normalized.
 /// - Relative paths are joined with the cwd and normalized.
 /// - Handles `.` (current dir) and `..` (parent dir) components.
-fn resolve_path(path: &str) -> String {
-    let abs = if path.starts_with('/') {
-        String::from(path)
-    } else {
-        let cwd = get_cwd();
-        if cwd.ends_with('/') {
-            alloc::format!("{}{}", cwd, path)
-        } else {
-            alloc::format!("{}/{}", cwd, path)
-        }
-    };
+///
+/// Takes anything path-like and returns a byte [`PathBuf`], because a path is
+/// a byte string: our paths allow every byte except `/` and NUL, so a `String`
+/// return type cannot represent every name the filesystem can hold.
+///
+/// The generic parameter is what lets this be converted without touching its
+/// ~270 callers. `AsRef<Path>` is implemented for `str`, `String`, `[u8]`,
+/// `Vec<u8>` and `PathBuf` alike (`fs/path.rs`), so every existing `&str`
+/// caller still compiles unchanged, while the byte-clean word-expansion work
+/// can hand it raw bytes. The `Vfs` entry points are likewise `impl
+/// AsRef<Path>`, so a caller that only forwards this result into the VFS needs
+/// no edit either — the change is invisible to it in both directions.
+///
+/// Part of the option-B conversion settled in `design-decisions.md` §261; see
+/// `TD-KSHELL-LINE-EDITOR-IS-UTF8`.
+fn resolve_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    let path = path.as_ref();
 
-    // Normalize: split into components, resolve . and ..
-    let mut parts: Vec<&str> = Vec::new();
-    for component in abs.split('/') {
-        match component {
-            "" | "." => {} // skip empty and current-dir
-            ".." => {
+    // `join` replaces the base entirely when `other` is absolute (matching
+    // `std`), so this single call covers both the absolute and the relative
+    // case. It also inserts the separator only when one is needed, which is
+    // the `cwd.ends_with('/')` branch this function used to spell out.
+    let abs = Path::new(&get_cwd()).join(path);
+
+    // Normalize: resolve `.` and `..`. `components()` already skips empty
+    // components, so the old `"" | "." => {}` arm collapses to just `.`.
+    let mut parts: Vec<&Path> = Vec::new();
+    for component in abs.components() {
+        match component.as_bytes() {
+            b"." => {}
+            b".." => {
                 parts.pop();
             }
-            other => parts.push(other),
+            _ => parts.push(component),
         }
     }
 
     if parts.is_empty() {
-        String::from("/")
-    } else {
-        let mut result = String::with_capacity(abs.len());
-        for p in &parts {
-            result.push('/');
-            result.push_str(p);
-        }
-        result
+        return PathBuf::from("/");
     }
+    let mut result = PathBuf::with_capacity(abs.as_bytes().len());
+    for p in &parts {
+        // `extend_bytes`, not `push`: `push` would refuse to add the leading
+        // separator to an empty buffer, so the first component would come out
+        // unrooted and turn an absolute path into a relative one.
+        result.extend_bytes(b"/");
+        result.extend_bytes(p.as_bytes());
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -2961,13 +3077,13 @@ pub fn run() -> ! {
     // Initialize cwd.
     {
         let mut cwd = CWD.lock();
-        if cwd.is_empty() {
-            cwd.push('/');
+        if cwd.as_path().as_bytes().is_empty() {
+            cwd.extend_bytes(b"/");
         }
     }
 
     // Initialize default environment variables.
-    env_set("PWD", &get_cwd());
+    sync_env_pwd();
     env_set("HOME", "/");
     env_set("SHELL", "kshell");
     env_set("USER", "root");
@@ -2988,7 +3104,7 @@ pub fn run() -> ! {
             crate::console_print!("> ");
         } else {
             let cwd = get_cwd();
-            crate::console_print!("{}> ", cwd);
+            crate::console_print!("{}> ", cwd.display());
         }
 
         // Read a line (blocking on keyboard).
@@ -3208,7 +3324,7 @@ fn reverse_search_mode(buf: &mut String, cursor: &mut usize, history: &mut Histo
                 // Accept the current match (already in buf).
                 // Redraw as a normal prompt line.
                 crate::console::write_str("\r\x1b[2K");
-                let prompt = alloc::format!("{}> ", get_cwd());
+                let prompt = alloc::format!("{}> ", get_cwd().display());
                 crate::console::write_str(&prompt);
                 for &b in buf.as_bytes() {
                     crate::console::putchar(b);
@@ -3222,7 +3338,7 @@ fn reverse_search_mode(buf: &mut String, cursor: &mut usize, history: &mut Histo
                 buf.push_str(&original);
                 *cursor = original_cursor;
                 crate::console::write_str("\r\x1b[2K");
-                let prompt = alloc::format!("{}> ", get_cwd());
+                let prompt = alloc::format!("{}> ", get_cwd().display());
                 crate::console::write_str(&prompt);
                 for &b in buf.as_bytes() {
                     crate::console::putchar(b);
@@ -3272,7 +3388,7 @@ fn reverse_search_mode(buf: &mut String, cursor: &mut usize, history: &mut Histo
                 // it on the next iteration.  This handles arrow keys,
                 // Ctrl+A/E, etc. gracefully.
                 crate::console::write_str("\r\x1b[2K");
-                let prompt = alloc::format!("{}> ", get_cwd());
+                let prompt = alloc::format!("{}> ", get_cwd().display());
                 crate::console::write_str(&prompt);
                 for &b in buf.as_bytes() {
                     crate::console::putchar(b);
@@ -3347,7 +3463,7 @@ fn read_line(buf: &mut String, history: &mut History) {
                             crate::console::putchar(b'\n');
                             do_session_switch(target);
                             // Reprint prompt after switch.
-                            let prompt = alloc::format!("{}> ", get_cwd());
+                            let prompt = alloc::format!("{}> ", get_cwd().display());
                             crate::console::write_str(&prompt);
                             buf.clear();
                             cursor = 0;
@@ -3361,7 +3477,7 @@ fn read_line(buf: &mut String, history: &mut History) {
                         if let Ok(id) = crate::termsession::create("") {
                             do_session_switch(id);
                         }
-                        let prompt = alloc::format!("{}> ", get_cwd());
+                        let prompt = alloc::format!("{}> ", get_cwd().display());
                         crate::console::write_str(&prompt);
                         buf.clear();
                         cursor = 0;
@@ -3384,7 +3500,7 @@ fn read_line(buf: &mut String, history: &mut History) {
                             keyboard::set_echo(true);
                             crate::console::putchar(b'\n');
                             do_session_switch(next_id);
-                            let prompt = alloc::format!("{}> ", get_cwd());
+                            let prompt = alloc::format!("{}> ", get_cwd().display());
                             crate::console::write_str(&prompt);
                             buf.clear();
                             cursor = 0;
@@ -3411,7 +3527,7 @@ fn read_line(buf: &mut String, history: &mut History) {
                             keyboard::set_echo(true);
                             crate::console::putchar(b'\n');
                             do_session_switch(prev_id);
-                            let prompt = alloc::format!("{}> ", get_cwd());
+                            let prompt = alloc::format!("{}> ", get_cwd().display());
                             crate::console::write_str(&prompt);
                             buf.clear();
                             cursor = 0;
@@ -3427,7 +3543,7 @@ fn read_line(buf: &mut String, history: &mut History) {
                             crate::console_println!(" {} {} {}", marker, s.id, s.name);
                         }
                         // Reprint prompt.
-                        let prompt = alloc::format!("{}> ", get_cwd());
+                        let prompt = alloc::format!("{}> ", get_cwd().display());
                         crate::console::write_str(&prompt);
                         for &b in buf.as_bytes() {
                             crate::console::putchar(b);
@@ -3443,7 +3559,7 @@ fn read_line(buf: &mut String, history: &mut History) {
                             keyboard::set_echo(true);
                             crate::console::putchar(b'\n');
                             do_session_switch(0);
-                            let prompt = alloc::format!("{}> ", get_cwd());
+                            let prompt = alloc::format!("{}> ", get_cwd().display());
                             crate::console::write_str(&prompt);
                             buf.clear();
                             cursor = 0;
@@ -3488,7 +3604,7 @@ fn read_line(buf: &mut String, history: &mut History) {
             0x0C => {
                 // Ctrl+L — clear screen and reprint prompt + line.
                 crate::console::clear();
-                let prompt = alloc::format!("{}> ", get_cwd());
+                let prompt = alloc::format!("{}> ", get_cwd().display());
                 crate::console::write_str(&prompt);
                 for &b in buf.as_bytes() {
                     crate::console::putchar(b);
@@ -3504,7 +3620,7 @@ fn read_line(buf: &mut String, history: &mut History) {
                 find_in_scrollback();
                 // Reprint prompt + line after returning from find mode.
                 crate::console::write_str("\r\x1b[2K");
-                let prompt = alloc::format!("{}> ", get_cwd());
+                let prompt = alloc::format!("{}> ", get_cwd().display());
                 crate::console::write_str(&prompt);
                 for &b in buf.as_bytes() {
                     crate::console::putchar(b);
@@ -3647,7 +3763,7 @@ fn read_line(buf: &mut String, history: &mut History) {
                     }
                     crate::console::putchar(b'\n');
                     // Reprint the prompt and current line.
-                    let prompt = alloc::format!("{}> ", get_cwd());
+                    let prompt = alloc::format!("{}> ", get_cwd().display());
                     crate::console::write_str(&prompt);
                     for &b in buf.as_bytes() {
                         crate::console::putchar(b);
@@ -8688,55 +8804,175 @@ fn cmd_echo(args: &str) {
 }
 
 /// Interpret C-style escape sequences for `echo -e`.
+///
+/// Iterates *characters*, not bytes. That distinction is the whole content of
+/// this function's history: it used to walk `s.as_bytes()` and copy each
+/// non-escape byte through with `result.push(bytes[i] as char)`. For an ASCII
+/// byte those agree, so the bug was invisible in every ASCII test — but `as
+/// char` maps `0x80..=0xFF` to `U+0080..=U+00FF`, which `String::push` then
+/// re-encodes as **two** UTF-8 bytes. Every byte of a multi-byte character was
+/// therefore expanded into its own two-byte sequence, so `echo -e "café"`
+/// printed `cafÃ©` while plain `echo "café"` (which never enters this
+/// function) printed correctly.
+///
+/// It is reachable, not theoretical: the line editor refuses bytes ≥ 0x80 from
+/// the keyboard, but `source` accepts any valid-UTF-8 script and command
+/// substitution feeds arbitrary command output back into the line, so a
+/// sourced `echo -e` on any non-ASCII text corrupts it.
+///
+/// Since `s` is a `&str`, every character in it is by construction whole and
+/// valid, so pushing the `char` is exactly right and cannot re-encode. All
+/// escape *triggers* are ASCII, which is why peeking one character ahead is
+/// equivalent to the old one-byte lookahead.
+///
+/// Note what this deliberately does *not* add: a `\xNN` escape for arbitrary
+/// bytes. That needs an output path that can carry non-UTF-8 — `shell_write`
+/// takes `&str` and the capture buffer is a `String` — and belongs to the
+/// byte-clean expanded-word work settled as option B in `design-decisions.md`
+/// §261, not to a corruption fix. See `TD-KSHELL-LINE-EDITOR-IS-UTF8`.
 fn interpret_echo_escapes(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
+    let mut chars = s.chars().peekable();
 
-    while i < len {
-        if bytes[i] == b'\\' && i.saturating_add(1) < len {
-            let next = bytes[i.saturating_add(1)];
-            match next {
-                b'n' => {
-                    result.push('\n');
-                    i = i.saturating_add(2);
-                }
-                b't' => {
-                    result.push('\t');
-                    i = i.saturating_add(2);
-                }
-                b'r' => {
-                    result.push('\r');
-                    i = i.saturating_add(2);
-                }
-                b'\\' => {
-                    result.push('\\');
-                    i = i.saturating_add(2);
-                }
-                b'0' => {
-                    result.push('\0');
-                    i = i.saturating_add(2);
-                }
-                b'a' => {
-                    result.push('\x07');
-                    i = i.saturating_add(2);
-                } // bell
-                b'b' => {
-                    result.push('\x08');
-                    i = i.saturating_add(2);
-                } // backspace
-                _ => {
-                    result.push('\\');
-                    i = i.saturating_add(1);
-                }
-            }
-        } else {
-            result.push(bytes[i] as char);
-            i = i.saturating_add(1);
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            result.push(c);
+            continue;
         }
+        // A backslash: consume the escape *only* if the next character forms
+        // one. `None` (trailing backslash) and any unrecognised character both
+        // emit a literal backslash and leave the peeked character in the
+        // stream, which is what the byte version did by advancing only one.
+        let escaped = match chars.peek() {
+            Some('n') => '\n',
+            Some('t') => '\t',
+            Some('r') => '\r',
+            Some('\\') => '\\',
+            Some('0') => '\0',
+            Some('a') => '\x07', // bell
+            Some('b') => '\x08', // backspace
+            _ => {
+                result.push('\\');
+                continue;
+            }
+        };
+        result.push(escaped);
+        chars.next();
     }
     result
+}
+
+/// Boot-time self-test for the shell's text helpers.
+///
+/// Exists because the kernel binary sets `test = false`, so `#[cfg(test)]`
+/// modules in this file never execute — a boot-battery entry is the only place
+/// a kshell assertion actually runs.
+///
+/// # Errors
+///
+/// Never returns `Err`; failures assert, matching the other boot self-tests.
+///
+/// # Panics
+///
+/// On any assertion failure.
+pub fn self_test() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    serial_println!("  kshell::self_test 1: echo -e escapes (ASCII)");
+    assert_eq!(interpret_echo_escapes("a\\nb"), "a\nb");
+    assert_eq!(interpret_echo_escapes("a\\tb"), "a\tb");
+    assert_eq!(interpret_echo_escapes("a\\rb"), "a\rb");
+    assert_eq!(interpret_echo_escapes("a\\\\b"), "a\\b");
+    assert_eq!(interpret_echo_escapes("a\\0b"), "a\0b");
+    assert_eq!(interpret_echo_escapes("a\\ab"), "a\x07b");
+    assert_eq!(interpret_echo_escapes("a\\bb"), "a\x08b");
+    // No escape: text passes through untouched.
+    assert_eq!(interpret_echo_escapes("plain"), "plain");
+    assert_eq!(interpret_echo_escapes(""), "");
+
+    serial_println!("  kshell::self_test 2: unknown and trailing backslashes");
+    // An unrecognised escape emits the backslash and keeps the character, so
+    // `\z` is two characters out, not a swallowed one.
+    assert_eq!(interpret_echo_escapes("a\\zb"), "a\\zb");
+    // A backslash with nothing after it is a literal backslash.
+    assert_eq!(interpret_echo_escapes("a\\"), "a\\");
+    assert_eq!(interpret_echo_escapes("\\"), "\\");
+    // Two escapes in a row, and an escaped backslash *before* an escape
+    // character — `\\n` is a literal backslash then `n`, not a newline.
+    assert_eq!(interpret_echo_escapes("\\n\\t"), "\n\t");
+    assert_eq!(interpret_echo_escapes("\\\\n"), "\\n");
+
+    serial_println!("  kshell::self_test 3: non-ASCII survives (regression)");
+    // The bug this test exists for: the old implementation walked bytes and
+    // copied each through as `byte as char`, which re-encoded every byte of a
+    // multi-byte character as its own two-byte sequence — "café" came out as
+    // "cafÃ©".  Compare byte lengths explicitly, because a String that *looks*
+    // right in a debugger can still carry the doubled encoding.
+    assert_eq!(interpret_echo_escapes("café"), "café");
+    assert_eq!(interpret_echo_escapes("café").len(), "café".len());
+    // 2-, 3- and 4-byte characters, since the doubling scaled with length.
+    assert_eq!(interpret_echo_escapes("é").len(), 2);
+    assert_eq!(interpret_echo_escapes("→").len(), 3);
+    assert_eq!(interpret_echo_escapes("🦀").len(), 4);
+    // Escapes still work when adjacent to multi-byte text, which is where a
+    // byte-indexed lookahead would have desynchronised.
+    assert_eq!(interpret_echo_escapes("é\\né"), "é\né");
+    assert_eq!(interpret_echo_escapes("🦀\\t🦀"), "🦀\t🦀");
+
+    serial_println!("  kshell::self_test 4: resolve_path normalisation");
+    // Drive `CWD` explicitly and restore it, so these assertions do not depend
+    // on where in the boot order this battery happens to run.
+    let saved_cwd = CWD.lock().clone();
+    *CWD.lock() = PathBuf::from("/");
+
+    let rp = |p: &str| resolve_path(p).as_path().as_bytes().to_vec();
+    assert_eq!(rp("/a/b"), b"/a/b");
+    assert_eq!(rp("a/b"), b"/a/b", "relative joins onto cwd");
+    assert_eq!(rp("/a/./b"), b"/a/b", "`.` is dropped");
+    assert_eq!(rp("/a/b/.."), b"/a", "`..` pops");
+    assert_eq!(rp("/a/../b"), b"/b");
+    assert_eq!(rp("/a//b"), b"/a/b", "repeated separators collapse");
+    assert_eq!(rp("/a/b/"), b"/a/b", "trailing separator dropped");
+    // `..` cannot escape the root: popping an empty stack is a no-op, so the
+    // result is `/` rather than something above it.
+    assert_eq!(rp("/.."), b"/");
+    assert_eq!(rp("/../.."), b"/");
+    assert_eq!(rp("/"), b"/");
+    assert_eq!(rp(""), b"/", "empty resolves to cwd");
+    assert_eq!(rp("."), b"/");
+
+    // A cwd that is not the root, with and without a trailing separator --
+    // the latter is the case the old implementation special-cased by hand and
+    // `PathBuf::push` now handles.
+    *CWD.lock() = PathBuf::from("/x");
+    assert_eq!(rp("y"), b"/x/y");
+    assert_eq!(rp(".."), b"/");
+    assert_eq!(rp("/abs"), b"/abs", "an absolute path ignores cwd");
+    *CWD.lock() = PathBuf::from("/x/");
+    assert_eq!(rp("y"), b"/x/y", "cwd's trailing separator is not doubled");
+
+    serial_println!("  kshell::self_test 5: resolve_path is byte-clean");
+    // The reason this function returns `PathBuf` and not `String`: a filename
+    // may contain any byte except `/` and NUL. 0xFF is not valid UTF-8, so a
+    // `String` could not carry this name at all -- it is the case the whole
+    // option-B conversion exists for.
+    *CWD.lock() = PathBuf::from("/");
+    let odd: &[u8] = b"/re\xffport.txt";
+    assert_eq!(resolve_path(odd).as_path().as_bytes(), odd);
+    // ...and it still normalises around the invalid byte.
+    assert_eq!(
+        resolve_path(&b"/a/../re\xffport.txt"[..])
+            .as_path()
+            .as_bytes(),
+        b"/re\xffport.txt"
+    );
+    // A lone high byte is an ordinary component, not a separator.
+    assert_eq!(resolve_path(&b"\xff"[..]).as_path().as_bytes(), b"/\xff");
+
+    *CWD.lock() = saved_cwd;
+
+    serial_println!("  kshell::self_test PASSED");
+    Ok(())
 }
 
 /// `printf FORMAT [ARG ...]` — formatted output (subset of POSIX printf).
@@ -9139,7 +9375,7 @@ fn cmd_strings(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("strings: {}: {:?}", path, e);
+            crate::console_println!("strings: {}: {:?}", path.display(), e);
             set_exit(1);
             return;
         }
@@ -9207,7 +9443,7 @@ fn cmd_column(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("column: {}: {:?}", path, e);
+            crate::console_println!("column: {}: {:?}", path.display(), e);
             set_exit(1);
             return;
         }
@@ -9247,7 +9483,7 @@ fn cmd_column_input(args: &str, input: &str) {
         let data = match crate::fs::Vfs::read_file(&path) {
             Ok(d) => d,
             Err(e) => {
-                crate::console_println!("column: {}: {:?}", path, e);
+                crate::console_println!("column: {}: {:?}", path.display(), e);
                 set_exit(1);
                 return;
             }
@@ -9690,7 +9926,7 @@ fn cmd_ls(args: &str) {
     };
 
     ls_list_dir(
-        Path::new(path.as_str()),
+        &path,
         long_format,
         show_all,
         human_sizes,
@@ -9938,7 +10174,7 @@ fn cmd_cat(args: &str) {
             }
         }
         Err(e) => {
-            crate::console_println!("cat: {}: {:?}", path, e);
+            crate::console_println!("cat: {}: {:?}", path.display(), e);
             set_exit(1);
         }
     }
@@ -9965,10 +10201,10 @@ fn cmd_write(args: &str) {
 
     match crate::fs::Vfs::write_file(&path, &data) {
         Ok(()) => {
-            crate::console_println!("Wrote {} bytes to {}", data.len(), path);
+            crate::console_println!("Wrote {} bytes to {}", data.len(), path.display());
         }
         Err(e) => {
-            crate::console_println!("write: {}: {:?}", path, e);
+            crate::console_println!("write: {}: {:?}", path.display(), e);
             set_exit(1);
         }
     }
@@ -10001,20 +10237,20 @@ fn cmd_rm(args: &str) {
     if recursive {
         match crate::fs::Vfs::remove_recursive(&path) {
             Ok(count) => {
-                crate::console_println!("Removed {} ({} items)", path, count);
+                crate::console_println!("Removed {} ({} items)", path.display(), count);
             }
             Err(e) => {
-                crate::console_println!("rm: {}: {:?}", path, e);
+                crate::console_println!("rm: {}: {:?}", path.display(), e);
                 set_exit(1);
             }
         }
     } else {
         match crate::fs::Vfs::remove(&path) {
             Ok(()) => {
-                crate::console_println!("Deleted {}", path);
+                crate::console_println!("Deleted {}", path.display());
             }
             Err(e) => {
-                crate::console_println!("rm: {}: {:?}", path, e);
+                crate::console_println!("rm: {}: {:?}", path.display(), e);
                 set_exit(1);
             }
         }
@@ -10047,10 +10283,10 @@ fn cmd_mkdir(args: &str) {
 
     match result {
         Ok(()) => {
-            crate::console_println!("Created directory {}", path);
+            crate::console_println!("Created directory {}", path.display());
         }
         Err(e) => {
-            crate::console_println!("mkdir: {}: {:?}", path, e);
+            crate::console_println!("mkdir: {}: {:?}", path.display(), e);
             set_exit(1);
         }
     }
@@ -10066,10 +10302,10 @@ fn cmd_rmdir(args: &str) {
 
     match crate::fs::Vfs::rmdir(&path) {
         Ok(()) => {
-            crate::console_println!("Removed directory {}", path);
+            crate::console_println!("Removed directory {}", path.display());
         }
         Err(e) => {
-            crate::console_println!("rmdir: {}: {:?}", path, e);
+            crate::console_println!("rmdir: {}: {:?}", path.display(), e);
             set_exit(1);
         }
     }
@@ -10094,7 +10330,7 @@ fn cmd_stat(args: &str) {
                 crate::fs::EntryType::VolumeLabel => "volume label",
                 crate::fs::EntryType::CharDevice => "character special file",
             };
-            crate::console_println!("  File: {}", path);
+            crate::console_println!("  File: {}", path.display());
             crate::console_println!(
                 "  Size: {}  Blocks: {}  Type: {}",
                 meta.size,
@@ -10180,7 +10416,7 @@ fn cmd_stat(args: &str) {
             }
         }
         Err(e) => {
-            crate::console_println!("stat: {}: {:?}", path, e);
+            crate::console_println!("stat: {}: {:?}", path.display(), e);
             set_exit(1);
         }
     }
@@ -10202,7 +10438,7 @@ fn cmd_ln(args: &str) {
 
     match crate::fs::Vfs::link(&src_path, &dst_path) {
         Ok(()) => {
-            crate::console_println!("{} -> {}", dst_path, src_path);
+            crate::console_println!("{} -> {}", dst_path.display(), src_path.display());
         }
         Err(e) => {
             crate::console_println!("ln: {:?}", e);
@@ -10291,7 +10527,7 @@ fn cmd_df(args: &str) {
                     format_bytes(used),
                     format_bytes(free),
                     pct,
-                    path,
+                    path.display(),
                     info.volume_label,
                 );
             }
@@ -10374,7 +10610,12 @@ fn cmd_cp(args: &str) {
     if recursive {
         match crate::fs::Vfs::copy_recursive(&src_path, &dst_path) {
             Ok(size) => {
-                crate::console_println!("'{}' -> '{}' ({} bytes copied)", src_path, dst_path, size);
+                crate::console_println!(
+                    "'{}' -> '{}' ({} bytes copied)",
+                    src_path.display(),
+                    dst_path.display(),
+                    size
+                );
             }
             Err(e) => {
                 crate::console_println!("cp: {:?}", e);
@@ -10384,7 +10625,12 @@ fn cmd_cp(args: &str) {
     } else {
         match crate::fs::Vfs::copy(&src_path, &dst_path) {
             Ok(size) => {
-                crate::console_println!("'{}' -> '{}' ({} bytes)", src_path, dst_path, size);
+                crate::console_println!(
+                    "'{}' -> '{}' ({} bytes)",
+                    src_path.display(),
+                    dst_path.display(),
+                    size
+                );
             }
             Err(e) => {
                 crate::console_println!("cp: {:?}", e);
@@ -10410,7 +10656,7 @@ fn cmd_mv(args: &str) {
 
     match crate::fs::Vfs::rename(&src_path, &dst_path) {
         Ok(()) => {
-            crate::console_println!("'{}' -> '{}'", src_path, dst_path);
+            crate::console_println!("'{}' -> '{}'", src_path.display(), dst_path.display());
         }
         Err(e) => {
             crate::console_println!("mv: {:?}", e);
@@ -10443,7 +10689,7 @@ fn cmd_chmod(args: &str) {
 
     match crate::fs::Vfs::set_permissions(&path, mode) {
         Ok(()) => {
-            crate::console_println!("{}: mode set to {:04o}", path, mode);
+            crate::console_println!("{}: mode set to {:04o}", path.display(), mode);
         }
         Err(e) => {
             crate::console_println!("chmod: {:?}", e);
@@ -10497,7 +10743,7 @@ fn cmd_chown(args: &str) {
 
     match crate::fs::Vfs::set_owner(&path, uid, gid) {
         Ok(()) => {
-            crate::console_println!("{}: owner set to {}:{}", path, uid, gid);
+            crate::console_println!("{}: owner set to {}:{}", path.display(), uid, gid);
         }
         Err(e) => {
             crate::console_println!("chown: {:?}", e);
@@ -10566,7 +10812,7 @@ fn cmd_chattr(args: &str) {
     let current_attrs = match crate::fs::Vfs::metadata(&path) {
         Ok(meta) => meta.attributes,
         Err(e) => {
-            crate::console_println!("chattr: {}: {:?}", path, e);
+            crate::console_println!("chattr: {}: {:?}", path.display(), e);
             set_exit(1);
             return;
         }
@@ -10599,7 +10845,7 @@ fn cmd_chattr(args: &str) {
             if desc.is_empty() {
                 desc.push_str("(none)");
             }
-            crate::console_println!("{}: attributes = {}", path, desc);
+            crate::console_println!("{}: attributes = {}", path.display(), desc);
         }
         Err(e) => {
             crate::console_println!("chattr: {:?}", e);
@@ -10644,10 +10890,10 @@ fn cmd_lsattr(args: &str) {
             } else {
                 '-'
             });
-            crate::console_println!("{} {}", flags, path);
+            crate::console_println!("{} {}", flags, path.display());
         }
         Err(e) => {
-            crate::console_println!("lsattr: {}: {:?}", path, e);
+            crate::console_println!("lsattr: {}: {:?}", path.display(), e);
             set_exit(1);
         }
     }
@@ -10712,7 +10958,7 @@ fn cmd_touch(args: &str) {
         match crate::fs::Vfs::metadata(&ref_path) {
             Ok(meta) => meta.modified_ns,
             Err(e) => {
-                crate::console_println!("touch: {}: {:?}", ref_path, e);
+                crate::console_println!("touch: {}: {:?}", ref_path.display(), e);
                 set_exit(1);
                 return;
             }
@@ -10727,10 +10973,10 @@ fn cmd_touch(args: &str) {
             // File exists — update timestamps.
             match crate::fs::Vfs::set_times(&path, timestamp, timestamp) {
                 Ok(()) => {
-                    crate::console_println!("{}: timestamps updated", path);
+                    crate::console_println!("{}: timestamps updated", path.display());
                 }
                 Err(e) => {
-                    crate::console_println!("touch: {}: {:?}", path, e);
+                    crate::console_println!("touch: {}: {:?}", path.display(), e);
                     set_exit(1);
                 }
             }
@@ -10739,10 +10985,10 @@ fn cmd_touch(args: &str) {
             // File doesn't exist — create empty file.
             match crate::fs::Vfs::write_file(&path, &[]) {
                 Ok(()) => {
-                    crate::console_println!("{}: created", path);
+                    crate::console_println!("{}: created", path.display());
                 }
                 Err(e) => {
-                    crate::console_println!("touch: {}: {:?}", path, e);
+                    crate::console_println!("touch: {}: {:?}", path.display(), e);
                     set_exit(1);
                 }
             }
@@ -10845,10 +11091,10 @@ fn cmd_append(args: &str) {
     }
     match crate::fs::Vfs::append(&path, &data) {
         Ok(()) => {
-            crate::console_println!("Appended {} bytes to {}", data.len(), path);
+            crate::console_println!("Appended {} bytes to {}", data.len(), path.display());
         }
         Err(e) => {
-            crate::console_println!("append: {}: {:?}", path, e);
+            crate::console_println!("append: {}: {:?}", path.display(), e);
         }
     }
 }
@@ -10861,7 +11107,7 @@ fn cmd_tree(args: &str) {
         resolve_path(args)
     };
 
-    crate::console_println!("{}", path);
+    crate::console_println!("{}", path.display());
     let mut dirs: u64 = 0;
     let mut files: u64 = 0;
     tree_recurse(Path::new(&path), "", &mut dirs, &mut files, 0);
@@ -10946,7 +11192,7 @@ fn cmd_du(args: &str) {
     };
 
     let total = du_recurse(Path::new(&path), 0, max_depth, summary_only);
-    crate::console_println!("{}\t{}", format_bytes(total), path);
+    crate::console_println!("{}\t{}", format_bytes(total), path.display());
 }
 
 /// Recursively calculate total size of a directory tree.
@@ -11396,12 +11642,12 @@ fn cmd_dedup(args: &str) {
     }
 
     let root = resolve_path(target_dir.unwrap_or("."));
-    shell_println!("Scanning {} for duplicates...", root);
+    shell_println!("Scanning {} for duplicates...", root.display());
 
     // Phase 1: Walk the directory tree, collecting (path, size) pairs.
     let mut file_list: Vec<(PathBuf, u64)> = Vec::new();
     let mut dirs_to_visit: Vec<PathBuf> = Vec::new();
-    dirs_to_visit.push(PathBuf::from(root.as_str()));
+    dirs_to_visit.push(root.clone());
 
     let mut total_scanned: u64 = 0;
     let mut total_skipped: u64 = 0;
@@ -11675,13 +11921,17 @@ fn cmd_integrity(args: &str) {
                             match integrity::baseline_file(&resolved) {
                                 Ok(hash) => {
                                     let hex = crate::fs::cas::hash_to_hex(&hash);
-                                    shell_println!("Baselined: {} ({})", resolved, &hex[..12]);
+                                    shell_println!(
+                                        "Baselined: {} ({})",
+                                        resolved.display(),
+                                        &hex[..12]
+                                    );
                                 }
                                 Err(e) => shell_println!("Error: {:?}", e),
                             }
                         } else if entry.entry_type == crate::fs::EntryType::Directory {
                             // Directory baseline.
-                            shell_println!("Baselining {}...", resolved);
+                            shell_println!("Baselining {}...", resolved.display());
                             match integrity::baseline_dir(&resolved) {
                                 Ok(count) => {
                                     shell_println!(
@@ -11701,7 +11951,7 @@ fn cmd_integrity(args: &str) {
             } else {
                 // Default: baseline current directory.
                 let cwd = get_cwd();
-                shell_println!("Baselining {}...", cwd);
+                shell_println!("Baselining {}...", cwd.display());
                 match integrity::baseline_dir(&cwd) {
                     Ok(count) => {
                         shell_println!(
@@ -11734,13 +11984,13 @@ fn cmd_integrity(args: &str) {
                                     print_verify_result(&result);
                                 }
                                 Err(crate::error::KernelError::NotFound) => {
-                                    shell_println!("{}: not in baseline", resolved);
+                                    shell_println!("{}: not in baseline", resolved.display());
                                 }
                                 Err(e) => shell_println!("Error: {:?}", e),
                             }
                         } else if entry.entry_type == crate::fs::EntryType::Directory {
                             // Directory verify.
-                            shell_println!("Verifying {}...", resolved);
+                            shell_println!("Verifying {}...", resolved.display());
                             run_dir_verify(&resolved);
                         } else {
                             shell_println!("Error: not a file or directory");
@@ -11749,14 +11999,14 @@ fn cmd_integrity(args: &str) {
                     Err(_) => {
                         // Path doesn't exist — might still be in baseline as missing.
                         // Try as directory verify (will detect missing files).
-                        shell_println!("Verifying {}...", resolved);
+                        shell_println!("Verifying {}...", resolved.display());
                         run_dir_verify(&resolved);
                     }
                 }
             } else {
                 // Default: verify current directory.
                 let cwd = get_cwd();
-                shell_println!("Verifying {}...", cwd);
+                shell_println!("Verifying {}...", cwd.display());
                 run_dir_verify(&cwd);
             }
         }
@@ -11851,7 +12101,7 @@ fn print_verify_result(result: &crate::fs::integrity::VerifyResult) {
 }
 
 /// Run a directory verify and print the summary.
-fn run_dir_verify(dir: &str) {
+fn run_dir_verify(dir: &Path) {
     use crate::fs::integrity;
 
     let (results, summary) = integrity::verify_dir(dir);
@@ -11931,11 +12181,11 @@ fn cmd_fhist(args: &str) {
 
             let versions = history::get_history(&path);
             if versions.is_empty() {
-                shell_println!("No version history for {}", path);
+                shell_println!("No version history for {}", path.display());
                 return;
             }
 
-            shell_println!("Version history for {}:", path);
+            shell_println!("Version history for {}:", path.display());
             shell_println!("{:>4}  {:>12}  {:>10}  {}", "Ver", "Hash", "Size", "Time");
             shell_println!("{}", "-".repeat(50));
 
@@ -11975,7 +12225,7 @@ fn cmd_fhist(args: &str) {
                     // Default to latest version.
                     let versions = history::get_history(&path);
                     if versions.is_empty() {
-                        shell_println!("No version history for {}", path);
+                        shell_println!("No version history for {}", path.display());
                         return;
                     }
                     // Latest stored version.
@@ -11995,7 +12245,7 @@ fn cmd_fhist(args: &str) {
                             let hex = crate::fs::cas::hash_to_hex(&hash);
                             shell_println!(
                                 "Restored {} to version {} ({}...)",
-                                path,
+                                path.display(),
                                 version_num,
                                 &hex[..12]
                             );
@@ -12007,8 +12257,8 @@ fn cmd_fhist(args: &str) {
                     shell_println!(
                         "Version {} not found for {}. Use `fhist show {}` to see available versions.",
                         version_num,
-                        path,
-                        path
+                        path.display(),
+                        path.display()
                     );
                 }
             }
@@ -12026,7 +12276,7 @@ fn cmd_fhist(args: &str) {
             match history::record_version(&path) {
                 Ok(Some(hash)) => {
                     let hex = crate::fs::cas::hash_to_hex(&hash);
-                    shell_println!("Recorded version of {} ({}...)", path, &hex[..12]);
+                    shell_println!("Recorded version of {} ({}...)", path.display(), &hex[..12]);
                 }
                 Ok(None) => {
                     shell_println!("No version recorded (file not found or tracking disabled).")
@@ -12039,7 +12289,7 @@ fn cmd_fhist(args: &str) {
             if let Some(path) = target {
                 let resolved = resolve_path(path);
                 history::clear_file(&resolved);
-                shell_println!("Cleared history for {}", resolved);
+                shell_println!("Cleared history for {}", resolved.display());
             } else {
                 let count = history::tracked_files();
                 history::clear_all();
@@ -12138,10 +12388,10 @@ fn cmd_mime(args: &str) {
         match crate::fs::mime::detect(&path) {
             Ok(mime) => {
                 let cat = crate::fs::mime::category(mime);
-                shell_println!("{}: {} ({})", path, mime, cat);
+                shell_println!("{}: {} ({})", path.display(), mime, cat);
             }
             Err(e) => {
-                shell_println!("{}: error: {:?}", path, e);
+                shell_println!("{}: error: {:?}", path.display(), e);
                 set_exit(1);
             }
         }
@@ -12257,7 +12507,7 @@ fn cmd_assoc(args: &str) {
             };
 
             let mime = crate::fs::mime::detect(&path).unwrap_or("unknown");
-            shell_println!("File:     {}", path);
+            shell_println!("File:     {}", path.display());
             shell_println!("MIME:     {}", mime);
 
             match associations::default_app_for_file(&path) {
@@ -12747,7 +12997,7 @@ fn cmd_intercept(args: &str) {
                 Ok(id) => shell_println!(
                     "Registered read-only zone interceptor #{} for '{}'",
                     id,
-                    prefix
+                    prefix.display()
                 ),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
@@ -12770,14 +13020,14 @@ fn cmd_intercept(args: &str) {
                 Ok(id) => shell_println!(
                     "Registered no-delete zone interceptor #{} for '{}'",
                     id,
-                    prefix
+                    prefix.display()
                 ),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
 
         "add-audit" => {
-            let prefix = parts.get(1).map(|p| resolve_path(p)).unwrap_or_default();
+            let prefix = parts.get(1).map(resolve_path).unwrap_or_default();
             match intercept::register(
                 "audit-log",
                 &prefix,
@@ -12787,10 +13037,10 @@ fn cmd_intercept(args: &str) {
                 Ok(id) => shell_println!(
                     "Registered audit logger #{} for '{}'",
                     id,
-                    if prefix.is_empty() {
-                        "(all paths)"
+                    if prefix.as_path().as_bytes().is_empty() {
+                        alloc::string::String::from("(all paths)")
                     } else {
-                        &prefix
+                        alloc::format!("{}", prefix.display())
                     }
                 ),
                 Err(e) => shell_println!("Error: {:?}", e),
@@ -13335,10 +13585,13 @@ fn cmd_mkfifo(args: &str) {
     };
 
     let resolved = resolve_path(path);
-    match pipe::mkfifo_with_capacity(&resolved, capacity) {
+    let Some(resolved_str) = path_arg_as_str(&resolved, "mkfifo") else {
+        return;
+    };
+    match pipe::mkfifo_with_capacity(resolved_str, capacity) {
         Ok(id) => shell_println!(
             "Named pipe created: {} (id={}, capacity={})",
-            resolved,
+            resolved.display(),
             id,
             capacity
         ),
@@ -13506,7 +13759,7 @@ fn cmd_tmpwatch(args: &str) {
             }
             let dir = resolve_path(parts[1]);
             match tmpwatch::add_watch_dir(&dir) {
-                Ok(()) => shell_println!("Added watch directory: {}", dir),
+                Ok(()) => shell_println!("Added watch directory: {}", dir.display()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -14450,7 +14703,7 @@ fn cmd_fstx(args: &str) {
             let path = resolve_path(parts[2]);
             let data = parts[3..].join(" ");
             match transaction::tx_write(id, &path, data.as_bytes()) {
-                Ok(()) => shell_println!("Queued write to {} in tx {}", path, id.0),
+                Ok(()) => shell_println!("Queued write to {} in tx {}", path.display(), id.0),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -14468,7 +14721,7 @@ fn cmd_fstx(args: &str) {
             };
             let path = resolve_path(parts[2]);
             match transaction::tx_remove(id, &path) {
-                Ok(()) => shell_println!("Queued removal of {} in tx {}", path, id.0),
+                Ok(()) => shell_println!("Queued removal of {} in tx {}", path.display(), id.0),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -14486,7 +14739,7 @@ fn cmd_fstx(args: &str) {
             };
             let path = resolve_path(parts[2]);
             match transaction::tx_mkdir(id, &path) {
-                Ok(()) => shell_println!("Queued mkdir {} in tx {}", path, id.0),
+                Ok(()) => shell_println!("Queued mkdir {} in tx {}", path.display(), id.0),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -14505,7 +14758,12 @@ fn cmd_fstx(args: &str) {
             let from = resolve_path(parts[2]);
             let to = resolve_path(parts[3]);
             match transaction::tx_rename(id, &from, &to) {
-                Ok(()) => shell_println!("Queued rename {} -> {} in tx {}", from, to, id.0),
+                Ok(()) => shell_println!(
+                    "Queued rename {} -> {} in tx {}",
+                    from.display(),
+                    to.display(),
+                    id.0
+                ),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -14524,7 +14782,12 @@ fn cmd_fstx(args: &str) {
             let path = resolve_path(parts[2]);
             let target = parts[3];
             match transaction::tx_symlink(id, &path, target) {
-                Ok(()) => shell_println!("Queued symlink {} -> {} in tx {}", path, target, id.0),
+                Ok(()) => shell_println!(
+                    "Queued symlink {} -> {} in tx {}",
+                    path.display(),
+                    target,
+                    id.0
+                ),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -14676,7 +14939,7 @@ fn cmd_changetrack(args: &str) {
             }
             let mut filter = changetrack::ChangeFilter::default();
             if parts.len() >= 3 {
-                filter.path_prefixes = alloc::vec![PathBuf::from(resolve_path(parts[2]).as_str())];
+                filter.path_prefixes = alloc::vec![resolve_path(parts[2])];
             }
             match changetrack::changes(parts[1], &filter) {
                 Ok(result) => {
@@ -14721,7 +14984,7 @@ fn cmd_changetrack(args: &str) {
             }
             let mut filter = changetrack::ChangeFilter::default();
             if parts.len() >= 3 {
-                filter.path_prefixes = alloc::vec![PathBuf::from(resolve_path(parts[2]).as_str())];
+                filter.path_prefixes = alloc::vec![resolve_path(parts[2])];
             }
             match changetrack::peek(parts[1], &filter) {
                 Ok(result) => {
@@ -14975,17 +15238,17 @@ fn cmd_fcompress(args: &str) {
                 Ok(data) => {
                     let info = fcompress::file_info(&data);
                     if info.compressed {
-                        shell_println!("File: {} (COMPRESSED)", path);
+                        shell_println!("File: {} (COMPRESSED)", path.display());
                         shell_println!("  Algorithm:   {}", info.algorithm.name());
                         shell_println!("  Original:    {} bytes", info.original_size);
                         shell_println!("  Stored:      {} bytes", info.stored_size);
                         shell_println!("  Ratio:       {:.2}:1", info.ratio);
                     } else {
-                        shell_println!("File: {} (not compressed)", path);
+                        shell_println!("File: {} (not compressed)", path.display());
                         shell_println!("  Size: {} bytes", info.stored_size);
                     }
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
             }
         }
         "compress" => {
@@ -15022,7 +15285,7 @@ fn cmd_fcompress(args: &str) {
                     // full table -- report it and stop rather than pressing on
                     // to measure a compression that would not have happened.
                     if let Err(e) = fcompress::add_rule(fcompress::CompressionRule {
-                        path_prefix: PathBuf::from(path.clone()),
+                        path_prefix: path.clone(),
                         extensions: Vec::new(),
                         algorithm: algo,
                     }) {
@@ -15040,7 +15303,7 @@ fn cmd_fcompress(args: &str) {
                             } else {
                                 shell_println!(
                                     "Compressed {} ({} -> {} bytes, saved {})",
-                                    path,
+                                    path.display(),
                                     data.len(),
                                     compressed.len(),
                                     saved
@@ -15056,7 +15319,7 @@ fn cmd_fcompress(args: &str) {
                     fcompress::set_min_size(old_min);
                     fcompress::set_enabled(was_enabled);
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
             }
         }
         "decompress" | "expand" => {
@@ -15078,7 +15341,7 @@ fn cmd_fcompress(args: &str) {
                             } else {
                                 shell_println!(
                                     "Decompressed {} ({} -> {} bytes)",
-                                    path,
+                                    path.display(),
                                     data.len(),
                                     decompressed.len()
                                 );
@@ -15087,7 +15350,7 @@ fn cmd_fcompress(args: &str) {
                         None => shell_println!("Decompression failed."),
                     }
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
             }
         }
         _ => {
@@ -15168,7 +15431,7 @@ fn cmd_encrypt(args: &str) {
                         Ok(encrypted) => match crate::fs::Vfs::write_file(&path, &encrypted) {
                             Ok(()) => shell_println!(
                                 "Encrypted {} ({} -> {} bytes)",
-                                path,
+                                path.display(),
                                 data.len(),
                                 encrypted.len()
                             ),
@@ -15177,7 +15440,7 @@ fn cmd_encrypt(args: &str) {
                         Err(e) => shell_println!("Encryption failed: {:?}", e),
                     }
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
             }
         }
         "decrypt" | "dec" => {
@@ -15198,7 +15461,7 @@ fn cmd_encrypt(args: &str) {
                         Ok(plaintext) => match crate::fs::Vfs::write_file(&path, &plaintext) {
                             Ok(()) => shell_println!(
                                 "Decrypted {} ({} -> {} bytes)",
-                                path,
+                                path.display(),
                                 data.len(),
                                 plaintext.len()
                             ),
@@ -15210,7 +15473,7 @@ fn cmd_encrypt(args: &str) {
                         Err(e) => shell_println!("Decryption failed: {:?}", e),
                     }
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
             }
         }
         "read" | "cat" => {
@@ -15241,7 +15504,7 @@ fn cmd_encrypt(args: &str) {
                         Err(e) => shell_println!("Decryption failed: {:?}", e),
                     }
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
             }
         }
         "info" => {
@@ -15254,12 +15517,12 @@ fn cmd_encrypt(args: &str) {
                 Ok(data) => {
                     let info = encrypt::file_info(&data);
                     if info.encrypted {
-                        shell_println!("File: {} (ENCRYPTED)", path);
+                        shell_println!("File: {} (ENCRYPTED)", path.display());
                         shell_println!("  Cipher:   {}", info.cipher);
                         shell_println!("  Original: {} bytes", info.original_size);
                         shell_println!("  Stored:   {} bytes", info.stored_size);
                     } else {
-                        shell_println!("File: {} (not encrypted)", path);
+                        shell_println!("File: {} (not encrypted)", path.display());
                     }
                 }
                 Err(e) => shell_println!("Error: {:?}", e),
@@ -16451,7 +16714,7 @@ fn cmd_archive(args: &str) {
                 Ok(data) => {
                     let fmt = archive::detect(&data);
                     let fmt_label = fmt.map_or("unknown", |f| f.label());
-                    shell_println!("Archive: {} ({})", path, fmt_label);
+                    shell_println!("Archive: {} ({})", path.display(), fmt_label);
                     match archive::list(&data) {
                         Ok(entries) => {
                             for e in &entries {
@@ -16468,7 +16731,7 @@ fn cmd_archive(args: &str) {
                         Err(e) => shell_println!("Error listing: {:?}", e),
                     }
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
             }
         }
         "extract" | "x" => {
@@ -16480,12 +16743,12 @@ fn cmd_archive(args: &str) {
             let dest = if parts.len() >= 3 {
                 resolve_path(parts[2])
             } else {
-                String::from(".")
+                PathBuf::from(".")
             };
             match crate::fs::Vfs::read_file(&path) {
                 Ok(data) => match archive::extract_all(&data, &dest) {
                     Ok(result) => {
-                        shell_println!("Extracted to {}:", dest);
+                        shell_println!("Extracted to {}:", dest.display());
                         shell_println!("  Files:   {}", result.files_extracted);
                         shell_println!("  Dirs:    {}", result.dirs_created);
                         shell_println!("  Bytes:   {}", result.bytes_written);
@@ -16498,7 +16761,7 @@ fn cmd_archive(args: &str) {
                     }
                     Err(e) => shell_println!("Error extracting: {:?}", e),
                 },
-                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
             }
         }
         "get" => {
@@ -16519,7 +16782,7 @@ fn cmd_archive(args: &str) {
                     }
                     Err(e) => shell_println!("Error: {:?}", e),
                 },
-                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
             }
         }
         "detect" | "info" => {
@@ -16532,7 +16795,7 @@ fn cmd_archive(args: &str) {
                 Ok(data) => {
                     match archive::detect(&data) {
                         Some(fmt) => {
-                            shell_println!("Format: {} ({})", fmt.label(), path);
+                            shell_println!("Format: {} ({})", fmt.label(), path.display());
                             shell_println!("Extensions: {:?}", fmt.extensions());
                             shell_println!("Create support: {}", fmt.supports_create());
                         }
@@ -16547,7 +16810,7 @@ fn cmd_archive(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
             }
         }
         "create" => {
@@ -16572,16 +16835,14 @@ fn cmd_archive(args: &str) {
                 let path = resolve_path(name);
                 match crate::fs::Vfs::read_file(&path) {
                     Ok(data) => {
-                        let entry_name = Path::new(path.as_str())
-                            .file_name()
-                            .unwrap_or(Path::new(path.as_str()));
+                        let entry_name = path.file_name().unwrap_or(path.as_path());
                         entries.push(archive::CreateEntry {
                             name: entry_name.to_path_buf(),
                             data,
                             kind: archive::EntryKind::File,
                         });
                     }
-                    Err(e) => shell_println!("Warning: skipping {}: {:?}", path, e),
+                    Err(e) => shell_println!("Warning: skipping {}: {:?}", path.display(), e),
                 }
             }
             if entries.is_empty() {
@@ -16592,11 +16853,11 @@ fn cmd_archive(args: &str) {
                 Ok(data) => match crate::fs::Vfs::write_file(&output, &data) {
                     Ok(()) => shell_println!(
                         "Created {} ({} bytes, {} entries)",
-                        output,
+                        output.display(),
                         data.len(),
                         entries.len()
                     ),
-                    Err(e) => shell_println!("Error writing {}: {:?}", output, e),
+                    Err(e) => shell_println!("Error writing {}: {:?}", output.display(), e),
                 },
                 Err(e) => shell_println!("Error creating archive: {:?}", e),
             }
@@ -16672,16 +16933,15 @@ fn cmd_batch(args: &str) {
                 return;
             }
             let dest = resolve_path(parts[1]);
-            let resolved: Vec<String> = parts[2..]
+            let resolved: Vec<PathBuf> = parts[2..]
                 .iter()
                 .filter(|f| !f.starts_with('-'))
-                .map(|f| resolve_path(f))
+                .map(resolve_path)
                 .collect();
-            let paths: Vec<&str> = resolved.iter().map(|s| s.as_str()).collect();
             if dry_run {
                 shell_println!("(dry run)");
             }
-            match batch::copy(&paths, &dest, &opts) {
+            match batch::copy(&resolved, &dest, &opts) {
                 Ok(r) => shell_println!(
                     "{} copied, {} failed, {} bytes",
                     r.succeeded,
@@ -16697,16 +16957,15 @@ fn cmd_batch(args: &str) {
                 return;
             }
             let dest = resolve_path(parts[1]);
-            let resolved: Vec<String> = parts[2..]
+            let resolved: Vec<PathBuf> = parts[2..]
                 .iter()
                 .filter(|f| !f.starts_with('-'))
-                .map(|f| resolve_path(f))
+                .map(resolve_path)
                 .collect();
-            let paths: Vec<&str> = resolved.iter().map(|s| s.as_str()).collect();
             if dry_run {
                 shell_println!("(dry run)");
             }
-            match batch::move_files(&paths, &dest, &opts) {
+            match batch::move_files(&resolved, &dest, &opts) {
                 Ok(r) => shell_println!("{} moved, {} failed", r.succeeded, r.failed),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
@@ -16716,16 +16975,15 @@ fn cmd_batch(args: &str) {
                 shell_println!("Usage: batch delete <file1> [file2...]");
                 return;
             }
-            let resolved: Vec<String> = parts[1..]
+            let resolved: Vec<PathBuf> = parts[1..]
                 .iter()
                 .filter(|f| !f.starts_with('-'))
-                .map(|f| resolve_path(f))
+                .map(resolve_path)
                 .collect();
-            let paths: Vec<&str> = resolved.iter().map(|s| s.as_str()).collect();
             if dry_run {
                 shell_println!("(dry run)");
             }
-            match batch::delete(&paths, &opts) {
+            match batch::delete(&resolved, &opts) {
                 Ok(r) => shell_println!("{} deleted, {} failed", r.succeeded, r.failed),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
@@ -16791,12 +17049,12 @@ fn cmd_linkcheck(args: &str) {
             let dir = if parts.len() >= 2 {
                 resolve_path(parts[1])
             } else {
-                String::from("/")
+                PathBuf::from("/")
             };
             let opts = linkcheck::CheckOptions::default();
             match linkcheck::check(&dir, &opts) {
                 Ok(report) => {
-                    shell_println!("Link check: {}", dir);
+                    shell_println!("Link check: {}", dir.display());
                     shell_println!("  Files scanned:    {}", report.files_scanned);
                     shell_println!("  Dirs scanned:     {}", report.dirs_scanned);
                     shell_println!(
@@ -16835,12 +17093,12 @@ fn cmd_linkcheck(args: &str) {
             let dir = if parts.len() >= 2 {
                 resolve_path(parts[1])
             } else {
-                String::from("/")
+                PathBuf::from("/")
             };
             match linkcheck::find_broken(&dir) {
                 Ok(broken) => {
                     if broken.is_empty() {
-                        shell_println!("No broken symlinks in {}", dir);
+                        shell_println!("No broken symlinks in {}", dir.display());
                     } else {
                         shell_println!("{} broken symlinks:", broken.len());
                         for b in &broken {
@@ -16859,7 +17117,7 @@ fn cmd_linkcheck(args: &str) {
             let dir = if parts.len() >= 2 {
                 resolve_path(parts[1])
             } else {
-                String::from("/")
+                PathBuf::from("/")
             };
             let dry_run = parts.iter().any(|f| *f == "--dry-run" || *f == "-n");
             if dry_run {
@@ -17137,9 +17395,9 @@ fn cmd_fsbench(args: &str) {
             let dir = if parts.len() >= 2 {
                 resolve_path(parts[1])
             } else {
-                String::from("/tmp")
+                PathBuf::from("/tmp")
             };
-            shell_println!("Running filesystem benchmark suite in {}...", dir);
+            shell_println!("Running filesystem benchmark suite in {}...", dir.display());
             match bench::run_all(&dir) {
                 Ok(report) => {
                     shell_println!();
@@ -17190,7 +17448,7 @@ fn cmd_fsbench(args: &str) {
             let path = if parts.len() >= 2 {
                 resolve_path(parts[1])
             } else {
-                String::from("/tmp/_bench_read")
+                PathBuf::from("/tmp/_bench_read")
             };
             let iters: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(500);
             match bench::bench_sequential_read(&path, iters) {
@@ -17210,7 +17468,7 @@ fn cmd_fsbench(args: &str) {
             let dir = if parts.len() >= 2 {
                 resolve_path(parts[1])
             } else {
-                String::from("/tmp")
+                PathBuf::from("/tmp")
             };
             let size: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(4096);
             let iters: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
@@ -17231,7 +17489,7 @@ fn cmd_fsbench(args: &str) {
             let dir = if parts.len() >= 2 {
                 resolve_path(parts[1])
             } else {
-                String::from("/tmp")
+                PathBuf::from("/tmp")
             };
             let iters: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
             match bench::bench_metadata(&dir, iters) {
@@ -17259,12 +17517,16 @@ fn cmd_fsbench(args: &str) {
             let path = if parts.len() >= 2 {
                 resolve_path(parts[1])
             } else {
-                String::from("/tmp")
+                PathBuf::from("/tmp")
             };
             let iters: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(1000);
             match bench::bench_path_lookup(&path, iters) {
                 Ok(r) => {
-                    shell_println!("Path lookup ({}): {} iterations", path, r.iterations);
+                    shell_println!(
+                        "Path lookup ({}): {} iterations",
+                        path.display(),
+                        r.iterations
+                    );
                     shell_println!(
                         "  Avg: {}ns | {} ops/s | target: {}ns {}",
                         r.avg_ns(),
@@ -17523,7 +17785,7 @@ fn cmd_prefetch(args: &str) {
             match AccessAdvice::from_name(parts[2]) {
                 Some(advice) => {
                     prefetch::advise(&path, advice);
-                    shell_println!("Advised {}: {}", path, advice.label());
+                    shell_println!("Advised {}: {}", path.display(), advice.label());
                 }
                 None => shell_println!(
                     "Unknown advice: {} (use: normal, seq, rand, willneed, dontneed)",
@@ -17540,7 +17802,11 @@ fn cmd_prefetch(args: &str) {
             let offset: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             let len: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
             match prefetch::prefetch(&path, offset, len) {
-                Ok(r) => shell_println!("Prefetched {} bytes from {}", r.bytes_prefetched, path),
+                Ok(r) => shell_println!(
+                    "Prefetched {} bytes from {}",
+                    r.bytes_prefetched,
+                    path.display()
+                ),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -17571,9 +17837,9 @@ fn cmd_prefetch(args: &str) {
             if parts.len() >= 2 {
                 let path = resolve_path(parts[1]);
                 if prefetch::clear_advice(&path) {
-                    shell_println!("Cleared advice for {}", path);
+                    shell_println!("Cleared advice for {}", path.display());
                 } else {
-                    shell_println!("No advice found for {}", path);
+                    shell_println!("No advice found for {}", path.display());
                 }
             } else {
                 prefetch::clear_all();
@@ -17626,8 +17892,8 @@ fn cmd_splice(args: &str) {
                     "Copied {} bytes ({} chunks): {} -> {}",
                     r.bytes_transferred,
                     r.chunks,
-                    src,
-                    dst
+                    src.display(),
+                    dst.display()
                 ),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
@@ -17649,8 +17915,8 @@ fn cmd_splice(args: &str) {
                     "Sent {} bytes ({} chunks): {} -> {}",
                     r.bytes_transferred,
                     r.chunks,
-                    src,
-                    dst
+                    src.display(),
+                    dst.display()
                 ),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
@@ -17672,8 +17938,8 @@ fn cmd_splice(args: &str) {
                     "Spliced {} bytes ({} chunks): {} -> {}",
                     r.bytes_transferred,
                     r.chunks,
-                    src,
-                    dst
+                    src.display(),
+                    dst.display()
                 ),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
@@ -17691,7 +17957,12 @@ fn cmd_splice(args: &str) {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(1024 * 1024);
             match splice::tee(&src, offset, &dst, len) {
-                Ok(r) => shell_println!("Tee'd {} bytes: {} -> {}", r.bytes_transferred, src, dst),
+                Ok(r) => shell_println!(
+                    "Tee'd {} bytes: {} -> {}",
+                    r.bytes_transferred,
+                    src.display(),
+                    dst.display()
+                ),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -17788,9 +18059,9 @@ fn cmd_directio(args: &str) {
             }
             let path = resolve_path(parts[1]);
             if directio::register_path(&path) {
-                shell_println!("Registered {} for direct I/O", path);
+                shell_println!("Registered {} for direct I/O", path.display());
             } else {
-                shell_println!("Already registered: {}", path);
+                shell_println!("Already registered: {}", path.display());
             }
         }
         "unregister" | "unreg" => {
@@ -17800,9 +18071,9 @@ fn cmd_directio(args: &str) {
             }
             let path = resolve_path(parts[1]);
             if directio::unregister_path(&path) {
-                shell_println!("Unregistered: {}", path);
+                shell_println!("Unregistered: {}", path.display());
             } else {
-                shell_println!("Not registered: {}", path);
+                shell_println!("Not registered: {}", path.display());
             }
         }
         "list" | "paths" => {
@@ -18080,7 +18351,7 @@ fn cmd_sparse(args: &str) {
             let path = resolve_path(parts[1]);
             match sparse::map_regions(&path) {
                 Ok(map) => {
-                    shell_println!("Sparse map: {} ({} bytes)", path, map.file_size);
+                    shell_println!("Sparse map: {} ({} bytes)", path.display(), map.file_size);
                     shell_println!(
                         "  Data: {} bytes | Holes: {} bytes",
                         map.data_bytes,
@@ -18154,7 +18425,7 @@ fn cmd_lsplus(args: &str) {
     use crate::fs::readdir_plus::{self, ListOptions, SortOrder, TypeFilter};
     let parts: Vec<&str> = args.split_whitespace().collect();
 
-    let mut dir_path = String::new();
+    let mut dir_path = PathBuf::new();
     let mut sort = SortOrder::Name;
     let mut type_filter = TypeFilter::All;
     let mut pattern: Vec<u8> = Vec::new();
@@ -18271,9 +18542,13 @@ fn cmd_fsfreeze(args: &str) {
             match freeze::freeze(&mp, &reason) {
                 Ok(r) => {
                     if r.was_initial {
-                        shell_println!("Frozen: {} (level {})", mp, r.freeze_level);
+                        shell_println!("Frozen: {} (level {})", mp.display(), r.freeze_level);
                     } else {
-                        shell_println!("Freeze level increased: {} (level {})", mp, r.freeze_level);
+                        shell_println!(
+                            "Freeze level increased: {} (level {})",
+                            mp.display(),
+                            r.freeze_level
+                        );
                     }
                 }
                 Err(e) => shell_println!("Error: {:?}", e),
@@ -18288,9 +18563,17 @@ fn cmd_fsfreeze(args: &str) {
             match freeze::thaw(&mp) {
                 Ok(r) => {
                     if r.fully_thawed {
-                        shell_println!("Thawed: {} ({} writes were blocked)", mp, r.blocked_writes);
+                        shell_println!(
+                            "Thawed: {} ({} writes were blocked)",
+                            mp.display(),
+                            r.blocked_writes
+                        );
                     } else {
-                        shell_println!("Freeze level decreased: {} (level {})", mp, r.freeze_level);
+                        shell_println!(
+                            "Freeze level decreased: {} (level {})",
+                            mp.display(),
+                            r.freeze_level
+                        );
                     }
                 }
                 Err(e) => shell_println!("Error: {:?}", e),
@@ -18304,7 +18587,11 @@ fn cmd_fsfreeze(args: &str) {
             let mp = resolve_path(parts[1]);
             match freeze::force_thaw(&mp) {
                 Ok(r) => {
-                    shell_println!("Force-thawed: {} ({} writes blocked)", mp, r.blocked_writes)
+                    shell_println!(
+                        "Force-thawed: {} ({} writes blocked)",
+                        mp.display(),
+                        r.blocked_writes
+                    )
                 }
                 Err(e) => shell_println!("Error: {:?}", e),
             }
@@ -18383,7 +18670,7 @@ fn cmd_seal(args: &str) {
                 return;
             }
             match sealing::add_seals(&path, flags) {
-                Ok(total) => shell_println!("Sealed {}: {}", path, total.label()),
+                Ok(total) => shell_println!("Sealed {}: {}", path.display(), total.label()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -18394,7 +18681,7 @@ fn cmd_seal(args: &str) {
             }
             let path = resolve_path(parts[1]);
             let seals = sealing::get_seals(&path);
-            shell_println!("{}: {}", path, seals.label());
+            shell_println!("{}: {}", path.display(), seals.label());
         }
         "check" => {
             if parts.len() < 3 {
@@ -18414,8 +18701,8 @@ fn cmd_seal(args: &str) {
                 }
             };
             match sealing::check_seals(&path, op) {
-                Ok(()) => shell_println!("ALLOWED: {} on {}", parts[2], path),
-                Err(_) => shell_println!("DENIED: {} on {} (sealed)", parts[2], path),
+                Ok(()) => shell_println!("ALLOWED: {} on {}", parts[2], path.display()),
+                Err(_) => shell_println!("DENIED: {} on {} (sealed)", parts[2], path.display()),
             }
         }
         "list" | "show" | "" => {
@@ -18527,7 +18814,7 @@ fn cmd_recent(args: &str) {
             };
             let source = if parts.len() > 3 { parts[3] } else { "kshell" };
             recent::record(&path, access_type, source);
-            shell_println!("Recorded: {} ({})", path, access_type.label());
+            shell_println!("Recorded: {} ({})", path.display(), access_type.label());
         }
         "clear" => {
             recent::clear();
@@ -18540,9 +18827,9 @@ fn cmd_recent(args: &str) {
             }
             let path = resolve_path(parts[1]);
             if recent::remove(&path) {
-                shell_println!("Removed: {}", path);
+                shell_println!("Removed: {}", path.display());
             } else {
-                shell_println!("Not found: {}", path);
+                shell_println!("Not found: {}", path.display());
             }
         }
         "exclude" => {
@@ -18721,7 +19008,7 @@ fn cmd_fswalk(args: &str) {
                 .unwrap_or(64);
             match fswalk::count(&path, depth) {
                 Ok((files, dirs)) => {
-                    shell_println!("{}: {} files, {} dirs", path, files, dirs);
+                    shell_println!("{}: {} files, {} dirs", path.display(), files, dirs);
                 }
                 Err(e) => shell_println!("Error: {:?}", e),
             }
@@ -18738,7 +19025,7 @@ fn cmd_fswalk(args: &str) {
                 .unwrap_or(64);
             match fswalk::total_size(&path, depth) {
                 Ok(size) => {
-                    shell_println!("{}: {} bytes", path, size);
+                    shell_println!("{}: {} bytes", path.display(), size);
                 }
                 Err(e) => shell_println!("Error: {:?}", e),
             }
@@ -18921,7 +19208,7 @@ fn cmd_findex(args: &str) {
                 .get(2)
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(3);
-            shell_println!("Indexing {}  (depth {})...", path, depth);
+            shell_println!("Indexing {}  (depth {})...", path.display(), depth);
             match findex::build(&path, depth) {
                 Ok(count) => shell_println!("Indexed {} files.", count),
                 Err(e) => shell_println!("Error: {:?}", e),
@@ -18934,7 +19221,7 @@ fn cmd_findex(args: &str) {
             }
             let path = resolve_path(parts[1]);
             match findex::index_file(&path) {
-                Ok(fields) => shell_println!("Indexed {}: {} fields", path, fields),
+                Ok(fields) => shell_println!("Indexed {}: {} fields", path.display(), fields),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -18945,9 +19232,9 @@ fn cmd_findex(args: &str) {
             }
             let path = resolve_path(parts[1]);
             if findex::remove_file(&path) {
-                shell_println!("Removed: {}", path);
+                shell_println!("Removed: {}", path.display());
             } else {
-                shell_println!("Not indexed: {}", path);
+                shell_println!("Not indexed: {}", path.display());
             }
         }
         "query" | "q" => {
@@ -18982,7 +19269,7 @@ fn cmd_findex(args: &str) {
             let path = resolve_path(parts[1]);
             let fields = findex::get_fields(&path);
             if fields.is_empty() {
-                shell_println!("No indexed fields for: {}", path);
+                shell_println!("No indexed fields for: {}", path.display());
             } else {
                 shell_println!("{:30} {}", "FIELD", "VALUE");
                 shell_println!("{}", "-".repeat(60));
@@ -18999,9 +19286,9 @@ fn cmd_findex(args: &str) {
             };
             let columns = findex::columns_for_dir(&path);
             if columns.is_empty() {
-                shell_println!("No indexed files in: {}", path);
+                shell_println!("No indexed files in: {}", path.display());
             } else {
-                shell_println!("Recommended columns for {}:", path);
+                shell_println!("Recommended columns for {}:", path.display());
                 shell_println!("{:30} {:20} {:>5}", "FIELD", "LABEL", "FILES");
                 shell_println!("{}", "-".repeat(60));
                 for col in &columns {
@@ -19097,7 +19384,7 @@ fn cmd_thumbcache(args: &str) {
             }
             let path = resolve_path(parts[1]);
             let removed = thumbcache::invalidate(&path);
-            shell_println!("Invalidated {} entries for: {}", removed, path);
+            shell_println!("Invalidated {} entries for: {}", removed, path.display());
         }
         "clear" => {
             thumbcache::clear();
@@ -19182,7 +19469,7 @@ fn cmd_bookmark(args: &str) {
                 .and_then(|s| Category::from_name(s))
                 .unwrap_or(Category::Favorites);
             match bookmarks::add(name, &path, label, category) {
-                Ok(()) => shell_println!("Bookmark '{}' added: {}", name, path),
+                Ok(()) => shell_println!("Bookmark '{}' added: {}", name, path.display()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -19216,11 +19503,7 @@ fn cmd_bookmark(args: &str) {
                     );
                     return;
                 };
-                {
-                    let mut cwd = CWD.lock();
-                    cwd.clear();
-                    cwd.push_str(text);
-                }
+                set_cwd(text);
                 shell_println!("{}", path.display());
             } else {
                 shell_println!("Unknown bookmark: {}", parts[1]);
@@ -19434,10 +19717,7 @@ fn cmd_contextmenu(args: &str) {
         "build" => {
             // contextmenu build <target> [path]
             let target_str = parts.get(1).copied().unwrap_or("file");
-            let path = parts
-                .get(2)
-                .map(|p| resolve_path(p))
-                .unwrap_or_else(get_cwd);
+            let path = parts.get(2).map(resolve_path).unwrap_or_else(get_cwd);
             let target = match target_str {
                 "file" => crate::fs::contextmenu::ContextTarget::File,
                 "dir" | "directory" => crate::fs::contextmenu::ContextTarget::Directory,
@@ -19568,14 +19848,14 @@ fn cmd_deskicons(args: &str) {
         "load" => {
             let dir = parts
                 .get(1)
-                .map(|p| resolve_path(p))
-                .unwrap_or_else(|| String::from("/home/user/Desktop"));
+                .map(resolve_path)
+                .unwrap_or_else(|| PathBuf::from("/home/user/Desktop"));
             let w: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(1920);
             let h: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(1080);
             match crate::fs::deskicons::load(&dir, w, h) {
                 Ok(()) => {
                     let count = crate::fs::deskicons::icon_count();
-                    shell_println!("Loaded {} desktop icons from {}", count, dir);
+                    shell_println!("Loaded {} desktop icons from {}", count, dir.display());
                 }
                 Err(e) => shell_println!("Error: {:?}", e),
             }
@@ -19864,9 +20144,7 @@ fn cmd_fileops(args: &str) {
             }
 
             let dest_resolved = resolve_path(dest);
-            let src_refs: Vec<&str> = sources.iter().map(|s| s.as_str()).collect();
-
-            match fileops::create(fileops::OpKind::Copy, &src_refs, &dest_resolved, policy) {
+            match fileops::create(fileops::OpKind::Copy, &sources, &dest_resolved, policy) {
                 Ok(op_id) => {
                     shell_println!("Created copy operation {}.", op_id);
                     match fileops::execute(op_id) {
@@ -19917,9 +20195,7 @@ fn cmd_fileops(args: &str) {
             }
 
             let dest_resolved = resolve_path(dest_str);
-            let src_refs: Vec<&str> = sources.iter().map(|s| s.as_str()).collect();
-
-            match fileops::create(fileops::OpKind::Move, &src_refs, &dest_resolved, policy) {
+            match fileops::create(fileops::OpKind::Move, &sources, &dest_resolved, policy) {
                 Ok(op_id) => {
                     shell_println!("Created move operation {}.", op_id);
                     match fileops::execute(op_id) {
@@ -19948,11 +20224,9 @@ fn cmd_fileops(args: &str) {
             for &p in parts.iter().skip(1) {
                 sources.push(resolve_path(p));
             }
-            let src_refs: Vec<&str> = sources.iter().map(|s| s.as_str()).collect();
-
             match fileops::create(
                 fileops::OpKind::Delete,
-                &src_refs,
+                &sources,
                 "",
                 fileops::ConflictPolicy::Skip,
             ) {
@@ -20073,7 +20347,7 @@ fn cmd_fileselect(args: &str) {
                 get_cwd()
             };
             match crate::fs::fileselect::create(&dir) {
-                Ok(id) => shell_println!("Created selection set #{} for {}", id, dir),
+                Ok(id) => shell_println!("Created selection set #{} for {}", id, dir.display()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -20095,7 +20369,7 @@ fn cmd_fileselect(args: &str) {
             ) {
                 let resolved = resolve_path(path);
                 match crate::fs::fileselect::select_single(id, &resolved, 0) {
-                    Ok(()) => shell_println!("Selected: {}", resolved),
+                    Ok(()) => shell_println!("Selected: {}", resolved.display()),
                     Err(e) => shell_println!("Error: {:?}", e),
                 }
             } else {
@@ -20114,7 +20388,7 @@ fn cmd_fileselect(args: &str) {
                             crate::fs::fileselect::is_selected(id, &resolved).unwrap_or(false);
                         shell_println!(
                             "{}: {}",
-                            resolved,
+                            resolved.display(),
                             if sel { "selected" } else { "deselected" }
                         );
                     }
@@ -20310,7 +20584,7 @@ fn cmd_filetype(args: &str) {
             if let Some(path) = parts.get(1) {
                 let resolved = resolve_path(path);
                 let icon = crate::fs::filetype::icon_for_file(&resolved);
-                shell_println!("File: {}", resolved);
+                shell_println!("File: {}", resolved.display());
                 shell_println!("  MIME:        {}", icon.mime);
                 shell_println!("  Description: {}", icon.description);
                 shell_println!("  Icon:        {}", icon.icon);
@@ -20382,9 +20656,9 @@ fn cmd_openwith(args: &str) {
                 match crate::fs::openwith::build_choices(&resolved) {
                     Ok(choices) => {
                         if choices.is_empty() {
-                            shell_println!("No applications found for {}", resolved);
+                            shell_println!("No applications found for {}", resolved.display());
                         } else {
-                            shell_println!("Open With choices for {}:", resolved);
+                            shell_println!("Open With choices for {}:", resolved.display());
                             shell_println!(
                                 "{:<25} {:<15} {:<8} {}",
                                 "Application",
@@ -20447,8 +20721,10 @@ fn cmd_openwith(args: &str) {
             if let Some(path) = parts.get(1) {
                 let resolved = resolve_path(path);
                 match crate::fs::openwith::current_default(&resolved) {
-                    Some(name) => shell_println!("Default app for {}: {}", resolved, name),
-                    None => shell_println!("No default app for {}", resolved),
+                    Some(name) => {
+                        shell_println!("Default app for {}: {}", resolved.display(), name)
+                    }
+                    None => shell_println!("No default app for {}", resolved.display()),
                 }
             } else {
                 shell_println!("Usage: openw default <file>");
@@ -20617,10 +20893,13 @@ fn cmd_sidebar(args: &str) {
                 let label = if parts.len() > 2 {
                     parts[2..].join(" ")
                 } else {
-                    String::from(resolved.rsplit('/').next().unwrap_or(&resolved))
+                    alloc::format!(
+                        "{}",
+                        resolved.file_name().unwrap_or(resolved.as_path()).display()
+                    )
                 };
                 match crate::fs::sidebar::pin_to_quick_access(&resolved, &label) {
-                    Ok(()) => shell_println!("Pinned: {} ({})", label, resolved),
+                    Ok(()) => shell_println!("Pinned: {} ({})", label, resolved.display()),
                     Err(e) => shell_println!("Error: {:?}", e),
                 }
             } else {
@@ -20631,7 +20910,7 @@ fn cmd_sidebar(args: &str) {
             if let Some(path) = parts.get(1) {
                 let resolved = resolve_path(path);
                 match crate::fs::sidebar::unpin_from_quick_access(&resolved) {
-                    Ok(()) => shell_println!("Unpinned: {}", resolved),
+                    Ok(()) => shell_println!("Unpinned: {}", resolved.display()),
                     Err(e) => shell_println!("Error: {:?}", e),
                 }
             } else {
@@ -20680,10 +20959,7 @@ fn cmd_statusbar(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "show" | "" => {
-            let dir = parts
-                .get(1)
-                .map(|p| resolve_path(p))
-                .unwrap_or_else(get_cwd);
+            let dir = parts.get(1).map(resolve_path).unwrap_or_else(get_cwd);
             let status = crate::fs::statusbar::generate_for_dir(&dir, 0, 0);
             shell_println!("Left:   {}", status.left);
             if !status.center.is_empty() {
@@ -20694,17 +20970,14 @@ fn cmd_statusbar(args: &str) {
             }
         }
         "disk" => {
-            let dir = parts
-                .get(1)
-                .map(|p| resolve_path(p))
-                .unwrap_or_else(get_cwd);
+            let dir = parts.get(1).map(resolve_path).unwrap_or_else(get_cwd);
             match crate::fs::statusbar::disk_info(&dir) {
                 Some(info) => {
                     shell_println!("Filesystem: {}", info.fs_type);
                     shell_println!("Free:  {} bytes", info.free_bytes);
                     shell_println!("Total: {} bytes", info.total_bytes);
                 }
-                None => shell_println!("No disk info available for {}", dir),
+                None => shell_println!("No disk info available for {}", dir.display()),
             }
         }
         "stats" => {
@@ -20933,7 +21206,7 @@ fn cmd_queryable(args: &str) {
                 _ => queryable::AttrValue::Text(String::from(val_str)),
             };
             match queryable::set_attr(&path, attr_name, value) {
-                Ok(()) => shell_println!("Set {}={} on {}", attr_name, val_str, path),
+                Ok(()) => shell_println!("Set {}={} on {}", attr_name, val_str, path.display()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -20967,7 +21240,7 @@ fn cmd_queryable(args: &str) {
             }
             let path = resolve_path(path_arg);
             match queryable::remove_attr(&path, attr_name) {
-                Ok(()) => shell_println!("Removed {} from {}", attr_name, path),
+                Ok(()) => shell_println!("Removed {} from {}", attr_name, path.display()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -20981,9 +21254,9 @@ fn cmd_queryable(args: &str) {
             match queryable::list_attrs(&path) {
                 Ok(attrs) => {
                     if attrs.is_empty() {
-                        shell_println!("No attributes on {}", path);
+                        shell_println!("No attributes on {}", path.display());
                     } else {
-                        shell_println!("{} attributes on {}:", attrs.len(), path);
+                        shell_println!("{} attributes on {}:", attrs.len(), path.display());
                         for (name, val) in &attrs {
                             let display = match val {
                                 queryable::AttrValue::Text(s) => alloc::format!("\"{}\"", s),
@@ -21008,7 +21281,7 @@ fn cmd_queryable(args: &str) {
             }
             let path = resolve_path(path_arg);
             match queryable::clear_attrs(&path) {
-                Ok(n) => shell_println!("Cleared {} attributes from {}", n, path),
+                Ok(n) => shell_println!("Cleared {} attributes from {}", n, path.display()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -21017,7 +21290,7 @@ fn cmd_queryable(args: &str) {
             let attr_name = parts.get(1).copied().unwrap_or("");
             let op_str = parts.get(2).copied().unwrap_or("=");
             let val_str = parts.get(3).copied().unwrap_or("");
-            let root = parts.get(4).map(|p| resolve_path(p));
+            let root = parts.get(4).map(resolve_path);
             if attr_name.is_empty() || val_str.is_empty() {
                 shell_println!("Usage: qattr query <attr> <op> <value> [root]");
                 shell_println!("  ops: = != < <= > >= contains starts-with ends-with");
@@ -21219,7 +21492,11 @@ fn cmd_fcomment(args: &str) {
                         acc
                     });
             match fcomment::set(&path, &comment) {
-                Ok(()) => shell_println!("Comment set on {} ({} bytes)", path, comment.len()),
+                Ok(()) => shell_println!(
+                    "Comment set on {} ({} bytes)",
+                    path.display(),
+                    comment.len()
+                ),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -21232,7 +21509,7 @@ fn cmd_fcomment(args: &str) {
             let path = resolve_path(path_arg);
             match fcomment::get(&path) {
                 Some(comment) => shell_println!("{}", comment),
-                None => shell_println!("No comment on {}", path),
+                None => shell_println!("No comment on {}", path.display()),
             }
         }
         "append" => {
@@ -21254,7 +21531,7 @@ fn cmd_fcomment(args: &str) {
                         acc
                     });
             match fcomment::append(&path, &text) {
-                Ok(()) => shell_println!("Appended to comment on {}", path),
+                Ok(()) => shell_println!("Appended to comment on {}", path.display()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -21266,13 +21543,13 @@ fn cmd_fcomment(args: &str) {
             }
             let path = resolve_path(path_arg);
             match fcomment::remove(&path) {
-                Ok(()) => shell_println!("Comment removed from {}", path),
+                Ok(()) => shell_println!("Comment removed from {}", path.display()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "search" => {
             let needle = parts.get(1).copied().unwrap_or("");
-            let root = parts.get(2).map(|p| resolve_path(p));
+            let root = parts.get(2).map(resolve_path);
             if needle.is_empty() {
                 shell_println!("Usage: fcomment search <text> [root]");
                 return;
@@ -21290,7 +21567,7 @@ fn cmd_fcomment(args: &str) {
             }
         }
         "list" | "" => {
-            let root = parts.get(1).map(|p| resolve_path(p));
+            let root = parts.get(1).map(resolve_path);
             let all = fcomment::list(root.as_deref().map(Path::new));
             if all.is_empty() {
                 shell_println!("No commented files");
@@ -49219,7 +49496,7 @@ fn cmd_pcap(args: &str) {
             let path = resolve_path(filename);
             match crate::fs::vfs::Vfs::write_file(&path, &data) {
                 Ok(()) => {
-                    shell_println!("Exported {} bytes to {}", data.len(), path);
+                    shell_println!("Exported {} bytes to {}", data.len(), path.display());
                 }
                 Err(e) => {
                     shell_println!("Export failed: {:?}", e);
@@ -82262,7 +82539,7 @@ fn cmd_fflags(args: &str) {
             match immutable::set_flags(&path, bits) {
                 Ok(()) => shell_println!(
                     "Set flags on {}: {}",
-                    path,
+                    path.display(),
                     immutable::flags_to_string(bits)
                 ),
                 Err(e) => shell_println!("Error: {:?}", e),
@@ -82286,7 +82563,7 @@ fn cmd_fflags(args: &str) {
                 }
             }
             match immutable::clear_flags(&path, bits) {
-                Ok(()) => shell_println!("Cleared flags on {}", path),
+                Ok(()) => shell_println!("Cleared flags on {}", path.display()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -82299,9 +82576,9 @@ fn cmd_fflags(args: &str) {
             let path = resolve_path(path_arg);
             let flags = immutable::get_flags(&path);
             if flags == 0 {
-                shell_println!("{}: no flags", path);
+                shell_println!("{}: no flags", path.display());
             } else {
-                shell_println!("{}: {}", path, immutable::flags_to_string(flags));
+                shell_println!("{}: {}", path.display(), immutable::flags_to_string(flags));
             }
         }
         "rm" | "remove" => {
@@ -82312,7 +82589,7 @@ fn cmd_fflags(args: &str) {
             }
             let path = resolve_path(path_arg);
             match immutable::remove_flags(&path) {
-                Ok(()) => shell_println!("All flags removed from {}", path),
+                Ok(()) => shell_println!("All flags removed from {}", path.display()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -82339,8 +82616,8 @@ fn cmd_fflags(args: &str) {
                 }
             };
             match result {
-                Ok(()) => shell_println!("{} on {}: ALLOWED", check_type, path),
-                Err(e) => shell_println!("{} on {}: BLOCKED ({:?})", check_type, path, e),
+                Ok(()) => shell_println!("{} on {}: ALLOWED", check_type, path.display()),
+                Err(e) => shell_println!("{} on {}: BLOCKED ({:?})", check_type, path.display(), e),
             }
         }
         "list" | "" => {
@@ -82454,9 +82731,9 @@ fn cmd_preview(args: &str) {
             }
             let path = resolve_path(path_arg);
             if preview::supports_preview(&path) {
-                shell_println!("{}: preview supported", path);
+                shell_println!("{}: preview supported", path.display());
             } else {
-                shell_println!("{}: no preview available", path);
+                shell_println!("{}: no preview available", path.display());
             }
         }
         "dir" => {
@@ -82468,7 +82745,7 @@ fn cmd_preview(args: &str) {
                 _ => preview::PreviewSize::Medium,
             };
             match preview::generate_for_directory(&dir, size) {
-                Ok(count) => shell_println!("Generated {} previews for {}", count, dir),
+                Ok(count) => shell_println!("Generated {} previews for {}", count, dir.display()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -82550,10 +82827,7 @@ fn cmd_template(args: &str) {
                 shell_println!("Usage: template create <name_or_id> [directory]");
                 return;
             }
-            let dir = parts
-                .get(2)
-                .map(|d| resolve_path(d))
-                .unwrap_or_else(get_cwd);
+            let dir = parts.get(2).map(resolve_path).unwrap_or_else(get_cwd);
 
             // Try by ID first, then by name.
             let template = if let Ok(id) = name_or_id.parse::<u64>() {
@@ -82562,8 +82836,12 @@ fn cmd_template(args: &str) {
                 templates::get_by_name(name_or_id)
             };
 
+            let Some(dir_str) = path_arg_as_str(&dir, "template") else {
+                return;
+            };
+
             match template {
-                Some(t) => match templates::create(t.id, &dir) {
+                Some(t) => match templates::create(t.id, dir_str) {
                     Ok(path) => shell_println!("Created: {}", path),
                     Err(e) => shell_println!("Error: {:?}", e),
                 },
@@ -82684,7 +82962,7 @@ fn cmd_columnview(args: &str) {
             let dir = resolve_path(dir_arg);
             match columnview::compute_columns(&dir) {
                 Ok(cols) => {
-                    shell_println!("Columns for {}:", dir);
+                    shell_println!("Columns for {}:", dir.display());
                     shell_println!(
                         "{:4} {:24} {:16} {:8} {:6}",
                         "POS",
@@ -82844,7 +83122,7 @@ fn cmd_pathbar(args: &str) {
             }
             let path = resolve_path(path_arg);
             match pathbar::go(&path) {
-                Ok(()) => shell_println!("Navigated to: {}", path),
+                Ok(()) => shell_println!("Navigated to: {}", path.display()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -82930,7 +83208,7 @@ fn cmd_viewstate(args: &str) {
             let path_arg = parts.get(1).copied().unwrap_or(".");
             let path = resolve_path(path_arg);
             let settings = viewstate::get(&path);
-            shell_println!("View settings for {}:", path);
+            shell_println!("View settings for {}:", path.display());
             shell_println!("  Mode:          {}", settings.mode.label());
             shell_println!(
                 "  Icon size:     {}",
@@ -82972,7 +83250,7 @@ fn cmd_viewstate(args: &str) {
                         settings.sort.ascending = *dir != "desc";
                     }
                     match viewstate::set(&path, settings) {
-                        Ok(()) => shell_println!("View state saved for {}.", path),
+                        Ok(()) => shell_println!("View state saved for {}.", path.display()),
                         Err(e) => shell_println!("Error: {:?}", e),
                     }
                 }
@@ -82990,9 +83268,9 @@ fn cmd_viewstate(args: &str) {
             }
             let path = resolve_path(path_arg);
             if viewstate::remove(&path) {
-                shell_println!("Removed view state for {}.", path);
+                shell_println!("Removed view state for {}.", path.display());
             } else {
-                shell_println!("No saved state for {}.", path);
+                shell_println!("No saved state for {}.", path.display());
             }
         }
         "list" | "ls" => {
@@ -83197,14 +83475,14 @@ fn cmd_getfacl(args: &str) {
     let path = resolve_path(args.trim());
     match acl::get_acl(&path) {
         Some(a) => {
-            shell_println!("# file: {}", path);
+            shell_println!("# file: {}", path.display());
             let lines = acl::format_acl(&a, None);
             for line in &lines {
                 shell_println!("{}", line);
             }
         }
         None => {
-            shell_println!("# file: {}", path);
+            shell_println!("# file: {}", path.display());
             shell_println!("# (no ACL set, using traditional permissions)");
         }
     }
@@ -83279,7 +83557,7 @@ fn cmd_setfacl(args: &str) {
             }
 
             match acl::set_acl(&path, a) {
-                Ok(()) => shell_println!("ACL updated for {}", path),
+                Ok(()) => shell_println!("ACL updated for {}", path.display()),
                 Err(e) => shell_println!("Error setting ACL: {:?}", e),
             }
         }
@@ -83314,11 +83592,11 @@ fn cmd_setfacl(args: &str) {
                 }
 
                 match acl::set_acl(&path, a) {
-                    Ok(()) => shell_println!("ACL entry removed for {}", path),
+                    Ok(()) => shell_println!("ACL entry removed for {}", path.display()),
                     Err(e) => shell_println!("Error: {:?}", e),
                 }
             } else {
-                shell_println!("No ACL set on {}", path);
+                shell_println!("No ACL set on {}", path.display());
             }
         }
 
@@ -83326,9 +83604,9 @@ fn cmd_setfacl(args: &str) {
             // setfacl -b PATH - remove all ACL
             let path = resolve_path(parts[1]);
             if acl::remove_acl(&path) {
-                shell_println!("ACL removed from {}", path);
+                shell_println!("ACL removed from {}", path.display());
             } else {
-                shell_println!("No ACL set on {}", path);
+                shell_println!("No ACL set on {}", path.display());
             }
         }
 
@@ -83348,7 +83626,7 @@ fn cmd_setfacl(args: &str) {
             let path = resolve_path(parts[2]);
             let a = acl::from_mode(mode);
             match acl::set_acl(&path, a) {
-                Ok(()) => shell_println!("ACL set from mode {:o} on {}", mode, path),
+                Ok(()) => shell_println!("ACL set from mode {:o} on {}", mode, path.display()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -83434,7 +83712,7 @@ fn cmd_file(args: &str) {
     let entry = match crate::fs::Vfs::lstat(&path) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!("file: {}: {:?}", path, e);
+            crate::console_println!("file: {}: {:?}", path.display(), e);
             set_exit(1);
             return;
         }
@@ -83442,16 +83720,16 @@ fn cmd_file(args: &str) {
 
     match entry.entry_type {
         crate::fs::EntryType::Directory => {
-            shell_println!("{}: directory", path);
+            shell_println!("{}: directory", path.display());
         }
         crate::fs::EntryType::Symlink => {
             // Try to read the link target.
             match crate::fs::Vfs::readlink(&path) {
                 Ok(target) => {
-                    shell_println!("{}: symbolic link to {}", path, target.display());
+                    shell_println!("{}: symbolic link to {}", path.display(), target.display());
                 }
                 Err(_) => {
-                    shell_println!("{}: symbolic link", path);
+                    shell_println!("{}: symbolic link", path.display());
                 }
             }
         }
@@ -83459,7 +83737,7 @@ fn cmd_file(args: &str) {
             // Heuristic: /dev/* entries with size 0 are character specials
             // (the VFS doesn't have a CharDevice entry type).
             if path.starts_with("/dev/") && entry.size == 0 {
-                shell_println!("{}: character special", path);
+                shell_println!("{}: character special", path.display());
             } else {
                 // Read up to 512 bytes for magic byte detection.
                 let magic_hint = match crate::fs::Vfs::read_at(&path, 0, 512) {
@@ -83467,12 +83745,12 @@ fn cmd_file(args: &str) {
                     Err(_) => None,
                 };
                 if let Some(hint) = magic_hint {
-                    shell_println!("{}: {}, {} bytes", path, hint, entry.size);
+                    shell_println!("{}: {}, {} bytes", path.display(), hint, entry.size);
                 } else {
                     let ext_hint = extension_hint(&path);
                     shell_println!(
                         "{}: regular file, {} bytes ({})",
-                        path,
+                        path.display(),
                         entry.size,
                         ext_hint
                     );
@@ -83480,10 +83758,10 @@ fn cmd_file(args: &str) {
             }
         }
         crate::fs::EntryType::VolumeLabel => {
-            shell_println!("{}: volume label", path);
+            shell_println!("{}: volume label", path.display());
         }
         crate::fs::EntryType::CharDevice => {
-            shell_println!("{}: character special", path);
+            shell_println!("{}: character special", path.display());
         }
     }
 }
@@ -83791,15 +84069,20 @@ fn detect_magic(header: &[u8]) -> Option<&'static str> {
 }
 
 /// Map a file extension to a human-readable type hint for the `file` command.
-fn extension_hint(path: &str) -> &'static str {
-    // Extract the extension (after the last '.'), lowercased comparison.
-    let ext = match path.rsplit_once('.') {
-        Some((_, e)) => e,
-        None => return "data",
+fn extension_hint(path: &Path) -> &'static str {
+    // `Path::extension` rather than the `rsplit_once('.')` this used to do:
+    // the latter searches the whole path, so `archive.tar/notes` reported the
+    // extension `tar/notes`, and a dotless name under a dotted directory was
+    // classified by its *directory*. `extension` looks only at the final
+    // component, which is what "the file's extension" means.
+    //
+    // Every arm below is ASCII, so an extension that is not valid UTF-8 cannot
+    // match one; reporting it as unknown is therefore not a loss of fidelity.
+    // Only the comparison is text -- the path itself stays bytes.
+    let Some(ext) = path.extension().and_then(Path::to_str) else {
+        return "data";
     };
 
-    // Compare case-insensitively by checking lowercase.
-    // Since ext is a slice of path, we need byte-level comparison.
     match ext {
         // Text and source files.
         "txt" | "text" | "log" => "text",
@@ -83972,7 +84255,7 @@ fn cmd_wc(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("wc: {}: {:?}", path, e);
+            crate::console_println!("wc: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -84000,7 +84283,7 @@ fn cmd_wc(args: &str) {
         lines,
         words,
         bytes,
-        path
+        path.display()
     );
 }
 
@@ -84022,7 +84305,7 @@ fn cmd_head(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("head: {}: {:?}", path, e);
+            crate::console_println!("head: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -84054,7 +84337,7 @@ fn cmd_tail(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("tail: {}: {:?}", path, e);
+            crate::console_println!("tail: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -84117,7 +84400,7 @@ fn cmd_hexdump(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("hexdump: {}: {:?}", path, e);
+            crate::console_println!("hexdump: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -84477,14 +84760,14 @@ fn cmd_cmp(args: &str) {
     let data1 = match crate::fs::Vfs::read_file(&path1) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("cmp: {}: {:?}", path1, e);
+            crate::console_println!("cmp: {}: {:?}", path1.display(), e);
             return;
         }
     };
     let data2 = match crate::fs::Vfs::read_file(&path2) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("cmp: {}: {:?}", path2, e);
+            crate::console_println!("cmp: {}: {:?}", path2.display(), e);
             return;
         }
     };
@@ -84492,8 +84775,8 @@ fn cmd_cmp(args: &str) {
     if data1 == data2 {
         crate::console_println!(
             "{} and {} are identical ({} bytes)",
-            path1,
-            path2,
+            path1.display(),
+            path2.display(),
             data1.len()
         );
         return;
@@ -84513,12 +84796,12 @@ fn cmd_cmp(args: &str) {
     let diff_at = diff_offset.unwrap_or(min_len);
     crate::console_println!(
         "{} {} differ: byte {}, {} size={}, {} size={}",
-        path1,
-        path2,
+        path1.display(),
+        path2.display(),
         diff_at,
-        path1,
+        path1.display(),
         data1.len(),
-        path2,
+        path2.display(),
         data2.len(),
     );
 }
@@ -84542,14 +84825,14 @@ fn cmd_diff(args: &str) {
     let data1 = match crate::fs::Vfs::read_file(&path1) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("diff: {}: {:?}", path1, e);
+            crate::console_println!("diff: {}: {:?}", path1.display(), e);
             return;
         }
     };
     let data2 = match crate::fs::Vfs::read_file(&path2) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("diff: {}: {:?}", path2, e);
+            crate::console_println!("diff: {}: {:?}", path2.display(), e);
             return;
         }
     };
@@ -84635,8 +84918,8 @@ fn cmd_diff(args: &str) {
     drop(dp);
 
     // Print header.
-    crate::console_println!("--- {}", path1);
-    crate::console_println!("+++ {}", path2);
+    crate::console_println!("--- {}", path1.display());
+    crate::console_println!("+++ {}", path2.display());
 
     // Group edits into hunks (unified diff with 3 lines context).
     const CONTEXT: usize = 3;
@@ -84792,10 +85075,10 @@ fn cmd_fallocate(args: &str) {
 
     match crate::fs::Vfs::fallocate(&path, size) {
         Ok(()) => {
-            crate::console_println!("fallocate: reserved {} bytes for {}", size, path);
+            crate::console_println!("fallocate: reserved {} bytes for {}", size, path.display());
         }
         Err(e) => {
-            crate::console_println!("fallocate: {}: {:?}", path, e);
+            crate::console_println!("fallocate: {}: {:?}", path.display(), e);
         }
     }
 }
@@ -84995,7 +85278,7 @@ fn cmd_mount(args: &str) {
             match crate::fs::Vfs::remount(&mount_path_resolved, mount_opts) {
                 Ok(()) => crate::console_println!(
                     "Remounted {} with options: {}",
-                    mount_path_resolved,
+                    mount_path_resolved.display(),
                     mount_opts.to_string(),
                 ),
                 Err(e) => {
@@ -85105,7 +85388,7 @@ fn cmd_mount(args: &str) {
             crate::console_println!(
                 "Mounted {} at {} ({})",
                 device,
-                mount_path_resolved,
+                mount_path_resolved.display(),
                 opts_display
             );
         }
@@ -85113,7 +85396,7 @@ fn cmd_mount(args: &str) {
             crate::console_println!(
                 "mount: failed to mount {} at {}: {:?}",
                 device,
-                mount_path_resolved,
+                mount_path_resolved.display(),
                 e
             );
             set_exit(1);
@@ -85132,10 +85415,10 @@ fn cmd_umount(args: &str) {
 
     match crate::fs::Vfs::unmount(&path) {
         Ok(()) => {
-            crate::console_println!("{}: unmounted", path);
+            crate::console_println!("{}: unmounted", path.display());
         }
         Err(e) => {
-            crate::console_println!("umount: {}: {:?}", path, e);
+            crate::console_println!("umount: {}: {:?}", path.display(), e);
         }
     }
 }
@@ -85173,12 +85456,12 @@ fn cmd_run(args: &str) {
     let elf_data = match crate::fs::Vfs::read_file(&path) {
         Ok(data) => data,
         Err(e) => {
-            crate::console_println!("run: {}: {:?}", path, e);
+            crate::console_println!("run: {}: {:?}", path.display(), e);
             return;
         }
     };
 
-    crate::console_println!("Loading {} ({} bytes)...", path, elf_data.len());
+    crate::console_println!("Loading {} ({} bytes)...", path.display(), elf_data.len());
 
     // Spawn a new process from the ELF data.  `path` is the resolved
     // absolute path of the binary; record it so /proc/<pid>/exe works.
@@ -93870,7 +94153,7 @@ fn cmd_source(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("source: {}: {:?}", path, e);
+            crate::console_println!("source: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -93878,7 +94161,7 @@ fn cmd_source(args: &str) {
     let text = match core::str::from_utf8(&data) {
         Ok(s) => s,
         Err(_) => {
-            crate::console_println!("source: {}: not a text file", path);
+            crate::console_println!("source: {}: not a text file", path.display());
             return;
         }
     };
@@ -93904,7 +94187,7 @@ fn cmd_source(args: &str) {
         }
         crate::serial_println!(
             "[source] {}:{}: {}",
-            path,
+            path.display(),
             line_num.saturating_add(1),
             trimmed
         );
@@ -93914,7 +94197,7 @@ fn cmd_source(args: &str) {
         if OPT_ERREXIT.load(core::sync::atomic::Ordering::Relaxed) && last_exit() != 0 {
             crate::console_println!(
                 "{}:{}: command failed (exit {}), aborting (set -e)",
-                path,
+                path.display(),
                 line_num.saturating_add(1),
                 last_exit(),
             );
@@ -93984,7 +94267,7 @@ fn cmd_nl(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("nl: {}: {:?}", path, e);
+            crate::console_println!("nl: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -94018,7 +94301,7 @@ fn cmd_rev(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("rev: {}: {:?}", path, e);
+            crate::console_println!("rev: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -95946,7 +96229,12 @@ fn strip_quotes(s: &str) -> &str {
 /// Keep the `PWD` environment variable in sync with the shell's CWD.
 fn sync_env_pwd() {
     let cwd = get_cwd();
-    env_set("PWD", &cwd);
+    // Lossy on purpose: the environment is a `String` map, and $PWD here is
+    // advisory -- path resolution goes through `CWD`, never through `$PWD`, so
+    // a U+FFFD in it cannot redirect a file operation. Leaving it stale
+    // instead would mislead just as much and would do so silently. Converting
+    // the environment to bytes is a separate change (see `path_arg_as_str`).
+    env_set("PWD", &alloc::format!("{}", cwd.display()));
 }
 
 /// `tee FILE TEXT` — write TEXT to FILE and also display it.
@@ -96473,8 +96761,8 @@ fn cmd_trash(args: &str) {
             // Default: move file to trash.
             let path = resolve_path(args);
             match crate::fs::trash::trash(&path) {
-                Ok(()) => crate::console_println!("Moved '{}' to recycle bin", path),
-                Err(e) => crate::console_println!("trash: '{}': {:?}", path, e),
+                Ok(()) => crate::console_println!("Moved '{}' to recycle bin", path.display()),
+                Err(e) => crate::console_println!("trash: '{}': {:?}", path.display(), e),
             }
         }
     }
@@ -96558,7 +96846,7 @@ fn cmd_realpath(args: &str) {
 
 /// `pwd` — print working directory (always / in kernel shell).
 fn cmd_pwd() {
-    shell_println!("{}", get_cwd());
+    shell_println!("{}", get_cwd().display());
 }
 
 /// `cd [dir]` — change the current working directory.
@@ -96573,24 +96861,20 @@ fn cmd_cd(args: &str) {
     match crate::fs::Vfs::stat(&target) {
         Ok(meta) => {
             if meta.entry_type != crate::fs::EntryType::Directory {
-                crate::console_println!("cd: not a directory: {}", target);
+                crate::console_println!("cd: not a directory: {}", target.display());
                 set_exit(1);
                 return;
             }
         }
         Err(e) => {
-            crate::console_println!("cd: {}: {:?}", target, e);
+            crate::console_println!("cd: {}: {:?}", target.display(), e);
             set_exit(1);
             return;
         }
     }
 
     // Update the working directory.
-    {
-        let mut cwd = CWD.lock();
-        cwd.clear();
-        cwd.push_str(&target);
-    }
+    set_cwd(&target);
     // Keep $PWD in sync.
     sync_env_pwd();
 }
@@ -102362,10 +102646,10 @@ fn cmd_label(args: &str) {
                 } else {
                     &info.volume_label
                 };
-                crate::console_println!("{}: {} [{}]", path, label, info.fs_type);
+                crate::console_println!("{}: {} [{}]", path.display(), label, info.fs_type);
             }
             Err(e) => {
-                crate::console_println!("label: {}: {:?}", path, e);
+                crate::console_println!("label: {}: {:?}", path.display(), e);
                 set_exit(1);
             }
         }
@@ -102655,7 +102939,7 @@ fn cmd_comm(args: &str) {
     let data1 = match crate::fs::Vfs::read_file(&path1) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("comm: {}: {:?}", path1, e);
+            crate::console_println!("comm: {}: {:?}", path1.display(), e);
             set_exit(1);
             return;
         }
@@ -102663,7 +102947,7 @@ fn cmd_comm(args: &str) {
     let data2 = match crate::fs::Vfs::read_file(&path2) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("comm: {}: {:?}", path2, e);
+            crate::console_println!("comm: {}: {:?}", path2.display(), e);
             set_exit(1);
             return;
         }
@@ -102781,7 +103065,7 @@ fn cmd_od(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("od: {}: {:?}", path, e);
+            crate::console_println!("od: {}: {:?}", path.display(), e);
             set_exit(1);
             return;
         }
@@ -103001,18 +103285,18 @@ fn cmd_tar(args: &str) {
             Ok(()) => {
                 crate::console_println!(
                     "tar: created '{}' ({} files, {} bytes)",
-                    archive_path,
+                    archive_path.display(),
                     file_count,
                     write_data.len()
                 );
             }
             Err(e) => {
-                crate::console_println!("tar: write '{}': {:?}", archive_path, e);
+                crate::console_println!("tar: write '{}': {:?}", archive_path.display(), e);
             }
         }
     } else if extract || list {
         // Parse -C dir option for extract.
-        let mut target_dir = alloc::string::String::from("/");
+        let mut target_dir = PathBuf::from("/");
         let mut i = 2;
         while i < parts.len() {
             if parts[i] == "-C" && i + 1 < parts.len() {
@@ -103026,7 +103310,7 @@ fn cmd_tar(args: &str) {
         let raw_data = match Vfs::read_file(&archive_path) {
             Ok(d) => d,
             Err(e) => {
-                crate::console_println!("tar: read '{}': {:?}", archive_path, e);
+                crate::console_println!("tar: read '{}': {:?}", archive_path.display(), e);
                 return;
             }
         };
@@ -103144,7 +103428,7 @@ fn cmd_tar(args: &str) {
         let entries = match crate::fs::tar::parse(&data) {
             Ok(e) => e,
             Err(e) => {
-                crate::console_println!("tar: parse '{}': {:?}", archive_path, e);
+                crate::console_println!("tar: parse '{}': {:?}", archive_path.display(), e);
                 return;
             }
         };
@@ -103258,7 +103542,7 @@ fn cmd_tar(args: &str) {
             crate::console_println!(
                 "tar: extracted {} entries from '{}'",
                 file_count,
-                archive_path
+                archive_path.display()
             );
         }
     }
@@ -103433,7 +103717,7 @@ fn cmd_unzip(args: &str) {
 
     let mut list_mode = false;
     let mut archive_arg: Option<&str> = None;
-    let mut target_dir = alloc::string::String::from("/");
+    let mut target_dir = PathBuf::from("/");
     let mut skip_next = false;
 
     for (i, &p) in parts.iter().enumerate() {
@@ -103471,7 +103755,7 @@ fn cmd_unzip(args: &str) {
     let data = match Vfs::read_file(&archive_path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("unzip: '{}': {:?}", archive_path, e);
+            crate::console_println!("unzip: '{}': {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -103479,7 +103763,10 @@ fn cmd_unzip(args: &str) {
     let entries = match zip::parse(&data) {
         Ok(e) => e,
         Err(_) => {
-            crate::console_println!("unzip: '{}': not a valid ZIP archive", archive_path);
+            crate::console_println!(
+                "unzip: '{}': not a valid ZIP archive",
+                archive_path.display()
+            );
             return;
         }
     };
@@ -103614,7 +103901,7 @@ fn cmd_unzip(args: &str) {
         } else {
             alloc::string::String::new()
         },
-        archive_path
+        archive_path.display()
     );
 }
 
@@ -103670,7 +103957,7 @@ fn cmd_cpio_list(args: &[&str]) {
     let data = match Vfs::read_file(&archive_path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("cpio: '{}': {:?}", archive_path, e);
+            crate::console_println!("cpio: '{}': {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -103678,7 +103965,7 @@ fn cmd_cpio_list(args: &[&str]) {
     let entries = match crate::fs::cpio::uncpio(&data) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!("cpio: '{}': parse failed: {:?}", archive_path, e);
+            crate::console_println!("cpio: '{}': parse failed: {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -103760,7 +104047,7 @@ fn cmd_cpio_extract(args: &[&str]) {
     use crate::fs::Vfs;
 
     let mut archive_arg: Option<&str> = None;
-    let mut target_dir = alloc::string::String::from("/");
+    let mut target_dir = PathBuf::from("/");
     let mut skip_next = false;
 
     for (i, &p) in args.iter().enumerate() {
@@ -103797,7 +104084,7 @@ fn cmd_cpio_extract(args: &[&str]) {
     let data = match Vfs::read_file(&archive_path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("cpio: '{}': {:?}", archive_path, e);
+            crate::console_println!("cpio: '{}': {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -103805,7 +104092,11 @@ fn cmd_cpio_extract(args: &[&str]) {
     let entries = match crate::fs::cpio::uncpio(&data) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!("cpio: '{}': extraction failed: {:?}", archive_path, e);
+            crate::console_println!(
+                "cpio: '{}': extraction failed: {:?}",
+                archive_path.display(),
+                e
+            );
             return;
         }
     };
@@ -103871,7 +104162,7 @@ fn cmd_cpio_extract(args: &[&str]) {
     crate::console_println!(
         "cpio: extracted {} item(s) from '{}'{}",
         extracted,
-        archive_path,
+        archive_path.display(),
         if errors > 0 {
             alloc::format!(" ({} errors)", errors)
         } else {
@@ -103907,7 +104198,7 @@ fn cmd_cpio_create(args: &[&str]) {
                     match Vfs::read_file(&path) {
                         Ok(d) => d,
                         Err(e) => {
-                            crate::console_println!("cpio: read '{}': {:?}", path, e);
+                            crate::console_println!("cpio: read '{}': {:?}", path.display(), e);
                             continue;
                         }
                     }
@@ -103922,13 +104213,13 @@ fn cmd_cpio_create(args: &[&str]) {
                 };
 
                 // A cpio member name is relative, so drop the leading `/`.
-                let name = path.strip_prefix('/').unwrap_or(&path);
+                let name = path.strip_prefix("/").unwrap_or_else(|| path.clone());
 
                 // Convert nanosecond timestamp to seconds for CPIO mtime.
                 let mtime_secs = (meta.modified_ns / 1_000_000_000) as u32;
 
                 entries.push(crate::fs::cpio::CpioEntry {
-                    name: PathBuf::from(name),
+                    name,
                     data,
                     entry_type: etype,
                     mode: 0o644, // Default mode
@@ -103939,7 +104230,7 @@ fn cmd_cpio_create(args: &[&str]) {
                 });
             }
             Err(e) => {
-                crate::console_println!("cpio: '{}': {:?}", path, e);
+                crate::console_println!("cpio: '{}': {:?}", path.display(), e);
             }
         }
     }
@@ -103961,13 +104252,13 @@ fn cmd_cpio_create(args: &[&str]) {
         Ok(()) => {
             crate::console_println!(
                 "cpio: created '{}' ({} entries, {} bytes)",
-                archive_path,
+                archive_path.display(),
                 entries.len(),
                 archive.len()
             );
         }
         Err(e) => {
-            crate::console_println!("cpio: write '{}': {:?}", archive_path, e);
+            crate::console_println!("cpio: write '{}': {:?}", archive_path.display(), e);
         }
     }
 }
@@ -104021,7 +104312,7 @@ fn cmd_ar_list(args: &[&str]) {
     let data = match Vfs::read_file(&archive_path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("ar: '{}': {:?}", archive_path, e);
+            crate::console_println!("ar: '{}': {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -104029,7 +104320,7 @@ fn cmd_ar_list(args: &[&str]) {
     let entries = match crate::fs::ar::unar(&data) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!("ar: '{}': parse failed: {:?}", archive_path, e);
+            crate::console_println!("ar: '{}': parse failed: {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -104070,7 +104361,7 @@ fn cmd_ar_extract(args: &[&str]) {
     use crate::fs::Vfs;
 
     let mut archive_arg: Option<&str> = None;
-    let mut target_dir = alloc::string::String::from("/");
+    let mut target_dir = PathBuf::from("/");
     let mut skip_next = false;
 
     for (i, &p) in args.iter().enumerate() {
@@ -104107,7 +104398,7 @@ fn cmd_ar_extract(args: &[&str]) {
     let data = match Vfs::read_file(&archive_path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("ar: '{}': {:?}", archive_path, e);
+            crate::console_println!("ar: '{}': {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -104115,7 +104406,11 @@ fn cmd_ar_extract(args: &[&str]) {
     let entries = match crate::fs::ar::unar(&data) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!("ar: '{}': extraction failed: {:?}", archive_path, e);
+            crate::console_println!(
+                "ar: '{}': extraction failed: {:?}",
+                archive_path.display(),
+                e
+            );
             return;
         }
     };
@@ -104147,7 +104442,7 @@ fn cmd_ar_extract(args: &[&str]) {
     crate::console_println!(
         "ar: extracted {} member(s) from '{}'{}",
         extracted,
-        archive_path,
+        archive_path.display(),
         if errors > 0 {
             alloc::format!(" ({} errors)", errors)
         } else {
@@ -104172,7 +104467,7 @@ fn cmd_ar_create(args: &[&str]) {
         match Vfs::read_file(&path) {
             Ok(data) => {
                 // Use the filename part only (strip directory).
-                let name = path.rsplit('/').next().unwrap_or(&path);
+                let name = path.file_name().unwrap_or(path.as_path());
                 entries.push(crate::fs::ar::ArEntry {
                     name: crate::fs::path::PathBuf::from(name),
                     data,
@@ -104183,7 +104478,7 @@ fn cmd_ar_create(args: &[&str]) {
                 });
             }
             Err(e) => {
-                crate::console_println!("ar: read '{}': {:?}", path, e);
+                crate::console_println!("ar: read '{}': {:?}", path.display(), e);
             }
         }
     }
@@ -104205,13 +104500,13 @@ fn cmd_ar_create(args: &[&str]) {
         Ok(()) => {
             crate::console_println!(
                 "ar: created '{}' ({} members, {} bytes)",
-                archive_path,
+                archive_path.display(),
                 entries.len(),
                 archive.len()
             );
         }
         Err(e) => {
-            crate::console_println!("ar: write '{}': {:?}", archive_path, e);
+            crate::console_println!("ar: write '{}': {:?}", archive_path.display(), e);
         }
     }
 }
@@ -104258,11 +104553,11 @@ fn cmd_dpkg(args: &str) {
 }
 
 /// Read a .deb file and parse it into ar members.
-fn dpkg_read_deb(path: &str) -> Option<alloc::vec::Vec<crate::fs::ar::ArEntry>> {
+fn dpkg_read_deb(path: &Path) -> Option<alloc::vec::Vec<crate::fs::ar::ArEntry>> {
     let data = match crate::fs::Vfs::read_file(path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("dpkg: '{}': {:?}", path, e);
+            crate::console_println!("dpkg: '{}': {:?}", path.display(), e);
             return None;
         }
     };
@@ -104272,7 +104567,7 @@ fn dpkg_read_deb(path: &str) -> Option<alloc::vec::Vec<crate::fs::ar::ArEntry>> 
         Err(e) => {
             crate::console_println!(
                 "dpkg: '{}': not a valid .deb (ar parse error: {:?})",
-                path,
+                path.display(),
                 e
             );
             None
@@ -104504,7 +104799,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
     use crate::fs::Vfs;
 
     let mut deb_arg: Option<&str> = None;
-    let mut target_dir = alloc::string::String::from("/");
+    let mut target_dir = PathBuf::from("/");
     let mut skip_next = false;
 
     for (i, &p) in args.iter().enumerate() {
@@ -104546,7 +104841,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
     let data_member = match dpkg_find_member(&members, "data.tar") {
         Some(m) => m,
         None => {
-            crate::console_println!("dpkg: no data.tar found in '{}'", deb_path);
+            crate::console_println!("dpkg: no data.tar found in '{}'", deb_path.display());
             return;
         }
     };
@@ -104616,7 +104911,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
     crate::console_println!(
         "dpkg: extracted {} file(s) from '{}'{}",
         extracted,
-        deb_path,
+        deb_path.display(),
         if errors > 0 {
             alloc::format!(" ({} errors)", errors)
         } else {
@@ -104651,7 +104946,7 @@ fn cmd_un7z(args: &str) {
 
     let mut list_mode = false;
     let mut archive_arg: Option<&str> = None;
-    let mut target_dir = alloc::string::String::from("/");
+    let mut target_dir = PathBuf::from("/");
     let mut skip_next = false;
 
     for (i, &p) in parts.iter().enumerate() {
@@ -104689,7 +104984,7 @@ fn cmd_un7z(args: &str) {
     let data = match Vfs::read_file(&archive_path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("un7z: '{}': {:?}", archive_path, e);
+            crate::console_println!("un7z: '{}': {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -104697,7 +104992,11 @@ fn cmd_un7z(args: &str) {
     let entries = match crate::fs::sevenz::un7z(&data) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!("un7z: '{}': extraction failed: {:?}", archive_path, e);
+            crate::console_println!(
+                "un7z: '{}': extraction failed: {:?}",
+                archive_path.display(),
+                e
+            );
             return;
         }
     };
@@ -104780,7 +105079,7 @@ fn cmd_un7z(args: &str) {
     crate::console_println!(
         "un7z: extracted {} file(s) from '{}'{}",
         extracted,
-        archive_path,
+        archive_path.display(),
         if errors > 0 {
             alloc::format!(" ({} errors)", errors)
         } else {
@@ -104813,7 +105112,7 @@ fn cmd_unrar(args: &str) {
 
     let mut list_mode = false;
     let mut archive_arg: Option<&str> = None;
-    let mut target_dir = alloc::string::String::from("/");
+    let mut target_dir = PathBuf::from("/");
     let mut skip_next = false;
 
     for (i, &p) in parts.iter().enumerate() {
@@ -104851,7 +105150,7 @@ fn cmd_unrar(args: &str) {
     let data = match Vfs::read_file(&archive_path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("unrar: '{}': {:?}", archive_path, e);
+            crate::console_println!("unrar: '{}': {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -104861,12 +105160,12 @@ fn cmd_unrar(args: &str) {
         Err(crate::error::KernelError::InvalidArgument) => {
             crate::console_println!(
                 "unrar: '{}': RAR4 format not supported (only RAR5)",
-                archive_path
+                archive_path.display()
             );
             return;
         }
         Err(e) => {
-            crate::console_println!("unrar: '{}': parse failed: {:?}", archive_path, e);
+            crate::console_println!("unrar: '{}': parse failed: {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -104975,7 +105274,7 @@ fn cmd_unrar(args: &str) {
     crate::console_println!(
         "unrar: extracted {} file(s) from '{}'{}{}",
         extracted,
-        archive_path,
+        archive_path.display(),
         if skipped > 0 {
             alloc::format!(", {} skipped (compressed)", skipped)
         } else {
@@ -105095,7 +105394,7 @@ fn cmd_zip(args: &str) {
     let mut input_files: Vec<(PathBuf, PathBuf)> = Vec::new();
 
     for &token in positional.iter().skip(1) {
-        let abs = PathBuf::from(resolve_path(token));
+        let abs = resolve_path(token);
 
         match Vfs::lstat(&abs) {
             Ok(meta) if meta.entry_type == crate::fs::vfs::EntryType::Directory => {
@@ -105184,7 +105483,7 @@ fn cmd_zip(args: &str) {
             };
             crate::console_println!(
                 "zip: created '{}' ({} bytes, {} entries, ~{}% compression{})",
-                archive_path,
+                archive_path.display(),
                 archive.len(),
                 entries.len(),
                 ratio,
@@ -105196,7 +105495,7 @@ fn cmd_zip(args: &str) {
             );
         }
         Err(e) => {
-            crate::console_println!("zip: write '{}': {:?}", archive_path, e);
+            crate::console_println!("zip: write '{}': {:?}", archive_path.display(), e);
             set_exit(1);
         }
     }
@@ -105216,10 +105515,10 @@ fn cmd_crc32(args: &str) {
         match crate::fs::Vfs::read_file(&path) {
             Ok(data) => {
                 let checksum = crate::crypto::crc32c(&data);
-                crate::console_println!("{:08x} {} {}", checksum, data.len(), path);
+                crate::console_println!("{:08x} {} {}", checksum, data.len(), path.display());
             }
             Err(e) => {
-                crate::console_println!("crc32: '{}': {:?}", path, e);
+                crate::console_println!("crc32: '{}': {:?}", path.display(), e);
             }
         }
     }
@@ -105345,7 +105644,7 @@ fn cmd_base64(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("base64: '{}': {:?}", path, e);
+            crate::console_println!("base64: '{}': {:?}", path.display(), e);
             return;
         }
     };
@@ -105407,7 +105706,7 @@ fn cmd_wipe(args: &str) {
                     // Zero-fill the file.
                     let zeros = alloc::vec![0u8; size];
                     if let Err(e) = crate::fs::Vfs::write_file(&path, &zeros) {
-                        crate::console_println!("wipe: write '{}': {:?}", path, e);
+                        crate::console_println!("wipe: write '{}': {:?}", path.display(), e);
                         continue;
                     }
                     // Sync to ensure zeros hit disk.
@@ -105416,15 +105715,19 @@ fn cmd_wipe(args: &str) {
                 // Remove the file.
                 match crate::fs::Vfs::remove(&path) {
                     Ok(()) => {
-                        crate::console_println!("wiped: {} ({} bytes zeroed)", path, size);
+                        crate::console_println!(
+                            "wiped: {} ({} bytes zeroed)",
+                            path.display(),
+                            size
+                        );
                     }
                     Err(e) => {
-                        crate::console_println!("wipe: remove '{}': {:?}", path, e);
+                        crate::console_println!("wipe: remove '{}': {:?}", path.display(), e);
                     }
                 }
             }
             Err(e) => {
-                crate::console_println!("wipe: '{}': {:?}", path, e);
+                crate::console_println!("wipe: '{}': {:?}", path.display(), e);
             }
         }
     }
@@ -105456,7 +105759,7 @@ fn cmd_checksum(args: &str) {
             Ok(data) => match algo {
                 "crc32" | "crc32c" => {
                     let cksum = crate::crypto::crc32c(&data);
-                    crate::console_println!("CRC32C {:08x}  {}", cksum, path);
+                    crate::console_println!("CRC32C {:08x}  {}", cksum, path.display());
                 }
                 "sha256" => match crate::fs::Vfs::content_hash(&path) {
                     Ok(hash) => {
@@ -105464,10 +105767,10 @@ fn cmd_checksum(args: &str) {
                         for byte in &hash {
                             hex.push_str(&alloc::format!("{:02x}", byte));
                         }
-                        crate::console_println!("SHA256 {}  {}", hex, path);
+                        crate::console_println!("SHA256 {}  {}", hex, path.display());
                     }
                     Err(e) => {
-                        crate::console_println!("checksum: sha256 '{}': {:?}", path, e);
+                        crate::console_println!("checksum: sha256 '{}': {:?}", path.display(), e);
                     }
                 },
                 _ => {
@@ -105479,7 +105782,7 @@ fn cmd_checksum(args: &str) {
                 }
             },
             Err(e) => {
-                crate::console_println!("checksum: '{}': {:?}", path, e);
+                crate::console_println!("checksum: '{}': {:?}", path.display(), e);
             }
         }
     }
@@ -105556,7 +105859,7 @@ fn cmd_gunzip(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("gzip: '{}': {:?}", input, e);
+            crate::console_println!("gzip: '{}': {:?}", input.display(), e);
             return;
         }
     };
@@ -105574,15 +105877,15 @@ fn cmd_gunzip(args: &str) {
         let out = if let Some(explicit) = output_path {
             resolve_path(explicit)
         } else {
-            alloc::format!("{}.gz", input)
+            path_with_suffix(&input, b".gz")
         };
 
         match crate::fs::Vfs::write_file(&out, &compressed) {
             Ok(()) => {
                 crate::console_println!(
                     "gzip: '{}' -> '{}' ({} -> {} bytes, {:.1}%)",
-                    input,
-                    out,
+                    input.display(),
+                    out.display(),
                     file_data.len(),
                     compressed.len(),
                     if file_data.is_empty() {
@@ -105593,7 +105896,7 @@ fn cmd_gunzip(args: &str) {
                 );
             }
             Err(e) => {
-                crate::console_println!("gzip: write '{}': {:?}", out, e);
+                crate::console_println!("gzip: write '{}': {:?}", out.display(), e);
             }
         }
         return;
@@ -105602,7 +105905,7 @@ fn cmd_gunzip(args: &str) {
     // DECOMPRESS mode from here on.
     let compressed = file_data;
     if !is_gzip {
-        crate::console_println!("gunzip: '{}': not in gzip format", input);
+        crate::console_println!("gunzip: '{}': not in gzip format", input.display());
         return;
     }
 
@@ -105628,7 +105931,7 @@ fn cmd_gunzip(args: &str) {
                 compressed.len(),
                 uncompressed_size,
                 ratio,
-                input
+                input.display()
             );
         }
         return;
@@ -105638,7 +105941,11 @@ fn cmd_gunzip(args: &str) {
     let decompressed = match crate::fs::compress::gunzip(&compressed) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("gunzip: '{}': decompression failed: {:?}", input, e);
+            crate::console_println!(
+                "gunzip: '{}': decompression failed: {:?}",
+                input.display(),
+                e
+            );
             return;
         }
     };
@@ -105646,7 +105953,7 @@ fn cmd_gunzip(args: &str) {
     if test_only {
         crate::console_println!(
             "gunzip: '{}': OK ({} -> {} bytes)",
-            input,
+            input.display(),
             compressed.len(),
             decompressed.len()
         );
@@ -105657,30 +105964,21 @@ fn cmd_gunzip(args: &str) {
     let out = if let Some(explicit) = output_path {
         resolve_path(explicit)
     } else {
-        // Strip .gz extension.
-
-        if input.ends_with(".gz") {
-            alloc::string::String::from(&input[..input.len().saturating_sub(3)])
-        } else if input.ends_with(".tgz") {
-            let base = &input[..input.len().saturating_sub(4)];
-            alloc::format!("{}.tar", base)
-        } else {
-            alloc::format!("{}.out", input)
-        }
+        decompressed_output_path(&input, &[(b".gz", b""), (b".tgz", b".tar")])
     };
 
     match crate::fs::Vfs::write_file(&out, &decompressed) {
         Ok(()) => {
             crate::console_println!(
                 "gunzip: '{}' -> '{}' ({} -> {} bytes)",
-                input,
-                out,
+                input.display(),
+                out.display(),
                 compressed.len(),
                 decompressed.len()
             );
         }
         Err(e) => {
-            crate::console_println!("gunzip: write '{}': {:?}", out, e);
+            crate::console_println!("gunzip: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -105742,7 +106040,7 @@ fn cmd_bunzip2(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("bunzip2: '{}': {:?}", input, e);
+            crate::console_println!("bunzip2: '{}': {:?}", input.display(), e);
             return;
         }
     };
@@ -105753,7 +106051,7 @@ fn cmd_bunzip2(args: &str) {
         || file_data.get(1) != Some(&b'Z')
         || file_data.get(2) != Some(&b'h')
     {
-        crate::console_println!("bunzip2: '{}': not a bzip2 file", input);
+        crate::console_println!("bunzip2: '{}': not a bzip2 file", input.display());
         return;
     }
 
@@ -105761,7 +106059,11 @@ fn cmd_bunzip2(args: &str) {
     let decompressed = match crate::fs::bzip2::bunzip2(&file_data) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("bunzip2: '{}': decompression failed: {:?}", input, e);
+            crate::console_println!(
+                "bunzip2: '{}': decompression failed: {:?}",
+                input.display(),
+                e
+            );
             return;
         }
     };
@@ -105769,7 +106071,7 @@ fn cmd_bunzip2(args: &str) {
     if test_only {
         crate::console_println!(
             "bunzip2: '{}': OK ({} -> {} bytes)",
-            input,
+            input.display(),
             file_data.len(),
             decompressed.len()
         );
@@ -105780,32 +106082,24 @@ fn cmd_bunzip2(args: &str) {
     let out = if let Some(explicit) = output_path {
         resolve_path(explicit)
     } else {
-        // Strip .bz2 extension.
-        if input.ends_with(".bz2") {
-            alloc::string::String::from(&input[..input.len().saturating_sub(4)])
-        } else if input.ends_with(".tbz2") {
-            let base = &input[..input.len().saturating_sub(5)];
-            alloc::format!("{}.tar", base)
-        } else if input.ends_with(".tbz") {
-            let base = &input[..input.len().saturating_sub(4)];
-            alloc::format!("{}.tar", base)
-        } else {
-            alloc::format!("{}.out", input)
-        }
+        decompressed_output_path(
+            &input,
+            &[(b".bz2", b""), (b".tbz2", b".tar"), (b".tbz", b".tar")],
+        )
     };
 
     match crate::fs::Vfs::write_file(&out, &decompressed) {
         Ok(()) => {
             crate::console_println!(
                 "bunzip2: '{}' -> '{}' ({} -> {} bytes)",
-                input,
-                out,
+                input.display(),
+                out.display(),
                 file_data.len(),
                 decompressed.len()
             );
         }
         Err(e) => {
-            crate::console_println!("bunzip2: write '{}': {:?}", out, e);
+            crate::console_println!("bunzip2: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -105874,7 +106168,7 @@ fn cmd_bzip2(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("bzip2: '{}': {:?}", input, e);
+            crate::console_println!("bzip2: '{}': {:?}", input.display(), e);
             return;
         }
     };
@@ -105886,7 +106180,7 @@ fn cmd_bzip2(args: &str) {
     let out = if let Some(explicit) = output_path {
         resolve_path(explicit)
     } else {
-        alloc::format!("{}.bz2", input)
+        path_with_suffix(&input, b".bz2")
     };
 
     match crate::fs::Vfs::write_file(&out, &compressed) {
@@ -105898,15 +106192,15 @@ fn cmd_bzip2(args: &str) {
             };
             crate::console_println!(
                 "bzip2: '{}' -> '{}' ({} -> {} bytes, {}%)",
-                input,
-                out,
+                input.display(),
+                out.display(),
                 file_data.len(),
                 compressed.len(),
                 ratio
             );
         }
         Err(e) => {
-            crate::console_println!("bzip2: write '{}': {:?}", out, e);
+            crate::console_println!("bzip2: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -105963,7 +106257,7 @@ fn cmd_xz(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("xz: '{}': {:?}", input, e);
+            crate::console_println!("xz: '{}': {:?}", input.display(), e);
             return;
         }
     };
@@ -105979,7 +106273,7 @@ fn cmd_xz(args: &str) {
     let out = if let Some(explicit) = output_path {
         resolve_path(explicit)
     } else {
-        alloc::format!("{}.xz", input)
+        path_with_suffix(&input, b".xz")
     };
 
     match crate::fs::Vfs::write_file(&out, &compressed) {
@@ -105991,15 +106285,15 @@ fn cmd_xz(args: &str) {
             };
             crate::console_println!(
                 "xz: '{}' -> '{}' ({} -> {} bytes, {}%)",
-                input,
-                out,
+                input.display(),
+                out.display(),
                 file_data.len(),
                 compressed.len(),
                 ratio
             );
         }
         Err(e) => {
-            crate::console_println!("xz: write '{}': {:?}", out, e);
+            crate::console_println!("xz: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -106061,14 +106355,14 @@ fn cmd_unxz(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("unxz: '{}': {:?}", input, e);
+            crate::console_println!("unxz: '{}': {:?}", input.display(), e);
             return;
         }
     };
 
     // Verify XZ magic (FD 37 7A 58 5A 00).
     if file_data.len() < 12 || file_data.get(..6) != Some(&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]) {
-        crate::console_println!("unxz: '{}': not an XZ file", input);
+        crate::console_println!("unxz: '{}': not an XZ file", input.display());
         return;
     }
 
@@ -106076,7 +106370,7 @@ fn cmd_unxz(args: &str) {
     let decompressed = match crate::fs::xz::unxz(&file_data) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("unxz: '{}': decompression failed: {:?}", input, e);
+            crate::console_println!("unxz: '{}': decompression failed: {:?}", input.display(), e);
             return;
         }
     };
@@ -106084,7 +106378,7 @@ fn cmd_unxz(args: &str) {
     if test_only {
         crate::console_println!(
             "unxz: '{}': OK ({} -> {} bytes)",
-            input,
+            input.display(),
             file_data.len(),
             decompressed.len()
         );
@@ -106095,31 +106389,24 @@ fn cmd_unxz(args: &str) {
     let out = if let Some(explicit) = output_path {
         resolve_path(explicit)
     } else {
-        // Strip .xz extension, or .txz → .tar
-        if input.ends_with(".xz") {
-            alloc::string::String::from(&input[..input.len().saturating_sub(3)])
-        } else if input.ends_with(".txz") {
-            let base = &input[..input.len().saturating_sub(4)];
-            alloc::format!("{}.tar", base)
-        } else if input.ends_with(".lzma") {
-            alloc::string::String::from(&input[..input.len().saturating_sub(5)])
-        } else {
-            alloc::format!("{}.out", input)
-        }
+        decompressed_output_path(
+            &input,
+            &[(b".xz", b""), (b".txz", b".tar"), (b".lzma", b"")],
+        )
     };
 
     match crate::fs::Vfs::write_file(&out, &decompressed) {
         Ok(()) => {
             crate::console_println!(
                 "unxz: '{}' -> '{}' ({} -> {} bytes)",
-                input,
-                out,
+                input.display(),
+                out.display(),
                 file_data.len(),
                 decompressed.len()
             );
         }
         Err(e) => {
-            crate::console_println!("unxz: write '{}': {:?}", out, e);
+            crate::console_println!("unxz: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -106182,14 +106469,14 @@ fn cmd_unzstd(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("unzstd: '{}': {:?}", input, e);
+            crate::console_println!("unzstd: '{}': {:?}", input.display(), e);
             return;
         }
     };
 
     // Verify Zstandard magic (FD 2F B5 28).
     if file_data.len() < 8 {
-        crate::console_println!("unzstd: '{}': file too small", input);
+        crate::console_println!("unzstd: '{}': file too small", input.display());
         return;
     }
     let magic = u32::from(file_data[0])
@@ -106197,7 +106484,7 @@ fn cmd_unzstd(args: &str) {
         | (u32::from(file_data[2]) << 16)
         | (u32::from(file_data[3]) << 24);
     if magic != 0xFD2F_B528 {
-        crate::console_println!("unzstd: '{}': not a Zstandard file", input);
+        crate::console_println!("unzstd: '{}': not a Zstandard file", input.display());
         return;
     }
 
@@ -106205,7 +106492,11 @@ fn cmd_unzstd(args: &str) {
     let decompressed = match crate::fs::zstd::unzstd(&file_data) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("unzstd: '{}': decompression failed: {:?}", input, e);
+            crate::console_println!(
+                "unzstd: '{}': decompression failed: {:?}",
+                input.display(),
+                e
+            );
             return;
         }
     };
@@ -106213,7 +106504,7 @@ fn cmd_unzstd(args: &str) {
     if test_only {
         crate::console_println!(
             "unzstd: '{}': OK ({} -> {} bytes)",
-            input,
+            input.display(),
             file_data.len(),
             decompressed.len()
         );
@@ -106224,31 +106515,24 @@ fn cmd_unzstd(args: &str) {
     let out = if let Some(explicit) = output_path {
         resolve_path(explicit)
     } else {
-        // Strip .zst extension, or .tzst → .tar
-        if input.ends_with(".zst") {
-            alloc::string::String::from(&input[..input.len().saturating_sub(4)])
-        } else if input.ends_with(".tzst") {
-            let base = &input[..input.len().saturating_sub(5)];
-            alloc::format!("{}.tar", base)
-        } else if input.ends_with(".zstd") {
-            alloc::string::String::from(&input[..input.len().saturating_sub(5)])
-        } else {
-            alloc::format!("{}.out", input)
-        }
+        decompressed_output_path(
+            &input,
+            &[(b".zst", b""), (b".tzst", b".tar"), (b".zstd", b"")],
+        )
     };
 
     match crate::fs::Vfs::write_file(&out, &decompressed) {
         Ok(()) => {
             crate::console_println!(
                 "unzstd: '{}' -> '{}' ({} -> {} bytes)",
-                input,
-                out,
+                input.display(),
+                out.display(),
                 file_data.len(),
                 decompressed.len()
             );
         }
         Err(e) => {
-            crate::console_println!("unzstd: write '{}': {:?}", out, e);
+            crate::console_println!("unzstd: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -106314,7 +106598,7 @@ fn cmd_zstd(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("zstd: '{}': {:?}", input, e);
+            crate::console_println!("zstd: '{}': {:?}", input.display(), e);
             return;
         }
     };
@@ -106330,7 +106614,7 @@ fn cmd_zstd(args: &str) {
     let out = if let Some(explicit) = output_path {
         resolve_path(explicit)
     } else {
-        alloc::format!("{}.zst", input)
+        path_with_suffix(&input, b".zst")
     };
 
     match crate::fs::Vfs::write_file(&out, &compressed) {
@@ -106342,15 +106626,15 @@ fn cmd_zstd(args: &str) {
             };
             crate::console_println!(
                 "zstd: '{}' -> '{}' ({} -> {} bytes, {}%)",
-                input,
-                out,
+                input.display(),
+                out.display(),
                 file_data.len(),
                 compressed.len(),
                 ratio
             );
         }
         Err(e) => {
-            crate::console_println!("zstd: write '{}': {:?}", out, e);
+            crate::console_println!("zstd: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -106417,14 +106701,14 @@ fn cmd_unlz4(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("unlz4: '{}': {:?}", input, e);
+            crate::console_println!("unlz4: '{}': {:?}", input.display(), e);
             return;
         }
     };
 
     // Verify LZ4 frame magic (04 22 4D 18).
     if file_data.len() < 7 {
-        crate::console_println!("unlz4: '{}': file too small", input);
+        crate::console_println!("unlz4: '{}': file too small", input.display());
         return;
     }
     let magic = u32::from(file_data[0])
@@ -106434,7 +106718,7 @@ fn cmd_unlz4(args: &str) {
     if magic != 0x04224D18 {
         crate::console_println!(
             "unlz4: '{}': not an LZ4 file (magic: {:#010X})",
-            input,
+            input.display(),
             magic
         );
         return;
@@ -106444,7 +106728,11 @@ fn cmd_unlz4(args: &str) {
     let decompressed = match crate::fs::lz4::decompress(&file_data) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("unlz4: '{}': decompression failed: {:?}", input, e);
+            crate::console_println!(
+                "unlz4: '{}': decompression failed: {:?}",
+                input.display(),
+                e
+            );
             return;
         }
     };
@@ -106452,7 +106740,7 @@ fn cmd_unlz4(args: &str) {
     if test_only {
         crate::console_println!(
             "unlz4: '{}': OK ({} -> {} bytes)",
-            input,
+            input.display(),
             file_data.len(),
             decompressed.len()
         );
@@ -106463,26 +106751,21 @@ fn cmd_unlz4(args: &str) {
     let out = if let Some(explicit) = output_path {
         resolve_path(explicit)
     } else {
-        // Strip .lz4 extension, or .tlz4 → .tar
-        if input.ends_with(".lz4") {
-            alloc::string::String::from(&input[..input.len().saturating_sub(4)])
-        } else {
-            alloc::format!("{}.out", input)
-        }
+        decompressed_output_path(&input, &[(b".lz4", b"")])
     };
 
     match crate::fs::Vfs::write_file(&out, &decompressed) {
         Ok(()) => {
             crate::console_println!(
                 "unlz4: '{}' -> '{}' ({} -> {} bytes)",
-                input,
-                out,
+                input.display(),
+                out.display(),
                 file_data.len(),
                 decompressed.len()
             );
         }
         Err(e) => {
-            crate::console_println!("unlz4: write '{}': {:?}", out, e);
+            crate::console_println!("unlz4: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -106544,7 +106827,7 @@ fn cmd_lz4(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("lz4: '{}': {:?}", input, e);
+            crate::console_println!("lz4: '{}': {:?}", input.display(), e);
             return;
         }
     };
@@ -106556,7 +106839,7 @@ fn cmd_lz4(args: &str) {
     let out = if let Some(explicit) = output_path {
         resolve_path(explicit)
     } else {
-        alloc::format!("{}.lz4", input)
+        path_with_suffix(&input, b".lz4")
     };
 
     match crate::fs::Vfs::write_file(&out, &compressed) {
@@ -106568,15 +106851,15 @@ fn cmd_lz4(args: &str) {
             };
             crate::console_println!(
                 "lz4: '{}' -> '{}' ({} -> {} bytes, {}%)",
-                input,
-                out,
+                input.display(),
+                out.display(),
                 file_data.len(),
                 compressed.len(),
                 ratio
             );
         }
         Err(e) => {
-            crate::console_println!("lz4: write '{}': {:?}", out, e);
+            crate::console_println!("lz4: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -106669,7 +106952,7 @@ fn cmd_sed(args: &str) {
         let data = match crate::fs::Vfs::read_file(&path) {
             Ok(d) => d,
             Err(e) => {
-                crate::console_println!("sed: '{}': {:?}", path, e);
+                crate::console_println!("sed: '{}': {:?}", path.display(), e);
                 continue;
             }
         };
@@ -106727,7 +107010,7 @@ fn cmd_sed(args: &str) {
             match crate::fs::Vfs::write_file(&path, output.as_bytes()) {
                 Ok(()) => {}
                 Err(e) => {
-                    crate::console_println!("sed: write '{}': {:?}", path, e);
+                    crate::console_println!("sed: write '{}': {:?}", path.display(), e);
                 }
             }
         } else {
@@ -107030,7 +107313,7 @@ fn cmd_awk(args: &str) {
         let data = match crate::fs::Vfs::read_file(&path) {
             Ok(d) => d,
             Err(e) => {
-                crate::console_println!("awk: '{}': {:?}", path, e);
+                crate::console_println!("awk: '{}': {:?}", path.display(), e);
                 continue;
             }
         };
@@ -108430,11 +108713,7 @@ fn do_session_switch(target_id: u32) {
 
     // Restore the incoming session's shell context.
     if let Some(ctx) = termsession::get_shell_context(target_id) {
-        {
-            let mut cwd = CWD.lock();
-            cwd.clear();
-            cwd.push_str(&ctx.cwd);
-        }
+        set_cwd(&ctx.cwd);
         {
             let mut env = ENV_VARS.lock();
             *env = ctx.env;

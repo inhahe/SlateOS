@@ -42,6 +42,7 @@ use alloc::vec::Vec;
 
 use crate::console::{self, ConsoleSnapshot, ScrollCell, ScrollbackBuffer};
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::PathBuf;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -63,7 +64,11 @@ const DEFAULT_SESSION_NAME: &str = "main";
 /// the global CWD, ENV_VARS, and History when switching sessions.
 pub struct ShellContext {
     /// Working directory.
-    pub cwd: String,
+    ///
+    /// A [`PathBuf`], not a `String`: this is restored straight into the
+    /// shell's `CWD` on session switch, so holding it as text would corrupt a
+    /// non-UTF-8 working directory at exactly the point it is handed back.
+    pub cwd: PathBuf,
     /// Environment variables.
     pub env: BTreeMap<String, String>,
     /// Command history entries (newest last).
@@ -80,7 +85,7 @@ impl ShellContext {
         env.insert(String::from("USER"), String::from("root"));
         env.insert(String::from("PATH"), String::from("/bin:/usr/bin"));
         Self {
-            cwd: String::from("/"),
+            cwd: PathBuf::from("/"),
             env,
             history: Vec::new(),
         }

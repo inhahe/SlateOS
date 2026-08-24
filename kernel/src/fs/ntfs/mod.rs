@@ -1046,10 +1046,15 @@ impl FileSystem for NtfsFs {
 /// # Errors
 ///
 /// Propagates [`NtfsFs::open`] and [`crate::fs::Vfs::mount`] failures.
-pub fn mount(device: &str, mount_path: &str) -> KernelResult<()> {
+pub fn mount(device: &str, mount_path: impl AsRef<crate::fs::path::Path>) -> KernelResult<()> {
+    let mount_path = mount_path.as_ref();
     let fs = NtfsFs::open(device)?;
     crate::fs::Vfs::mount(mount_path, Box::new(fs))?;
-    serial_println!("[ntfs] Mounted {} at {} (read-only)", device, mount_path);
+    serial_println!(
+        "[ntfs] Mounted {} at {} (read-only)",
+        device,
+        mount_path.display()
+    );
     Ok(())
 }
 

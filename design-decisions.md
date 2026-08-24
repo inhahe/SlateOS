@@ -37431,12 +37431,113 @@ mitigation is that the condition is mechanical and checkable: *if any ink on the
 selection fill is quieter than `text`, the fill may not be a `surface*` role.*
 Each module's contrast test enumerates its own ink-on-fill pairings by hand, so a
 future module that gets this wrong fails its own test rather than shipping.
+(**Superseded in part by §530**: a hand-written pairing table catches a *role*
+moving underneath it, but cannot catch a pairing nobody wrote down, and cannot
+catch anything at all in the module it lives in. The pairings are now read out of
+the rendered commands.)
 
 **Consequence for what is left.** Five shell modules remain in part 2, and the
 ~2,258-constant application conversion after it. Every list, menu and picker in
 that set has this same shape, so the rule above is the first thing to check when
 converting one — before the mechanical `theme::X` → `p.x` pass, not after, since
 finding it afterwards means redoing the fixture that pins the row.
+
+---
+
+## 530. A contrast test reads its ink-on-fill pairings out of the rendered output, not out of a table written by hand
+
+**Date:** 2026-08-24
+**Decided by:** Claude (autonomous)
+
+**In short:** Several shell modules carry a test that checks their text is dark
+enough against the colour behind it to be readable. Those tests were written as a
+list: "the title is drawn on the card, the caption is drawn on the row", and so
+on, typed out by the same person who wrote the drawing code. Five modules in, the
+measured result is that such a test has never caught a single thing wrong with
+the module it lives in — it *cannot*, for a reason that is structural rather than
+accidental. This entry changes the shape: the test now walks the drawing commands
+the module actually produced, pairs each block of colour with the text drawn on
+top of it, and measures what it finds. In the first module written that way it
+caught fourteen of thirty-four seeded bugs.
+
+**Why the hand-written table cannot catch anything.** A test of the form "check
+that `text` on `base` clears 4.5:1" is a claim about *the palette*. It reads two
+palette values, computes a ratio, and asserts. Nothing in it calls the renderer,
+so no change to the renderer can make it fail. Break the module completely —
+paint the caption in the fill's own colour, transpose an ink and a fill, delete a
+site — and the test still reads the same two palette entries and still passes.
+The reintroduction harness measured this precisely across modules 42, 43 and 44:
+each module's contrast test caught **0** of its own seeded defects, while every
+other test in the same file caught between 1 and 33.
+
+That zero is not a bug in those tests. They are genuinely useful — as *palette*
+tests, they would fail if a role were retuned in a way that broke a pairing
+somebody had written down. But they were being counted as coverage of the
+drawing code, and they were never that.
+
+There is a second, quieter failure. A hand-written table lists the pairings its
+author thought of. Module 44 had three sites drawing `overlay0` as an ink at
+**3.59:1** in Mocha and **2.14:1** in Latte, and its contrast test passed
+throughout — the pairing was simply not in the table. **A test over a
+hand-written table catches a role moving underneath a pairing; it cannot catch a
+pairing nobody listed.** Reading the pairings out of the output makes the list
+exhaustive by construction.
+
+**The shape.** Render the scene, walk the command list in pairs, and for every
+`FillRect` immediately followed by a `Text`, measure the ratio:
+
+```rust
+for pair in cmds.windows(2) {
+    let (RenderCommand::FillRect { color: fill, .. },
+         RenderCommand::Text { color: ink, .. }) = (&pair[0], &pair[1])
+    else { continue };
+    assert!(contrast(*fill, *ink) >= 4.5, "…");
+    checked += 1;
+}
+assert_eq!(checked, 24, "the pairing walk did not reach every chip");
+```
+
+Run it over both modes and over every variant of the scene that changes a colour
+(here: the four drop effects), so a defect that only shows in Latte, or only on
+one of four badge fills, is still measured.
+
+**Three properties this has to keep, and how.**
+
+1. **It must not become an echo** (the standing rule: an expectation derived
+   from the code under test asserts nothing). Everything asserted comes from
+   outside the module — the 4.5:1 floor is WCAG's, and the expected pair count is
+   written by hand. What is *read* from the code is only which pairs exist, which
+   is the question, not the answer.
+2. **It must notice a site that stops being drawn.** Without the `checked` count,
+   deleting a site makes the walk find fewer pairs and pass more easily — the
+   classic shape where removing the code removes the test. The count is what
+   turns an absence into a failure, and it did: "the tooltip is never drawn" is
+   caught by this test and by nothing else that measures contrast.
+3. **It cannot see its two operands exchanged.** Contrast is a symmetric
+   function, so drawing the fill in the ink's role and vice versa yields exactly
+   the ratio it yielded before. Legibility survives a transposition; the design
+   does not. That defect belongs to the module's *ordered site table*, which
+   pins which role goes where — and the sweep confirms the two tests divide the
+   space cleanly between them.
+
+**The cost.** Pairing by adjacency is an approximation: it assumes a `Text`
+command that follows a `FillRect` is drawn on it, which is true of the shell's
+renderers because they emit each chip as fill-then-label, and false in general.
+It also flattens alpha, so a fill drawn at 220/255 is measured as if opaque.
+Both are acceptable here and both are checked rather than assumed: the module
+asserts the exact number of pairs the walk should find, so a renderer that
+stopped emitting in that order would fail loudly rather than silently measure
+the wrong pairs; and where a flattened alpha could matter, the flattened pairing
+clears the floor by such a margin (11.34 and 7.06 against 4.5) that no realistic
+blend could drop it under. The alternative — a real compositing model in a unit
+test — would be an echo of the compositor.
+
+**Consequence for what is left.** Four shell modules remain, and the
+~2,258-constant application conversion after them. Every one gets the walking
+form, and the four modules already converted with the table form keep their
+tables (they are correct as palette tests) but are not counted as covering their
+own drawing code. The census in `known-issues.md` records the per-module catch
+counts so that a zero is read as a structural property and not as a gap.
 
 ---
 
@@ -40414,6 +40515,78 @@ already implies this; §272 is what it looks like when the skip decision is a
 - **Skipping on `Ok(v)` with `v.is_empty()`.** A zero-byte fixture is not an
   absent one; it is a build that produced a file and got it wrong, which is
   worth a red line rather than a quiet one.
+
+---
+
+## 531. Blur tint weights are anchored at the most-transparent setting and interpolated up to opaque, rather than being independent of the setting
+
+**Date:** 2026-08-24
+**Decided by:** Claude (autonomous)
+
+**In short:** The desktop blurs what is behind a taskbar, a menu or a
+notification, and then lays a thin wash of colour over the blur so the panel
+reads as a surface rather than as a smear. How strong that wash is was a fixed
+number per panel type — a menu 100 of 255, a taskbar 160 — and it took no
+notice whatsoever of the user's transparency setting in Appearance. So a user
+who set transparency to **Off** still had a taskbar about 37% see-through.
+This entry decides how the setting and those numbers are reconciled: the
+existing numbers are kept and reinterpreted as the values for the *most*
+transparent setting, and every setting above that interpolates toward fully
+opaque.
+
+**The problem.** `BlurEffect::taskbar()`, `::title_bar()`, `::menu()`,
+`::notification()` and `::standard()` each hardcoded a tint alpha. Those five
+numbers are not arbitrary — they are a deliberate hierarchy (a menu is the
+lightest touch, a taskbar the heaviest, a notification and the generic surface
+in between), and they look right. But `TransparencyLevel` — `Off`, `Subtle`,
+`Moderate`, `Full`, exposed as a user setting and already honoured by
+`Palette::panel_bg()` via `panel_alpha` — was read by nothing in this module.
+Two things were therefore wrong at once: the setting did nothing to blurred
+surfaces, and `Off` in particular was a promise the shell did not keep.
+
+**The options.**
+
+- **Leave the tints independent of the setting.** *What changes:* nothing; the
+  transparency slider continues to affect solid panels and not blurred ones.
+  Defensible only if blur tint is considered a separate concept from panel
+  translucency — but a user cannot see two concepts here, only one surface that
+  disobeys the control above it.
+- **Multiply each preset by `panel_alpha / 255`.** *What changes:* every panel
+  gets *more* see-through as the setting rises, and `Off` (255) leaves the
+  presets exactly as they are — i.e. `Off` still means 37% see-through. This
+  gets the direction of the control right and the endpoint wrong, which is the
+  worse half to get wrong: the endpoint is the only part of the scale that is
+  not a matter of taste.
+- **Anchor at `Full` and interpolate up to opaque.** *(chosen)* *What changes:*
+  at `Full` every panel looks exactly as it does today; at `Off` every tint is
+  fully opaque and nothing shows through; `Subtle` and `Moderate` sit in
+  between, each preset keeping its position in the hierarchy the whole way up.
+
+**Why the third.** The five numbers were unquestionably written while looking
+at a translucent desktop, so treating them as the *Full* row of a table costs
+nothing — the look everyone has seen is preserved bit-for-bit at that setting.
+And the constraint that actually decides it is at the other end: **`Off` must
+mean opaque.** That is not a preference, it is what the word means, and it is
+the one point on the scale where a wrong answer is a bug rather than a taste
+disagreement. Anchoring at `Full` is the only one of the three that satisfies
+it without moving anything a user has already grown used to.
+
+The anchor is a named constant (`TINT_ANCHOR = 160`, which is
+`TransparencyLevel::Full.panel_alpha()`) rather than an inlined 160, because
+"these weights were written for Full" is the entire premise of the scheme and a
+premise should be checkable. `the_tint_weights_are_written_for_the_full_setting`
+checks it, and `transparency_off_leaves_no_blurred_surface_see_through` checks
+the endpoint that decided the question.
+
+**The cost, and why it is accepted.** `Palette::panel_alpha` is a public field,
+so a caller can put a value *below* the anchor there — more transparency than
+the shell's own most-transparent setting offers. There is nothing below the
+anchor to interpolate toward, so such a value is clamped up to it, and
+`a_panel_alpha_below_the_anchor_is_clamped` pins that. The alternative —
+extending the scale downward past `Full` — would invent a look no setting can
+produce and no one has approved.
+
+---
 
 ## §375 — Guarding the standard descriptors is a shared module with a macro-shaped hook, not a copy in each binary and not a library initialiser
 

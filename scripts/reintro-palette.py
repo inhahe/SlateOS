@@ -114,6 +114,9 @@ PEEK = "gui/desktop/src/window_peek.rs"
 ABOUT = "gui/desktop/src/about.rs"
 CAL = "gui/desktop/src/calendar.rs"
 SESS = "gui/desktop/src/session_mgr.rs"
+FD = "gui/desktop/src/file_drop.rs"
+IM = "gui/desktop/src/input_method.rs"
+BL = "gui/desktop/src/blur.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -20291,6 +20294,1478 @@ DEFECTS = [
         [
             'every_picker_site_draws_the_role_it_claims',
             'the_title_wears_the_accent_only_while_searching',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the drag card's fill is mantle, not base",
+        FD,
+        [
+            ('    let card_fill = p.base;',
+             '    let card_fill = p.mantle;'),
+        ],
+        ["desktop"],
+        [
+        # mantle is a role, moves with the mode, and `text` on it reads 12.14/6.57 -
+        # so membership, the mode test and the contrast walk all pass. Only the
+        # ordered pin knows which role belongs here.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the drag card's fill is still the Mocha BASE constant",
+        FD,
+        [
+            ('    let card_fill = p.base;',
+             '    let card_fill = Color::from_hex(0x1E1E2E);'),
+        ],
+        ["desktop"],
+        [
+        # the contrast walk catches this one too: Latte `text` on Mocha `base` is
+        # 2.05, because the card stops following the mode but its ink does not.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the dragged item's description drops a tier to subtext0",
+        FD,
+        [
+            ('    let desc_ink = p.text;',
+             '    let desc_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+        # 7.37/4.64 on base, so it clears the floor - a readable defect is still a
+        # defect, and only the pin can see it.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the dragged item's description is still the Mocha TEXT constant",
+        FD,
+        [
+            ('    let desc_ink = p.text;',
+             '    let desc_ink = Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the badge ink is crust, the reflexive darkest role',
+        FD,
+        [
+            ('    let badge_ink = p.base;',
+             '    let badge_ink = p.crust;'),
+        ],
+        ["desktop"],
+        [
+        # the headline defect this module exists to catch: 12.61/10.59 in Mocha but
+        # 3.98/3.95 in Latte. Membership and the mode test both pass - crust is a
+        # perfectly good role that moves with the theme. Only a contrast check that
+        # reads the real ink/fill pairing out of the rendered commands sees it.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the badge ink is still the Mocha BASE constant',
+        FD,
+        [
+            ('    let badge_ink = p.base;',
+             '    let badge_ink = Color::from_hex(0x1E1E2E);'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the item-count chip goes back to peach, colliding with Link',
+        FD,
+        [
+            ('    let count_chip = p.text;',
+             '    let count_chip = p.peach;'),
+        ],
+        ["desktop"],
+        [
+        # base ink on peach is 9.27/4.62, so the contrast walk passes: this is a
+        # meaning collision, not a legibility one, and it needs its own test.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'the_item_count_chip_is_never_an_effect_colour',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the item-count chip is still the Mocha PEACH constant',
+        FD,
+        [
+            ('    let count_chip = p.text;',
+             '    let count_chip = Color::from_hex(0xFAB387);'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'the_item_count_chip_is_never_an_effect_colour',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the item-count chip is surface2, the obvious-looking chip that cannot work',
+        FD,
+        [
+            ('    let count_chip = p.text;',
+             '    let count_chip = p.surface2;'),
+        ],
+        ["desktop"],
+        [
+        # 2.46 Mocha / 1.91 Latte - a surface role is defined as being near the
+        # background, so it fails as a badge fill in *both* modes.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the description's ink and the badge's ink are transposed",
+        FD,
+        [
+            ('    let desc_ink = p.text;',
+             '    let desc_ink = p.base;'),
+            ('    let badge_ink = p.base;',
+             '    let badge_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+        # two edits are safe: each anchor carries its own binding name, so the first
+        # edit cannot create a duplicate of the second's anchor (lesson 18).
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the card's fill and the count chip are transposed",
+        FD,
+        [
+            ('    let card_fill = p.base;',
+             '    let card_fill = p.text;'),
+            ('    let count_chip = p.text;',
+             '    let count_chip = p.base;'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: copy and move wear each other's colours, so green now means move",
+        FD,
+        [
+            ('            Self::Copy => p.green,\n            Self::Move => p.blue,',
+             '            Self::Copy => p.blue,\n            Self::Move => p.green,'),
+        ],
+        ["desktop"],
+        [
+        # the site pin cannot catch this and must not be declared: its expectation
+        # calls `effect.color(p)`, so it is an echo of the code under test (lesson
+        # 22). Both colours are palette roles that move with the mode, so
+        # membership and the mode test pass, and base ink clears 4.5 on both, so
+        # the contrast walk passes. Only the hand-pinned role vector sees it.
+            'each_drop_effect_wears_its_own_role',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a forbidden drop wears the link colour',
+        FD,
+        [
+            ('            Self::None => p.red,',
+             '            Self::None => p.peach,'),
+        ],
+        ["desktop"],
+        [
+            'each_drop_effect_wears_its_own_role',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: every effect wears the same blue, so the badge says nothing',
+        FD,
+        [
+            ('            Self::None => p.red,\n            Self::Copy => p.green,\n            Self::Move => p.blue,\n            Self::Link => p.peach,',
+             '            Self::None => p.blue,\n            Self::Copy => p.blue,\n            Self::Move => p.blue,\n            Self::Link => p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'each_drop_effect_wears_its_own_role',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: every effect wears the accent, so the badge tracks the theme not the verb',
+        FD,
+        [
+            ('            Self::None => p.red,\n            Self::Copy => p.green,\n            Self::Move => p.blue,\n            Self::Link => p.peach,',
+             '            Self::None => p.accent,\n            Self::Copy => p.accent,\n            Self::Move => p.accent,\n            Self::Link => p.accent,'),
+        ],
+        ["desktop"],
+        [
+        # the accent is one of the 21 roles, so membership passes, and it moves with
+        # the mode, so the mode test passes.
+            'each_drop_effect_wears_its_own_role',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the link effect is still the Mocha PEACH constant',
+        FD,
+        [
+            ('            Self::Link => p.peach,',
+             '            Self::Link => Color::from_hex(0xFAB387),'),
+        ],
+        ["desktop"],
+        [
+            'each_drop_effect_wears_its_own_role',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_colour_the_drop_highlight_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the effect badge's label is drawn in the description's ink",
+        FD,
+        [
+            ('        font_size: 9.0,\n        color: badge_ink,',
+             '        font_size: 9.0,\n        color: desc_ink,'),
+        ],
+        ["desktop"],
+        [
+        # `color: badge_ink,` appears at two sites, so the anchor has to span the
+        # font size above it to be unique.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the item count is drawn in the chip's own colour, so it is invisible",
+        FD,
+        [
+            ('            font_size: 10.0,\n            color: badge_ink,',
+             '            font_size: 10.0,\n            color: count_chip,'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the item-count chip is filled with the card's own colour",
+        FD,
+        [
+            ('            height: 16.0,\n            color: count_chip,',
+             '            height: 16.0,\n            color: card_fill,'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the effect badge is filled with the count chip's colour",
+        FD,
+        [
+            ('        height: 12.0,\n        color: badge_color,',
+             '        height: 12.0,\n        color: count_chip,'),
+        ],
+        ["desktop"],
+        [
+        # base ink on a `text` chip is 11.34/7.06, so this is perfectly legible and
+        # perfectly wrong - the badge stops saying what will happen. Contrast
+        # cannot see it; only the pin can.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the target tooltip's label drops to overlay0",
+        FD,
+        [
+            ('    let tooltip_ink = p.text;',
+             '    let tooltip_ink = p.overlay0;'),
+        ],
+        ["desktop"],
+        [
+        # 3.36 Mocha / 2.30 Latte - the same overlay-as-ink shape module 44 found.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'the_drop_tooltips_label_is_readable_on_its_fill',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the target tooltip's label is still the Mocha TEXT constant",
+        FD,
+        [
+            ('    let tooltip_ink = p.text;',
+             '    let tooltip_ink = Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'every_colour_the_drop_highlight_draws_comes_from_its_palette',
+            'every_site_the_drop_highlight_draws_moves_with_the_mode',
+            'the_drop_tooltips_label_is_readable_on_its_fill',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the target tooltip is filled with surface1',
+        FD,
+        [
+            ('    let tooltip_fill = p.base;',
+             '    let tooltip_fill = p.surface1;'),
+        ],
+        ["desktop"],
+        [
+        # 6.31 in Mocha and 4.39 in Latte - under the floor by a tenth, and
+        # invisible to any check that only looks at dark mode.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'the_drop_tooltips_label_is_readable_on_its_fill',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the target tooltip's fill and label are transposed",
+        FD,
+        [
+            ('    let tooltip_fill = p.base;',
+             '    let tooltip_fill = p.text;'),
+            ('    let tooltip_ink = p.text;',
+             '    let tooltip_ink = p.base;'),
+        ],
+        ["desktop"],
+        [
+        # NOT the contrast test, though it walks exactly this pair: the contrast
+        # ratio is symmetric in its two arguments, so a transposition of the
+        # fill and the ink reproduces the ratio exactly. Only the ordered site
+        # table can see this one.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the target's glowing border is drawn in the tooltip's ink",
+        FD,
+        [
+            ('        color,\n        line_width: 2.0,',
+             '        color: tooltip_ink,\n        line_width: 2.0,'),
+        ],
+        ["desktop"],
+        [
+        # the border carries no text, so no contrast pair changes; `text` is a role
+        # that moves with the mode, so membership and the mode test pass. The
+        # border stops meaning anything and only the pin notices.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the target's border and its tooltip fill are transposed",
+        FD,
+        [
+            ('        color,\n        line_width: 2.0,',
+             '        color: tooltip_fill,\n        line_width: 2.0,'),
+            ('            color: Color::rgba(tooltip_fill.r, tooltip_fill.g, tooltip_fill.b, 200),',
+             '            color: Color::rgba(color.r, color.g, color.b, 200),'),
+        ],
+        ["desktop"],
+        [
+        # safe as two edits: the first writes `color: tooltip_fill,` which does not
+        # match the second anchor's `Color::rgba(` shape.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'the_drop_tooltips_label_is_readable_on_its_fill',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the drop highlight resolves its effect colour from a hardcoded dark palette',
+        FD,
+        [
+            ('    let color = effect.color(p);',
+             '    let color = effect.color(&Palette::for_mode(false));'),
+        ],
+        ["desktop"],
+        [
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'every_colour_the_drop_highlight_draws_comes_from_its_palette',
+            'every_site_the_drop_highlight_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the drag badge resolves its effect colour from a hardcoded dark palette',
+        FD,
+        [
+            ('    let badge_color = session.current_effect.color(p);',
+             '    let badge_color = session.current_effect.color(&Palette::for_mode(false));'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a single-item drag draws a count badge reading 1',
+        FD,
+        [
+            ('    // Item count badge (if multiple).\n    if count > 1 {',
+             '    // Item count badge (if multiple).\n    if true {'),
+        ],
+        ["desktop"],
+        [
+        # `if count > 1` appears twice - the other governs the description's room -
+        # so the anchor spans the comment above it.
+            'a_single_item_drag_draws_no_count_chip',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the count badge is never drawn, so a twelve-file drag looks like one file',
+        FD,
+        [
+            ('    // Item count badge (if multiple).\n    if count > 1 {',
+             '    // Item count badge (if multiple).\n    if false {'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+            'the_item_count_chip_is_never_an_effect_colour',
+            'a_multi_item_description_stops_before_the_count_badge',
+            'only_the_card_and_the_tooltip_are_translucent',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: an unlabelled target draws an empty tooltip',
+        FD,
+        [
+            ('    if !target.label.is_empty() {',
+             '    if true {'),
+        ],
+        ["desktop"],
+        [
+            'an_unlabelled_target_draws_no_tooltip',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the target tooltip is never drawn, so the target never says what it is',
+        FD,
+        [
+            ('    if !target.label.is_empty() {',
+             '    if false {'),
+        ],
+        ["desktop"],
+        [
+        # not declared against the highlight membership test: drawing *fewer*
+        # colours leaves every colour still drawn a legal member.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'every_site_the_drop_highlight_draws_moves_with_the_mode',
+            'the_drop_tooltips_label_is_readable_on_its_fill',
+            'only_the_card_and_the_tooltip_are_translucent',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the drag card is fully opaque and hides what is being dragged onto',
+        FD,
+        [
+            ('        color: Color::rgba(card_fill.r, card_fill.g, card_fill.b, 220),',
+             '        color: Color::rgba(card_fill.r, card_fill.g, card_fill.b, 255),'),
+        ],
+        ["desktop"],
+        [
+        # every other test in the module flattens alpha so one list can be compared
+        # against palette roles, which makes all of them blind to this.
+            'only_the_card_and_the_tooltip_are_translucent',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the target tooltip is fully opaque',
+        FD,
+        [
+            ('            color: Color::rgba(tooltip_fill.r, tooltip_fill.g, tooltip_fill.b, 200),',
+             '            color: Color::rgba(tooltip_fill.r, tooltip_fill.g, tooltip_fill.b, 255),'),
+        ],
+        ["desktop"],
+        [
+            'only_the_card_and_the_tooltip_are_translucent',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the tray chip is mantle, so it sinks into the taskbar instead of sitting on it',
+        IM,
+        [
+            ('        let chip = p.surface0;',
+             '        let chip = p.mantle;'),
+        ],
+        ["desktop"],
+        [
+        # readable either way (12.14 / 6.57), so only the ordered table and the
+        # empty-manager pin see it
+            'every_tray_site_draws_the_role_it_claims',
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the tray chip is still the Mocha SURFACE0 constant',
+        IM,
+        [
+            ('        let chip = p.surface0;',
+             '        let chip = guitk::color::Color::from_hex(0x313244);'),
+        ],
+        ["desktop"],
+        [
+        # in dark mode the literal *is* p.surface0, so the empty-manager pin --
+        # which uses dark() -- cannot see this one. In Latte it is a near-black
+        # chip under Latte's dark ink: 1.57:1
+            'every_tray_site_draws_the_role_it_claims',
+            'every_colour_the_tray_draws_comes_from_its_palette',
+            'every_site_the_tray_draws_moves_with_the_mode',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the tray label drops a tier to subtext0',
+        IM,
+        [
+            ('        let chip_ink = p.text;',
+             '        let chip_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+        # 5.65 Mocha but 3.40 Latte
+            'every_tray_site_draws_the_role_it_claims',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the tray label is overlay0, an overlay role used as an ink',
+        IM,
+        [
+            ('        let chip_ink = p.text;',
+             '        let chip_ink = p.overlay0;'),
+        ],
+        ["desktop"],
+        [
+        # 2.57 / 1.69 -- fails in both modes
+            'every_tray_site_draws_the_role_it_claims',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the tray label is still the Mocha TEXT constant',
+        IM,
+        [
+            ('        let chip_ink = p.text;',
+             '        let chip_ink = guitk::color::Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+        # 1.07:1 on Latte's surface0; invisible to the dark-fixture pin
+            'every_tray_site_draws_the_role_it_claims',
+            'every_colour_the_tray_draws_comes_from_its_palette',
+            'every_site_the_tray_draws_moves_with_the_mode',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the tray chip and its label are transposed',
+        IM,
+        [
+            ('        let chip = p.surface0;',
+             '        let chip = p.text;'),
+            ('        let chip_ink = p.text;',
+             '        let chip_ink = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+        # NOT the contrast walk: the ratio is symmetric in its two arguments, so
+        # an exchanged fill and ink measure exactly what they measured before
+            'every_tray_site_draws_the_role_it_claims',
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the tray chip is the accent, so the taskbar gains a themed lozenge nobody chose',
+        IM,
+        [
+            ('        let chip = p.surface0;',
+             '        let chip = p.accent;'),
+        ],
+        ["desktop"],
+        [
+        # accent resolves to blue under for_mode, which the walk measures at
+        # 5.97 / 3.39 -- the Latte side fails
+            'every_tray_site_draws_the_role_it_claims',
+            'no_site_in_this_module_wears_the_accent',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the preview popup's fill is mantle",
+        IM,
+        [
+            ('        let popup_fill = p.base;',
+             '        let popup_fill = p.mantle;'),
+        ],
+        ["desktop"],
+        [
+        # 12.14 / 6.57, and still distinct from both the caps and the border, so
+        # the ordered table is the only thing that can object
+            'every_preview_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the preview popup's fill is surface0, the caps' own colour",
+        IM,
+        [
+            ('        let popup_fill = p.base;',
+             '        let popup_fill = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+        # the caps vanish into the popup
+            'every_preview_site_draws_the_role_it_claims',
+            'the_popup_its_border_and_its_key_caps_are_three_different_values',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the preview popup's fill is still the Mocha BASE constant",
+        IM,
+        [
+            ('        let popup_fill = p.base;',
+             '        let popup_fill = guitk::color::Color::from_hex(0x1E1E2E);'),
+        ],
+        ["desktop"],
+        [
+        # 2.05:1 under Latte's ink
+            'every_preview_site_draws_the_role_it_claims',
+            'every_colour_the_preview_draws_comes_from_its_palette',
+            'every_site_the_preview_draws_moves_with_the_mode',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the popup's border is surface0, the caps' own colour",
+        IM,
+        [
+            ('        let popup_edge = p.surface1;',
+             '        let popup_edge = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+        # the caps stop being framed and become holes in the frame
+            'every_preview_site_draws_the_role_it_claims',
+            'the_popup_its_border_and_its_key_caps_are_three_different_values',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the popup's border is still the Mocha SURFACE1 constant",
+        IM,
+        [
+            ('        let popup_edge = p.surface1;',
+             '        let popup_edge = guitk::color::Color::from_hex(0x45475A);'),
+        ],
+        ["desktop"],
+        [
+        # a StrokeRect, so the ink-on-fill walk never looks at it
+            'every_preview_site_draws_the_role_it_claims',
+            'every_colour_the_preview_draws_comes_from_its_palette',
+            'every_site_the_preview_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the layout name is drawn in the accent',
+        IM,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = p.accent;'),
+        ],
+        ["desktop"],
+        [
+        # the module's headline regression. It reads perfectly well (7.79 / 4.63
+        # under for_mode, where the accent is blue), which is exactly why it needs
+        # a test that objects to the *meaning* rather than the legibility
+            'every_preview_site_draws_the_role_it_claims',
+            'no_site_in_this_module_wears_the_accent',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the layout name goes back to blue',
+        IM,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = p.blue;'),
+        ],
+        ["desktop"],
+        [
+        # the defect this module was converted to remove, in its role-shaped form.
+        # Legal member, moves with the mode, clears the contrast floor at 7.79 /
+        # 4.63, and is not the off-palette accent -- the ordered site table is the
+        # only test in the file that can see it
+            'every_preview_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the layout name is still the Mocha BLUE constant',
+        IM,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = guitk::color::Color::from_hex(0x89B4FA);'),
+        ],
+        ["desktop"],
+        [
+        # 1.86:1 on Latte's base
+            'every_preview_site_draws_the_role_it_claims',
+            'every_colour_the_preview_draws_comes_from_its_palette',
+            'every_site_the_preview_draws_moves_with_the_mode',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the layout name drops to overlay0',
+        IM,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = p.overlay0;'),
+        ],
+        ["desktop"],
+        [
+        # 3.36 / 2.30
+            'every_preview_site_draws_the_role_it_claims',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the key caps are surface1, the border's own colour",
+        IM,
+        [
+            ('        let cap = p.surface0;',
+             '        let cap = p.surface1;'),
+        ],
+        ["desktop"],
+        [
+        # 6.31 Mocha but 4.39 Latte, *and* the caps collapse onto the frame
+            'every_preview_site_draws_the_role_it_claims',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+            'the_popup_its_border_and_its_key_caps_are_three_different_values',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the key caps are base, the popup's own colour",
+        IM,
+        [
+            ('        let cap = p.surface0;',
+             '        let cap = p.base;'),
+        ],
+        ["desktop"],
+        [
+        # text on base is 11.34 / 7.06, so only the three-values test objects
+            'every_preview_site_draws_the_role_it_claims',
+            'the_popup_its_border_and_its_key_caps_are_three_different_values',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the key caps are still the Mocha SURFACE0 constant',
+        IM,
+        [
+            ('        let cap = p.surface0;',
+             '        let cap = guitk::color::Color::from_hex(0x313244);'),
+        ],
+        ["desktop"],
+        [
+        # 1.57:1 under Latte's ink
+            'every_preview_site_draws_the_role_it_claims',
+            'every_colour_the_preview_draws_comes_from_its_palette',
+            'every_site_the_preview_draws_moves_with_the_mode',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the key labels drop a tier to subtext1',
+        IM,
+        [
+            ('        let cap_ink = p.text;',
+             '        let cap_ink = p.subtext1;'),
+        ],
+        ["desktop"],
+        [
+        # 7.10 Mocha but 4.05 Latte
+            'every_preview_site_draws_the_role_it_claims',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the key labels are surface2, a fill role used as an ink',
+        IM,
+        [
+            ('        let cap_ink = p.text;',
+             '        let cap_ink = p.surface2;'),
+        ],
+        ["desktop"],
+        [
+        # 1.88 / 1.40
+            'every_preview_site_draws_the_role_it_claims',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a key cap and its label are transposed',
+        IM,
+        [
+            ('        let cap = p.surface0;',
+             '        let cap = p.text;'),
+            ('        let cap_ink = p.text;',
+             '        let cap_ink = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+        # symmetric, so not the contrast walk; and p.text is distinct from both
+        # the popup and its border, so not the three-values test either
+            'every_preview_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the popup's fill and its key caps are transposed",
+        IM,
+        [
+            ('        let popup_fill = p.base;',
+             '        let popup_fill = p.surface0;'),
+            ('        let cap = p.surface0;',
+             '        let cap = p.base;'),
+        ],
+        ["desktop"],
+        [
+        # all three fills stay distinct and both pairings still clear the floor --
+        # an inside-out popup that only an ordered table can name
+            'every_preview_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: a key label is clipped 2px wider than its own cap again',
+        IM,
+        [
+            ('                    max_width: Some(key_size - 12.0),',
+             '                    max_width: Some(key_size - 4.0),'),
+        ],
+        ["desktop"],
+        [
+        # the layout bug this module fixed: a 6px inset with a 24px box on a 28px
+        # cap
+            'a_key_label_is_clipped_inside_its_own_cap',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: a key label may paint a full inset past its cap',
+        IM,
+        [
+            ('                    max_width: Some(key_size - 12.0),',
+             '                    max_width: Some(key_size),'),
+        ],
+        ["desktop"],
+        [
+            'a_key_label_is_clipped_inside_its_own_cap',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the preview popup is drawn even when it is hidden',
+        IM,
+        [
+            ('        if !self.preview_visible {',
+             '        if false {'),
+        ],
+        ["desktop"],
+        [
+        # every colour test builds its manager through previewing(), which sets
+        # the flag, so only the hidden-case test is looking
+            'test_manager_render_preview_hidden',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a key label is drawn unbounded, so a wide glyph runs across the keyboard',
+        IM,
+        [
+            ('                    max_width: Some(key_size - 12.0),',
+             '                    max_width: None,'),
+        ],
+        ["desktop"],
+        [
+            'a_key_label_is_clipped_inside_its_own_cap',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the tray falls back to an empty label instead of ??',
+        IM,
+        [
+            ('            .unwrap_or("??")',
+             '            .unwrap_or("")'),
+        ],
+        ["desktop"],
+        [
+        # a layout-less tray that draws a blank chip says nothing is wrong
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+            'test_empty_manager_tray_label',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the preview popup is never drawn at all',
+        IM,
+        [
+            ('        if !self.preview_visible {',
+             '        if true {'),
+        ],
+        ["desktop"],
+        [
+            'every_preview_site_draws_the_role_it_claims',
+            'every_site_the_preview_draws_moves_with_the_mode',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+            'the_popup_its_border_and_its_key_caps_are_three_different_values',
+            'a_key_label_is_clipped_inside_its_own_cap',
+            'test_manager_render_preview_visible',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the tray chip is crust, the reflexive darkest role',
+        IM,
+        [
+            ('        let chip = p.surface0;',
+             '        let chip = p.crust;'),
+        ],
+        ["desktop"],
+        [
+        # 12.97 / 6.04, so legible -- it is the taskbar it disappears into, which
+        # no test in this module can see, because the taskbar is another module
+            'every_tray_site_draws_the_role_it_claims',
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the key labels are crust',
+        IM,
+        [
+            ('        let cap_ink = p.text;',
+             '        let cap_ink = p.crust;'),
+        ],
+        ["desktop"],
+        [
+        # 1.49 / 1.17
+            'every_preview_site_draws_the_role_it_claims',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the popup's border is base, so the popup has no frame",
+        IM,
+        [
+            ('        let popup_edge = p.surface1;',
+             '        let popup_edge = p.base;'),
+        ],
+        ["desktop"],
+        [
+        # contrast has nothing to say about a fill-on-fill collapse
+            'every_preview_site_draws_the_role_it_claims',
+            'the_popup_its_border_and_its_key_caps_are_three_different_values',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the tray label is drawn in the accent',
+        IM,
+        [
+            ('        let chip_ink = p.text;',
+             '        let chip_ink = p.accent;'),
+        ],
+        ["desktop"],
+        [
+        # 5.97 / 3.39 under for_mode
+            'every_tray_site_draws_the_role_it_claims',
+            'no_site_in_this_module_wears_the_accent',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the preview popup's fill is the accent",
+        IM,
+        [
+            ('        let popup_fill = p.base;',
+             '        let popup_fill = p.accent;'),
+        ],
+        ["desktop"],
+        [
+        # text on blue is 1.46 / 1.53 -- a themed sheet nobody can read
+            'every_preview_site_draws_the_role_it_claims',
+            'no_site_in_this_module_wears_the_accent',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the taskbar tints with mantle, the title bar's role",
+        BL,
+        [
+            ('Self::new(24.0, 0.65, tint(p.base, TINT_TASKBAR, p), 1.3, 0.03)',
+             'Self::new(24.0, 0.65, tint(p.mantle, TINT_TASKBAR, p), 1.3, 0.03)'),
+        ],
+        ["desktop"],
+        [
+        # mantle is a legal role that moves with the mode, so only the ordered
+        # table can tell it from the base it claims
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the taskbar's tint is still the Mocha BASE constant",
+        BL,
+        [
+            ('Self::new(24.0, 0.65, tint(p.base, TINT_TASKBAR, p), 1.3, 0.03)',
+             'Self::new(24.0, 0.65, Color::rgba(0x1E, 0x1E, 0x2E, scaled_tint(TINT_TASKBAR, p.panel_alpha)), 1.3, 0.03)'),
+        ],
+        ["desktop"],
+        [
+        # the conversion's own defect: a dark literal the light palette cannot
+        # contain, identical in both modes
+            'every_preset_tints_with_the_role_it_claims',
+            'every_tint_comes_from_its_palette',
+            'every_tint_moves_with_the_mode',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the taskbar tints with the accent',
+        BL,
+        [
+            ('Self::new(24.0, 0.65, tint(p.base, TINT_TASKBAR, p), 1.3, 0.03)',
+             'Self::new(24.0, 0.65, tint(p.accent, TINT_TASKBAR, p), 1.3, 0.03)'),
+        ],
+        ["desktop"],
+        [
+        # the accent is a role and it moves with the mode, so membership and the
+        # mode test both pass; on a stock palette it is merely blue
+            'every_preset_tints_with_the_role_it_claims',
+            'no_blur_tint_wears_the_accent',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: a title bar tints with base, so it stops separating from the taskbar',
+        BL,
+        [
+            ('Self::new(16.0, 0.75, tint(p.mantle, TINT_TITLE_BAR, p), 1.1, 0.02)',
+             'Self::new(16.0, 0.75, tint(p.base, TINT_TITLE_BAR, p), 1.1, 0.02)'),
+        ],
+        ["desktop"],
+        [
+        # a real collapse: two adjacent chrome surfaces become one colour, and
+        # nothing but the ordered table is looking at which role each claims
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a title bar's tint is still the Mocha MANTLE constant",
+        BL,
+        [
+            ('Self::new(16.0, 0.75, tint(p.mantle, TINT_TITLE_BAR, p), 1.1, 0.02)',
+             'Self::new(16.0, 0.75, Color::rgba(0x18, 0x18, 0x25, scaled_tint(TINT_TITLE_BAR, p.panel_alpha)), 1.1, 0.02)'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+            'every_tint_comes_from_its_palette',
+            'every_tint_moves_with_the_mode',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: a menu tints with base instead of the raised surface0',
+        BL,
+        [
+            ('Self::new(12.0, 0.80, tint(p.surface0, TINT_MENU, p), 1.0, 0.01)',
+             'Self::new(12.0, 0.80, tint(p.base, TINT_MENU, p), 1.0, 0.01)'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a menu's tint is still the Mocha SURFACE0 constant",
+        BL,
+        [
+            ('Self::new(12.0, 0.80, tint(p.surface0, TINT_MENU, p), 1.0, 0.01)',
+             'Self::new(12.0, 0.80, Color::rgba(0x31, 0x32, 0x44, scaled_tint(TINT_MENU, p.panel_alpha)), 1.0, 0.01)'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+            'every_tint_comes_from_its_palette',
+            'every_tint_moves_with_the_mode',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a notification tints with surface0, the menu's role",
+        BL,
+        [
+            ('Self::new(18.0, 0.70, tint(p.base, TINT_NOTIFICATION, p), 1.2, 0.02)',
+             'Self::new(18.0, 0.70, tint(p.surface0, TINT_NOTIFICATION, p), 1.2, 0.02)'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the standard surface tints with mantle',
+        BL,
+        [
+            ('Self::new(20.0, 0.70, tint(p.base, TINT_STANDARD, p), 1.2, 0.02)',
+             'Self::new(20.0, 0.70, tint(p.mantle, TINT_STANDARD, p), 1.2, 0.02)'),
+        ],
+        ["desktop"],
+        [
+        # this is the preset that replaced Default::default(), which is where
+        # the unfixable Mocha literal used to live
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the standard surface tints with the accent',
+        BL,
+        [
+            ('Self::new(20.0, 0.70, tint(p.base, TINT_STANDARD, p), 1.2, 0.02)',
+             'Self::new(20.0, 0.70, tint(p.accent, TINT_STANDARD, p), 1.2, 0.02)'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+            'no_blur_tint_wears_the_accent',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the no-blur fallback's tint is still the Mocha BASE constant",
+        BL,
+        [
+            ('Color::rgba(p.base.r, p.base.g, p.base.b, 255),',
+             'Color::rgba(0x1E, 0x1E, 0x2E, 255),'),
+        ],
+        ["desktop"],
+        [
+        # the worst-looking of the leftovers: opaque, so in light mode it is a
+        # solid dark slab rather than a subtle mis-tinting
+            'every_preset_tints_with_the_role_it_claims',
+            'every_tint_comes_from_its_palette',
+            'every_tint_moves_with_the_mode',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the no-blur fallback tints with mantle',
+        BL,
+        [
+            ('Color::rgba(p.base.r, p.base.g, p.base.b, 255),',
+             'Color::rgba(p.mantle.r, p.mantle.g, p.mantle.b, 255),'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the taskbar's and the menu's roles are transposed",
+        BL,
+        [
+            ('Self::new(24.0, 0.65, tint(p.base, TINT_TASKBAR, p), 1.3, 0.03)',
+             'Self::new(24.0, 0.65, tint(p.surface0, TINT_TASKBAR, p), 1.3, 0.03)'),
+            ('Self::new(12.0, 0.80, tint(p.surface0, TINT_MENU, p), 1.0, 0.01)',
+             'Self::new(12.0, 0.80, tint(p.base, TINT_MENU, p), 1.0, 0.01)'),
+        ],
+        ["desktop"],
+        [
+        # a transposition leaves every value present, so membership sees a legal
+        # set and the mode test sees two colours that both still move
+        # -- only an ordered table can see a permutation (lesson 9)
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: a title bar's and a menu's roles are transposed",
+        BL,
+        [
+            ('Self::new(16.0, 0.75, tint(p.mantle, TINT_TITLE_BAR, p), 1.1, 0.02)',
+             'Self::new(16.0, 0.75, tint(p.surface0, TINT_TITLE_BAR, p), 1.1, 0.02)'),
+            ('Self::new(12.0, 0.80, tint(p.surface0, TINT_MENU, p), 1.0, 0.01)',
+             'Self::new(12.0, 0.80, tint(p.mantle, TINT_MENU, p), 1.0, 0.01)'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a menu's and a notification's roles are transposed",
+        BL,
+        [
+            ('Self::new(12.0, 0.80, tint(p.surface0, TINT_MENU, p), 1.0, 0.01)',
+             'Self::new(12.0, 0.80, tint(p.base, TINT_MENU, p), 1.0, 0.01)'),
+            ('Self::new(18.0, 0.70, tint(p.base, TINT_NOTIFICATION, p), 1.2, 0.02)',
+             'Self::new(18.0, 0.70, tint(p.surface0, TINT_NOTIFICATION, p), 1.2, 0.02)'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the taskbar's tint weight drops to the menu's, flattening the hierarchy",
+        BL,
+        [
+            ('const TINT_TASKBAR: u8 = 160;',
+             'const TINT_TASKBAR: u8 = 100;'),
+        ],
+        ["desktop"],
+        [
+        # an alpha defect: every RGB is still right, so the role table, the
+        # membership sweep and the mode test all pass
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a menu's tint weight rises to the taskbar's",
+        BL,
+        [
+            ('const TINT_MENU: u8 = 100;',
+             'const TINT_MENU: u8 = 160;'),
+        ],
+        ["desktop"],
+        [
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a menu's tint weight rises to a title bar's, by one step",
+        BL,
+        [
+            ('const TINT_MENU: u8 = 100;',
+             'const TINT_MENU: u8 = 120;'),
+        ],
+        ["desktop"],
+        [
+        # a one-step collapse rather than a wholesale one: the ordering
+        # assertion catches it only because the comparison is strict
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a notification's tint weight drops to a menu's",
+        BL,
+        [
+            ('const TINT_NOTIFICATION: u8 = 140;',
+             'const TINT_NOTIFICATION: u8 = 100;'),
+        ],
+        ["desktop"],
+        [
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the standard surface's tint weight drifts away from a notification's",
+        BL,
+        [
+            ('const TINT_STANDARD: u8 = 140;',
+             'const TINT_STANDARD: u8 = 200;'),
+        ],
+        ["desktop"],
+        [
+        # the weight that sits between no two others, so a pure ordering check
+        # would let it take any value at all -- this is why the weights test
+        # pins an exact table and not just an inequality chain
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the standard surface's tint goes fully opaque",
+        BL,
+        [
+            ('Self::new(20.0, 0.70, tint(p.base, TINT_STANDARD, p), 1.2, 0.02)',
+             'Self::new(20.0, 0.70, Color::rgba(p.base.r, p.base.g, p.base.b, 255), 1.2, 0.02)'),
+        ],
+        ["desktop"],
+        [
+        # the hole this module's declarations found before the sweep ran: RGB is
+        # right, the mode moves, membership passes, the setting is honoured at
+        # Off -- and the surface is simply never see-through
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the no-blur fallback is put through the transparency scaling',
+        BL,
+        [
+            ('Color::rgba(p.base.r, p.base.g, p.base.b, 255),',
+             'tint(p.base, TINT_MENU, p),'),
+        ],
+        ["desktop"],
+        [
+        # the accessibility fallback hands translucency back to a user who
+        # reached for it to get rid of translucency; at Off it still reads 255,
+        # so only the Full-end table sees it
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the transparency setting is ignored again, as it was before the fix',
+        BL,
+        [
+            ('u8::try_from(u16::from(preset).saturating_add(lifted).min(255)).unwrap_or(255)',
+             'preset'),
+        ],
+        ["desktop"],
+        [
+        # the original bug restored: weights are absolute, so Transparency=Off
+        # leaves the taskbar 37% see-through. Identity at Full, so the weights
+        # table passes and only the two end-of-scale tests object
+            'transparency_off_leaves_no_blurred_surface_see_through',
+            'less_transparency_is_never_more_see_through',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the tint weights are anchored at Moderate instead of Full',
+        BL,
+        [
+            ('const TINT_ANCHOR: u16 = 160;',
+             'const TINT_ANCHOR: u16 = 200;'),
+        ],
+        ["desktop"],
+        [
+        # both ends of the scale still behave (Off is opaque, Full is the preset)
+        # and the interpolation stays monotone -- the only thing wrong is that
+        # the anchor no longer matches the level the weights were chosen at,
+        # which is exactly the one assertion that compares the two
+            'the_tint_weights_are_written_for_the_full_setting',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the clamp goes, and the interpolation subtracts without saturating',
+        BL,
+        [
+            ('let pa = u16::from(panel_alpha).max(TINT_ANCHOR);',
+             'let pa = u16::from(panel_alpha);'),
+            ('let travelled = pa.saturating_sub(TINT_ANCHOR);',
+             'let travelled = pa - TINT_ANCHOR;'),
+        ],
+        ["desktop"],
+        [
+        # a panel_alpha below the anchor now underflows. Both edits are needed:
+        # the saturating_sub alone would absorb the missing clamp, which is why
+        # the production comment says the clamp is intent and not overflow cover
+            'less_transparency_is_never_more_see_through',
+            'a_panel_alpha_below_the_anchor_is_clamped',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the interpolation divides by 255 rather than by the span it travels',
+        BL,
+        [
+            ('        .checked_div(span)',
+             '        .checked_div(255)'),
+        ],
+        ["desktop"],
+        [
+        # Off now reaches only 195 of 255 for the taskbar, so transparency-off
+        # is still see-through -- an off-by-scale that is invisible at the Full
+        # end, where travelled is zero either way
+            'transparency_off_leaves_no_blurred_surface_see_through',
+            'less_transparency_is_never_more_see_through',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: every tint takes the accent rather than the role it was handed',
+        BL,
+        [
+            ('    Color::rgba(role.r, role.g, role.b, scaled_tint(preset, p.panel_alpha))',
+             '    Color::rgba(p.accent.r, p.accent.g, p.accent.b, scaled_tint(preset, p.panel_alpha))'),
+        ],
+        ["desktop"],
+        [
+        # the whole shell goes accent-coloured, and on a default install that
+        # just looks blue-ish; the accent test is the one that names it
+            'every_preset_tints_with_the_role_it_claims',
+            'no_blur_tint_wears_the_accent',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: every scaled tint goes fully opaque',
+        BL,
+        [
+            ('    Color::rgba(role.r, role.g, role.b, scaled_tint(preset, p.panel_alpha))',
+             '    Color::rgba(role.r, role.g, role.b, 255)'),
+        ],
+        ["desktop"],
+        [
+        # blur stops being translucent at all, at every setting; the Off test
+        # passes precisely because opaque is what Off asks for
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: every preset is scaled with the menu's weight",
+        BL,
+        [
+            ('    Color::rgba(role.r, role.g, role.b, scaled_tint(preset, p.panel_alpha))',
+             '    Color::rgba(role.r, role.g, role.b, scaled_tint(TINT_MENU, p.panel_alpha))'),
+        ],
+        ["desktop"],
+        [
+        # the four weights collapse onto one, which is lesson 23's step function:
+        # the distinctions are gone but every individual value is still legal
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the taskbar stops blurring heavily',
+        BL,
+        [
+            ('Self::new(24.0, 0.65, tint(p.base, TINT_TASKBAR, p), 1.3, 0.03)',
+             'Self::new(8.0, 0.65, tint(p.base, TINT_TASKBAR, p), 1.3, 0.03)'),
+        ],
+        ["desktop"],
+        [
+        # not a palette defect: asked so the six pre-existing preset tests are
+        # shown to still hold the fields the new tests do not look at
+            'test_preset_taskbar',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the no-blur fallback becomes half-opaque',
+        BL,
+        [
+            ('            0.0,\n            1.0,\n            Color::rgba(p.base.r, p.base.g, p.base.b, 255),',
+             '            0.0,\n            0.5,\n            Color::rgba(p.base.r, p.base.g, p.base.b, 255),'),
+        ],
+        ["desktop"],
+        [
+            'test_preset_none',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the standard surface's blur radius drifts",
+        BL,
+        [
+            ('Self::new(20.0, 0.70, tint(p.base, TINT_STANDARD, p), 1.2, 0.02)',
+             'Self::new(5.0, 0.70, tint(p.base, TINT_STANDARD, p), 1.2, 0.02)'),
+        ],
+        ["desktop"],
+        [
+            'test_default_effect',
         ],
     ),
 ]

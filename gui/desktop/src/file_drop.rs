@@ -10,21 +10,46 @@
 //! - Drag cancellation (Escape key)
 //! - Auto-scroll when dragging near window edges
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
-// ============================================================================
-// Catppuccin Mocha palette
-// ============================================================================
-
-const MOCHA_BASE: Color = Color::from_hex(0x1E1E2E);
-const MOCHA_TEXT: Color = Color::from_hex(0xCDD6F4);
-const MOCHA_BLUE: Color = Color::from_hex(0x89B4FA);
-const MOCHA_GREEN: Color = Color::from_hex(0xA6E3A1);
-const MOCHA_RED: Color = Color::from_hex(0xF38BA8);
-const MOCHA_PEACH: Color = Color::from_hex(0xFAB387);
+// This module used to open with six `const MOCHA_… : Color`, so the drag
+// overlay was a dark-mode decoration whatever the user had chosen. Both
+// renderers now take the `Palette` and every site names a role. Three things
+// about the conversion are worth keeping:
+//
+// * **The badge ink is `base`, and `crust` — the reflexive "darkest role" —
+//   would be a bug.** The effect badge and the count badge both draw dark text
+//   on a saturated fill. On Latte, `base` ink clears the floor on all four
+//   effect colours by the thinnest of margins (4.80 red, 4.66 green, 4.63
+//   blue, 4.62 peach) while `crust` fails all four (4.10 / 3.98 / 3.96 /
+//   3.95). In Mocha both are comfortable (7.08–10.59), so a dark-mode-only
+//   check cannot tell the two apart. `the_badge_ink_stays_readable_on_every_
+//   effect_colour` reads the pairing out of the rendered commands rather than
+//   from a hand-written table, so it fails if the ink ever moves.
+//
+// * **No `surface*` or `overlay0` role can be a badge fill at all.** A badge is
+//   a small patch of colour carrying text, which needs the fill to be far from
+//   the ink; the surface roles are defined as being *near* the background.
+//   Measured, the best any of them manages is `surface2` + `text` at 4.62 in
+//   Mocha and 3.69 in Latte. The only fills that work in both modes are the
+//   accents, `subtext1` and `text`.
+//
+// * **The item-count badge moved off `peach`.** It was `MOCHA_PEACH`, which is
+//   also `DropEffect::Link`'s colour, so a Link drag of several files drew two
+//   peach badges 20px apart meaning entirely different things — one "this will
+//   make a shortcut", one "there are twelve of these". A count is not a
+//   semantic state and should not wear a semantic colour, so the chip is now
+//   the neutral `text` (11.34 Mocha / 7.06 Latte against its `base` ink, the
+//   strongest pairing the palette offers).
+//
+// The two `Color::rgba(p.base…, 220 / 200)` alphas are deliberately *not*
+// `p.panel_alpha`: that setting is the user's transparency preference for
+// panels, and this is a transient decoration pinned to the cursor rather than
+// a panel.
 
 // ============================================================================
 // Drag-cursor card geometry
@@ -38,6 +63,9 @@ const DRAG_CARD_PAD: f32 = 8.0;
 /// right bound on the description whenever the badge is drawn, so the two
 /// cannot drift into each other.
 const COUNT_BADGE_INSET: f32 = 28.0;
+/// Width of the item-count badge. Named so the geometry tests can locate the
+/// badge by its size instead of by its colour.
+const COUNT_BADGE_W: f32 = 24.0;
 const DRAG_DESC_SIZE: f32 = 11.0;
 
 // ============================================================================
@@ -129,12 +157,21 @@ impl DropEffect {
         }
     }
 
-    pub fn color(&self) -> Color {
+    /// The colour that stands for this effect, in the theme now in force.
+    ///
+    /// Takes the palette rather than returning a constant because the four
+    /// hues are *semantic* — red forbids, green copies, blue moves, peach
+    /// links — and a semantic colour has to be the one the rest of the shell
+    /// uses for that meaning in the mode the user is actually in. Mocha's
+    /// pastel `#A6E3A1` is unreadably pale on a light desktop; Latte's
+    /// `#317B21` is the same green with the same meaning, resolved for it.
+    #[must_use]
+    pub fn color(&self, p: &Palette) -> Color {
         match self {
-            Self::None => MOCHA_RED,
-            Self::Copy => MOCHA_GREEN,
-            Self::Move => MOCHA_BLUE,
-            Self::Link => MOCHA_PEACH,
+            Self::None => p.red,
+            Self::Copy => p.green,
+            Self::Move => p.blue,
+            Self::Link => p.peach,
         }
     }
 }
@@ -368,12 +405,17 @@ impl Default for DragDropManager {
 // ============================================================================
 
 /// Render the drag cursor overlay.
-pub fn render_drag_overlay(session: &DragSession) -> Vec<RenderCommand> {
+pub fn render_drag_overlay(p: &Palette, session: &DragSession) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
 
     if session.phase != DragPhase::Active {
         return cmds;
     }
+
+    let card_fill = p.base;
+    let desc_ink = p.text;
+    let badge_ink = p.base;
+    let count_chip = p.text;
 
     let cx = session.mouse_x;
     let cy = session.mouse_y;
@@ -389,7 +431,7 @@ pub fn render_drag_overlay(session: &DragSession) -> Vec<RenderCommand> {
         y: oy,
         width: w,
         height: h,
-        color: Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, 220),
+        color: Color::rgba(card_fill.r, card_fill.g, card_fill.b, 220),
         corner_radii: CornerRadii::all(6.0),
     });
 
@@ -413,7 +455,7 @@ pub fn render_drag_overlay(session: &DragSession) -> Vec<RenderCommand> {
             FontWeightHint::Regular,
         ),
         font_size: DRAG_DESC_SIZE,
-        color: MOCHA_TEXT,
+        color: desc_ink,
         font_weight: FontWeightHint::Regular,
         max_width: Some(desc_room),
         overflow: TextOverflow::Ellipsis,
@@ -421,7 +463,7 @@ pub fn render_drag_overlay(session: &DragSession) -> Vec<RenderCommand> {
 
     // Effect badge.
     let badge_text = session.current_effect.label();
-    let badge_color = session.current_effect.color();
+    let badge_color = session.current_effect.color(p);
     cmds.push(RenderCommand::FillRect {
         x: ox + 8.0,
         y: oy + 18.0,
@@ -435,7 +477,7 @@ pub fn render_drag_overlay(session: &DragSession) -> Vec<RenderCommand> {
         y: oy + 19.0,
         text: badge_text.to_string(),
         font_size: 9.0,
-        color: MOCHA_BASE,
+        color: badge_ink,
         font_weight: FontWeightHint::Bold,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -446,9 +488,9 @@ pub fn render_drag_overlay(session: &DragSession) -> Vec<RenderCommand> {
         cmds.push(RenderCommand::FillRect {
             x: ox + w - COUNT_BADGE_INSET,
             y: oy + 2.0,
-            width: 24.0,
+            width: COUNT_BADGE_W,
             height: 16.0,
-            color: MOCHA_PEACH,
+            color: count_chip,
             corner_radii: CornerRadii::all(8.0),
         });
         cmds.push(RenderCommand::Text {
@@ -456,7 +498,7 @@ pub fn render_drag_overlay(session: &DragSession) -> Vec<RenderCommand> {
             y: oy + 3.0,
             text: format!("{}", count),
             font_size: 10.0,
-            color: MOCHA_BASE,
+            color: badge_ink,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -467,9 +509,15 @@ pub fn render_drag_overlay(session: &DragSession) -> Vec<RenderCommand> {
 }
 
 /// Render the drop target highlight (glowing border).
-pub fn render_drop_target_highlight(target: &DropTarget, effect: DropEffect) -> Vec<RenderCommand> {
+pub fn render_drop_target_highlight(
+    p: &Palette,
+    target: &DropTarget,
+    effect: DropEffect,
+) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
-    let color = effect.color();
+    let color = effect.color(p);
+    let tooltip_fill = p.base;
+    let tooltip_ink = p.text;
 
     cmds.push(RenderCommand::StrokeRect {
         x: target.x - 2.0,
@@ -492,7 +540,7 @@ pub fn render_drop_target_highlight(target: &DropTarget, effect: DropEffect) -> 
             y: label_y,
             width: label_w,
             height: 20.0,
-            color: Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, 200),
+            color: Color::rgba(tooltip_fill.r, tooltip_fill.g, tooltip_fill.b, 200),
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -500,7 +548,7 @@ pub fn render_drop_target_highlight(target: &DropTarget, effect: DropEffect) -> 
             y: label_y + 3.0,
             text: target.label.clone(),
             font_size: 11.0,
-            color: MOCHA_TEXT,
+            color: tooltip_ink,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -558,10 +606,86 @@ mod tests {
 
     // --- Drag overlay: non-ASCII safety and width discipline ---
 
+    fn dark() -> Palette {
+        Palette::for_mode(false)
+    }
+
+    /// A palette whose accent is off every role, so a site that draws the
+    /// accent cannot be mistaken for one that draws the stock `blue` — the
+    /// two are the same colour in the shipped palette.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0xFF00FF);
+        p
+    }
+
     fn overlay_for(data: DragDataType) -> Vec<RenderCommand> {
+        overlay_in(&dark(), data)
+    }
+
+    fn overlay_in(p: &Palette, data: DragDataType) -> Vec<RenderCommand> {
         let mut session = DragSession::new(1, data, 400.0, 300.0);
         session.phase = DragPhase::Active;
-        render_drag_overlay(&session)
+        render_drag_overlay(p, &session)
+    }
+
+    /// A drag of `n` files, with `effect` showing on the badge.
+    fn overlay_of(p: &Palette, n: usize, effect: DropEffect) -> Vec<RenderCommand> {
+        let files: Vec<String> = (0..n).map(|i| format!("/home/u/f{i}.txt")).collect();
+        let mut session = DragSession::new(1, DragDataType::Files(files), 400.0, 300.0);
+        session.phase = DragPhase::Active;
+        session.current_effect = effect;
+        render_drag_overlay(p, &session)
+    }
+
+    fn target_with(label: &str) -> DropTarget {
+        DropTarget {
+            id: 7,
+            x: 50.0,
+            y: 60.0,
+            width: 200.0,
+            height: 150.0,
+            accepted_effects: vec![DropEffect::Copy],
+            label: label.to_string(),
+        }
+    }
+
+    /// Every colour the renderer put on the screen, in order, opaque.
+    ///
+    /// The two card fills are drawn at alpha 220 and 200 over whatever the
+    /// desktop happens to be showing, so the alpha is a compositing decision
+    /// rather than part of the role; flattening it here lets one list compare
+    /// against palette roles without every entry needing a special case.
+    fn colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. } => {
+                    Some(Color::rgba(color.r, color.g, color.b, 255))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn contrast(a: Color, b: Color) -> f64 {
+        fn channel(v: u8) -> f64 {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        fn luminance(c: Color) -> f64 {
+            0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+        }
+        let (mut hi, mut lo) = (luminance(a), luminance(b));
+        if hi < lo {
+            std::mem::swap(&mut hi, &mut lo);
+        }
+        (hi + 0.05) / (lo + 0.05)
     }
 
     fn description_of(cmds: &[RenderCommand]) -> String {
@@ -654,8 +778,14 @@ mod tests {
         let badge_x = cmds
             .iter()
             .find_map(|c| match c {
-                // The count badge is the only peach fill on the card.
-                RenderCommand::FillRect { x, color, .. } if *color == MOCHA_PEACH => Some(*x),
+                // Located by its geometry, not its colour. It used to be found
+                // as "the only peach fill on the card", which made a *layout*
+                // test silently assert the count badge's role as well — and
+                // then stop working the moment the role changed, reporting a
+                // colour defect in the vocabulary of overlap. A geometry test
+                // should locate by geometry: the count badge is the only fill
+                // 24px wide.
+                RenderCommand::FillRect { x, width, .. } if *width == COUNT_BADGE_W => Some(*x),
                 _ => None,
             })
             .expect("a 12-item drag draws a count badge");
@@ -882,7 +1012,7 @@ mod tests {
     #[test]
     fn test_render_overlay_idle() {
         let s = DragSession::new(1, DragDataType::Text("hi".into()), 0.0, 0.0);
-        let cmds = render_drag_overlay(&s);
+        let cmds = render_drag_overlay(&dark(), &s);
         assert!(cmds.is_empty()); // Not active
     }
 
@@ -897,7 +1027,7 @@ mod tests {
         s.phase = DragPhase::Active;
         s.mouse_x = 100.0;
         s.mouse_y = 100.0;
-        let cmds = render_drag_overlay(&s);
+        let cmds = render_drag_overlay(&dark(), &s);
         assert!(!cmds.is_empty());
     }
 
@@ -912,12 +1042,427 @@ mod tests {
             accepted_effects: vec![DropEffect::Copy],
             label: "Drop files here".into(),
         };
-        let cmds = render_drop_target_highlight(&t, DropEffect::Copy);
+        let cmds = render_drop_target_highlight(&dark(), &t, DropEffect::Copy);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_default_trait() {
         let _ = DragDropManager::default();
+    }
+
+    // --- Palette conformance ---
+
+    /// The drag card's sites, in the order the renderer emits them.
+    ///
+    /// An ordered vector rather than a set, because a set cannot see a
+    /// permutation: swapping the description's ink with the badge's would
+    /// leave the *collection* of colours drawn exactly as it was.
+    fn expected_overlay(p: &Palette, effect: DropEffect) -> Vec<(&'static str, Color)> {
+        vec![
+            ("the drag card's fill", p.base),
+            ("the dragged item's description", p.text),
+            ("the effect badge's fill", effect.color(p)),
+            ("the effect badge's label", p.base),
+            ("the item-count chip", p.text),
+            ("the item count", p.base),
+        ]
+    }
+
+    #[test]
+    fn every_drag_overlay_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+            for effect in [
+                DropEffect::None,
+                DropEffect::Copy,
+                DropEffect::Move,
+                DropEffect::Link,
+            ] {
+                let drawn = colors(&overlay_of(&p, 12, effect));
+                let want = expected_overlay(&p, effect);
+                assert_eq!(
+                    drawn.len(),
+                    want.len(),
+                    "the overlay drew {} colours, not the {} the table lists",
+                    drawn.len(),
+                    want.len()
+                );
+                for ((what, expect), got) in want.into_iter().zip(&drawn) {
+                    assert_eq!(
+                        format!("{got:?}"),
+                        format!("{expect:?}"),
+                        "{what} is wrong in {} mode with {effect:?}",
+                        if light { "light" } else { "dark" }
+                    );
+                }
+            }
+        }
+    }
+
+    /// The drop-target highlight's sites, in render order.
+    ///
+    /// A second renderer is a second surface: nothing in the drag-card pin
+    /// above reaches any of these three sites, so they need their own.
+    fn expected_highlight(p: &Palette, effect: DropEffect) -> Vec<(&'static str, Color)> {
+        vec![
+            ("the target's glowing border", effect.color(p)),
+            ("the target tooltip's fill", p.base),
+            ("the target tooltip's label", p.text),
+        ]
+    }
+
+    #[test]
+    fn every_drop_highlight_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+            for effect in [
+                DropEffect::None,
+                DropEffect::Copy,
+                DropEffect::Move,
+                DropEffect::Link,
+            ] {
+                let drawn = colors(&render_drop_target_highlight(
+                    &p,
+                    &target_with("Drop files here"),
+                    effect,
+                ));
+                let want = expected_highlight(&p, effect);
+                assert_eq!(drawn.len(), want.len());
+                for ((what, expect), got) in want.into_iter().zip(&drawn) {
+                    assert_eq!(
+                        format!("{got:?}"),
+                        format!("{expect:?}"),
+                        "{what} is wrong in {} mode with {effect:?}",
+                        if light { "light" } else { "dark" }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_colour_the_drag_overlay_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+            for effect in [
+                DropEffect::None,
+                DropEffect::Copy,
+                DropEffect::Move,
+                DropEffect::Link,
+            ] {
+                crate::palette_check::assert_drawn_from(
+                    &p,
+                    &overlay_of(&p, 12, effect),
+                    &[],
+                    "the drag overlay",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_colour_the_drop_highlight_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+            for effect in [
+                DropEffect::None,
+                DropEffect::Copy,
+                DropEffect::Move,
+                DropEffect::Link,
+            ] {
+                crate::palette_check::assert_drawn_from(
+                    &p,
+                    &render_drop_target_highlight(&p, &target_with("Drop here"), effect),
+                    &[],
+                    "the drop target highlight",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_site_the_drag_overlay_draws_moves_with_the_mode() {
+        let in_dark = colors(&overlay_of(&Palette::for_mode(false), 12, DropEffect::Link));
+        let in_light = colors(&overlay_of(&Palette::for_mode(true), 12, DropEffect::Link));
+        assert_eq!(in_dark.len(), in_light.len());
+        // Pinned against the *table*, not merely against the other mode. The
+        // loop below zips the table onto the drawn list, and a zip stops at the
+        // shorter side: a site that stopped being drawn at all shrinks both
+        // modes equally, satisfies the assertion above, and then falls off the
+        // end of the zip without ever being asked whether it moves. The site
+        // tables' own tests pin this length; so must these.
+        assert_eq!(
+            in_dark.len(),
+            expected_overlay(&dark(), DropEffect::Link).len(),
+            "the overlay drew {} colours, not the {} the table lists",
+            in_dark.len(),
+            expected_overlay(&dark(), DropEffect::Link).len()
+        );
+        for ((what, _), (d, l)) in expected_overlay(&dark(), DropEffect::Link)
+            .into_iter()
+            .zip(in_dark.iter().zip(&in_light))
+        {
+            assert_ne!(
+                format!("{d:?}"),
+                format!("{l:?}"),
+                "{what} draws the same colour in both modes"
+            );
+        }
+    }
+
+    #[test]
+    fn every_site_the_drop_highlight_draws_moves_with_the_mode() {
+        let t = target_with("Drop here");
+        let in_dark = colors(&render_drop_target_highlight(
+            &Palette::for_mode(false),
+            &t,
+            DropEffect::Copy,
+        ));
+        let in_light = colors(&render_drop_target_highlight(
+            &Palette::for_mode(true),
+            &t,
+            DropEffect::Copy,
+        ));
+        assert_eq!(in_dark.len(), in_light.len());
+        // See the sibling test: the zip below truncates, so a site that is not
+        // drawn at all is never asked whether it moves with the mode.
+        assert_eq!(
+            in_dark.len(),
+            expected_highlight(&dark(), DropEffect::Copy).len(),
+            "the highlight drew {} colours, not the {} the table lists",
+            in_dark.len(),
+            expected_highlight(&dark(), DropEffect::Copy).len()
+        );
+        for ((what, _), (d, l)) in expected_highlight(&dark(), DropEffect::Copy)
+            .into_iter()
+            .zip(in_dark.iter().zip(&in_light))
+        {
+            assert_ne!(
+                format!("{d:?}"),
+                format!("{l:?}"),
+                "{what} draws the same colour in both modes"
+            );
+        }
+    }
+
+    /// The four effects wear four different roles, and they are these four.
+    ///
+    /// Pinned as an ordered vector for the same reason as the site tables: a
+    /// check that the four are merely *distinct* cannot see them permuted, and
+    /// "green means move, blue means copy" is exactly the defect that matters
+    /// here — a user who sees green and lets go has consented to the wrong
+    /// operation.
+    #[test]
+    fn each_drop_effect_wears_its_own_role() {
+        for light in [false, true] {
+            let p = accented(light);
+            assert_eq!(
+                [
+                    DropEffect::None,
+                    DropEffect::Copy,
+                    DropEffect::Move,
+                    DropEffect::Link,
+                ]
+                .map(|e| format!("{:?}", e.color(&p))),
+                [p.red, p.green, p.blue, p.peach].map(|c| format!("{c:?}"))
+            );
+        }
+    }
+
+    /// Every ink the drag card draws is readable on the fill it lands on.
+    ///
+    /// **The pairing is read out of the rendered commands rather than written
+    /// into the test.** Each `FillRect` is paired with the `Text` that
+    /// immediately follows it, which is how the renderer actually lays the
+    /// card out — fill, then the words on it. That is the difference between
+    /// this test and the contrast tests in the previous four modules, which
+    /// paired a hand-written table of roles: a hand-written table is a claim
+    /// about the *palette*, and no defect in this file can falsify it, so
+    /// those tests were structurally incapable of catching anything here. This
+    /// one fails the moment an ink moves, and there is a tempting wrong place
+    /// for it to move to — `crust`, the reflexive "darkest role", reads
+    /// 3.95–4.10 on the four effect colours in light mode where `base` reads
+    /// 4.62–4.80.
+    ///
+    /// It is not an echo of the renderer (lesson 22) because the *expectation*
+    /// — 4.5:1, and which pairs must exist at all — comes from outside the
+    /// code under test. Only the question "what sits on what" is read from it,
+    /// and that question has no answer the file could give wrongly: if the
+    /// renderer draws an ink on a fill, that is the pairing the user sees.
+    ///
+    /// One approximation is deliberate: the card and tooltip fills are drawn
+    /// at alpha 220 and 200 over whatever the desktop is showing, so their
+    /// true composited luminance varies a little with the backdrop. The
+    /// flattened value is the design intent, and both pairings clear the floor
+    /// with room to spare (11.34 Mocha / 7.06 Latte), so the approximation
+    /// cannot mask a failure.
+    #[test]
+    fn every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on() {
+        let mut checked = 0usize;
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for effect in [
+                DropEffect::None,
+                DropEffect::Copy,
+                DropEffect::Move,
+                DropEffect::Link,
+            ] {
+                let cmds = overlay_of(&p, 12, effect);
+                for pair in cmds.windows(2) {
+                    let (
+                        RenderCommand::FillRect { color: fill, .. },
+                        RenderCommand::Text { color: ink, .. },
+                    ) = (&pair[0], &pair[1])
+                    else {
+                        continue;
+                    };
+                    let ratio = contrast(*fill, *ink);
+                    assert!(
+                        ratio >= 4.5,
+                        "the card draws {ink:?} on {fill:?} at {ratio:.2}:1 in {} mode \
+                         with {effect:?}",
+                        if light { "light" } else { "dark" }
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        // Card + description, effect badge + label, count chip + count:
+        // three pairs x four effects x two modes.
+        assert_eq!(checked, 24, "the pairing walk did not reach every chip");
+    }
+
+    /// The same walk over the drop-target tooltip, which the card test cannot
+    /// reach — a second renderer is a second surface.
+    ///
+    /// Neither walk can see the fill and the ink *transposed*: the contrast
+    /// ratio is a symmetric function of its two arguments, so drawing the fill
+    /// in the ink's role and the ink in the fill's yields exactly the ratio it
+    /// yielded before. Legibility survives a transposition; the design does
+    /// not. That defect belongs to the site tables above, which are ordered,
+    /// and the sweep confirms they catch it.
+    #[test]
+    fn the_drop_tooltips_label_is_readable_on_its_fill() {
+        let mut checked = 0usize;
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for effect in [
+                DropEffect::None,
+                DropEffect::Copy,
+                DropEffect::Move,
+                DropEffect::Link,
+            ] {
+                let cmds = render_drop_target_highlight(&p, &target_with("Drop here"), effect);
+                for pair in cmds.windows(2) {
+                    let (
+                        RenderCommand::FillRect { color: fill, .. },
+                        RenderCommand::Text { color: ink, .. },
+                    ) = (&pair[0], &pair[1])
+                    else {
+                        continue;
+                    };
+                    let ratio = contrast(*fill, *ink);
+                    assert!(
+                        ratio >= 4.5,
+                        "the tooltip draws {ink:?} on {fill:?} at {ratio:.2}:1 in {} mode",
+                        if light { "light" } else { "dark" }
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 8, "the pairing walk did not reach the tooltip");
+    }
+
+    /// The count is a quantity, not a verdict, so it must not wear a verdict's
+    /// colour. It used to be `peach`, which is also `DropEffect::Link` — so a
+    /// Link drag of several files drew two peach badges on one small card
+    /// meaning different things.
+    #[test]
+    fn the_item_count_chip_is_never_an_effect_colour() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let chip = colors(&overlay_of(&p, 12, DropEffect::Link))[4];
+            for effect in [
+                DropEffect::None,
+                DropEffect::Copy,
+                DropEffect::Move,
+                DropEffect::Link,
+            ] {
+                assert_ne!(
+                    format!("{chip:?}"),
+                    format!("{:?}", effect.color(&p)),
+                    "the item-count chip wears {effect:?}'s colour in {} mode",
+                    if light { "light" } else { "dark" }
+                );
+            }
+        }
+    }
+
+    /// A one-item drag draws no count badge — there is nothing to count.
+    ///
+    /// The site tables above all use a twelve-file drag, so without this the
+    /// single-item shape of the card is a branch no test renders.
+    #[test]
+    fn a_single_item_drag_draws_no_count_chip() {
+        let p = dark();
+        let drawn = colors(&overlay_of(&p, 1, DropEffect::Copy));
+        assert_eq!(
+            drawn.len(),
+            4,
+            "a single-item drag drew {drawn:?}, which is more than the card, \
+             the description and the effect badge"
+        );
+    }
+
+    /// The card and the tooltip are translucent, and nothing else is.
+    ///
+    /// `colors()` flattens alpha so that one list can be compared against
+    /// palette roles, which means every other test in this module is blind to
+    /// it — the card could go fully opaque and hide the thing being dragged
+    /// *onto*, and nothing above would notice. The two alphas are a deliberate
+    /// property of these two surfaces: a drag decoration follows the cursor
+    /// across arbitrary content and has to let it through.
+    #[test]
+    fn only_the_card_and_the_tooltip_are_translucent() {
+        let p = dark();
+        let alphas = |cmds: &[RenderCommand]| -> Vec<u8> {
+            cmds.iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. }
+                    | RenderCommand::StrokeRect { color, .. }
+                    | RenderCommand::Text { color, .. } => Some(color.a),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Card, description, badge, label, chip, count.
+        assert_eq!(
+            alphas(&overlay_of(&p, 12, DropEffect::Copy)),
+            vec![220, 255, 255, 255, 255, 255]
+        );
+        // Border, tooltip fill, tooltip label.
+        assert_eq!(
+            alphas(&render_drop_target_highlight(
+                &p,
+                &target_with("Drop here"),
+                DropEffect::Copy
+            )),
+            vec![255, 200, 255]
+        );
+    }
+
+    /// An unlabelled target glows but says nothing.
+    #[test]
+    fn an_unlabelled_target_draws_no_tooltip() {
+        let p = dark();
+        let drawn = colors(&render_drop_target_highlight(
+            &p,
+            &target_with(""),
+            DropEffect::Copy,
+        ));
+        assert_eq!(drawn.len(), 1, "an unlabelled target drew {drawn:?}");
+        assert_eq!(format!("{:?}", drawn[0]), format!("{:?}", p.green));
     }
 }

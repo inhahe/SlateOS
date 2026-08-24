@@ -736,7 +736,15 @@ Known-issues (open, kernel-owned):
 - `W-KERNEL-COW-WRITE` — kernel-mode write fault on a user COW page
 - `TD-KSHELL-LINE-EDITOR-IS-UTF8` — byte-input escape + `PathBuf` completion
   candidates (~270 `resolve_path` call sites in `kernel/src/kshell.rs`)
-- `W1` — intermittent boot-test hang at the OOM self-test
+- ~~`W1` — intermittent boot-test hang at the OOM self-test~~ — **[x] closed
+  2026-08-24 (lane A)** as cured incidentally by the three `serial.rs`
+  re-entrancy fixes (`cac8d7624`, `1e5c091f4`, `58102abca`), all of which
+  postdate every piece of W1 evidence. Closed on a count, not an assertion:
+  `bench/boot-history.jsonl` records `ends_mid_line`, which is the entry's own
+  discriminator, and over 373 boots there are **0** that both hang and cut
+  mid-token. All 8 TIMEOUTs ended on a line boundary — the shape of an
+  unrelated wedge, not of a CPU stopped inside `_print` holding `SERIAL`.
+  Re-open only on `ends_mid_line: true` with `boot_ok: false`.
 
 ### Lane B — POSIX & Userland
 

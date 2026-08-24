@@ -202,7 +202,9 @@ fn main() {
             old_violations += 1;
         }
     }
-    println!("identity-on-escape-free-text: new() holds for all 6 samples; old() violated it for {old_violations}/6");
+    println!(
+        "identity-on-escape-free-text: new() holds for all 6 samples; old() violated it for {old_violations}/6"
+    );
 
     if mismatches == 0 {
         println!();

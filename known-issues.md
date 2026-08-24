@@ -14351,7 +14351,7 @@ leading 4 preserved (`'A'`) and the grown tail zero-filled.
    `O_APPEND`-doesn't-block-truncate nuance. The append/immutable-flag EPERM
    path is not yet plumbed (same capability-model gap as B-CHOWN1).
 
-### W1. Intermittent boot-test hang recurred once at the OOM self-test — WATCHLIST 2026-06-10
+### W1. Intermittent boot-test hang recurred once at the OOM self-test — ✅ CLOSED 2026-08-24 (lane A), cured incidentally; see the closure at the end
 
 **Where:** boot self-test sequence; serial output (`build/serial-test.txt`)
 truncated mid-line at `[sysctl] mm.oom_pol…` during `mm::oom::self_test()`
@@ -14468,6 +14468,53 @@ stale bookkeeping, not a real count: many dozens of routine boots have passed
 since 2026-06-14 (including a 20/20 pthread soak on 2026-08-13) with no
 recurrence, and the entry's own rule counts routine boots toward the streak.
 
+**Closed 2026-08-24 (lane A) — the 2026-08-14 recommendation, now with the
+count actually taken.**
+
+That analysis recommended retargeting the bar and then did not close the
+entry, so the Status line above has read "clean streak **7**" for ten weeks
+while the real figure was untracked. Rather than assert the streak, it is
+machine-checkable: `bench/boot-history.jsonl` records `ends_mid_line` per
+boot, which is *precisely* this entry's discriminator.
+
+| Query over `bench/boot-history.jsonl` | Result |
+|---|---|
+| Boots recorded (2026-08-16 → 2026-08-24) | **373** |
+| Verdicts | 278 PASS, 50 SELFTEST_FAIL, 37 PANIC, 8 TIMEOUT |
+| Never reached `BOOT_OK` | 45 (37 PANIC + 8 TIMEOUT) |
+| **W1-shaped (`ends_mid_line` AND not `boot_ok`)** | **0** |
+
+The 8 TIMEOUTs are the only candidates that hung rather than reported, and
+**all 8 ended on a line boundary** (`ends_mid_line: false`, from 6 lines to
+38 842). That is the discriminator the mechanism analysis turns on: a CPU
+that wedges for an unrelated reason stops *between* lines, having flushed the
+line in flight; only a CPU that stopped *inside* `_print` holding the `SERIAL`
+mutex cuts mid-token. Zero of 373 boots did that.
+
+Two records do have `ends_mid_line: true` (2026-08-21 SELFTEST_FAIL,
+2026-08-23 PASS) and **neither is W1**: both reached `BOOT_OK`. Their serial
+is cut because capture stops once the marker is seen, which truncates
+wherever the guest happened to be — the artefact of a *successful* run, not a
+wedge. Worth spelling out because `ends_mid_line` alone looks like a hit; it
+is only W1's fingerprint when paired with never reaching the marker.
+
+**Honest limit on this evidence:** the history file begins 2026-08-16, so it
+cannot demonstrate an unbroken streak back to the last recurrence
+(2026-06-12). What it does show is 373 boots inside its own window with zero
+occurrences — on its own **4× the ~90-boot bar** the entry set, without
+needing to count the two months in between.
+
+Closing as **cured incidentally**, same disposition as F6/F7, attributed to
+the three `serial.rs` fixes tabulated above (`cac8d7624`, `1e5c091f4`,
+`58102abca`), all of which postdate every piece of W1 evidence.
+
+**Re-open condition (unchanged from the 2026-08-14 recommendation, and
+narrower than the old bar):** a boot that hangs *and* leaves serial cut
+mid-token *and* produces no diagnostic — i.e. `ends_mid_line: true` with
+`boot_ok: false`. That combination would falsify the mechanism analysis, and
+is worth far more than further blind soaking. The query above is the test;
+re-run it rather than re-deriving it.
+
 Left at WATCHLIST rather than closed unilaterally, since retargeting a closure
 condition an earlier session set deliberately is the operator's call if they
 want it; the analysis above is the argument for doing so.
@@ -14548,6 +14595,69 @@ lookup is filed under before asking what the lookup does.
 ---
 
 ## Fixed Bugs
+
+### B-KSHELL-ECHO-E-MANGLES-NON-ASCII. `echo -e` doubled every byte of every multi-byte character — 2026-08-24 — FIXED 2026-08-24 (lane A, `abeaca2aa`)
+
+**Where:** `interpret_echo_escapes`, `kernel/src/kshell.rs` (~line 8691); one
+caller, `cmd_echo`, on the `-e` path only.
+
+**Symptom.** `echo -e` corrupted any non-ASCII text, while plain `echo` —
+which does not enter this function — printed it correctly.
+
+| input | old output | bytes |
+|---|---|---|
+| `café` | `cafÃ©` | 5 → 7 |
+| `é` | `Ã©` | 2 → 4 |
+| `→` | `â\x86\x92` | 3 → 6 |
+| `🦀` | `ð\x9f¦\x80` | 4 → 8 |
+
+**Cause.** The function walked `s.as_bytes()` and copied each non-escape byte
+through as `result.push(bytes[i] as char)`. For an ASCII byte that is a no-op.
+For a byte ≥ 0x80 it is not: `as char` maps `0x80..=0xFF` to
+`U+0080..=U+00FF`, which `String::push` re-encodes as **two** UTF-8 bytes. So
+each byte of a multi-byte character was expanded into its own two-byte
+sequence — the output is not merely wrong, it grows with the input.
+
+**Why it lasted.** Every test of this function was ASCII, and on ASCII the
+buggy and correct forms agree exactly. This is the same `as char` mistake
+already documented as a *landmine* in `TD-KSHELL-LINE-EDITOR-IS-UTF8` at
+`kshell.rs:3583` — that entry flagged the instance on the **input** path as a
+hazard for whoever widens the editor's `0x20..0x7F` guard, and did not notice
+the identical one on the **output** path, which was not a hazard but a live
+bug.
+
+**Reachability** (it is not blocked by the editor's guard): the line editor
+refuses bytes ≥ 0x80 from the keyboard, but `source` accepts any *valid-UTF-8*
+script — and non-ASCII text is valid UTF-8; `cmd_source` rejects only invalid
+sequences — and command substitution feeds arbitrary command output back into
+the line. So a sourced or substituted `echo -e` on ordinary accented text
+corrupts it.
+
+**Fix.** Iterate `chars()` rather than bytes. `s` is a `&str`, so every
+character is whole and valid by construction and pushing it cannot re-encode;
+all escape *triggers* are ASCII, so a one-character peek is equivalent to the
+old one-byte lookahead.
+
+**Not fixed here, deliberately:** `\xNN` for arbitrary bytes. That needs an
+output path that can carry non-UTF-8 (`shell_write` takes `&str`;
+`SHELL_OUTPUT` is a `String`) and belongs to the byte-clean expanded-word work
+settled as option B in `design-decisions.md` §261.
+
+**Verification.** Changing a parser's iteration model risks silently altering
+the inputs that were already correct — and those are the ASCII ones, where
+every existing test lived, so a regression would have hidden exactly as the
+original bug did. Checked both directions:
+
+- `scripts/echo-escapes-oracle.rs` reproduces the old implementation verbatim
+  and diffs it against the new one over **1204 ASCII inputs** — every string
+  of length 0..=3 over an alphabet covering each character class, plus every
+  ASCII byte alone, backslash-prefixed and embedded. **0 mismatches.** Same
+  host-oracle pattern, and for the same reason, as `scripts/bytestr-oracle.rs`.
+- `kshell::self_test` (new) is wired into the boot battery, since the kernel
+  binary sets `test = false` and `#[cfg(test)]` never runs. It asserts the
+  escape table, unknown/trailing backslashes, and 2-, 3- and 4-byte characters
+  **by byte length** — a `String` that renders correctly can still carry the
+  doubled encoding, so comparing rendered text would not have caught this.
 
 ### B-FONT-SYMBOL-ENCODED-FACES-DRAW-EVERYTHING-AS-BOXES. Wingdings and friends mapped no ASCII at all — 2026-08-14 — FIXED 2026-08-14
 
@@ -14954,6 +15064,99 @@ converts one **data path** end-to-end and so introduces no lossy step.
 A-vs-B is an architectural fork on a large, costly-to-reverse change, and B
 knowingly departs from the plan written above, so it is the operator's call:
 see `open-questions.md` **Q45**. Stage (a) is independently useful either way.
+
+**[A] 2026-08-24 — Q45 is answered (B), and Correction 4's premise for B is
+wrong. Read this before planning stages (b)/(c).**
+
+*Q45 no longer gates this.* The operator resolved it **2026-08-21 as option
+B, the expanded word** (`design-decisions.md` §261): one data path —
+keystroke to syscall — goes byte-clean end to end, while the source line
+stays text, as in bash. The paragraph above has read "the operator's call"
+for three days after the call was made, which is how an unblocked task keeps
+looking blocked.
+
+*But B's stated escape hatch does not exist.* Correction 4 justified B partly
+on letting the user reach arbitrary bytes "through the `$'\xff'` escape the
+shell **already parses** (7 sites)". Checked: **kshell has no ANSI-C quoting
+at all.** Those 7 sites are Rust byte literals — `b'$'` and `push('$')` in the
+expansion code — matched by a grep for `$'`, which is a substring of `b'$'`.
+The file contains no `$'…'` parser, no hex-escape decoder, and no
+`is_ascii_hexdigit`/`from_str_radix` pair anywhere near word expansion. This
+also means **Correction 2 was right** and Correction 4 silently contradicted
+it; two corrections in the same entry, written the same day, disagree, and
+the later and wronger one is the one the chosen option leans on.
+
+Consequence for scope, which is real but bounded: the escape has to be
+**built**, and it needs somewhere to put a non-UTF-8 byte once parsed. The
+only escape decoder in the file today is `interpret_echo_escapes`, which
+serves `echo -e` alone, has no `\xNN` case, and returns a `String` — so it is
+a model for the syntax, not a component to reuse. The output sink is the
+binding constraint: `shell_write` takes `&str` and `SHELL_OUTPUT` is a
+`String`, so command-substitution capture must go byte-clean as part of (b),
+not after it.
+
+*Found while checking the above, fixed separately:* `interpret_echo_escapes`
+corrupted **every non-ASCII character** — it walked bytes into a `String` via
+`bytes[i] as char`, doubling each byte of a multi-byte sequence, so a sourced
+`echo -e "café"` printed `cafÃ©`. Written up under *Fixed Bugs* as
+`B-KSHELL-ECHO-E-MANGLES-NON-ASCII` (`abeaca2aa`). It is the same `as char`
+landmine this entry already documents at `kshell.rs:3583` for the input
+guard — the entry flagged the one on the *input* path and missed the
+identical one on the *output* path, which was already live.
+
+**[A] 2026-08-24 — stage (b), the path pipeline, has LANDED (`961a160a3`).**
+
+`resolve_path` is now `fn resolve_path<P: AsRef<Path>>(P) -> PathBuf`, `CWD`
+is a `Mutex<PathBuf>`, and `TermSession.cwd` is a `PathBuf` — so a 0xFF byte
+survives `cd`, resolution and session switch intact. `fs::bench` (7
+signatures) and the five filesystem `mount` pass-throughs went with it.
+
+*The ~270-call-site figure this entry has quoted since 2026-08-13 never had
+to be paid.* `fs/path.rs` already implements `AsRef<Path>` for `str`,
+`String`, `[u8]`, `Vec<u8>` and `PathBuf`, so making `resolve_path` generic
+left every forwarding caller compiling untouched. The compiler enumerated the
+real cost: **387 errors**, of which **289 (75%)** were the single mechanical
+`PathBuf: !Display` case and only ~98 carried judgment. Driving the edits
+from rustc's own JSON byte spans (rather than a regex) put each one exactly
+on the expression rustc objected to.
+
+**The finding worth carrying forward, because it is a silent-corruption class
+the type system does not catch:** `format!("{}.gz", input.display())`
+type-checks *as a path*, because `String: AsRef<Path>`. It also writes a
+U+FFFD-mangled filename to disk. My own mechanical `.display()` pass
+introduced ten of these (five compressors, five decompressor `.out`
+fallbacks); the compiler caught them only incidentally, because the sibling
+`if` branch happened to be a `PathBuf`. Had both branches been `String`, they
+would have compiled clean and corrupted filenames silently. They are now
+`path_with_suffix`/`decompressed_output_path`, appending via `extend_bytes` —
+not `push`, which inserts a separator. **Anyone extending this conversion
+should grep for `display()` inside path construction, not trust the types.**
+
+Also fixed in passing: `extension_hint` used `rsplit_once('.')`, which
+searches the whole path, so `archive.tar/notes` reported extension
+`tar/notes`. Now `Path::extension`, which stops at the last component.
+
+*Verification:* `self_test` sections 4 and 5 assert 20 normalisation cases
+(`.`, `..`, root escape, repeated/trailing separators, cwd-relative) and 3
+that drive 0xFF through `resolve_path` — the case a `String` return type
+could not represent at all.
+
+**Still open, and deliberately not narrowed:** `fs::pipe` and `fs::templates`
+store paths as `String` internally, and the environment is a `String` map.
+Rather than paper over these with `display()` — which would hand the callee a
+*different path than the user typed* — `path_arg_as_str` refuses loudly at
+`mkfifo` and `template`, and is grep-able as the marker for that follow-up.
+`$PWD` stays lossy on purpose and says so in-code: resolution goes through
+`CWD`, never `$PWD`, so a U+FFFD there cannot redirect a file operation.
+
+**Remaining for (b)/(c):** word expansion → `Vec<u8>`; completion → `PathBuf`
+candidates; the `\xNN` escape (still must be *built* — Correction 2 above is
+the right one); and the output sink (`shell_write` takes `&str`,
+`SHELL_OUTPUT` is a `String`, `capture_command` returns `String`), which per
+the paragraph above must land *with* (b), not after. The editor buffer
+(`line_buf`, `History.entries`) and the 3580 input guard are unchanged — and
+the 3583 `ch as char` landmine is still live, so that guard must not be
+widened before the buffer type changes.
 
 ### D-NETSTACK-RX-DEMUX. The netstack daemon had no shared RX demux — concurrent connections couldn't safely receive at once — FIXED 2026-07-14
 
@@ -69450,6 +69653,27 @@ through the failure filter; then reverted.
 
 **Still not gated:** the `bench/**` crates, also lane A's. Same one-line
 addition if they turn out to be clippy-clean; unmeasured as of this writing.
+
+**Correction, 2026-08-24 — there are no `bench/**` crates, so the gate is
+already complete for lane A's scope.** Checked before extending it: `bench/`
+holds three data files (`baselines.toml`, `boot-history.jsonl`,
+`history.jsonl`) and no `Cargo.toml`, and the workspace `members` list has no
+`bench/*` glob. Benchmarking here is the boot test's own `--bench` mode over
+in-kernel code, which `-p kernel` already covers.
+
+The paragraph above was written from `CLAUDE.md`'s instruction to *put*
+benchmarks in `bench/<subsystem>/` — a statement about where they should go,
+read as one about where they are. Worth noting as a pattern, because it is the
+second time in two days that an entry in this file recorded an unverified
+premise as fact (the first being the fingerprint claim corrected above). Both
+were about a minute's work to check; neither was checked before being written
+down, and both were written *confidently enough to act on* — the fingerprint
+one deferred this gate by a day, and this one would have sent the next reader
+looking for crates that do not exist.
+
+Nothing further to gate. `-p kernel` is the whole of lane A's lintable tree;
+the other lanes' crates are theirs to gate, and a workspace-wide run is not
+lane A's to impose on them.
 
 ---
 

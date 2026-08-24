@@ -5206,6 +5206,15 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = bytestr::self_test() {
                 serial_println!("WARNING: bytestr self-test failed: {:?}", e);
             }
+            // The shell's `echo -e` escape decoder. Worth a boot-battery slot
+            // despite being one small function: it walked bytes while writing
+            // into a `String`, so it re-encoded every byte of a multi-byte
+            // character and printed "cafÃ©" for "café". Every ASCII test of it
+            // passed throughout, which is exactly why the test added with the
+            // fix is deliberately *not* ASCII.
+            if let Err(e) = kshell::self_test() {
+                serial_println!("WARNING: kshell self-test failed: {:?}", e);
+            }
             // The one byte-size formatter, replacing twenty-one private copies.
             // Two of those copies printed a two-digit tenths ("1.10 KiB", which
             // reads as larger than the "1.9 KiB" below it) because they divided

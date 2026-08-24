@@ -490,10 +490,15 @@ impl FileSystem for F2fsFs {
 /// # Errors
 ///
 /// Propagates [`F2fsFs::open`] and [`crate::fs::Vfs::mount`] failures.
-pub fn mount(device: &str, mount_path: &str) -> KernelResult<()> {
+pub fn mount(device: &str, mount_path: impl AsRef<crate::fs::path::Path>) -> KernelResult<()> {
+    let mount_path = mount_path.as_ref();
     let fs = F2fsFs::open(device)?;
     crate::fs::Vfs::mount(mount_path, Box::new(fs))?;
-    serial_println!("[f2fs] Mounted {} at {} (read-only)", device, mount_path);
+    serial_println!(
+        "[f2fs] Mounted {} at {} (read-only)",
+        device,
+        mount_path.display()
+    );
     Ok(())
 }
 

@@ -955,6 +955,28 @@ pub fn self_test() {
     assert_eq!(m.id(), s.id(), "both ends name one device");
     assert_eq!(m.end(), PtyEnd::Master);
     assert_eq!(s.end(), PtyEnd::Slave);
+
+    // The two assertions above are a *round trip*: they encode and decode with
+    // the same `as_bit`, so they would pass just as happily with the bits
+    // flipped. That is not enough any more, because the low bit left this
+    // kernel and became an ABI.
+    //
+    // Since 2026-08-24 libc reconstructs an inherited pty's `HandleKind` from
+    // this bit (`handle_type_to_kind_for` in posix/src/spawn.rs): one wire type
+    // `fd_handle_type::PTY = 7` names both ends, so the type byte alone cannot
+    // say which end a `spawn`ed child received, and the child reads the low bit
+    // to decide. Lane B pinned that with its own test — against its own copy of
+    // the convention. A test on that side cannot notice this side changing, so
+    // reordering `enum PtyEnd` here would leave both test suites green while
+    // every inherited master silently decoded as a slave.
+    //
+    // The consequence is specifically worse than a decode that merely fails: a
+    // terminal emulator's own keystrokes, written to what it believes is its
+    // master, would be delivered back to itself as terminal input. So pin the
+    // numeric values, not just their round trip.
+    assert_eq!(m.raw() & 1, 0, "master is bit 0 (libc decodes this)");
+    assert_eq!(s.raw() & 1, 1, "slave is bit 1 (libc decodes this)");
+
     let id = m.id();
     assert!(tty::exists(id), "creating a pty creates its tty device");
 

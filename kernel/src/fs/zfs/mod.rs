@@ -826,10 +826,15 @@ impl FileSystem for ZfsFs {
 /// # Errors
 ///
 /// Propagates [`ZfsFs::open`] and [`crate::fs::Vfs::mount`] failures.
-pub fn mount(device: &str, mount_path: &str) -> KernelResult<()> {
+pub fn mount(device: &str, mount_path: impl AsRef<crate::fs::path::Path>) -> KernelResult<()> {
+    let mount_path = mount_path.as_ref();
     let fs = ZfsFs::open(device)?;
     crate::fs::Vfs::mount(mount_path, Box::new(fs))?;
-    serial_println!("[zfs] Mounted {} at {} (read-only)", device, mount_path);
+    serial_println!(
+        "[zfs] Mounted {} at {} (read-only)",
+        device,
+        mount_path.display()
+    );
     Ok(())
 }
 

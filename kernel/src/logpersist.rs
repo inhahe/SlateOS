@@ -258,6 +258,21 @@ impl Drop for FlushGuard {
     }
 }
 
+/// A log file on disk, as surveyed by [`prune`].
+struct LogFile {
+    path: String,
+    size: u64,
+    /// How many rotations back this file is: `0` is the file currently being
+    /// written, `1` the most recent rotation, and so on up to
+    /// `max_rotated_files`. Higher is older, and older is pruned first.
+    ///
+    /// This is carried explicitly rather than recovered from the path because
+    /// the path does not order correctly: as strings, `combined.1.jsonl` sorts
+    /// before `combined.jsonl`, and `combined.10.jsonl` sorts between `.1` and
+    /// `.2`.
+    age: u32,
+}
+
 /// One cursor's share of a flush, applied back to `STATE` after the I/O.
 struct CursorOutcome {
     /// Identifies the cursor to write back to. A name, not an index: the
@@ -749,7 +764,7 @@ pub fn prune() -> usize {
 
     // Calculate total storage used.
     let mut total_used: u64 = 0;
-    let mut files: Vec<(String, u64)> = Vec::new(); // (path, size)
+    let mut files: Vec<LogFile> = Vec::new();
 
     match mode {
         RotationMode::Combined => {
@@ -768,20 +783,25 @@ pub fn prune() -> usize {
         }
     }
 
-    // Sort by name descending (oldest rotations have highest numbers).
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    // Youngest first, so `pop` takes the oldest. Sorting on `age` rather than
+    // on the path is what makes that true: the paths were compared as strings,
+    // and `combined.1.jsonl` < `combined.2.jsonl` < ... < `combined.jsonl`, so
+    // popping from the end deleted the *newest* rotation first and kept the
+    // stalest history — the reverse of what a log cap is for. (String order
+    // also puts `.10` between `.1` and `.2`, so any cap above nine rotations
+    // pruned in a scrambled order as well.)
+    files.sort_by(|a, b| a.age.cmp(&b.age).then_with(|| a.path.cmp(&b.path)));
 
     let mut pruned = 0usize;
     while total_used > max_total {
-        if let Some((path, size)) = files.pop() {
-            // A file that cannot be removed is one we also cannot account for,
-            // so its size stays subtracted either way: the loop must terminate.
-            let _ = crate::fs::Vfs::remove(&path);
-            total_used = total_used.saturating_sub(size);
-            pruned = pruned.saturating_add(1);
-        } else {
+        let Some(file) = files.pop() else {
             break;
-        }
+        };
+        // A file that cannot be removed is one we also cannot account for,
+        // so its size stays subtracted either way: the loop must terminate.
+        let _ = crate::fs::Vfs::remove(&file.path);
+        total_used = total_used.saturating_sub(file.size);
+        pruned = pruned.saturating_add(1);
     }
 
     let mut state = STATE.lock();
@@ -796,7 +816,7 @@ fn collect_log_files(
     log_dir: &str,
     name: &str,
     max_rotated: u32,
-    files: &mut Vec<(String, u64)>,
+    files: &mut Vec<LogFile>,
     total: &mut u64,
 ) {
     use alloc::format;
@@ -805,13 +825,16 @@ fn collect_log_files(
     let compress_exts = [".zst", ".lz4", ".gz"];
 
     // Current file (never compressed — only rotated files get compressed).
+    // Age 0: it is the one being written to, so it is pruned last, and only
+    // if deleting every rotation still left us over the cap.
     let current = format!("{}/{}.jsonl", log_dir, name);
     if let Ok(meta) = crate::fs::Vfs::stat(&current) {
-        #[allow(clippy::arithmetic_side_effects)]
-        {
-            *total += meta.size;
-        }
-        files.push((current, meta.size));
+        *total = total.saturating_add(meta.size);
+        files.push(LogFile {
+            path: current,
+            size: meta.size,
+            age: 0,
+        });
     }
 
     // Rotated files — check compressed extensions first, then plain.
@@ -820,11 +843,12 @@ fn collect_log_files(
         for ext in &compress_exts {
             let path = format!("{}/{}.{}.jsonl{}", log_dir, name, i, ext);
             if let Ok(meta) = crate::fs::Vfs::stat(&path) {
-                #[allow(clippy::arithmetic_side_effects)]
-                {
-                    *total += meta.size;
-                }
-                files.push((path, meta.size));
+                *total = total.saturating_add(meta.size);
+                files.push(LogFile {
+                    path,
+                    size: meta.size,
+                    age: i,
+                });
                 found = true;
                 break;
             }
@@ -832,11 +856,12 @@ fn collect_log_files(
         if !found {
             let path = format!("{}/{}.{}.jsonl", log_dir, name, i);
             if let Ok(meta) = crate::fs::Vfs::stat(&path) {
-                #[allow(clippy::arithmetic_side_effects)]
-                {
-                    *total += meta.size;
-                }
-                files.push((path, meta.size));
+                *total = total.saturating_add(meta.size);
+                files.push(LogFile {
+                    path,
+                    size: meta.size,
+                    age: i,
+                });
             }
         }
     }
@@ -1277,8 +1302,75 @@ fn self_test_inner() -> KernelResult<()> {
     }
     crate::serial_println!("[logpersist]   6. Prune (empty): OK");
 
+    // Test 7: Prune deletes the *oldest* rotation first, and the live file
+    // last. Test 6 only proved that pruning nothing prunes nothing, which the
+    // reversed sort order passed just as happily.
+    {
+        let mut state = STATE.lock();
+        state.initialized = false;
+        state.cursors.clear();
+        state.total_pruned = 0;
+    }
+    // Four 100-byte files and a 250-byte cap: two must go, and which two is
+    // the whole point.
+    init_with_config(RotationConfig {
+        mode: RotationMode::Combined,
+        max_total_storage: 250,
+        max_rotated_files: 3,
+        ..self_test_config()
+    });
+    let live = alloc::format!("{SELF_TEST_LOG_DIR}/combined.jsonl");
+    let rot1 = alloc::format!("{SELF_TEST_LOG_DIR}/combined.1.jsonl");
+    let rot2 = alloc::format!("{SELF_TEST_LOG_DIR}/combined.2.jsonl");
+    let rot3 = alloc::format!("{SELF_TEST_LOG_DIR}/combined.3.jsonl");
+    let filler = [b'x'; 100];
+    for path in [&live, &rot1, &rot2, &rot3] {
+        crate::fs::Vfs::write_file(path, &filler)?;
+    }
+
+    let pruned = prune();
+    if pruned != 2 {
+        crate::serial_println!(
+            "[logpersist]   FAIL: expected 2 files pruned to get 400 bytes under a \
+             250-byte cap, got {pruned}"
+        );
+        return Err(KernelError::InternalError);
+    }
+    for (path, want, what) in [
+        (
+            &rot3,
+            false,
+            "oldest rotation (.3) should have been pruned first",
+        ),
+        (
+            &rot2,
+            false,
+            "second-oldest rotation (.2) should have been pruned",
+        ),
+        (&rot1, true, "newest rotation (.1) should have survived"),
+        (
+            &live,
+            true,
+            "the live file should never be pruned before a rotation",
+        ),
+    ] {
+        if crate::fs::Vfs::exists(path) != want {
+            crate::serial_println!("[logpersist]   FAIL: {what} ({path})");
+            return Err(KernelError::InternalError);
+        }
+    }
+    if stats().total_pruned != 2 {
+        crate::serial_println!(
+            "[logpersist]   FAIL: total_pruned is {}, expected 2",
+            stats().total_pruned
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[logpersist]   7. Prune order (oldest first): OK");
+
     // No clean-up of the ring here: `self_test` runs this against a substitute
     // one, which is dropped on the way out along with every event emitted above.
-    crate::serial_println!("[logpersist] All 6 self-tests passed.");
+    // The scratch log directory is removed by `self_test` itself.
+    crate::serial_println!("[logpersist] All 7 self-tests passed.");
     Ok(())
 }

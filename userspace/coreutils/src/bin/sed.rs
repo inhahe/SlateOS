@@ -17,8 +17,10 @@
 //! | `-u` | accepted and ignored: this sed does not buffer between files |
 //! | `--` | end of options; what follows is a file |
 //!
-//! Exit status: 0 normally, 1 for a bad script or usage, 2 for a file that
-//! could not be read, or the status given to `q`.
+//! Exit status: 0 normally, 1 for a bad script or usage, 2 for an input file
+//! that could not be opened (the rest are still processed), 4 for a failure
+//! the run cannot continue past — see [`EXIT_PANIC`] — or the status given
+//! to `q`.
 //!
 //! ## What this used to be
 //!
@@ -60,6 +62,29 @@ use std::rc::Rc;
 
 use coreutils::errmsg::strerror;
 use ere::{Regex, bre};
+
+/// The status for a failure that stops the run where it stands.
+///
+/// sed has three failure statuses and they are not interchangeable: 1 means
+/// the command line or the script was wrong, 2 means an input file could not
+/// be opened (the remaining files are still processed), and 4 — this one —
+/// means something failed that sed cannot carry on past: a `-f` script file
+/// that will not open, a `w` target that will not open, a read that failed
+/// mid-stream, an in-place edit with nothing to edit. Upstream reaches all of
+/// these through one function, `panic()`, which is where the name below comes
+/// from.
+const EXIT_PANIC: i32 = 4;
+
+/// Report a failure sed cannot continue past, and leave with status 4.
+///
+/// The pending output is flushed *first*: the diagnostic is about the stream
+/// whose bytes were already written, so it has to arrive after them, and
+/// `process::exit` does not run the runtime's own flush-at-exit.
+fn panic_out(msg: &str) -> ! {
+    let _ = io::stdout().flush();
+    diag!("sed: {msg}");
+    process::exit(EXIT_PANIC)
+}
 
 // ---------------------------------------------------------------- the script
 
@@ -891,6 +916,9 @@ struct Input {
     paths: Vec<String>,
     next_path: usize,
     cur: Option<Box<dyn BufRead>>,
+    /// What to call the file now open, in a read-error diagnostic. Upstream
+    /// names standard input `stdin` there even though the operand was `-`.
+    cur_name: String,
     peeked: Option<Line>,
     sep: u8,
     had_error: bool,
@@ -902,6 +930,7 @@ impl Input {
             paths,
             next_path: 0,
             cur: None,
+            cur_name: "stdin".to_string(),
             peeked: None,
             sep,
             had_error: false,
@@ -914,11 +943,13 @@ impl Input {
             self.next_path = self.next_path.saturating_add(1);
             if path == "-" {
                 self.cur = Some(Box::new(BufReader::new(io::stdin())));
+                self.cur_name = "stdin".to_string();
                 return true;
             }
             match File::open(&path) {
                 Ok(f) => {
                     self.cur = Some(Box::new(BufReader::new(f)));
+                    self.cur_name = path;
                     return true;
                 }
                 Err(e) => {
@@ -955,11 +986,14 @@ impl Input {
                     });
                     return;
                 }
-                Err(e) => {
-                    diag!("sed: read error: {}", strerror(&e));
-                    self.had_error = true;
-                    self.cur = None;
-                }
+                // A read that fails part-way through a file is not the same
+                // as a file that would not open: there is no sensible way to
+                // carry on with the rest of the stream, so this ends the run.
+                Err(e) => panic_out(&format!(
+                    "read error on {}: {}",
+                    self.cur_name,
+                    strerror(&e)
+                )),
             }
         }
     }
@@ -1037,10 +1071,56 @@ enum Pending {
     File(String),
 }
 
+/// Where a `w` (or `s///w`) target sends its lines.
+enum WTarget {
+    /// `/dev/stdout` is not opened: it is sed's own output stream, so writing
+    /// it through the same [`Out`] is what keeps `w /dev/stdout` interleaved
+    /// with the pattern space rather than racing it through a second buffer.
+    Stdout,
+    /// `/dev/stderr` goes to descriptor 2 with one `write(2)` per line.
+    Stderr,
+    File(File),
+}
+
+/// One opened `w` target, with the separator it may still owe.
+///
+/// The `owed` flag is the same trick [`Out`] plays, for the same reason: a
+/// pattern space that came from a line with no trailing separator must be
+/// written without one, *unless* another line follows it in this file.
 struct WFile {
-    path: String,
-    file: Option<File>,
-    failed: bool,
+    target: WTarget,
+    owed: bool,
+}
+
+/// Open every `w` target the script names, before a line of input is read.
+///
+/// Two things depend on this happening at compile time rather than at the
+/// first write. `sed 'w /nosuch/f' </dev/null` must fail even though the
+/// command never runs — upstream opens the files while compiling, so an
+/// unwritable target is a startup failure, not a surprise half way through a
+/// long pipeline. And the handle has to outlive the per-file [`Exec`]: with
+/// `-s`, or with `-i` over several files, a target reopened per input file
+/// would truncate away what the previous file wrote.
+fn open_wfiles(paths: &[String]) -> Vec<WFile> {
+    paths
+        .iter()
+        .map(|path| {
+            let target = match path.as_str() {
+                "/dev/stdout" => WTarget::Stdout,
+                "/dev/stderr" => WTarget::Stderr,
+                _ => match File::create(path) {
+                    Ok(f) => WTarget::File(f),
+                    Err(e) => {
+                        panic_out(&format!("couldn't open file {path}: {}", strerror(&e)));
+                    }
+                },
+            };
+            WFile {
+                target,
+                owed: false,
+            }
+        })
+        .collect()
 }
 
 struct RangeState {
@@ -1076,7 +1156,7 @@ impl From<ere::MatchLimit> for Stop {
 
 type Run<T> = Result<T, Stop>;
 
-struct Exec {
+struct Exec<'w> {
     pattern: Vec<u8>,
     hold: Vec<u8>,
     line_num: usize,
@@ -1085,13 +1165,15 @@ struct Exec {
     appends: Vec<Pending>,
     last_re: Option<Rc<Regex>>,
     ranges: Vec<RangeState>,
-    wfiles: Vec<WFile>,
+    /// Borrowed, not owned: the `w` targets are opened once for the whole run
+    /// and survive every `Exec` built over them. See [`open_wfiles`].
+    wfiles: &'w mut Vec<WFile>,
     suppress: bool,
     had_error: bool,
 }
 
-impl Exec {
-    fn new(script: &Script, suppress: bool) -> Exec {
+impl<'w> Exec<'w> {
+    fn new(script: &Script, suppress: bool, wfiles: &'w mut Vec<WFile>) -> Exec<'w> {
         let mut ranges: Vec<RangeState> = Vec::with_capacity(script.cmds.len());
         for cmd in &script.cmds {
             // `0,/re/` is the one range that is open before any line is read;
@@ -1117,15 +1199,7 @@ impl Exec {
             appends: Vec::new(),
             last_re: None,
             ranges,
-            wfiles: script
-                .wfiles
-                .iter()
-                .map(|p| WFile {
-                    path: p.clone(),
-                    file: None,
-                    failed: false,
-                })
-                .collect(),
+            wfiles,
             suppress,
             had_error: false,
         }
@@ -1235,45 +1309,50 @@ impl Exec {
     }
 
     fn write_wfile(&mut self, idx: usize, bytes: &[u8], out: &mut Out<'_>) -> io::Result<()> {
+        // The separator is written only if the line that produced this pattern
+        // space had one. `printf 'a\nb' | sed -n 'w f'` leaves `f` ending in
+        // `b`, not `b\n` — the missing final separator is a property of the
+        // text, and every copy of it made anywhere has to keep it.
+        let had_sep = self.had_sep;
+        let sep = out.sep;
         let Some(w) = self.wfiles.get_mut(idx) else {
             return Ok(());
         };
-        if w.path == "/dev/stdout" {
-            return out.line(bytes, true);
-        }
-        if w.path == "/dev/stderr" {
-            // Assembled and written once, because `write_all` here is one
-            // `write(2)` per call and a line torn into two of them can have
-            // another process's output land between the text and its newline.
-            //
-            // The raw `write(2)` and not `io::stderr()`, whose `EBADF` the
-            // runtime reports back as success: upstream gives status 4 for
-            // `sed 'w /dev/stderr' f 2>&-` and for `2>/dev/full`, and it can
-            // only be 4 here if the failure is visible to the `?` below.
-            let mut line = Vec::with_capacity(bytes.len().saturating_add(1));
-            line.extend_from_slice(bytes);
-            line.push(b'\n');
-            return coreutils::stdfd::write_all(2, &line);
-        }
-        if w.failed {
-            return Ok(());
-        }
-        if w.file.is_none() {
-            match File::create(&w.path) {
-                Ok(f) => w.file = Some(f),
-                Err(e) => {
-                    let msg = format!("couldn't open file {}: {}", w.path, strerror(&e));
-                    w.failed = true;
-                    self.fail(&msg);
-                    return Ok(());
+        match &mut w.target {
+            WTarget::Stdout => out.line(bytes, had_sep),
+            WTarget::Stderr => {
+                // Assembled and written once, because `write_all` here is one
+                // `write(2)` per call and a line torn into two of them can
+                // have another process's output land between the text and its
+                // separator.
+                //
+                // The raw `write(2)` and not `io::stderr()`, whose `EBADF` the
+                // runtime reports back as success: upstream gives status 4 for
+                // `sed 'w /dev/stderr' f 2>&-` and for `2>/dev/full`, and it
+                // can only be 4 here if the failure is visible to the caller.
+                let mut line = Vec::with_capacity(bytes.len().saturating_add(2));
+                if w.owed {
+                    line.push(sep);
                 }
+                line.extend_from_slice(bytes);
+                if had_sep {
+                    line.push(sep);
+                }
+                w.owed = !had_sep;
+                coreutils::stdfd::write_all(2, &line)
+            }
+            WTarget::File(f) => {
+                let mut o = Out {
+                    w: f,
+                    sep,
+                    owed: w.owed,
+                };
+                let r = o.line(bytes, had_sep);
+                let owed = o.owed;
+                w.owed = owed;
+                r
             }
         }
-        if let Some(f) = w.file.as_mut() {
-            f.write_all(bytes)?;
-            f.write_all(b"\n")?;
-        }
-        Ok(())
     }
 
     fn flush_appends(&mut self, out: &mut Out<'_>) -> io::Result<()> {
@@ -1800,10 +1879,9 @@ fn main() {
 
     let script_text = match collect_script(&parsed.script_parts) {
         Ok(s) => s,
-        Err(e) => {
-            diag!("sed: {e}");
-            process::exit(1);
-        }
+        // Not status 1: the command line was well formed, and a `-f` file that
+        // will not open is an I/O failure like any other.
+        Err(e) => panic_out(&e),
     };
 
     let script = match compile_script(&script_text, parsed.ere) {
@@ -1817,129 +1895,164 @@ fn main() {
         }
     };
 
-    let suppress = parsed.suppress || script.suppress;
-    let sep = if parsed.null_data { 0 } else { b'\n' };
+    // `-i` rewrites the files it is given, so with none it has nothing to
+    // mean; upstream refuses rather than quietly editing standard input.
+    if parsed.in_place.is_some() && parsed.files.is_empty() {
+        panic_out("no input files");
+    }
+
     let mut files = parsed.files.clone();
     if files.is_empty() {
         files.push("-".to_string());
     }
 
+    let mut job = Job {
+        script: &script,
+        // Opened before a line is read, and once for the whole run.
+        wfiles: open_wfiles(&script.wfiles),
+        suppress: parsed.suppress || script.suppress,
+        sep: if parsed.null_data { 0 } else { b'\n' },
+    };
+
     let status = if let Some(suffix) = parsed.in_place.as_ref() {
-        run_in_place(&script, &files, suppress, sep, suffix)
+        job.in_place(&files, suffix)
     } else if parsed.separate {
-        run_separate(&script, &files, suppress, sep)
+        job.separate(&files)
     } else {
-        run_joined(&script, &files, suppress, sep)
+        job.joined(&files)
     };
     process::exit(status);
 }
 
-/// Wire one `Input` to one `Out` and run the script over it.
-fn run_one(
-    script: &Script,
-    input: &mut Input,
-    sink: &mut dyn Write,
+/// Everything a run needs that does not change from one input file to the next.
+///
+/// The `w` targets live here rather than in [`Exec`] because an `Exec` is built
+/// per input file under `-s` and `-i`, and a `w` target must not be reopened —
+/// and so truncated — when the next file starts.
+struct Job<'a> {
+    script: &'a Script,
+    wfiles: Vec<WFile>,
     suppress: bool,
     sep: u8,
-) -> (Option<i32>, bool) {
-    let mut exec = Exec::new(script, suppress);
-    let mut out = Out {
-        w: sink,
-        sep,
-        owed: false,
-    };
-    let quit = match exec.cycle(&script.cmds, input, &mut out) {
-        Ok(q) => q,
-        Err(Stop::Io(e)) => {
-            // A closed pipe is how `sed … | head` ends, and is not a failure.
-            if e.kind() != io::ErrorKind::BrokenPipe {
-                diag!("sed: couldn't write: {}", strerror(&e));
-                return (Some(4), true);
+}
+
+impl Job<'_> {
+    /// Wire one `Input` to one `Out` and run the script over it.
+    fn run_one(&mut self, input: &mut Input, sink: &mut dyn Write) -> (Option<i32>, bool) {
+        let mut exec = Exec::new(self.script, self.suppress, &mut self.wfiles);
+        let mut out = Out {
+            w: sink,
+            sep: self.sep,
+            owed: false,
+        };
+        let quit = match exec.cycle(&self.script.cmds, input, &mut out) {
+            Ok(q) => q,
+            Err(Stop::Io(e)) => {
+                // A closed pipe is how `sed … | head` ends, not a failure.
+                if e.kind() != io::ErrorKind::BrokenPipe {
+                    diag!("sed: couldn't write: {}", strerror(&e));
+                    return (Some(EXIT_PANIC), true);
+                }
+                None
             }
-            None
-        }
-        // Not "couldn't write": the run stopped because a search was
-        // abandoned, and sending the reader to the disk would waste their time.
-        Err(Stop::Limit(e)) => {
-            diag!("sed: {e}");
-            return (Some(4), true);
-        }
-    };
-    (quit, exec.had_error)
-}
-
-/// All the files as one stream: line numbers and `$` run across them.
-fn run_joined(script: &Script, files: &[String], suppress: bool, sep: u8) -> i32 {
-    let stdout = io::stdout();
-    let mut sink = stdout.lock();
-    let mut input = Input::new(files.to_vec(), sep);
-    let (quit, exec_err) = run_one(script, &mut input, &mut sink, suppress, sep);
-    let _ = sink.flush();
-    status(quit, input.had_error || exec_err)
-}
-
-/// `-s`: each file starts again at line 1, and each has its own last line.
-fn run_separate(script: &Script, files: &[String], suppress: bool, sep: u8) -> i32 {
-    let stdout = io::stdout();
-    let mut sink = stdout.lock();
-    let mut bad = false;
-    for path in files {
-        let mut input = Input::new(vec![path.clone()], sep);
-        let (quit, exec_err) = run_one(script, &mut input, &mut sink, suppress, sep);
-        bad = bad || input.had_error || exec_err;
-        if let Some(code) = quit {
-            let _ = sink.flush();
-            return status(Some(code), bad);
-        }
+            // Not "couldn't write": the run stopped because a search was
+            // abandoned, and sending the reader to the disk would waste their
+            // time.
+            Err(Stop::Limit(e)) => {
+                diag!("sed: {e}");
+                return (Some(EXIT_PANIC), true);
+            }
+        };
+        (quit, exec.had_error)
     }
-    let _ = sink.flush();
-    status(None, bad)
-}
 
-/// `-i`: the output of each file replaces it.
-///
-/// The result is built in memory and written once, so a script that fails
-/// part-way through does not leave the file half-edited.
-fn run_in_place(script: &Script, files: &[String], suppress: bool, sep: u8, suffix: &str) -> i32 {
-    let mut bad = false;
-    for path in files {
-        if path == "-" {
-            diag!("sed: no input files while in-place editing");
-            bad = true;
-            continue;
-        }
-        if let Err(e) = File::open(path) {
-            diag!("sed: can't read {path}: {}", strerror(&e));
-            bad = true;
-            continue;
-        }
-        let mut buf: Vec<u8> = Vec::new();
-        let mut input = Input::new(vec![path.clone()], sep);
-        let (quit, exec_err) = run_one(script, &mut input, &mut buf, suppress, sep);
-        bad = bad || input.had_error || exec_err;
+    /// All the files as one stream: line numbers and `$` run across them.
+    fn joined(&mut self, files: &[String]) -> i32 {
+        let stdout = io::stdout();
+        let mut sink = stdout.lock();
+        let mut input = Input::new(files.to_vec(), self.sep);
+        let (quit, exec_err) = self.run_one(&mut input, &mut sink);
+        let _ = sink.flush();
+        status(quit, input.had_error || exec_err)
+    }
 
-        if !suffix.is_empty() {
-            // GNU puts the file name where a `*` is, and appends otherwise.
-            let backup = if suffix.contains('*') {
-                suffix.replace('*', path)
-            } else {
-                format!("{path}{suffix}")
-            };
-            if let Err(e) = fs::copy(path, &backup) {
-                diag!("sed: cannot back up {path}: {}", strerror(&e));
+    /// `-s`: each file starts again at line 1, and each has its own last line.
+    fn separate(&mut self, files: &[String]) -> i32 {
+        let stdout = io::stdout();
+        let mut sink = stdout.lock();
+        let mut bad = false;
+        for path in files {
+            let mut input = Input::new(vec![path.clone()], self.sep);
+            let (quit, exec_err) = self.run_one(&mut input, &mut sink);
+            bad = bad || input.had_error || exec_err;
+            if let Some(code) = quit {
+                let _ = sink.flush();
+                return status(Some(code), bad);
+            }
+        }
+        let _ = sink.flush();
+        status(None, bad)
+    }
+
+    /// `-i`: the output of each file replaces it.
+    ///
+    /// The result is built in memory and written once, so a script that fails
+    /// part-way through does not leave the file half-edited.
+    fn in_place(&mut self, files: &[String], suffix: &str) -> i32 {
+        let mut bad = false;
+        for path in files {
+            // A `-` operand is a file named `-`, not standard input: there is
+            // no way to rewrite a stream in place, so it gets no special case
+            // and fails as any missing file would.
+            match File::open(path) {
+                Err(e) => {
+                    diag!("sed: can't read {path}: {}", strerror(&e));
+                    bad = true;
+                    continue;
+                }
+                // A directory opens happily and then fails to read, which
+                // would end the run with a confusing "read error". Refusing
+                // anything that is not a regular file names the real problem.
+                Ok(f) => match f.metadata() {
+                    Ok(m) if !m.is_file() => {
+                        panic_out(&format!("couldn't edit {path}: not a regular file"));
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        diag!("sed: can't read {path}: {}", strerror(&e));
+                        bad = true;
+                        continue;
+                    }
+                },
+            }
+            let mut buf: Vec<u8> = Vec::new();
+            let mut input = Input::new(vec![path.clone()], self.sep);
+            let (quit, exec_err) = self.run_one(&mut input, &mut buf);
+            bad = bad || input.had_error || exec_err;
+
+            if !suffix.is_empty() {
+                // GNU puts the file name where a `*` is, and appends otherwise.
+                let backup = if suffix.contains('*') {
+                    suffix.replace('*', path)
+                } else {
+                    format!("{path}{suffix}")
+                };
+                if let Err(e) = fs::copy(path, &backup) {
+                    diag!("sed: cannot back up {path}: {}", strerror(&e));
+                    bad = true;
+                    continue;
+                }
+            }
+            if let Err(e) = fs::write(path, &buf) {
+                diag!("sed: couldn't write {path}: {}", strerror(&e));
                 bad = true;
-                continue;
+            }
+            if let Some(code) = quit {
+                return status(Some(code), bad);
             }
         }
-        if let Err(e) = fs::write(path, &buf) {
-            diag!("sed: couldn't write {path}: {}", strerror(&e));
-            bad = true;
-        }
-        if let Some(code) = quit {
-            return status(Some(code), bad);
-        }
+        status(None, bad)
     }
-    status(None, bad)
 }
 
 fn status(quit: Option<i32>, bad: bool) -> i32 {
@@ -1979,6 +2092,7 @@ mod tests {
         let mut inp = Input {
             paths: Vec::new(),
             next_path: 0,
+            cur_name: "stdin".to_string(),
             cur: Some(Box::new(BufReader::new(io::Cursor::new(
                 input.as_bytes().to_vec(),
             )))),
@@ -1986,13 +2100,13 @@ mod tests {
             sep: b'\n',
             had_error: false,
         };
-        run_one(
-            &compiled,
-            &mut inp,
-            &mut sink,
-            suppress || compiled.suppress,
-            b'\n',
-        );
+        let mut job = Job {
+            script: &compiled,
+            wfiles: open_wfiles(&compiled.wfiles),
+            suppress: suppress || compiled.suppress,
+            sep: b'\n',
+        };
+        job.run_one(&mut inp, &mut sink);
         String::from_utf8_lossy(&sink).into_owned()
     }
 
@@ -2048,12 +2162,19 @@ mod tests {
         let mut inp = Input {
             paths: Vec::new(),
             next_path: 0,
+            cur_name: "stdin".to_string(),
             cur: Some(Box::new(BufReader::new(io::Cursor::new(line.into_bytes())))),
             peeked: None,
             sep: b'\n',
             had_error: false,
         };
-        let (status, _) = run_one(&compiled, &mut inp, &mut sink, false, b'\n');
+        let mut job = Job {
+            script: &compiled,
+            wfiles: Vec::new(),
+            suppress: false,
+            sep: b'\n',
+        };
+        let (status, _) = job.run_one(&mut inp, &mut sink);
         assert_eq!(status, Some(4), "a declined search must fail the run");
         assert!(
             sink.is_empty(),
@@ -2304,12 +2425,19 @@ mod tests {
         let mut inp = Input {
             paths: Vec::new(),
             next_path: 0,
+            cur_name: "stdin".to_string(),
             cur: Some(Box::new(BufReader::new(io::Cursor::new(raw)))),
             peeked: None,
             sep: b'\n',
             had_error: false,
         };
-        run_one(&compiled, &mut inp, &mut sink, false, b'\n');
+        let mut job = Job {
+            script: &compiled,
+            wfiles: Vec::new(),
+            suppress: false,
+            sep: b'\n',
+        };
+        job.run_one(&mut inp, &mut sink);
         assert_eq!(sink, vec![0xff, b'a', b'B', 0xfe, b'\n']);
     }
 

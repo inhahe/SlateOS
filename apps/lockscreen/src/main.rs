@@ -1158,7 +1158,7 @@ impl LockScreen {
             // "reject" and is right by accident: it collapses "wrong password"
             // and "nothing here can check a password" into one answer, and the
             // second needs an administrator rather than another guess.
-            AuthOutcome::Rejected,
+            AuthOutcome::Unusable,
             |authority| authority.authenticate(&username, self.password_buffer.as_bytes()),
         );
         self.settle(outcome)
@@ -2735,6 +2735,48 @@ mod tests {
         assert_eq!(
             *seen.borrow(),
             vec![("alice".to_string(), b"hunter2".to_vec())]
+        );
+    }
+
+    #[test]
+    fn the_password_reaches_the_authority_exactly_as_it_was_typed() {
+        // Every other password in this file is lowercase ASCII -- "hunter2",
+        // "correcthorse", a run of 'x' -- so a screen that folded the case or
+        // re-encoded the text on its way out would pass all of them, while
+        // locking every user with a capital letter out of their own machine.
+        // The reintroduction sweep found exactly that: substituting
+        // `password_buffer.to_lowercase().as_bytes()` for
+        // `password_buffer.as_bytes()` failed no test.
+        //
+        // So this one types something no accident survives: two capitals, a
+        // multi-byte character and a symbol. The expected value is spelled as
+        // an explicit byte string rather than `"...".as_bytes()`, so that a
+        // mangling cannot be made to pass by editing the source literal to
+        // match it.
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut ls = LockScreen::new(
+            vec![UserInfo::new("alice", "Alice Johnson", true)],
+            LockScreenConfig::default(),
+            Some(Box::new(FakeAuthority::recording(
+                AuthOutcome::Rejected,
+                Rc::clone(&seen),
+            ))),
+        );
+        ls.enter_password_mode();
+        for ch in "PaSSwörd!".chars() {
+            ls.type_char(ch);
+        }
+        ls.submit_password();
+
+        assert_eq!(
+            seen.borrow().len(),
+            1,
+            "one submission must ask exactly once"
+        );
+        assert_eq!(
+            seen.borrow()[0].1,
+            b"PaSSw\xc3\xb6rd!".to_vec(),
+            "the password must arrive as it was typed, case and encoding included"
         );
     }
 

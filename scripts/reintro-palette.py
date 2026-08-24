@@ -22289,23 +22289,13 @@ DEFECTS = [
             'the_knob_is_legible_on_both_pills',
         ],
     ),
-    (
-        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the ink chooser's threshold drifts five points up",
-        APP,
-        [
-            ('    if luma > 140.0 {\n',
-             '    if luma > 145.0 {\n'),
-        ],
-        ["appearance", "desktop"],
-        [
-            # Deliberately narrow: only light overlay1 (luma 144.15) and light
-            # lavender (142.17) sit in the five-point window, so this fails only
-            # for a test that sweeps every role or every accent in light mode. A
-            # test that checks one hand-picked colour would not notice.
-            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
-            'the_knob_is_legible_on_every_track_a_panel_can_choose',
-        ],
-    ),
+    # RETIRED by 536: `readable_on` has no threshold left to drift. It now
+    # compares the two candidate inks by contrast ratio, so the constant this
+    # defect moved does not exist. It was never observable in any case -- the
+    # palette colours nearest 140 are luma 133 and 161, so a five-point drift
+    # changed no verdict, and the sweep of 2026-08-24 duly recorded it as the
+    # module's one escape. Its replacement is Ax81, which puts the whole luma
+    # rule back rather than nudging a number inside it.
     (
         "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a slider thumb hangs off the bottom of its own track",
         SLIDER,
@@ -22349,9 +22339,15 @@ DEFECTS = [
         [
             # This is the touchpad bug (1.00:1) generalised to all five sliders.
             'the_thumb_is_legible_against_every_card_it_can_sit_on',
-            'text_beats_readable_on_the_fill_against_the_card',
             'every_control_that_offers_something_follows_the_accent',
             'the_thumb_does_not_follow_the_fill_it_ends',
+            # `text_beats_readable_on_the_fill_against_the_card` was declared
+            # here and the sweep of 2026-08-24 recorded it as MISSING. Correctly
+            # so, and the declaration was the error: that test renders nothing.
+            # It compares two palette values -- contrast(base, text) against
+            # contrast(base, readable_on(fill)) -- to establish *why* the thumb
+            # uses `text`, so no change to what the thumb is actually drawn with
+            # can reach it. It is the rule's premise, not its witness.
         ],
     ),
     (
@@ -22367,9 +22363,11 @@ DEFECTS = [
             # switch.rs. On Mocha it inks the thumb #11111B -- 1.1:1 against a
             # base card. Containment, not consistency, decides the rule.
             'the_thumb_is_legible_against_every_card_it_can_sit_on',
-            'text_beats_readable_on_the_fill_against_the_card',
             'every_control_that_offers_something_follows_the_accent',
             'the_thumb_does_not_follow_the_fill_it_ends',
+            # Not `text_beats_readable_on_the_fill_against_the_card`, for the
+            # reason given under GGG...x80 above: it renders no slider, so a
+            # change to the thumb's colour is invisible to it.
         ],
     ),
     (
@@ -22385,8 +22383,16 @@ DEFECTS = [
             # number but it is light overlay1's own value, and a duplicate would
             # trip the palette's distinctness tests for the wrong reason.
             'the_thumb_is_legible_against_every_card_it_can_sit_on',
-            'text_beats_readable_on_the_fill_against_the_card',
             'every_role_a_user_reads_is_legible_on_the_base_of_its_own_palette',
+            # `text_beats_readable_on_the_fill_against_the_card` was declared
+            # here too, and was MISSING for a subtler reason than under
+            # GGG...x80: it *does* read LIGHT_TEXT. But the value it compares
+            # the drifted ink against is contrast(base, readable_on(fill)), and
+            # on the light palette `readable_on` of any preset accent returns
+            # LIGHT_EXTREME -- which is the light base's own value. So the
+            # right-hand side is 1.00:1, and even a 2.90:1 ink beats it. The
+            # test constrains the ink from below only as far as the base itself,
+            # which is not far enough to see this.
         ],
     ),
     (
@@ -22464,6 +22470,196 @@ DEFECTS = [
             # that proves nothing. A full fill covers the track exactly, which
             # is the erasure the test is named for.
             'the_panel_draws_nothing_that_is_immediately_erased',
+        ],
+    ),
+    # ---------------------------------------------------------------- 51
+    # 536: `readable_on` stops estimating brightness and measures contrast.
+    #
+    # The rule it replaced could not be broken observably -- see the retired
+    # Dx80 above -- because a luma threshold is only ever as constrained as the
+    # colours that happen to sit near it, and none did. What replaced it is
+    # constrained by the whole 24-bit cube, so every way of getting it wrong
+    # below is caught by something.
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the ink chooser goes back to estimating brightness from a luma sum",
+        APP,
+        [
+            ('    if contrast_ratio(bg, DARK_EXTREME) >= contrast_ratio(bg, LIGHT_EXTREME) {\n',
+             '    if 0.299 * f32::from(bg.r) + 0.587 * f32::from(bg.g) + 0.114 * f32::from(bg.b) > 140.0 {\n'),
+        ],
+        ["appearance", "desktop"],
+        [
+            # The exact code 536 removed. A luma sum agrees with the ratio on
+            # every colour in the shell's own palettes, so nothing that walks a
+            # palette can see this -- only the cube walk, and the one colour
+            # kept as a named case, look anywhere it is wrong.
+            'the_chosen_ink_is_the_more_legible_of_the_two_for_any_colour_at_all',
+            'a_bright_green_custom_accent_does_not_get_pale_ink',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the ink chooser returns whichever of the two inks is harder to read",
+        APP,
+        [
+            ('    if contrast_ratio(bg, DARK_EXTREME) >= contrast_ratio(bg, LIGHT_EXTREME) {\n',
+             '    if contrast_ratio(bg, DARK_EXTREME) < contrast_ratio(bg, LIGHT_EXTREME) {\n'),
+        ],
+        ["appearance", "desktop"],
+        [
+            # One character. Unlike the luma rule this is wrong for *every*
+            # colour, so the two fixtures 536 taught to assert their own
+            # premise are expected to be among the first to say so.
+            'the_chosen_ink_is_the_more_legible_of_the_two_for_any_colour_at_all',
+            'a_bright_green_custom_accent_does_not_get_pale_ink',
+            'readable_on_answers_with_the_palettes_own_extremes',
+            'green_means_on_and_the_accent_means_chosen',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'the_knob_is_legible_on_every_track_a_panel_can_choose',
+            # Everything below was found by the sweep of 2026-08-24, not
+            # predicted: an ink rule that is wrong for every colour is
+            # visible from every site that inks anything, so the blast
+            # radius is the whole shell. Recorded in full so that a
+            # *shrinking* radius shows up as a regression in coverage.
+            'a_category_with_no_default_app_is_not_accented_as_if_it_had_one',
+            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
+            'a_title_is_readable_on_every_bar_the_settings_can_produce',
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+            'an_accented_taskbar_keeps_its_glyph_visible',
+            'an_empty_search_box_is_dimmer_than_a_typed_query',
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'every_colour_the_popup_draws_comes_from_its_palette',
+            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_pairing_the_calendar_draws_clears_the_contrast_floor',
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+            'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'test_ui_render_audio',
+            'test_ui_render_input',
+            'test_ui_render_magnifier',
+            'test_ui_render_reader',
+            'test_ui_render_visual',
+            'test_ui_render_with_active_features',
+            'text_beats_readable_on_the_fill_against_the_card',
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+            'the_active_feature_line_is_green_and_only_drawn_when_there_is_one',
+            'the_content_well_is_deeper_than_the_panel_it_sits_in',
+            'the_crosshairs_are_legible_on_the_lens_in_both_modes',
+            'the_knob_follows_the_track_rather_than_the_theme',
+            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'the_section_headings_keep_their_hue_in_both_modes',
+            'the_wordmark_is_legible_on_the_logo_tile',
+            'what_is_drawn_on_the_accent_is_chosen_for_the_accent',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: luminance is read straight off the stored bytes, skipping the sRGB curve",
+        APP,
+        [
+            ('        if v <= 0.039_28 {\n            v / 12.92\n        } else {\n            ((v + 0.055) / 1.055).powf(2.4)\n        }\n',
+             '        v\n'),
+        ],
+        ["appearance", "desktop"],
+        [
+            # The plausible simplification: the weights are still there, only
+            # the un-gamma-ing is gone. It moves the crossover from a true
+            # luminance of 0.178 to 0.071, which flips eighteen of the fifty
+            # palette constants -- every light accent among them -- so unlike
+            # the luma rule this one is caught by anything walking a palette.
+            'the_published_ratios_are_what_this_crate_computes',
+            'the_chosen_ink_is_the_more_legible_of_the_two_for_any_colour_at_all',
+            'a_title_is_readable_on_every_bar_the_settings_can_produce',
+            'the_knob_is_legible_on_every_track_a_panel_can_choose',
+            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
+            # Everything below was found by the sweep of 2026-08-24. The
+            # eighteen constants that flip are concentrated in the light
+            # palette, which is why the mode-sensitive tests dominate.
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'an_accented_taskbar_keeps_its_glyph_visible',
+            'each_badges_mark_can_be_read_on_the_badge',
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'every_colour_the_popup_draws_comes_from_its_palette',
+            'every_pairing_the_calendar_draws_clears_the_contrast_floor',
+            'every_site_changes_when_the_mode_does',
+            'green_means_on_and_the_accent_means_chosen',
+            'text_beats_readable_on_the_fill_against_the_card',
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+            'the_wordmark_is_legible_on_the_logo_tile',
+            'what_is_drawn_on_the_accent_is_chosen_for_the_accent',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the contrast ratio is computed upside down, dividing the darker by the lighter",
+        APP,
+        [
+            ('    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };\n',
+             '    let (hi, lo) = if la > lb { (lb, la) } else { (la, lb) };\n'),
+        ],
+        ["appearance", "desktop"],
+        [
+            # Returns the reciprocal, so every floor assertion in the tree
+            # compares a number below 1.0 against 3.0 or 4.5 -- and
+            # `readable_on`, picking the larger of two reciprocals, returns the
+            # worse ink every time. The definitional anchors are what name it:
+            # black on white is 21:1 by definition and would read 0.05:1.
+            'the_published_ratios_are_what_this_crate_computes',
+            'the_chosen_ink_is_the_more_legible_of_the_two_for_any_colour_at_all',
+            'a_bright_green_custom_accent_does_not_get_pale_ink',
+            'green_means_on_and_the_accent_means_chosen',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'the_knob_is_legible_on_every_track_a_panel_can_choose',
+            # Everything below was found by the sweep of 2026-08-24. A
+            # reciprocal ratio fails every floor assertion in the tree at
+            # once, so this is the widest blast radius of the four.
+            'a_category_with_no_default_app_is_not_accented_as_if_it_had_one',
+            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
+            'a_title_is_readable_on_every_bar_the_settings_can_produce',
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+            'an_accented_taskbar_keeps_its_glyph_visible',
+            'an_empty_search_box_is_dimmer_than_a_typed_query',
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'every_colour_the_popup_draws_comes_from_its_palette',
+            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_pairing_the_calendar_draws_clears_the_contrast_floor',
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+            'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'readable_on_answers_with_the_palettes_own_extremes',
+            'test_ui_render_audio',
+            'test_ui_render_input',
+            'test_ui_render_magnifier',
+            'test_ui_render_reader',
+            'test_ui_render_visual',
+            'test_ui_render_with_active_features',
+            'text_beats_readable_on_the_fill_against_the_card',
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+            'the_active_feature_line_is_green_and_only_drawn_when_there_is_one',
+            'the_content_well_is_deeper_than_the_panel_it_sits_in',
+            'the_crosshairs_are_legible_on_the_lens_in_both_modes',
+            'the_knob_follows_the_track_rather_than_the_theme',
+            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'the_section_headings_keep_their_hue_in_both_modes',
+            'the_wordmark_is_legible_on_the_logo_tile',
+            'what_is_drawn_on_the_accent_is_chosen_for_the_accent',
         ],
     ),
 ]

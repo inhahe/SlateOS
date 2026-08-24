@@ -2532,15 +2532,22 @@ fn execute_select(variable: &str, words_raw: &str, body: &[String]) {
     LOOP_BREAK.store(false, core::sync::atomic::Ordering::Relaxed);
 
     // Limit iterations to prevent infinite loops.
+    //
+    // Everything printed by this loop goes to the console rather than through
+    // `shell_println!`, and that is deliberate: the menu, the `#? ` prompt and
+    // the keystroke echo are terminal *interaction*, not the command's output.
+    // Bash sends select's menu and prompt to stderr and lets the tty echo the
+    // keys, so none of it appears in `x=$(select …)`. Capturing them would put
+    // the menu, the prompt and the user's own typing into the value.
     for _ in 0..100_u32 {
         // Display numbered menu.
         for (i, word) in words.iter().enumerate() {
-            shell_println!("{}) {}", i + 1, word);
+            crate::console_println!("{}) {}", i + 1, word);
         }
 
         // Prompt for selection.
         use crate::keyboard;
-        shell_print!("#? ");
+        crate::console_print!("#? ");
 
         // Read a line of input (reusing the simple line-reading approach).
         let mut buf = [0u8; 64];
@@ -2548,20 +2555,20 @@ fn execute_select(variable: &str, words_raw: &str, body: &[String]) {
         loop {
             let byte = keyboard::read_char();
             if byte == b'\n' || byte == b'\r' {
-                shell_print!("\n");
+                crate::console_print!("\n");
                 break;
             }
             if byte == 0x08 || byte == 0x7F {
                 // Backspace.
                 if len > 0 {
                     len -= 1;
-                    shell_print!("\x08 \x08");
+                    crate::console_print!("\x08 \x08");
                 }
                 continue;
             }
             if byte == 3 {
                 // Ctrl+C — cancel.
-                shell_println!();
+                crate::console_println!();
                 LOOP_BREAK.store(true, core::sync::atomic::Ordering::Relaxed);
                 break;
             }
@@ -2569,7 +2576,7 @@ fn execute_select(variable: &str, words_raw: &str, body: &[String]) {
                 if len < buf.len() {
                     buf[len] = byte;
                     len += 1;
-                    shell_print!("{}", byte as char);
+                    crate::console_print!("{}", byte as char);
                 }
             }
         }
@@ -3393,9 +3400,15 @@ impl<'a> Iterator for HistoryIter<'a> {
 /// This function never returns.  It prints a prompt, reads a line,
 /// executes the command, and repeats.
 pub fn run() -> ! {
-    shell_println!("");
-    shell_println!("Kernel debug shell. Type 'help' for commands.");
-    shell_println!("");
+    // The banner and, below, the prompt are console writes rather than
+    // `shell_println!` because they are the terminal's own furniture, not any
+    // command's output. No capture can be active in this loop today, so the
+    // two would behave identically — but writing them through the shell writer
+    // would encode the claim that a prompt is something a caller might want to
+    // receive, and it is not.
+    crate::console_println!("");
+    crate::console_println!("Kernel debug shell. Type 'help' for commands.");
+    crate::console_println!("");
 
     // Initialize cwd.
     {
@@ -3424,10 +3437,10 @@ pub fn run() -> ! {
             || FUNC_COLLECTOR.lock().is_some()
             || CASE_COLLECTOR.lock().is_some();
         if collecting {
-            shell_print!("> ");
+            crate::console_print!("> ");
         } else {
             let cwd = get_cwd();
-            shell_print!("{}> ", cwd.display());
+            crate::console_print!("{}> ", cwd.display());
         }
 
         // Read a line (blocking on keyboard).
@@ -97488,8 +97501,13 @@ fn cmd_read(args: &str) {
     }
 
     // Print prompt if specified.
+    //
+    // The prompt and the keystroke echo below go to the console, not through
+    // the shell writer: bash sends `read -p`'s prompt to stderr and lets the
+    // tty echo the keys, so neither belongs in `x=$(read -p "name: " n)`. The
+    // value `read` produces is the variable it sets, not anything it printed.
     if let Some(p) = prompt {
-        shell_print!("{}", p);
+        crate::console_print!("{}", p);
     }
 
     // Read a line from keyboard input.
@@ -97500,19 +97518,19 @@ fn cmd_read(args: &str) {
         let byte = crate::keyboard::read_char();
         match byte {
             b'\r' | b'\n' => {
-                shell_println!();
+                crate::console_println!();
                 break;
             }
             0x7F | 0x08 => {
                 // Backspace.
                 if len > 0 {
                     len -= 1;
-                    shell_print!("\x08 \x08");
+                    crate::console_print!("\x08 \x08");
                 }
             }
             3 => {
                 // Ctrl+C — cancel.
-                shell_println!();
+                crate::console_println!();
                 set_exit(1);
                 return;
             }
@@ -97520,7 +97538,7 @@ fn cmd_read(args: &str) {
                 if len < MAX_LINE {
                     buf[len] = byte;
                     len += 1;
-                    shell_print!("{}", byte as char);
+                    crate::console_print!("{}", byte as char);
                 }
             }
         }

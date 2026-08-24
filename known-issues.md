@@ -72324,13 +72324,25 @@ nothing capturing — the local interactive case — the two writers are the sam
 writer. The change is a no-op locally and a fix everywhere else, which is why
 it could be applied to all 2,334 sites at once rather than audited one by one.
 
-**One deliberate exclusion**, and it is not an oversight: `execute:5537`, the
-`+ {}` line printed when `set -x` is on. Bash sends xtrace to *stderr*, which
-`$(…)` does not capture. Routing it through the shell writer would make
-`x=$(echo hi)` evaluate to `"+ echo hi\nhi"` — turning on tracing would
-silently corrupt every captured value in the script being traced. The site
-carries a comment saying so, and self-test §17 asserts it, so nobody
-"finishes the conversion" later.
+**17 sites stay on the console, and the rule separating them is not "these
+happened to be console calls" but *terminal interaction is not output*.** A
+prompt, a menu and the echo of the user's own keystrokes are the terminal's
+furniture; they are not something a caller asked for and must never appear in
+a captured value. Bash agrees: it puts all of them on stderr or leaves them to
+the tty.
+
+| kept on the console | why |
+|---|---|
+| `execute` — the `+ {}` xtrace line | Bash sends xtrace to stderr. Capturing it would make `x=$(echo hi)` evaluate to `"+ echo hi\nhi"`, so *turning on tracing would silently corrupt every captured value in the script being traced.* |
+| `execute_select` × 6 — the numbered menu, the `#? ` prompt, backspace and character echo | `x=$(select …)` would otherwise contain the menu, the prompt and the user's typing. |
+| `cmd_read` × 5 — the `-p` prompt, backspace and character echo | `read`'s result is the variable it sets, not anything it printed. |
+| `run` × 5 — the startup banner and the `> ` / `cwd> ` prompt | No capture can be active in the REPL loop, so behaviour is identical either way — but routing a prompt through the shell writer would encode the claim that a prompt is something a caller might want, and it is not. |
+
+The `cmd_read` five were *already* `shell_print!` before this change and were
+wrong in the pre-existing code, not broken by the sweep; they are corrected
+here because the rule is being written down here. Each group carries a comment
+at the site, and self-test §17 asserts the xtrace case, so nobody "finishes
+the conversion" later.
 
 **Covered by** kshell self-test §17: a command body reaching the capture
 (`cgroup`), a usage diagnostic from inside the same command

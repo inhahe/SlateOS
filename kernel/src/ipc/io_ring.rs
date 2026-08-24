@@ -1287,13 +1287,22 @@ fn exec_sleep(sqe: &SqEntry) -> i64 {
 
 /// Run io_ring self-tests (early boot — no filesystem available).
 pub fn self_test() -> KernelResult<()> {
+    // The two file-handle sections cannot run here — this entry point is
+    // called before /tmp exists — so their skips are expected.  They are
+    // still reported, because "expected" and "invisible" are different
+    // things: `self_test_fh` below re-runs them once /tmp is mounted, and
+    // if *that* call ever stopped happening the only evidence would be
+    // these two lines never being followed by an OK.
+    let mut skips = crate::fs::selftest::Skips::new();
+
     test_ring_create_destroy()?;
     test_nop_submission()?;
     test_console_write_batch()?;
-    test_fh_read_write()?;
-    test_fh_positioned_io_leaves_the_cursor_alone()?;
+    test_fh_read_write(&mut skips)?;
+    test_fh_positioned_io_leaves_the_cursor_alone(&mut skips)?;
     test_timeout_and_service()?;
 
+    skips.report("[io_ring]");
     Ok(())
 }
 
@@ -1302,8 +1311,11 @@ pub fn self_test() -> KernelResult<()> {
 /// This is called separately from main self_test() because it requires
 /// /tmp to be mounted, which happens later in the boot sequence.
 pub fn self_test_fh() -> KernelResult<()> {
-    test_fh_read_write()?;
-    test_fh_positioned_io_leaves_the_cursor_alone()
+    let mut skips = crate::fs::selftest::Skips::new();
+    test_fh_read_write(&mut skips)?;
+    test_fh_positioned_io_leaves_the_cursor_alone(&mut skips)?;
+    skips.report("[io_ring]");
+    Ok(())
 }
 
 /// Test 1: Create and destroy a ring.
@@ -1511,14 +1523,26 @@ fn test_console_write_batch() -> KernelResult<()> {
 ///
 /// Skipped if no filesystem is mounted yet (io_ring self-test runs
 /// before VFS init in the boot sequence).
-fn test_fh_read_write() -> KernelResult<()> {
-    // Check if /tmp is available.  If no filesystem is mounted yet
-    // (io_ring self-test runs early in boot), skip gracefully.
+fn test_fh_read_write(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
+    // Ask the mount table whether /tmp exists, rather than inferring it from
+    // a failed write.  The old form skipped on *any* write failure, so a VFS
+    // that had regressed to rejecting every write would have read as a clean
+    // early-boot run — and this file's whole purpose is to prove that reads
+    // and writes issued through a ring reach the filesystem.
     let test_path = "/tmp/io_ring_test";
-    let test_data = b"io_ring file handle test data 1234567890";
-    if crate::fs::Vfs::write_file(test_path, test_data).is_err() {
-        serial_println!("[io_ring]   File handle read/write: SKIPPED (no FS)");
+    if !crate::fs::selftest::is_mounted("/tmp") {
+        skips.record(
+            "File handle read/write",
+            "/tmp is not mounted yet (running before filesystem init)",
+        );
         return Ok(());
+    }
+    let test_data = b"io_ring file handle test data 1234567890";
+    if let Err(e) = crate::fs::Vfs::write_file(test_path, test_data) {
+        serial_println!(
+            "[io_ring]   FAIL: File handle read/write: /tmp is mounted but seeding {test_path} failed: {e:?}"
+        );
+        return Err(e);
     }
 
     // Open the file for read.
@@ -1622,10 +1646,21 @@ fn test_fh_read_write() -> KernelResult<()> {
 /// exactly what the seek sandwich could not guarantee.
 ///
 /// Skipped if no filesystem is mounted yet.
-fn test_fh_positioned_io_leaves_the_cursor_alone() -> KernelResult<()> {
+fn test_fh_positioned_io_leaves_the_cursor_alone(
+    skips: &mut crate::fs::selftest::Skips,
+) -> KernelResult<()> {
     use crate::fs::handle::{OpenFlags, SeekFrom};
 
     let test_path = "/tmp/io_ring_pio_test";
+    // See `test_fh_read_write`: the mount table, not a failed write, is what
+    // tells us whether the boot has reached filesystem init.
+    if !crate::fs::selftest::is_mounted("/tmp") {
+        skips.record(
+            "Positioned I/O (pread/pwrite)",
+            "/tmp is not mounted yet (running before filesystem init)",
+        );
+        return Ok(());
+    }
     // 26 bytes: byte i is b'A' + i, so any offset is self-identifying.
     let mut test_data = [0u8; 26];
     for (i, b) in test_data.iter_mut().enumerate() {
@@ -1634,9 +1669,11 @@ fn test_fh_positioned_io_leaves_the_cursor_alone() -> KernelResult<()> {
         // far worse outcome than a test that then fails its own assertion.
         *b = b'A'.wrapping_add(u8::try_from(i).unwrap_or(0));
     }
-    if crate::fs::Vfs::write_file(test_path, &test_data).is_err() {
-        serial_println!("[io_ring]   Positioned I/O (pread/pwrite): SKIPPED (no FS)");
-        return Ok(());
+    if let Err(e) = crate::fs::Vfs::write_file(test_path, &test_data) {
+        serial_println!(
+            "[io_ring]   FAIL: Positioned I/O: /tmp is mounted but seeding {test_path} failed: {e:?}"
+        );
+        return Err(e);
     }
 
     let fh = crate::fs::handle::open(test_path, OpenFlags::READ.union(OpenFlags::WRITE))?;

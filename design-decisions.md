@@ -39607,10 +39607,22 @@ before the build costs milliseconds against a ten-minute build, and exit 2
 (could not run at all) counts as failure, so a check that cannot fire is never
 mistaken for one that passed.
 
-**The cost, stated plainly.** The checker is textual: it matches
-`.is_ok()`/`.is_err()` inside a function whose name looks like a self-test, so
-the same defect spelled `if let Err(e) = ..` or `if let Ok(()) = ..` is
-invisible to it and was found by hand during the sweep. It also cannot tell a
+**The cost, stated plainly.** The checker is textual. It matches three
+spellings of the decision -- `.is_ok()`/`.is_err()`, `if let Ok(..)`/`if let
+Err(..)`, and a `match` arm whose pattern is a catch-all `Err(_)`/`Err(e)`
+(an arm naming *specific* errors is the approved form and stays exempt) -- and
+it examines not only functions whose *name* looks like a self-test but
+everything reachable from one by a same-file call, because a large suite is
+mostly helpers. Both of those started as narrowings, and each hid real
+instances: the name-only rule missed `io_ring`'s two file-handle sections,
+which skipped on a failed `/tmp` write and were caught by reading a boot log
+rather than by the gate.
+
+What remains invisible is a skip decided from an **integer errno** rather than
+a `Result` -- `if write_result.value < 0 { ..SKIPPED.. }`, in a test that drives
+the syscall dispatch table directly. Catching that needs dataflow, not a
+pattern: `x.value < 0` is ordinary code, and what makes it a defect is only
+that the value came from the code under test. The checker also cannot tell a
 precondition probe from a genuine assertion about a `Result`, which is why
 `ALLOW` exists -- currently empty, and it should stay a list with reasons rather
 than a habit. A false positive costs one entry in that map; a false *negative*

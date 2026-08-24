@@ -67948,12 +67948,46 @@ had to check into one the type system guarantees. `syscall/linux`'s
 that returned `Ok(())` on failure and silently abandoned the remaining
 sub-tests without printing anything at all.
 
-**Known blind spot.** The checker matches `.is_ok()`/`.is_err()` textually, so
-the same defect spelled `if let Err(e) = ..` or `if let Ok(()) = ..` is
-invisible to it; those instances were found by hand during the sweep and a new
-one would not be caught. Extending the checker to the `if let` forms is the
-outstanding work on this shape — it is a matter of teaching
-`check-selftest-skips.py` a second pattern, not of re-doing the sweep.
+**Addendum, 2026-08-23 — the checker was too narrow twice over, and both
+narrowings hid real instances.**
+
+It originally matched only `.is_ok()`/`.is_err()`, and it only examined
+functions whose *name* looked like a self-test. Fixing each of those turned up
+sites the first sweep had declared clean:
+
+| Narrowing | What it hid | Found |
+|---|---|---|
+| Only `.is_ok()`/`.is_err()` | `if let Ok(cg_id) = cgroup::create(..)` and `match alloc_frame() { .. Err(_) => SKIP }` | 142 sites, incl. all 6 cgroup sections of `mm/frame.rs` |
+| Only name-matched functions | a suite split across helpers — `io_ring`'s `test_fh_read_write` / `test_fh_positioned_io_leaves_the_cursor_alone`, both called from `self_test`, both skipping on a failed `/tmp` write | 2 sites, seen first in a boot log, not by the checker |
+
+The checker now also matches `if let Ok(..)`/`if let Err(..)` and a `match`
+arm whose pattern is a catch-all `Err(_)`/`Err(e)`; an arm naming *specific*
+errors stays exempt, since that is the approved form. And it takes the
+transitive closure over same-file calls out of every name-matched self-test,
+so a helper is checked exactly when a self-test can reach it — which also
+keeps `#[cfg(test)]` unit tests out, as nothing calls them. (That closure was
+first written pairwise and made the gate take 200 s, long enough that a boot
+test looked hung; extracting each body's callee names in one scan brought it
+to 22 s.)
+
+**Remaining blind spot: the skip decided from an integer errno.** Both rules
+key on a `Result`, so a syscall-level test that reads a negative return value
+is invisible:
+
+    // syscall/dispatch.rs, before the fix
+    let write_result = dispatch(SYS_FS_WRITE_FILE, &write_args);
+    if write_result.value < 0 {
+        serial_println!("[syscall]   Dispatch FS roundtrip: SKIPPED (no FS, err={})", ..);
+        return Ok(());
+    }
+
+That one is fixed (it asks `is_mounted_rw("/")` and now fails when a mounted
+`/` rejects the write), but a new one would not be caught. Detecting it
+textually is not obviously possible: `if x.value < 0` is ordinary code, and
+the thing that makes it a defect is that the value came from the code under
+test — which needs dataflow, not a pattern. The practical mitigation is that
+this spelling only arises where a test drives the syscall dispatch table
+directly, which is a handful of files; they were reviewed by hand.
 
 ---
 

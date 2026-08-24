@@ -2727,6 +2727,12 @@ pub(crate) extern "C" fn userspace_entry_trampoline(info_raw: u64) {
 
 /// Run spawn self-tests.
 pub fn self_test() -> KernelResult<()> {
+    // `proc::self_test()` runs during boot *before* filesystem init, so the
+    // two sections that need a real file handle can legitimately not run.
+    // They must say so where the reader looks — at the end of the suite —
+    // rather than as one SKIP line lost among a hundred OK lines.
+    let mut skips = crate::fs::selftest::Skips::new();
+
     test_spawn_from_elf()?;
     test_spawn_invalid_elf()?;
     test_spawn_with_capabilities()?;
@@ -2742,12 +2748,12 @@ pub fn self_test() -> KernelResult<()> {
     test_process_kill()?;
     test_no_frame_leak()?;
     test_fd_map_entry_layout()?;
-    test_spawn_with_fd_map()?;
+    test_spawn_with_fd_map(&mut skips)?;
     test_spawn_with_empty_fd_map()?;
     test_spawn_fd_map_invalid_handle()?;
     test_spawn_with_pty_master()?;
     test_spawn_pty_master_not_owned()?;
-    test_take_initial_fds_one_shot()?;
+    test_take_initial_fds_one_shot(&mut skips)?;
     test_spawn_args_header_layout()?;
     test_spawn_with_argv()?;
     test_spawn_with_argv_envp()?;
@@ -2762,6 +2768,7 @@ pub fn self_test() -> KernelResult<()> {
     test_pie_aslr_window()?;
     test_brk_aslr_gap()?;
 
+    skips.report("[spawn]");
     Ok(())
 }
 
@@ -31889,11 +31896,22 @@ fn test_fd_map_entry_layout() -> KernelResult<()> {
 /// Requires VFS to be initialized (needs a real file handle to dup).
 /// Skips gracefully if VFS is not yet available — proc::self_test()
 /// runs before filesystem initialization during boot.
-fn test_spawn_with_fd_map() -> KernelResult<()> {
+fn test_spawn_with_fd_map(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
     use crate::fs::handle;
 
+    // "VFS not ready" is a fact about the boot stage, and the mount table
+    // states it directly.  Deriving it from a failed `open` instead would
+    // make *any* open bug — a broken CREATE, a permission regression, a
+    // handle-table leak — silently switch this section off.
+    if !crate::fs::selftest::is_mounted_rw("/") {
+        skips.record(
+            "Spawn with fd_map",
+            "/ is not mounted read-write yet (running before filesystem init)",
+        );
+        return Ok(());
+    }
+
     // Create a file to get a real kernel handle.
-    // This may fail during early boot before VFS is mounted.
     let parent_handle = match handle::open(
         "/test_fd_map_spawn.tmp",
         handle::OpenFlags::READ
@@ -31901,9 +31919,12 @@ fn test_spawn_with_fd_map() -> KernelResult<()> {
             .union(handle::OpenFlags::CREATE),
     ) {
         Ok(h) => h,
-        Err(_) => {
-            serial_println!("[spawn]   Spawn with fd_map: SKIP (VFS not ready)");
-            return Ok(());
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: Spawn with fd_map: / is mounted rw but opening {} failed: {e:?}",
+                "/test_fd_map_spawn.tmp"
+            );
+            return Err(e);
         }
     };
 
@@ -32200,8 +32221,18 @@ fn test_spawn_pty_master_not_owned() -> KernelResult<()> {
 ///
 /// Requires VFS to be initialized (needs a real file handle).
 /// Skips gracefully if VFS is not yet available.
-fn test_take_initial_fds_one_shot() -> KernelResult<()> {
+fn test_take_initial_fds_one_shot(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
     use crate::fs::handle;
+
+    // See `test_spawn_with_fd_map`: ask the mount table whether the boot has
+    // reached filesystem init, rather than inferring it from a failed open.
+    if !crate::fs::selftest::is_mounted_rw("/") {
+        skips.record(
+            "take_initial_fds one-shot",
+            "/ is not mounted read-write yet (running before filesystem init)",
+        );
+        return Ok(());
+    }
 
     let parent_handle = match handle::open(
         "/test_fd_oneshot.tmp",
@@ -32210,9 +32241,12 @@ fn test_take_initial_fds_one_shot() -> KernelResult<()> {
             .union(handle::OpenFlags::CREATE),
     ) {
         Ok(h) => h,
-        Err(_) => {
-            serial_println!("[spawn]   take_initial_fds one-shot: SKIP (VFS not ready)");
-            return Ok(());
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: take_initial_fds one-shot: / is mounted rw but opening {} failed: {e:?}",
+                "/test_fd_oneshot.tmp"
+            );
+            return Err(e);
         }
     };
 

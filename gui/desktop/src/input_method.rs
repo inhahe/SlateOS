@@ -9,20 +9,45 @@
 //! - Dead key / compose key support tracking
 //! - Custom layout support
 
-use guitk::color::Color;
+use appearance::Palette;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::step;
 use guitk::style::CornerRadii;
 
 // ============================================================================
-// Theme
+// Colour
 // ============================================================================
+//
+// Seven sites, and — unusually for this shell — not one of them is the accent.
+// The accent means "you chose this" (see `focus_assist`'s settings panel, which
+// spells the rule out), and it earns its keep where a chosen thing sits beside
+// unchosen siblings. Nothing here has siblings on screen: the tray shows one
+// label, and the preview popup shows one keyboard. A lone accented heading
+// would be decoration wearing the vocabulary of choice.
+//
+// **The preview's title was `MOCHA_BLUE`, and that was the default accent in
+// disguise.** Blue is what `Palette::accent` resolves to on a fresh install, so
+// the title read as a properly accented heading for as long as nobody visited
+// Appearance — and became a stray blue that matched nothing else on screen the
+// moment somebody picked Green. This is `backup_settings`'s `InProgress => blue`
+// trap arriving from the other direction: there, a semantic hue would have
+// collapsed onto the accent; here, an accent-shaped decision was made by
+// writing the accent's *current value*. The title is now `p.text` bold, which is
+// what every other panel title in the shell is.
+//
+// The remaining six are neutral by construction and both clear the contrast
+// floor in both modes: the tray label and the key caps are `text` on `surface0`
+// (8.69 Mocha / 5.17 Latte), and the popup is `base` behind a `surface1` hairline
+// with `text` on it (11.34 / 7.06). `surface0` for the key caps is the one place
+// a *fill* role is load-bearing rather than decorative — the caps have to read as
+// raised against the popup's `base`, and `surface1` would put them at the same
+// value as the border that frames them.
 
-const MOCHA_BASE: Color = Color::from_hex(0x1E1E2E);
-const MOCHA_SURFACE0: Color = Color::from_hex(0x313244);
-const MOCHA_SURFACE1: Color = Color::from_hex(0x45475A);
-const MOCHA_TEXT: Color = Color::from_hex(0xCDD6F4);
-const MOCHA_BLUE: Color = Color::from_hex(0x89B4FA);
+/// Side of one key cap in the layout preview. Named so the geometry tests can
+/// find a cap by its size rather than by its colour — a layout test that
+/// locates by colour silently asserts a role, and stops working the moment the
+/// role changes.
+const KEY_SIZE: f32 = 28.0;
 
 // ============================================================================
 // Keyboard layouts
@@ -363,8 +388,10 @@ impl InputMethodManager {
     }
 
     /// Render the tray indicator (small label showing current layout).
-    pub fn render_tray_indicator(&self, x: f32, y: f32) -> Vec<RenderCommand> {
+    pub fn render_tray_indicator(&self, p: &Palette, x: f32, y: f32) -> Vec<RenderCommand> {
         let label = self.tray_label();
+        let chip = p.surface0;
+        let chip_ink = p.text;
 
         vec![
             RenderCommand::FillRect {
@@ -372,7 +399,7 @@ impl InputMethodManager {
                 y,
                 width: 28.0,
                 height: 20.0,
-                color: MOCHA_SURFACE0,
+                color: chip,
                 corner_radii: CornerRadii::all(4.0),
             },
             RenderCommand::Text {
@@ -380,7 +407,7 @@ impl InputMethodManager {
                 y: y + 3.0,
                 text: label.to_string(),
                 font_size: 11.0,
-                color: MOCHA_TEXT,
+                color: chip_ink,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -389,7 +416,13 @@ impl InputMethodManager {
     }
 
     /// Render the keyboard layout preview popup.
-    pub fn render_preview(&self, popup_x: f32, popup_y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render_preview(
+        &self,
+        p: &Palette,
+        popup_x: f32,
+        popup_y: f32,
+        width: f32,
+    ) -> Vec<RenderCommand> {
         if !self.preview_visible {
             return Vec::new();
         }
@@ -398,6 +431,12 @@ impl InputMethodManager {
             Some(l) => l,
             None => return Vec::new(),
         };
+
+        let popup_fill = p.base;
+        let popup_edge = p.surface1;
+        let title_ink = p.text;
+        let cap = p.surface0;
+        let cap_ink = p.text;
 
         let mut cmds = Vec::with_capacity(80);
         let height = 200.0;
@@ -408,7 +447,7 @@ impl InputMethodManager {
             y: popup_y,
             width,
             height,
-            color: MOCHA_BASE,
+            color: popup_fill,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -418,7 +457,7 @@ impl InputMethodManager {
             y: popup_y,
             width,
             height,
-            color: MOCHA_SURFACE1,
+            color: popup_edge,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -429,14 +468,14 @@ impl InputMethodManager {
             y: popup_y + 8.0,
             text: layout.display_name.clone(),
             font_size: 13.0,
-            color: MOCHA_BLUE,
+            color: title_ink,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
 
         // Render keyboard rows
-        let key_size = 28.0;
+        let key_size = KEY_SIZE;
         let key_gap = 3.0;
         let row_offsets = [0.0_f32, 12.0, 20.0, 32.0]; // Stagger offsets
         let start_y = popup_y + 32.0;
@@ -454,7 +493,7 @@ impl InputMethodManager {
                     y: row_y,
                     width: key_size,
                     height: key_size,
-                    color: MOCHA_SURFACE0,
+                    color: cap,
                     corner_radii: CornerRadii::all(4.0),
                 });
 
@@ -466,9 +505,12 @@ impl InputMethodManager {
                     y: row_y + 6.0,
                     text: label,
                     font_size: 12.0,
-                    color: MOCHA_TEXT,
+                    color: cap_ink,
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(key_size - 4.0),
+                    // The label starts 6px in, so it gets `key_size` less
+                    // *both* insets. It used to get `key_size - 4.0`, which
+                    // let a wide glyph paint 2px onto the neighbouring cap.
+                    max_width: Some(key_size - 12.0),
                     overflow: TextOverflow::Ellipsis,
                 });
             }
@@ -540,6 +582,107 @@ mod tests {
     )]
 
     use super::*;
+    use guitk::color::Color;
+
+    // ---- Colour fixtures and helpers ----
+
+    fn dark() -> Palette {
+        Palette::for_mode(false)
+    }
+
+    /// A palette whose accent is a colour no role holds, so "this site wears the
+    /// accent" and "this site wears blue" are distinguishable. Stock accent *is*
+    /// blue, which is the whole reason this module's title was wrong.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0x00FF_00FF);
+        p
+    }
+
+    /// Four keys in known positions, so the expected command vector can be
+    /// written out by hand instead of derived from the same rows the renderer
+    /// reads — an expectation computed from the code under test asserts nothing.
+    /// The empty third row also exercises a row that contributes no keys.
+    fn tiny_layout() -> KeyboardLayout {
+        KeyboardLayout {
+            id: LayoutId::new("tiny"),
+            display_name: "Tiny".to_string(),
+            short_label: "TY".to_string(),
+            language: "xx".to_string(),
+            has_dead_keys: false,
+            is_rtl: false,
+            rows_unshifted: [
+                "ab".to_string(),
+                "c".to_string(),
+                String::new(),
+                "d".to_string(),
+            ],
+            rows_shifted: [
+                "AB".to_string(),
+                "C".to_string(),
+                String::new(),
+                "D".to_string(),
+            ],
+        }
+    }
+
+    fn previewing(layout: KeyboardLayout) -> InputMethodManager {
+        let mut mgr = InputMethodManager::new(vec![layout]);
+        mgr.preview_visible = true;
+        mgr
+    }
+
+    /// Every colour the commands carry, in draw order.
+    fn colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// WCAG relative-luminance contrast ratio.
+    fn contrast(a: Color, b: Color) -> f64 {
+        fn lum(c: Color) -> f64 {
+            fn chan(v: u8) -> f64 {
+                let s = f64::from(v) / 255.0;
+                if s <= 0.039_28 {
+                    s / 12.92
+                } else {
+                    ((s + 0.055) / 1.055).powf(2.4)
+                }
+            }
+            0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b)
+        }
+        let (x, y) = (lum(a), lum(b));
+        let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// The tray's sites, in draw order.
+    fn expected_tray(p: &Palette) -> Vec<(&'static str, Color)> {
+        vec![("the tray chip", p.surface0), ("the tray label", p.text)]
+    }
+
+    /// The preview's sites, in draw order, for [`tiny_layout`]'s four keys.
+    fn expected_preview(p: &Palette) -> Vec<(&'static str, Color)> {
+        vec![
+            ("the popup's fill", p.base),
+            ("the popup's edge", p.surface1),
+            ("the layout name", p.text),
+            ("key 1's cap", p.surface0),
+            ("key 1's label", p.text),
+            ("key 2's cap", p.surface0),
+            ("key 2's label", p.text),
+            ("key 3's cap", p.surface0),
+            ("key 3's label", p.text),
+            ("key 4's cap", p.surface0),
+            ("key 4's label", p.text),
+        ]
+    }
 
     // ---- KeyboardLayout tests ----
 
@@ -732,14 +875,14 @@ mod tests {
     #[test]
     fn test_manager_render_tray() {
         let mgr = InputMethodManager::default();
-        let cmds = mgr.render_tray_indicator(100.0, 50.0);
+        let cmds = mgr.render_tray_indicator(&dark(), 100.0, 50.0);
         assert_eq!(cmds.len(), 2); // bg rect + text
     }
 
     #[test]
     fn test_manager_render_preview_hidden() {
         let mgr = InputMethodManager::default();
-        let cmds = mgr.render_preview(0.0, 0.0, 400.0);
+        let cmds = mgr.render_preview(&dark(), 0.0, 0.0, 400.0);
         assert!(cmds.is_empty());
     }
 
@@ -747,7 +890,7 @@ mod tests {
     fn test_manager_render_preview_visible() {
         let mut mgr = InputMethodManager::default();
         mgr.preview_visible = true;
-        let cmds = mgr.render_preview(0.0, 0.0, 400.0);
+        let cmds = mgr.render_preview(&dark(), 0.0, 0.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -787,5 +930,283 @@ mod tests {
             ..InputMethodManager::default()
         };
         mgr.next_layout(); // Should not panic
+    }
+
+    // ---- Colour tests ----
+
+    #[test]
+    fn every_tray_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+            let drawn = colors(&InputMethodManager::default().render_tray_indicator(&p, 0.0, 0.0));
+            let want = expected_tray(&p);
+            assert_eq!(
+                drawn.len(),
+                want.len(),
+                "the tray drew {} colours, not {}",
+                drawn.len(),
+                want.len()
+            );
+            for ((what, expect), got) in want.into_iter().zip(&drawn) {
+                assert_eq!(
+                    format!("{got:?}"),
+                    format!("{expect:?}"),
+                    "{what} is wrong in {} mode",
+                    if light { "light" } else { "dark" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_preview_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+            let drawn = colors(&previewing(tiny_layout()).render_preview(&p, 0.0, 0.0, 400.0));
+            let want = expected_preview(&p);
+            assert_eq!(
+                drawn.len(),
+                want.len(),
+                "the preview drew {} colours, not the {} the table lists",
+                drawn.len(),
+                want.len()
+            );
+            for ((what, expect), got) in want.into_iter().zip(&drawn) {
+                assert_eq!(
+                    format!("{got:?}"),
+                    format!("{expect:?}"),
+                    "{what} is wrong in {} mode",
+                    if light { "light" } else { "dark" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_colour_the_tray_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+            crate::palette_check::assert_drawn_from(
+                &p,
+                &InputMethodManager::default().render_tray_indicator(&p, 0.0, 0.0),
+                &[],
+                "the input-method tray indicator",
+            );
+        }
+    }
+
+    #[test]
+    fn every_colour_the_preview_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+            crate::palette_check::assert_drawn_from(
+                &p,
+                &previewing(KeyboardLayout::german_qwertz()).render_preview(&p, 0.0, 0.0, 400.0),
+                &[],
+                "the keyboard layout preview",
+            );
+        }
+    }
+
+    #[test]
+    fn every_site_the_tray_draws_moves_with_the_mode() {
+        let mgr = InputMethodManager::default();
+        let in_dark = colors(&mgr.render_tray_indicator(&Palette::for_mode(false), 0.0, 0.0));
+        let in_light = colors(&mgr.render_tray_indicator(&Palette::for_mode(true), 0.0, 0.0));
+        assert_eq!(in_dark.len(), in_light.len());
+        // Pinned against the table, not merely against the other mode: the zip
+        // below stops at the shorter side, so a site that stopped being drawn
+        // would shrink both modes equally and never be asked whether it moves.
+        assert_eq!(in_dark.len(), expected_tray(&dark()).len());
+        for ((what, _), (d, l)) in expected_tray(&dark())
+            .into_iter()
+            .zip(in_dark.iter().zip(&in_light))
+        {
+            assert_ne!(
+                format!("{d:?}"),
+                format!("{l:?}"),
+                "{what} draws the same colour in both modes"
+            );
+        }
+    }
+
+    #[test]
+    fn every_site_the_preview_draws_moves_with_the_mode() {
+        let mgr = previewing(tiny_layout());
+        let in_dark = colors(&mgr.render_preview(&Palette::for_mode(false), 0.0, 0.0, 400.0));
+        let in_light = colors(&mgr.render_preview(&Palette::for_mode(true), 0.0, 0.0, 400.0));
+        assert_eq!(in_dark.len(), in_light.len());
+        assert_eq!(in_dark.len(), expected_preview(&dark()).len());
+        for ((what, _), (d, l)) in expected_preview(&dark())
+            .into_iter()
+            .zip(in_dark.iter().zip(&in_light))
+        {
+            assert_ne!(
+                format!("{d:?}"),
+                format!("{l:?}"),
+                "{what} draws the same colour in both modes"
+            );
+        }
+    }
+
+    /// The module's headline decision, pinned as a negative.
+    ///
+    /// The accent means "you chose this", and nothing on either of these two
+    /// surfaces has an unchosen sibling beside it to be chosen *over*. The
+    /// preview's title used to be a hardcoded `#89B4FA` — which is precisely
+    /// what the stock accent resolves to — so on a fresh install it looked like
+    /// a deliberate accented heading and on any other theme it looked like a
+    /// stray blue. This fails the moment any site reaches for `p.accent` again.
+    #[test]
+    fn no_site_in_this_module_wears_the_accent() {
+        for light in [false, true] {
+            let p = accented(light);
+            let mut drawn =
+                colors(&InputMethodManager::default().render_tray_indicator(&p, 0.0, 0.0));
+            drawn.extend(colors(
+                &previewing(tiny_layout()).render_preview(&p, 0.0, 0.0, 400.0),
+            ));
+            assert!(!drawn.is_empty());
+            for c in drawn {
+                assert_ne!(
+                    format!("{c:?}"),
+                    format!("{:?}", p.accent),
+                    "a site wears the accent in {} mode",
+                    if light { "light" } else { "dark" }
+                );
+            }
+        }
+    }
+
+    /// Contrast, read out of the rendered commands rather than a table written
+    /// by hand — see `design-decisions.md` §530 for why the table form catches
+    /// nothing in its own module.
+    ///
+    /// The pairing rule is "an ink sits on the most recent fill", not "on the
+    /// fill immediately before it": the popup draws its background, then its
+    /// border, then the title, so an adjacency walk would skip the one pairing
+    /// the popup chrome actually has. Tracking the last `FillRect` seen gets the
+    /// caps right too, since each cap is the last fill before its own label.
+    #[test]
+    fn every_ink_this_module_draws_is_readable_on_what_it_sits_on() {
+        let mut checked = 0usize;
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mut scene = InputMethodManager::default().render_tray_indicator(&p, 0.0, 0.0);
+            scene.extend(previewing(tiny_layout()).render_preview(&p, 0.0, 0.0, 400.0));
+
+            let mut under: Option<Color> = None;
+            for cmd in &scene {
+                match cmd {
+                    RenderCommand::FillRect { color, .. } => under = Some(*color),
+                    RenderCommand::Text { color: ink, .. } => {
+                        let Some(fill) = under else {
+                            panic!("an ink is drawn before any fill");
+                        };
+                        let ratio = contrast(fill, *ink);
+                        assert!(
+                            ratio >= 4.5,
+                            "{ink:?} on {fill:?} is {ratio:.2}:1 in {} mode",
+                            if light { "light" } else { "dark" }
+                        );
+                        checked += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Tray label, popup title, four key labels; twice over for the modes.
+        assert_eq!(checked, 12, "the pairing walk did not reach every ink");
+    }
+
+    /// The key caps have to read as raised against the popup, and must not
+    /// share a value with the hairline that frames the popup — `surface1` for
+    /// the caps would put cap and border at the same tone and turn the keyboard
+    /// into a grid of holes. A by-construction claim in this module's header, so
+    /// it gets a test that asserts the construction.
+    #[test]
+    fn the_key_caps_stand_apart_from_the_popup_and_its_border() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let drawn = colors(&previewing(tiny_layout()).render_preview(&p, 0.0, 0.0, 400.0));
+            let (fill, edge, cap) = (drawn[0], drawn[1], drawn[3]);
+            assert_ne!(
+                format!("{cap:?}"),
+                format!("{fill:?}"),
+                "the caps vanish into the popup"
+            );
+            assert_ne!(
+                format!("{cap:?}"),
+                format!("{edge:?}"),
+                "the caps match the popup's border"
+            );
+        }
+    }
+
+    /// A key label is clipped to a box that fits inside its own cap.
+    ///
+    /// It did not: the label started 6px in from a 28px cap and was given 24px
+    /// of width, so a wide glyph could paint 2px past the cap's right edge and
+    /// onto the neighbouring one. Nothing else in the module measures the caps,
+    /// so without this the next widening would go unnoticed too.
+    #[test]
+    fn a_key_label_is_clipped_inside_its_own_cap() {
+        let cmds = previewing(tiny_layout()).render_preview(&dark(), 0.0, 0.0, 400.0);
+        let mut cap: Option<(f32, f32)> = None;
+        let mut checked = 0usize;
+        for cmd in &cmds {
+            match cmd {
+                RenderCommand::FillRect { x, width, .. }
+                    if (*width - KEY_SIZE).abs() < f32::EPSILON =>
+                {
+                    cap = Some((*x, *width));
+                }
+                RenderCommand::Text { x, max_width, .. } => {
+                    let Some((cap_x, cap_w)) = cap else { continue };
+                    let Some(mw) = max_width else {
+                        panic!("a key label is unbounded");
+                    };
+                    assert!(
+                        *x + mw <= cap_x + cap_w,
+                        "a key label may paint {:.1}px past its cap",
+                        (*x + mw) - (cap_x + cap_w)
+                    );
+                    checked += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(checked, 4, "the walk did not reach every key label");
+    }
+
+    /// A branch nothing else renders: a manager with no layouts at all. The
+    /// preview bails before drawing its background, so the popup is absent
+    /// rather than empty-and-framed.
+    #[test]
+    fn a_manager_with_no_layouts_draws_no_preview() {
+        let mgr = InputMethodManager {
+            layouts: Vec::new(),
+            active_index: 0,
+            preview_visible: true,
+            ..InputMethodManager::default()
+        };
+        assert!(mgr.render_preview(&dark(), 0.0, 0.0, 400.0).is_empty());
+    }
+
+    /// …but the tray still draws its chip, because the tray is how you find out
+    /// something is wrong. It falls back to "??" rather than disappearing.
+    #[test]
+    fn a_manager_with_no_layouts_still_draws_a_tray_chip() {
+        let mgr = InputMethodManager {
+            layouts: Vec::new(),
+            active_index: 0,
+            ..InputMethodManager::default()
+        };
+        let cmds = mgr.render_tray_indicator(&dark(), 0.0, 0.0);
+        assert_eq!(colors(&cmds), vec![dark().surface0, dark().text]);
+        let RenderCommand::Text { text, .. } = &cmds[1] else {
+            panic!("the tray's second command is not its label");
+        };
+        assert_eq!(text, "??");
     }
 }

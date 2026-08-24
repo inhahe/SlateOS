@@ -10411,6 +10411,38 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    serial_println!("  kshell::self_test 18: asking for help is not a mistake");
+    // The mirror of the silent-success bug, and one this codebase introduced
+    // while fixing that one: a sweep that marks "printed a usage message" as
+    // "failed" also marks `--help` as failed, because a granted request and a
+    // rejected one print the *same text*. Only the status can separate them,
+    // and `cmd --help >/dev/null || echo "not installed"` is a real idiom that
+    // a non-zero `--help` breaks.
+    {
+        let helped = capture_command("zip --help");
+        assert!(
+            helped.starts_with(b"Usage: zip "),
+            "`zip --help` prints the usage"
+        );
+        assert_eq!(last_exit(), 0, "`--help` was granted, so it succeeded");
+
+        // Same command, same output, opposite status: with no arguments at
+        // all there was nothing to do. This pair is the whole rule.
+        let bare = capture_command("zip");
+        assert_eq!(
+            bare, helped,
+            "the two print identical text -- the status is the only difference"
+        );
+        assert_eq!(last_exit(), 1, "`zip` with no arguments could not run");
+
+        let helped = capture_command("fsck.ext4 --help");
+        assert!(
+            helped.starts_with(b"Usage: fsck.ext4 "),
+            "`fsck.ext4 --help` prints the usage"
+        );
+        assert_eq!(last_exit(), 0, "`--help` is not a failure here either");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -13079,7 +13111,9 @@ fn cmd_dedup(args: &str) {
                     "  --delete: remove duplicates, keeping the first file in each group."
                 );
                 shell_println!("  --stats:  show summary only (no file listing).");
-                set_exit(1);
+                // No `set_exit(1)`: `--help` is a request that was granted.
+                // It prints the same text as an unrecognised argument does,
+                // which is precisely why the *status* has to tell them apart.
                 return;
             }
             s => {
@@ -99461,7 +99495,7 @@ fn cmd_journal(args: &str) {
                      \x20 --stats     Show journal statistics\n\
                      \x20 --flush     Flush journal to disk"
                 );
-                set_exit(1);
+                // No `set_exit(1)`: `--help` succeeded at what it was asked.
                 return;
             }
             _ => {}
@@ -105479,7 +105513,7 @@ fn cmd_fsck_ext4(args: &str) {
             shell_println!("Usage: fsck.ext4 [-v] DEVICE");
             shell_println!("  Check ext4 filesystem consistency (read-only).");
             shell_println!("  -v  Verbose output (show all phases)");
-            set_exit(1);
+            // No `set_exit(1)`: `--help` succeeded at what it was asked.
             return;
         } else {
             device = w;
@@ -108240,14 +108274,21 @@ fn cmd_zip(args: &str) {
     use crate::fs::Vfs;
     use crate::fs::zip;
 
-    if args.trim().is_empty() || args.trim() == "--help" || args.trim() == "-h" {
+    // One condition, two outcomes. `zip --help` is a request that was granted
+    // and must report success; `zip` with no arguments at all is a command
+    // that could not run and must report failure. They print the same text,
+    // which is exactly why the status is the only thing that can separate them.
+    let asked_for_help = matches!(args.trim(), "--help" | "-h");
+    if args.trim().is_empty() || asked_for_help {
         shell_println!(
             "Usage: zip [-0] [-r] archive.zip file1 [file2 ...]\n\
              Create a ZIP archive.\n  \
                -0      Store files uncompressed (method 0)\n  \
                -r      Recurse into directories"
         );
-        set_exit(1);
+        if !asked_for_help {
+            set_exit(1);
+        }
         return;
     }
 

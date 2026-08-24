@@ -2666,15 +2666,112 @@ check_production_unwrap() {
 
 check_production_unwrap
 
+# Resolved once, here, because two things now need it: the clippy gate below
+# and the build after it.  Hoisted out of the build block rather than
+# duplicated -- a gate that resolves `cargo` differently from the build it
+# guards could lint one toolchain and ship another.
+CARGO="${CARGO:-cargo}"
+# Try full path on Windows if cargo not in PATH
+if ! command -v "$CARGO" &>/dev/null; then
+    CARGO="/c/Users/${USER:-${USERNAME:-$(whoami)}}/.cargo/bin/cargo.exe"
+fi
+
+# Keep `cargo clippy -p kernel` exiting 0.
+#
+# The workspace sets `clippy::all = deny` and `clippy::pedantic = warn`, so the
+# exit status is an exact question with no judgement in it: **zero `clippy::all`
+# violations**.  The ~18,000 `pedantic` / `indexing_slicing` /
+# `arithmetic_side_effects` warnings are the known backlog, are `warn`-level by
+# deliberate workspace policy, and do not affect the status.
+#
+# WHY A GATE AND NOT A HABIT.  Eight `deny`-level errors accumulated in this
+# crate unnoticed and were only found on 2026-08-24 by someone running clippy by
+# hand for the first time in the project's life.  That is the whole failure mode:
+# a crate can *declare* `deny` and still drift, because a declaration is only
+# enforced by something that runs.  Fixing the eight without adding this would
+# have bought exactly one clean day.
+#
+# WHY IT IS AFFORDABLE, MEASURED RATHER THAN ASSUMED.  This gate was deferred
+# once already on the belief that "a clippy run and a `cargo check` run
+# invalidate each other's fingerprints in a shared target/, so adding one
+# doubles every boot's build time."  That is false, and it was reasoning rather
+# than evidence.  `cargo clippy` sets `RUSTC_WORKSPACE_WRAPPER`, which is hashed
+# into the fingerprint of every workspace unit, so clippy's artifacts occupy
+# their own entries and leave the build's alone.  Measured on 2026-08-24:
+#
+#   cargo build (warm baseline)          13.8 s
+#   cargo clippy -p kernel (cold)       200   s
+#   cargo build immediately after         4.7 s   <-- not invalidated
+#   cargo clippy again, no source edit    5   s
+#   cargo clippy after touching one file 113   s   <-- what a real run pays
+#
+# 113 s against a boot test whose QEMU window alone is 400-900 s.  The number is
+# not nothing, which is why it is written down here instead of being described
+# as free.
+#
+# WHY `-p kernel` AND NOT THE WORKSPACE.  A workspace-wide clippy would let a
+# red crate in lane B's or lane C's tree block lane A's boot test, which is the
+# exact coupling the lane split exists to prevent.  Each lane gates its own.
+#
+# WHY THE SAME PROFILE AS THE BUILD.  `cfg(debug_assertions)` selects real code
+# in this kernel, so linting debug while shipping release would leave a hole of
+# precisely the size of the difference.  The gate checks what the run builds.
+#
+# Skipped under --no-build: that mode boots an already-built kernel, so there is
+# no new source for the gate to have an opinion about, and 113 s buys nothing.
+check_kernel_clippy() {
+    if [ "$NO_BUILD" -ne 0 ]; then
+        echo "=== Kernel clippy gate: skipped (--no-build; nothing new to lint) ==="
+        return 0
+    fi
+
+    local log="$PROJECT_ROOT/build/clippy-kernel.log"
+    mkdir -p "$PROJECT_ROOT/build"
+
+    echo "=== Checking that the kernel is clippy-clean (clippy::all = deny) ==="
+    local start
+    start="$(date +%s)"
+    # Output to a file, never to this log.  18,000 warning lines would bury the
+    # boot output that the rest of this script greps, and the full text is worth
+    # keeping for whoever is working the pedantic backlog.
+    #
+    # Not a pipe: `cargo ... | grep` would make `$?` grep's, and grep's status is
+    # "did I match", which for an error filter is *inverted* -- a clean crate
+    # would report failure and a broken one success.
+    if (cd "$PROJECT_ROOT" && "$CARGO" clippy -p kernel \
+            ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"} \
+            --message-format=short) > "$log" 2>&1; then
+        local warns
+        warns="$(grep -c ' warning: ' "$log" 2>/dev/null || echo 0)"
+        echo "Clippy OK ($BENCH_PROFILE profile, $(( $(date +%s) - start ))s, \
+0 errors, $warns pedantic-level warnings -> $log)."
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  cargo clippy -p kernel exited non-zero," >&2
+    echo "which under this workspace's lint policy means at least one" >&2
+    echo "clippy::all violation -- those are deny-level.  Sites:" >&2
+    echo "" >&2
+    grep ' error: ' "$log" >&2 || true
+    echo "" >&2
+    echo "Full output (including the pedantic-level backlog, which is NOT what" >&2
+    echo "failed this gate): $log" >&2
+    echo "" >&2
+    echo "Fix them rather than #[allow] them.  Every one of the eight found on" >&2
+    echo "2026-08-24 was a case clippy was right about, and seven were the" >&2
+    echo "one-line rewrite clippy dictated verbatim.  If a lint genuinely does" >&2
+    echo "not apply here, the allow goes at the narrowest possible scope with a" >&2
+    echo "comment saying why -- per CLAUDE.md, not at workspace scope." >&2
+    exit 1
+}
+
+check_kernel_clippy
+
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then
     check_free_space "before building"
     echo "=== Building kernel ==="
-    CARGO="${CARGO:-cargo}"
-    # Try full path on Windows if cargo not in PATH
-    if ! command -v "$CARGO" &>/dev/null; then
-        CARGO="/c/Users/${USER:-${USERNAME:-$(whoami)}}/.cargo/bin/cargo.exe"
-    fi
     # Timed, and recorded in bench/boot-history.jsonl alongside the QEMU window.
     #
     # WHY THIS MATTERS BEYOND CURIOSITY.  open-questions.md Q46 asks whether the

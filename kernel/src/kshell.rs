@@ -94666,7 +94666,20 @@ fn cmd_hexdump(args: &str) {
     }
 }
 
-/// Search for a pattern in a file (simple substring grep).
+// The `grep` family: flag parsing, the per-file search, the recursive walk, and
+// the tally that carries their verdict back to the caller.
+//
+// A plain comment, not a doc comment. It used to read `/// Search for a pattern
+// in a file (simple substring grep).` — left over from a function that no longer
+// exists here, so it was silently documenting whatever item happened to follow
+// it, which after this change would have been the depth limit.
+
+/// How deep `grep -r` will descend before giving up on a subtree.
+///
+/// Named rather than inlined because the limit is now *reported* when it bites,
+/// and the diagnostic and the check must not be able to drift apart.
+const MAX_GREP_DEPTH: usize = 16;
+
 /// Grep flags parsed from command-line arguments.
 struct GrepFlags {
     case_insensitive: bool,
@@ -94692,6 +94705,35 @@ impl GrepFlags {
             max_matches: 200,
         }
     }
+}
+
+/// What a `grep` run produced: what it found, and what it could not look at.
+///
+/// `grep` has **three** outcomes, not two. GNU exits 0 when it matched, 1 when
+/// it searched everywhere it was asked to and found nothing, and 2 when it
+/// could not *look* — an unreadable file, a directory it could not stat.
+///
+/// The search used to carry a bare match count, which folds the third outcome
+/// into the second: every failure to read ended as "no matches", exit 1. So
+/// `grep pat missing-file || echo "not present"` reported a missing *file* as
+/// missing *text*, and `grep -r pat /typo` reported a mistyped directory as a
+/// clean search of it. Both are the silent-success shape from the other end —
+/// the command does report something, it just reports the wrong one of two
+/// indistinguishable-looking answers.
+///
+/// Carrying the two numbers side by side is what lets the caller tell "looked
+/// and found nothing" from "never got to look".
+#[derive(Default)]
+struct GrepTally {
+    /// Lines matched across every target searched so far.
+    matches: usize,
+    /// Targets the search could not read: a file that failed to open, a path
+    /// that failed to stat, a subtree cut off by the depth limit.
+    ///
+    /// Counted rather than flagged because the count is worth reporting, and
+    /// because a partly-completed search is a different thing from one that
+    /// never started.
+    unreadable: usize,
 }
 
 /// Check if a character is a word boundary (not alphanumeric or underscore).
@@ -94744,6 +94786,14 @@ fn to_lower(s: &str) -> String {
     out
 }
 
+/// `grep [-ivclnwrI] PATTERN TARGET...` — search files, or trees with `-r`.
+///
+/// Exits with GNU's three-valued status: **0** matched, **1** searched
+/// everything it was asked to and found nothing, **2** could not search — an
+/// unreadable file, an unstattable path, a subtree cut off by the depth limit,
+/// or a usage error. See [`GrepTally`] for why the third value has to exist:
+/// without it, `grep pat missing-file || echo absent` reports a missing *file*
+/// as missing *text*.
 fn cmd_grep(args: &str) {
     let mut flags = GrepFlags::new();
     let mut words: alloc::vec::Vec<&str> = Vec::new();
@@ -94762,8 +94812,13 @@ fn cmd_grep(args: &str) {
                     'w' => flags.whole_word = true,
                     'r' | 'R' => flags.recursive = true,
                     _ => {
+                        // 2, not the shell's usual 1: within `grep`, 1 is the
+                        // reserved, meaningful answer "searched, found
+                        // nothing". A usage error that returned 1 would tell
+                        // `grep -Z pat f || echo absent` that the pattern is
+                        // absent from a file it never opened.
                         shell_println!("grep: unknown flag '-{}'", ch);
-                        set_exit(1);
+                        set_exit(2);
                         return;
                     }
                 }
@@ -94775,7 +94830,7 @@ fn cmd_grep(args: &str) {
 
     if words.is_empty() {
         shell_println!("Usage: grep [-ivclnwrI] <pattern> <file|dir> [file2 ...]");
-        set_exit(1);
+        set_exit(2);
         return;
     }
 
@@ -94784,7 +94839,7 @@ fn cmd_grep(args: &str) {
         &words[1..]
     } else {
         shell_println!("Usage: grep [-ivclnwrI] <pattern> <file|dir> [file2 ...]");
-        set_exit(1);
+        set_exit(2);
         return;
     };
 
@@ -94795,7 +94850,7 @@ fn cmd_grep(args: &str) {
     };
 
     let multi_file = targets.len() > 1 || flags.recursive;
-    let mut total_matches = 0usize;
+    let mut tally = GrepTally::default();
 
     for &target in targets {
         let path = resolve_path(target);
@@ -94805,7 +94860,7 @@ fn cmd_grep(args: &str) {
                 &pattern_cmp,
                 &flags,
                 multi_file,
-                &mut total_matches,
+                &mut tally,
                 0,
             );
         } else {
@@ -94814,33 +94869,56 @@ fn cmd_grep(args: &str) {
                 &pattern_cmp,
                 &flags,
                 multi_file,
-                &mut total_matches,
+                &mut tally,
             );
         }
-        if total_matches >= flags.max_matches {
+        if tally.matches >= flags.max_matches {
             break;
         }
     }
 
     if flags.count_only && !multi_file {
-        shell_println!("{}", total_matches);
-    } else if total_matches == 0 && !flags.count_only && !flags.files_only {
+        shell_println!("{}", tally.matches);
+    } else if tally.matches == 0 && !flags.count_only && !flags.files_only && tally.unreadable == 0
+    {
+        // Only claim "no matches" when the search actually completed. Saying it
+        // after a failure to read would assert the file's *contents* lack the
+        // pattern, which is precisely what was never established.
         shell_println!("grep: no matches for '{}'", pattern);
     }
-    // Same contract as the piped form above: no match is exit 1, whatever the
-    // output flags. The two halves must agree, or `grep pat f` and
-    // `cat f | grep pat` would answer `&&` differently.
-    if total_matches == 0 {
+
+    // GNU's three-way status: 0 matched, 1 searched and found nothing, 2 could
+    // not look. The failure to look outranks the empty result -- a run that
+    // could not read one of three files has not established that the pattern is
+    // absent, so it must not answer as though it had.
+    //
+    // Same contract as the piped form: no match is exit 1, whatever the output
+    // flags. The two halves must agree, or `grep pat f` and `cat f | grep pat`
+    // would answer `&&` differently.
+    if tally.unreadable > 0 {
+        set_exit(2);
+    } else if tally.matches == 0 {
         set_exit(1);
     }
 }
 
 /// Search a single file for grep matches.
-fn grep_file(path: &Path, pattern: &str, flags: &GrepFlags, multi_file: bool, total: &mut usize) {
+///
+/// Records both halves of the outcome in `tally`: matches found, and any
+/// failure to read this file. A caller cannot tell those apart from the match
+/// count alone — see [`GrepTally`].
+fn grep_file(
+    path: &Path,
+    pattern: &str,
+    flags: &GrepFlags,
+    multi_file: bool,
+    tally: &mut GrepTally,
+) {
     let data = match crate::fs::Vfs::read_file(path) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("grep: {}: {:?}", path.display(), e);
+            tally.unreadable = tally.unreadable.saturating_add(1);
             return;
         }
     };
@@ -94848,9 +94926,17 @@ fn grep_file(path: &Path, pattern: &str, flags: &GrepFlags, multi_file: bool, to
     let text = match core::str::from_utf8(&data) {
         Ok(s) => s,
         Err(_) => {
-            // Skip binary files silently in recursive mode.
+            // A binary file named explicitly is a file we were asked to search
+            // and did not: that is a failure to look, and it prints a
+            // diagnostic saying so, so it owes a non-zero status too.
+            //
+            // In recursive mode it is neither. `grep -r` walks whatever is
+            // there, and skipping the binaries it finds along the way is the
+            // expected behaviour rather than a refusal — hence silent, and not
+            // counted.
             if !flags.recursive {
                 shell_println!("grep: {}: binary file", path.display());
+                tally.unreadable = tally.unreadable.saturating_add(1);
             }
             return;
         }
@@ -94870,7 +94956,7 @@ fn grep_file(path: &Path, pattern: &str, flags: &GrepFlags, multi_file: bool, to
 
         if show {
             file_matches = file_matches.saturating_add(1);
-            *total = total.saturating_add(1);
+            tally.matches = tally.matches.saturating_add(1);
 
             if flags.files_only {
                 shell_println!("{}", path.display());
@@ -94889,7 +94975,7 @@ fn grep_file(path: &Path, pattern: &str, flags: &GrepFlags, multi_file: bool, to
                 }
             }
 
-            if *total >= flags.max_matches {
+            if tally.matches >= flags.max_matches {
                 shell_println!("... (showing first {} matches)", flags.max_matches);
                 return;
             }
@@ -94902,36 +94988,65 @@ fn grep_file(path: &Path, pattern: &str, flags: &GrepFlags, multi_file: bool, to
 }
 
 /// Recursively search a directory for grep matches (depth limit 16).
+///
+/// Every way this can decline to search something now says so and records it in
+/// `tally`. It previously had three bare `return`s — an unstattable path, an
+/// unreadable directory, and the depth cutoff — each of which left no trace at
+/// all, so `grep -r pat /typo` printed nothing and exited 1, exactly as a
+/// successful search of an empty tree does.
 fn grep_recursive(
     path: &Path,
     pattern: &str,
     flags: &GrepFlags,
     multi_file: bool,
-    total: &mut usize,
+    tally: &mut GrepTally,
     depth: usize,
 ) {
-    if depth > 16 || *total >= flags.max_matches {
+    // Two unrelated stopping conditions used to share one `if`. Only one of
+    // them is a failure: reaching the match cap is the ordinary, already-
+    // announced end of a successful search (`grep_file` prints "showing first
+    // N"), whereas running out of depth means a subtree was never looked at.
+    if tally.matches >= flags.max_matches {
+        return;
+    }
+    if depth > MAX_GREP_DEPTH {
+        shell_println!(
+            "grep: {}: recursion limit ({}) reached, not searched",
+            path.display(),
+            MAX_GREP_DEPTH
+        );
+        tally.unreadable = tally.unreadable.saturating_add(1);
         return;
     }
 
     // Check if path is a directory or file.
     let entry = match crate::fs::Vfs::stat(path) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(e) => {
+            shell_println!("grep: {}: {:?}", path.display(), e);
+            tally.unreadable = tally.unreadable.saturating_add(1);
+            return;
+        }
     };
 
     if entry.entry_type == crate::fs::vfs::EntryType::File {
-        grep_file(path, pattern, flags, multi_file, total);
+        grep_file(path, pattern, flags, multi_file, tally);
         return;
     }
 
     if entry.entry_type != crate::fs::vfs::EntryType::Directory {
+        // Neither file nor directory (a device node, a socket). Nothing to
+        // search and nothing withheld, so this one really is silent.
         return;
     }
 
     let entries = match crate::fs::Vfs::readdir(path) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(e) => {
+            shell_println!("grep: {}: {:?}", path.display(), e);
+            tally.unreadable = tally.unreadable.saturating_add(1);
+            return;
+        }
     };
 
     for child in &entries {
@@ -94948,7 +95063,7 @@ fn grep_recursive(
 
         match child.entry_type {
             crate::fs::vfs::EntryType::File => {
-                grep_file(&child_path, pattern, flags, multi_file, total);
+                grep_file(&child_path, pattern, flags, multi_file, tally);
             }
             crate::fs::vfs::EntryType::Directory => {
                 grep_recursive(
@@ -94956,14 +95071,14 @@ fn grep_recursive(
                     pattern,
                     flags,
                     multi_file,
-                    total,
+                    tally,
                     depth.saturating_add(1),
                 );
             }
             _ => {}
         }
 
-        if *total >= flags.max_matches {
+        if tally.matches >= flags.max_matches {
             return;
         }
     }
@@ -104607,6 +104722,11 @@ fn cmd_uniq_input(args: &str, input: &[u8]) {
 /// Grep piped input for a pattern.  `args` is the search pattern (no file
 /// argument).  If `args` contains a space it is interpreted as
 /// `<pattern> <file>` and delegates to `cmd_grep`.
+///
+/// Exits with the same three-valued status as the file form: 0 matched, 1
+/// searched and found nothing, 2 could not search at all (a usage error). There
+/// is no unreadable-target case here — the input arrived already read — so 2
+/// only ever comes from a bad argument.
 fn cmd_grep_input(args: &str, input: &str) {
     // Parse flags and find the pattern.
     let mut flags = GrepFlags::new();
@@ -104622,7 +104742,17 @@ fn cmd_grep_input(args: &str, input: &str) {
                     'c' => flags.count_only = true,
                     'n' => flags.show_line_numbers = true,
                     'w' => flags.whole_word = true,
-                    _ => {}
+                    _ => {
+                        // The file form rejects an unknown flag; this one used
+                        // to drop it on the floor. So `grep -Z pat f` failed
+                        // while `cat f | grep -Z pat` quietly searched with -Z
+                        // ignored -- the two halves disagreeing about the same
+                        // argument, which the contract below forbids. A typo'd
+                        // flag must not silently change what was searched for.
+                        shell_println!("grep: unknown flag '-{}'", ch);
+                        set_exit(2);
+                        return;
+                    }
                 }
             }
         } else {
@@ -104639,7 +104769,10 @@ fn cmd_grep_input(args: &str, input: &str) {
     let pattern = match positional.first() {
         Some(p) => *p,
         None => {
+            // 2 for the same reason the file form uses it: 1 would claim the
+            // input does not contain a pattern that was never supplied.
             shell_println!("grep: no pattern specified");
+            set_exit(2);
             return;
         }
     };

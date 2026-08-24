@@ -141,14 +141,26 @@ MISSING
         echo "ls-diff: cargo missing inside WSL; SKIPPED"
         exit 0
     fi
+    # The target directory is under WSL's home, and shared with du-diff,
+    # find-diff and cmp-diff: same workspace, same triple, so their dependency
+    # artifacts are identical and a directory each stored the same objects four
+    # times over. See design-decisions.md §374. Delete it with
+    # `wsl rm -rf ~/.cache/slateos-diff-target`.
+    #
+    # Built from the workspace *root*, not from `userspace/coreutils`. Cargo
+    # searches for config upwards from the cwd, and `userspace/.cargo/config.
+    # toml` turns on `build-std` -- which this build does not want (Linux has a
+    # prebuilt std) and which fails outright unless the `rust-src` component is
+    # installed for the active toolchain. Running from the root avoids the zone
+    # config entirely; `-p coreutils` picks the same package.
     root=$(cd "$(dirname "$0")/.." && pwd) || exit 1
-    ( cd "$root/userspace/coreutils" \
-      && CARGO_TARGET_DIR="$HOME/du-diff-target" \
-         cargo build --bin ls --target x86_64-unknown-linux-gnu ) >&2 || {
+    ( cd "$root" \
+      && CARGO_TARGET_DIR="$HOME/.cache/slateos-diff-target" \
+         cargo build -p coreutils --bin ls --target x86_64-unknown-linux-gnu ) >&2 || {
         echo "ls-diff: the build failed"
         exit 1
     }
-    OURS="$HOME/du-diff-target/x86_64-unknown-linux-gnu/debug/ls"
+    OURS="$HOME/.cache/slateos-diff-target/x86_64-unknown-linux-gnu/debug/ls"
 fi
 
 if [ ! -x "$OURS" ]; then

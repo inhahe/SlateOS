@@ -8688,55 +8688,123 @@ fn cmd_echo(args: &str) {
 }
 
 /// Interpret C-style escape sequences for `echo -e`.
+///
+/// Iterates *characters*, not bytes. That distinction is the whole content of
+/// this function's history: it used to walk `s.as_bytes()` and copy each
+/// non-escape byte through with `result.push(bytes[i] as char)`. For an ASCII
+/// byte those agree, so the bug was invisible in every ASCII test — but `as
+/// char` maps `0x80..=0xFF` to `U+0080..=U+00FF`, which `String::push` then
+/// re-encodes as **two** UTF-8 bytes. Every byte of a multi-byte character was
+/// therefore expanded into its own two-byte sequence, so `echo -e "café"`
+/// printed `cafÃ©` while plain `echo "café"` (which never enters this
+/// function) printed correctly.
+///
+/// It is reachable, not theoretical: the line editor refuses bytes ≥ 0x80 from
+/// the keyboard, but `source` accepts any valid-UTF-8 script and command
+/// substitution feeds arbitrary command output back into the line, so a
+/// sourced `echo -e` on any non-ASCII text corrupts it.
+///
+/// Since `s` is a `&str`, every character in it is by construction whole and
+/// valid, so pushing the `char` is exactly right and cannot re-encode. All
+/// escape *triggers* are ASCII, which is why peeking one character ahead is
+/// equivalent to the old one-byte lookahead.
+///
+/// Note what this deliberately does *not* add: a `\xNN` escape for arbitrary
+/// bytes. That needs an output path that can carry non-UTF-8 — `shell_write`
+/// takes `&str` and the capture buffer is a `String` — and belongs to the
+/// byte-clean expanded-word work settled as option B in `design-decisions.md`
+/// §261, not to a corruption fix. See `TD-KSHELL-LINE-EDITOR-IS-UTF8`.
 fn interpret_echo_escapes(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
+    let mut chars = s.chars().peekable();
 
-    while i < len {
-        if bytes[i] == b'\\' && i.saturating_add(1) < len {
-            let next = bytes[i.saturating_add(1)];
-            match next {
-                b'n' => {
-                    result.push('\n');
-                    i = i.saturating_add(2);
-                }
-                b't' => {
-                    result.push('\t');
-                    i = i.saturating_add(2);
-                }
-                b'r' => {
-                    result.push('\r');
-                    i = i.saturating_add(2);
-                }
-                b'\\' => {
-                    result.push('\\');
-                    i = i.saturating_add(2);
-                }
-                b'0' => {
-                    result.push('\0');
-                    i = i.saturating_add(2);
-                }
-                b'a' => {
-                    result.push('\x07');
-                    i = i.saturating_add(2);
-                } // bell
-                b'b' => {
-                    result.push('\x08');
-                    i = i.saturating_add(2);
-                } // backspace
-                _ => {
-                    result.push('\\');
-                    i = i.saturating_add(1);
-                }
-            }
-        } else {
-            result.push(bytes[i] as char);
-            i = i.saturating_add(1);
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            result.push(c);
+            continue;
         }
+        // A backslash: consume the escape *only* if the next character forms
+        // one. `None` (trailing backslash) and any unrecognised character both
+        // emit a literal backslash and leave the peeked character in the
+        // stream, which is what the byte version did by advancing only one.
+        let escaped = match chars.peek() {
+            Some('n') => '\n',
+            Some('t') => '\t',
+            Some('r') => '\r',
+            Some('\\') => '\\',
+            Some('0') => '\0',
+            Some('a') => '\x07', // bell
+            Some('b') => '\x08', // backspace
+            _ => {
+                result.push('\\');
+                continue;
+            }
+        };
+        result.push(escaped);
+        chars.next();
     }
     result
+}
+
+/// Boot-time self-test for the shell's text helpers.
+///
+/// Exists because the kernel binary sets `test = false`, so `#[cfg(test)]`
+/// modules in this file never execute — a boot-battery entry is the only place
+/// a kshell assertion actually runs.
+///
+/// # Errors
+///
+/// Never returns `Err`; failures assert, matching the other boot self-tests.
+///
+/// # Panics
+///
+/// On any assertion failure.
+pub fn self_test() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    serial_println!("  kshell::self_test 1: echo -e escapes (ASCII)");
+    assert_eq!(interpret_echo_escapes("a\\nb"), "a\nb");
+    assert_eq!(interpret_echo_escapes("a\\tb"), "a\tb");
+    assert_eq!(interpret_echo_escapes("a\\rb"), "a\rb");
+    assert_eq!(interpret_echo_escapes("a\\\\b"), "a\\b");
+    assert_eq!(interpret_echo_escapes("a\\0b"), "a\0b");
+    assert_eq!(interpret_echo_escapes("a\\ab"), "a\x07b");
+    assert_eq!(interpret_echo_escapes("a\\bb"), "a\x08b");
+    // No escape: text passes through untouched.
+    assert_eq!(interpret_echo_escapes("plain"), "plain");
+    assert_eq!(interpret_echo_escapes(""), "");
+
+    serial_println!("  kshell::self_test 2: unknown and trailing backslashes");
+    // An unrecognised escape emits the backslash and keeps the character, so
+    // `\z` is two characters out, not a swallowed one.
+    assert_eq!(interpret_echo_escapes("a\\zb"), "a\\zb");
+    // A backslash with nothing after it is a literal backslash.
+    assert_eq!(interpret_echo_escapes("a\\"), "a\\");
+    assert_eq!(interpret_echo_escapes("\\"), "\\");
+    // Two escapes in a row, and an escaped backslash *before* an escape
+    // character — `\\n` is a literal backslash then `n`, not a newline.
+    assert_eq!(interpret_echo_escapes("\\n\\t"), "\n\t");
+    assert_eq!(interpret_echo_escapes("\\\\n"), "\\n");
+
+    serial_println!("  kshell::self_test 3: non-ASCII survives (regression)");
+    // The bug this test exists for: the old implementation walked bytes and
+    // copied each through as `byte as char`, which re-encoded every byte of a
+    // multi-byte character as its own two-byte sequence — "café" came out as
+    // "cafÃ©".  Compare byte lengths explicitly, because a String that *looks*
+    // right in a debugger can still carry the doubled encoding.
+    assert_eq!(interpret_echo_escapes("café"), "café");
+    assert_eq!(interpret_echo_escapes("café").len(), "café".len());
+    // 2-, 3- and 4-byte characters, since the doubling scaled with length.
+    assert_eq!(interpret_echo_escapes("é").len(), 2);
+    assert_eq!(interpret_echo_escapes("→").len(), 3);
+    assert_eq!(interpret_echo_escapes("🦀").len(), 4);
+    // Escapes still work when adjacent to multi-byte text, which is where a
+    // byte-indexed lookahead would have desynchronised.
+    assert_eq!(interpret_echo_escapes("é\\né"), "é\né");
+    assert_eq!(interpret_echo_escapes("🦀\\t🦀"), "🦀\t🦀");
+
+    serial_println!("  kshell::self_test PASSED");
+    Ok(())
 }
 
 /// `printf FORMAT [ARG ...]` — formatted output (subset of POSIX printf).

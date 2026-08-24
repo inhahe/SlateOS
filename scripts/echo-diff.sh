@@ -48,75 +48,19 @@
 # discriminates: it should report every xfail as XPASS and nothing else.
 set -u
 
-export MSYS2_ARG_CONV_EXCL='*'
-
-# --- get ourselves into WSL --------------------------------------------------
-if ! command -v wslpath >/dev/null 2>&1; then
-  if ! command -v wsl >/dev/null 2>&1; then
-    echo "echo-diff: no WSL on this host; skipping"
-    exit 0
-  fi
-  here=$(cd "$(dirname "$0")" && pwd)
-  if command -v cygpath >/dev/null 2>&1; then here=$(cygpath -m "$here"); fi
-  inside=$(wsl wslpath -u "$here" 2>/dev/null) || {
-    echo "echo-diff: could not map $here into WSL; skipping"
-    exit 0
-  }
-  exec wsl -e env "OURS=${OURS:-}" "VERBOSE=${VERBOSE:-}" \
-    bash "$inside/echo-diff.sh"
-fi
-
-root=$(cd "$(dirname "$0")/.." && pwd) || exit 1
-
-# --- the reference -----------------------------------------------------------
-# `command -v echo` finds the *builtin* in bash, which is not what is being
-# compared here. Ask for the file.
-gnu_real=
-for candidate in /usr/bin/echo /bin/echo; do
-  [ -x "$candidate" ] && { gnu_real=$candidate; break; }
-done
-if [ -z "$gnu_real" ]; then
-  echo "echo-diff: no GNU echo binary inside WSL; skipping"
-  exit 0
-fi
-
-# --- the subject -------------------------------------------------------------
-OURS=${OURS:-}
-if [ -z "$OURS" ]; then
-  # shellcheck disable=SC1091
-  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "echo-diff: no cargo inside WSL; skipping"
-    echo "  install one with:  wsl -e sh -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal'"
-    exit 0
-  fi
-  target_dir=$HOME/.cache/slateos-diff-target
-  ( cd "$root" && cargo build -p coreutils --bin echo \
-      --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || exit 1
-  OURS=$target_dir/x86_64-unknown-linux-gnu/debug/echo
-fi
-if [ ! -x "$OURS" ]; then
-  echo "echo-diff: $OURS is not executable" >&2
-  exit 1
-fi
-case $OURS in
-  /*) ;;
-  *) OURS=$(cd "$(dirname "$OURS")" && pwd)/$(basename "$OURS") ;;
-esac
-
-# echo produces no locale-dependent text of its own, but `write error` comes
-# from `strerror`, which does. Fixed for the same reason as everywhere since
-# §351.
-export LC_ALL=C.UTF-8
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `echo` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+#
+# `DIFF_REF` names the reference explicitly because `command -v echo` finds the
+# shell *builtin*, which is not what is being compared here. (echo produces no
+# locale-dependent text of its own, but `write error` comes from `strerror`,
+# which does — so the fixed locale the shared preamble sets matters here too.)
+DIFF_PROG=echo
+DIFF_REF="/usr/bin/echo /bin/echo"
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
-
-# --- one name for both sides -------------------------------------------------
-bindir=$(mktemp -d)
-mkdir -p "$bindir/ours" "$bindir/gnu"
-ln -s "$OURS" "$bindir/ours/echo"
-ln -s "$gnu_real" "$bindir/gnu/echo"
-trap 'rm -rf "$bindir"' EXIT
 
 # --- knobs, reset before every case ------------------------------------------
 # `ENVV` is a `VAR=value` word placed in the environment of both sides, and

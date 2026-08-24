@@ -59,93 +59,30 @@
 # discriminates: it should report every xfail as XPASS and nothing else.
 set -u
 
-export MSYS2_ARG_CONV_EXCL='*'
-
-# --- get ourselves into WSL --------------------------------------------------
-# `$0` may be an MSYS path (`/d/visual studio projects/...`) or a Windows one.
-# `wslpath` translates whatever it is; it exists only inside WSL, which is also
-# how we tell we are already there.
-if ! command -v wslpath >/dev/null 2>&1; then
-  if ! command -v wsl >/dev/null 2>&1; then
-    echo "cmp-diff: no WSL on this host; skipping (our cmp is a unix-only binary)"
-    exit 0
-  fi
-  here=$(cd "$(dirname "$0")" && pwd)
-  # `wsl wslpath` converts a Windows path; MSYS's own `/d/...` form is not one,
-  # so hand over the mixed form cygpath produces, which WSL does understand.
-  if command -v cygpath >/dev/null 2>&1; then here=$(cygpath -m "$here"); fi
-  inside=$(wsl wslpath -u "$here" 2>/dev/null) || {
-    echo "cmp-diff: could not map $here into WSL; skipping"
-    exit 0
-  }
-  exec wsl -e env "OURS=${OURS:-}" "VERBOSE=${VERBOSE:-}" \
-    bash "$inside/cmp-diff.sh"
-fi
-
-root=$(cd "$(dirname "$0")/.." && pwd) || exit 1
-
-# --- the reference -----------------------------------------------------------
-if ! command -v cmp >/dev/null 2>&1; then
-  echo "cmp-diff: no GNU cmp inside WSL; skipping"
-  exit 0
-fi
-
-# --- the subject -------------------------------------------------------------
-OURS=${OURS:-}
-if [ -z "$OURS" ]; then
-  # shellcheck disable=SC1091
-  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "cmp-diff: no cargo inside WSL; skipping"
-    echo "  install one with:  wsl -e sh -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal'"
-    exit 0
-  fi
-  target_dir=$HOME/.cache/slateos-diff-target
-  # Built every run, for the reason `diff-subject.sh` spells out at length: a
-  # harness that merely runs a path measures whatever was last written there.
-  ( cd "$root" && cargo build -p coreutils --bin cmp \
-      --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || exit 1
-  OURS=$target_dir/x86_64-unknown-linux-gnu/debug/cmp
-fi
-if [ ! -x "$OURS" ]; then
-  echo "cmp-diff: $OURS is not executable" >&2
-  exit 1
-fi
-# Absolute, because the symlinks below are followed from a different directory.
-case $OURS in
-  /*) ;;
-  *) OURS=$(cd "$(dirname "$OURS")" && pwd)/$(basename "$OURS") ;;
-esac
-
-# Diagnostics are referenced under a UTF-8 locale, as everywhere since §351.
-# It matters more here than usual: `cmp` picks the word `byte` or `char` for its
-# result line from `hard_locale (LC_MESSAGES)`, so the locale is not merely
-# cosmetic. `C.UTF-8` is present on every glibc build; a named territory locale
-# such as `en_US.UTF-8` may not be generated, and GNU would then fall back to
-# `C` and say `char` where we — reading the environment variable, having no
-# `setlocale` — would say `byte`. Both are covered below, the second only if the
-# system really has the locale.
-export LC_ALL=C.UTF-8
-
-pass=0; fail=0; xfail=0; xpass=0
-
-fixtures=$(mktemp -d)
-
-# --- one name for both sides -------------------------------------------------
-# Each binary is reached through a symlink called `cmp`, in a directory that is
-# the whole of `PATH` for that one invocation, so `argv[0]` is the bare word
-# `cmp` on both sides. This is not tidiness: `cmp` with no operands prints
-# `missing operand after '%s'`, and the `%s` is `argv[argc - 1]` — which, when
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `cmp` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+#
+# The matching `argv[0]` is not tidiness here: `cmp` with no operands prints
+# `missing operand after '%s'`, and the `%s` is `argv[argc - 1]` -- which, when
 # there were no arguments at all, is `argv[0]`. Invoked by its build path our
 # binary would name that path while GNU, found on `PATH`, named `cmp`, and the
 # harness would report a difference it had manufactured itself.
-gnu_real=$(command -v cmp)
-bindir=$(mktemp -d)
-mkdir -p "$bindir/ours" "$bindir/gnu"
-ln -s "$OURS" "$bindir/ours/cmp"
-ln -s "$gnu_real" "$bindir/gnu/cmp"
+#
+# The fixed UTF-8 locale matters more here than usual: `cmp` picks the word
+# `byte` or `char` for its result line from `hard_locale (LC_MESSAGES)`, so the
+# locale is not merely cosmetic. `C.UTF-8` is present on every glibc build; a
+# named territory locale such as `en_US.UTF-8` may not be generated, and GNU
+# would then fall back to `C` and say `char` where we -- reading the
+# environment variable, having no `setlocale` -- would say `byte`. Both are
+# covered below, the second only if the system really has the locale.
+DIFF_PROG=cmp
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
-trap 'chmod -R u+rwx "$fixtures" 2>/dev/null; rm -rf "$fixtures" "$bindir"' EXIT
+pass=0; fail=0; xfail=0; xpass=0
+
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
 cd "$fixtures" >/dev/null || exit 1
 
 # --- fixtures ----------------------------------------------------------------

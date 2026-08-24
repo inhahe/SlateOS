@@ -26,12 +26,11 @@
 #
 # ## Why both sides run inside WSL
 #
-# The same reasons as `cmp-diff.sh`, `tee-diff.sh` and `digest-diff.sh`, whose
-# headers spell them out: the fixtures include an argument that is not valid
-# UTF-16 and so cannot exist on Windows at all, and a Linux build sharing the
-# repository's `target/` with the Windows one would make each invalidate the
-# other. The build lands in `$HOME/.cache/slateos-diff-target` inside WSL,
-# shared with the other harnesses (`design-decisions.md` §374).
+# `scripts/diff-wsl.sh` gives the general reasons. Two are particular to this
+# program: the fixtures include an argument that is not valid UTF-16 and so
+# cannot exist on Windows at all, and `yes >&-` needs `coreutils::stdfd`, which
+# is `#[cfg(target_os = "linux")]` — without it the program does not merely
+# report the wrong thing, it never terminates.
 #
 # ## Cases that differ on purpose
 #
@@ -42,74 +41,13 @@
 # discriminates: it should report every xfail as XPASS and nothing else.
 set -u
 
-export MSYS2_ARG_CONV_EXCL='*'
-
-# --- get ourselves into WSL --------------------------------------------------
-if ! command -v wslpath >/dev/null 2>&1; then
-  if ! command -v wsl >/dev/null 2>&1; then
-    echo "yes-diff: no WSL on this host; skipping (ours is a unix-only binary)"
-    exit 0
-  fi
-  here=$(cd "$(dirname "$0")" && pwd)
-  if command -v cygpath >/dev/null 2>&1; then here=$(cygpath -m "$here"); fi
-  inside=$(wsl wslpath -u "$here" 2>/dev/null) || {
-    echo "yes-diff: could not map $here into WSL; skipping"
-    exit 0
-  }
-  exec wsl -e env "OURS=${OURS:-}" "VERBOSE=${VERBOSE:-}" \
-    bash "$inside/yes-diff.sh"
-fi
-
-root=$(cd "$(dirname "$0")/.." && pwd) || exit 1
-
-# --- the reference -----------------------------------------------------------
-if ! command -v yes >/dev/null 2>&1; then
-  echo "yes-diff: no GNU yes inside WSL; skipping"
-  exit 0
-fi
-
-# --- the subject -------------------------------------------------------------
-OURS=${OURS:-}
-if [ -z "$OURS" ]; then
-  # shellcheck disable=SC1091
-  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "yes-diff: no cargo inside WSL; skipping"
-    echo "  install one with:  wsl -e sh -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal'"
-    exit 0
-  fi
-  target_dir=$HOME/.cache/slateos-diff-target
-  ( cd "$root" && cargo build -p coreutils --bin yes \
-      --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || exit 1
-  OURS=$target_dir/x86_64-unknown-linux-gnu/debug/yes
-fi
-if [ ! -x "$OURS" ]; then
-  echo "yes-diff: $OURS is not executable" >&2
-  exit 1
-fi
-case $OURS in
-  /*) ;;
-  *) OURS=$(cd "$(dirname "$OURS")" && pwd)/$(basename "$OURS") ;;
-esac
-
-# Diagnostics are referenced under a UTF-8 locale, as everywhere since §351:
-# getopt renders an unknown or ambiguous option with directional single quotes
-# under a UTF-8 locale and ASCII apostrophes under `C`, so the whole
-# option-error family would disagree for a reason unrelated to this program.
-export LC_ALL=C.UTF-8
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `yes` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+DIFF_PROG=yes
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
-
-# --- one name for both sides -------------------------------------------------
-# Each binary is reached through a symlink called `yes`, in a directory that is
-# the whole of `PATH` for that one invocation, so `argv[0]` is the bare word
-# `yes` on both sides and the `yes: ` prefix on every diagnostic matches.
-gnu_real=$(command -v yes)
-bindir=$(mktemp -d)
-mkdir -p "$bindir/ours" "$bindir/gnu"
-ln -s "$OURS" "$bindir/ours/yes"
-ln -s "$gnu_real" "$bindir/gnu/yes"
-trap 'rm -rf "$bindir"' EXIT
 
 # Several times the 8 KiB output buffer, so a record split across a write shows.
 LIMIT=40000

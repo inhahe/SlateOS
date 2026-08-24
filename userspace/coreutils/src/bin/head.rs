@@ -24,6 +24,7 @@
 //! digit reaching getopt at all means it was not first, and upstream turns that
 //! into a diagnostic rather than a count.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::quoteaf;
@@ -137,7 +138,7 @@ fn main() -> ExitCode {
             // The referral, when there is one, is part of the message, and only
             // the first line carries the `head: ` prefix — which is what GNU
             // prints.
-            eprintln!("head: {e}");
+            diag!("head: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }
@@ -510,7 +511,7 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
             match File::open(name) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!(
+                    diag!(
                         "head: cannot open {} for reading: {}",
                         quoteaf(&bytes),
                         strerror(&e)
@@ -542,7 +543,7 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
                 // and nothing left to do.
                 return ExitCode::from(u8::from(!ok));
             }
-            eprintln!("head: error reading {}: {}", quoteaf(label), strerror(&e));
+            diag!("head: error reading {}: {}", quoteaf(label), strerror(&e));
             ok = false;
         }
     }

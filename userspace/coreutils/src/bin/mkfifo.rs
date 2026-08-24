@@ -67,6 +67,7 @@
 //! stay in [`LONG_OPTIONS`] because the table is what decides whether an
 //! abbreviation is ambiguous.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quoteaf_os};
@@ -156,7 +157,7 @@ fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("mkfifo: {e}");
+            diag!("mkfifo: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }

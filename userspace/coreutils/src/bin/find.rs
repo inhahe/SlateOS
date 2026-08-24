@@ -79,6 +79,7 @@
 //! false would be a wrong answer rather than a refusal. `%Z` renders empty for
 //! the same reason. Tracked in `known-issues.md`.
 
+use coreutils::diag;
 use coreutils::errmsg::{self, strerror};
 #[cfg(unix)]
 use coreutils::quote::os_bytes;
@@ -206,7 +207,7 @@ trait Tree {
 
 #[cfg(not(unix))]
 fn main() -> ExitCode {
-    eprintln!("find: unix-only utility; not supported on this platform");
+    diag!("find: unix-only utility; not supported on this platform");
     ExitCode::from(1)
 }
 
@@ -814,7 +815,7 @@ fn process_debug_options(spec: &[u8]) -> Result<(), Leading> {
             // however late in the list the offender is. `-D exec,bogus`
             // really does say `Ignoring unrecognised debug flag 'exec'`.
             let head = strtok_first(spec);
-            eprintln!("find: Ignoring unrecognised debug flag {}", quote(head));
+            diag!("find: Ignoring unrecognised debug flag {}", quote(head));
         }
     }
     if empty {
@@ -3898,7 +3899,7 @@ impl Ctx<'_> {
     /// complaint belongs after the tree it managed to walk.
     fn warn(&mut self, msg: &str) {
         self.flush();
-        eprintln!("find: {msg}");
+        diag!("find: {msg}");
     }
 
     /// `following_links()`: whether the walk dereferenced this item's own name.
@@ -3940,7 +3941,7 @@ impl Ctx<'_> {
             if let Err(e) = res {
                 // Upstream dies here rather than carrying on: a `find` whose
                 // output is going nowhere has nothing useful left to do.
-                eprintln!("find: {}", errmsg::strerror(&e));
+                diag!("find: {}", errmsg::strerror(&e));
                 self.status = 1;
             }
         }
@@ -4915,7 +4916,7 @@ fn help_text() -> String {
 /// supplies.
 fn report(f: &Fatal) {
     for line in &f.0 {
-        eprintln!("find: {line}");
+        diag!("find: {line}");
     }
 }
 
@@ -4968,12 +4969,12 @@ fn run_inner(argv: &[Vec<u8>], tree: &dyn Tree, capture: &mut Option<Vec<u8>>) -
     let leading = match process_leading_options(argv, &mut follow) {
         Ok(i) => i,
         Err(Leading::Usage(msg)) => {
-            eprintln!("find: {msg}");
-            eprintln!("Try 'find --help' for more information.");
+            diag!("find: {msg}");
+            diag!("Try 'find --help' for more information.");
             return 1;
         }
         Err(Leading::Die(msg)) => {
-            eprintln!("find: {msg}");
+            diag!("find: {msg}");
             return 1;
         }
         Err(Leading::DebugHelp) => {
@@ -5002,7 +5003,7 @@ fn run_inner(argv: &[Vec<u8>], tree: &dyn Tree, capture: &mut Option<Vec<u8>>) -
     // since it prints each one at the moment it decides on it and nothing else
     // has reached the output yet.
     for w in &parser.warnings {
-        eprintln!("find: {w}");
+        diag!("find: {w}");
     }
     match parsed {
         Ok(None) => {}
@@ -5113,23 +5114,25 @@ fn process_all_startpoints(
         // `-files0-from` and start points on the command line are mutually
         // exclusive, and the refusal is two lines: the operand, then the rule.
         if let Some(first) = start_points.first() {
-            eprintln!("find: extra operand {}", quote(first));
-            eprintln!("find: file operands cannot be combined with -files0-from");
+            diag!("find: extra operand {}", quote(first));
+            diag!("find: file operands cannot be combined with -files0-from");
             return 1;
         }
         if from == b"-" {
             if ok_prompt {
                 // The prompt and the name list would be reading the same
                 // stream, so one would eat the other's input.
-                eprintln!(
+                diag!(
                     "find: option -files0-from reading from standard input cannot be combined with -ok, -okdir"
                 );
-                eprintln!();
+                // Upstream's refusal ends with a blank line. It goes out the
+                // same way the line above it does, so that losing it counts.
+                diag!("");
                 return 1;
             }
             let mut buf = Vec::new();
             if let Err(e) = io::Read::read_to_end(&mut io::stdin(), &mut buf) {
-                eprintln!(
+                diag!(
                     "find: {}: read error: {}",
                     files0_name(from),
                     errmsg::strerror(&e)
@@ -5141,7 +5144,7 @@ fn process_all_startpoints(
             match std::fs::read(os_from_bytes(from)) {
                 Ok(buf) => split_nul(&buf),
                 Err(e) => {
-                    eprintln!(
+                    diag!(
                         "find: cannot open {} for reading: {}",
                         files0_name(from),
                         errmsg::strerror(&e)
@@ -5216,7 +5219,7 @@ fn split_nul(buf: &[u8]) -> Vec<Vec<u8>> {
 #[cfg(unix)]
 fn main() -> ExitCode {
     if std::env::var_os("FIND_BLOCK_SIZE").is_some() {
-        eprintln!(
+        diag!(
             "find: The environment variable FIND_BLOCK_SIZE is not supported, the only thing \
              that affects the block size is the POSIXLY_CORRECT environment variable"
         );

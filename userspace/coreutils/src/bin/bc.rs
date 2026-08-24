@@ -7,6 +7,7 @@
 //! Architecture: hand-written lexer -> recursive-descent parser -> AST ->
 //! tree-walk interpreter.  The numbers are `bignum::Decimal`, shared with `dc`.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::{quoteaf_os, quotef_os};
@@ -1171,7 +1172,7 @@ impl Interpreter {
     /// not captured in tests: a caller redirecting stdout must not find
     /// diagnostics mixed into the numbers.
     fn warn(&self, message: &str) {
-        eprintln!("Runtime warning (func=(main)): {message}");
+        diag!("Runtime warning (func=(main)): {message}");
     }
 
     fn get_var(&self, name: &str) -> Decimal {
@@ -1256,7 +1257,7 @@ impl Interpreter {
                 // `break`, `continue` or `return` outside any enclosing
                 // construct ends the program, as there is nothing to return to.
                 Ok(_) => return,
-                Err(e) => eprintln!("Runtime error: {e}"),
+                Err(e) => diag!("Runtime error: {e}"),
             }
         }
     }
@@ -2222,7 +2223,7 @@ impl Refusal {
     fn report(&self) -> ExitCode {
         let status = match self {
             Self::Getopt(e) => {
-                eprintln!("bc: {}", e.sentence);
+                diag!("bc: {}", e.sentence);
                 // GNU prints the sentence on stderr and the usage block on
                 // stdout, from two different pieces of code. Reproduced
                 // rather than tidied: a script doing `bc -x 2>/dev/null`
@@ -2231,7 +2232,7 @@ impl Refusal {
                 e.status
             }
             Self::Unimplemented(message) => {
-                eprintln!("bc: {message}");
+                diag!("bc: {message}");
                 println!("{USAGE}");
                 1
             }
@@ -2270,13 +2271,13 @@ impl Trouble {
         match self {
             // Mid-sentence, so the quotes are never elided: a bare name would
             // blur into the words either side of it.
-            Self::Unavailable(name) => eprintln!("File {} is unavailable.", quoteaf_os(name)),
+            Self::Unavailable(name) => diag!("File {} is unavailable.", quoteaf_os(name)),
             // Ends the clause, so it takes the bare form when it can, exactly
             // as `wc: missing.txt: No such file or directory` does.
-            Self::FileNotUtf8(name) => eprintln!("bc: {}: not valid UTF-8", quotef_os(name)),
-            Self::ExpressionNotUtf8 => eprintln!("bc: -e expression: not valid UTF-8"),
-            Self::StdinNotUtf8 => eprintln!("bc: standard input: not valid UTF-8"),
-            Self::StdinRead(message) => eprintln!("bc: standard input: {message}"),
+            Self::FileNotUtf8(name) => diag!("bc: {}: not valid UTF-8", quotef_os(name)),
+            Self::ExpressionNotUtf8 => diag!("bc: -e expression: not valid UTF-8"),
+            Self::StdinNotUtf8 => diag!("bc: standard input: not valid UTF-8"),
+            Self::StdinRead(message) => diag!("bc: standard input: {message}"),
         }
         ExitCode::FAILURE
     }

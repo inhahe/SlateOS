@@ -51,6 +51,7 @@
 
 #![cfg_attr(not(unix), allow(dead_code))]
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fnmatch::{Flags, fnmatch};
 use coreutils::getopt::{self, Opt, Program, Takes};
@@ -909,7 +910,7 @@ fn parse_args(
         // A warning, not a refusal: `du -s -d0` says its piece and then runs.
         // Threaded out through `Request` would need a third variant for one
         // string, so it is printed here by the only caller that can.
-        eprintln!("du: {text}");
+        diag!("du: {text}");
     }
     Ok(Request::Run(cfg, Source::Operands(operands)))
 }
@@ -1049,7 +1050,7 @@ Binary prefixes can be used, too: KiB=K, MiB=M, and so on.
 
 #[cfg(not(unix))]
 fn main() -> ExitCode {
-    eprintln!("du: unix-only utility; not supported on this platform");
+    diag!("du: unix-only utility; not supported on this platform");
     ExitCode::from(1)
 }
 

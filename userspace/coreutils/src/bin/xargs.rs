@@ -6,6 +6,7 @@
 //!   -I REPL   replace REPL in COMMAND with each input item (one per invocation)
 //!   Default: append all stdin items to COMMAND and run once.
 
+use coreutils::diag;
 use coreutils::quote::quotef_os;
 use std::env;
 use std::io::{self, Read};
@@ -29,7 +30,7 @@ fn main() {
 
     let mut input = String::new();
     if io::stdin().read_to_string(&mut input).is_err() {
-        eprintln!("xargs: failed to read stdin");
+        diag!("xargs: failed to read stdin");
         process::exit(1);
     }
 
@@ -47,7 +48,7 @@ fn main() {
                 match Command::new(cmd).args(args).status() {
                     Ok(s) if !s.success() => exit_code = 1,
                     Err(e) => {
-                        eprintln!("xargs: {}: {e}", quotef_os(cmd));
+                        diag!("xargs: {}: {e}", quotef_os(cmd));
                         exit_code = 1;
                     }
                     _ => {}
@@ -65,7 +66,7 @@ fn main() {
             match Command::new(cmd).args(&full_args).status() {
                 Ok(s) if !s.success() => exit_code = 1,
                 Err(e) => {
-                    eprintln!("xargs: {}: {e}", quotef_os(cmd));
+                    diag!("xargs: {}: {e}", quotef_os(cmd));
                     exit_code = 1;
                 }
                 _ => {}
@@ -83,7 +84,7 @@ fn main() {
         match Command::new(cmd).args(&full_args).status() {
             Ok(s) if !s.success() => exit_code = 1,
             Err(e) => {
-                eprintln!("xargs: {}: {e}", quotef_os(cmd));
+                diag!("xargs: {}: {e}", quotef_os(cmd));
                 exit_code = 1;
             }
             _ => {}

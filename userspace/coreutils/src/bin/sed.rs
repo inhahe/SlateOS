@@ -51,6 +51,7 @@
 //! is why writing goes through [`Out`], which holds a newline back until it
 //! knows something follows it.
 
+use coreutils::diag;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -921,7 +922,7 @@ impl Input {
                     return true;
                 }
                 Err(e) => {
-                    eprintln!("sed: can't read {path}: {}", strerror(&e));
+                    diag!("sed: can't read {path}: {}", strerror(&e));
                     self.had_error = true;
                 }
             }
@@ -955,7 +956,7 @@ impl Input {
                     return;
                 }
                 Err(e) => {
-                    eprintln!("sed: read error: {}", strerror(&e));
+                    diag!("sed: read error: {}", strerror(&e));
                     self.had_error = true;
                     self.cur = None;
                 }
@@ -1131,7 +1132,7 @@ impl Exec {
     }
 
     fn fail(&mut self, msg: &str) {
-        eprintln!("sed: {msg}");
+        diag!("sed: {msg}");
         self.had_error = true;
     }
 
@@ -1776,22 +1777,22 @@ fn main() {
             process::exit(0);
         }
         Err(e) => {
-            eprintln!("sed: {e}");
-            eprintln!("{USAGE}");
+            diag!("sed: {e}");
+            diag!("{USAGE}");
             process::exit(1);
         }
     };
 
     if parsed.script_parts.is_empty() {
-        eprintln!("sed: no script specified");
-        eprintln!("{USAGE}");
+        diag!("sed: no script specified");
+        diag!("{USAGE}");
         process::exit(1);
     }
 
     let script_text = match collect_script(&parsed.script_parts) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("sed: {e}");
+            diag!("sed: {e}");
             process::exit(1);
         }
     };
@@ -1800,8 +1801,8 @@ fn main() {
         Ok(s) => s,
         Err(e) => {
             match e.at {
-                Some(at) => eprintln!("sed: -e expression #1, char {at}: {}", e.msg),
-                None => eprintln!("sed: {}", e.msg),
+                Some(at) => diag!("sed: -e expression #1, char {at}: {}", e.msg),
+                None => diag!("sed: {}", e.msg),
             }
             process::exit(e.code);
         }
@@ -1843,7 +1844,7 @@ fn run_one(
         Err(Stop::Io(e)) => {
             // A closed pipe is how `sed … | head` ends, and is not a failure.
             if e.kind() != io::ErrorKind::BrokenPipe {
-                eprintln!("sed: couldn't write: {}", strerror(&e));
+                diag!("sed: couldn't write: {}", strerror(&e));
                 return (Some(4), true);
             }
             None
@@ -1851,7 +1852,7 @@ fn run_one(
         // Not "couldn't write": the run stopped because a search was
         // abandoned, and sending the reader to the disk would waste their time.
         Err(Stop::Limit(e)) => {
-            eprintln!("sed: {e}");
+            diag!("sed: {e}");
             return (Some(4), true);
         }
     };
@@ -1894,12 +1895,12 @@ fn run_in_place(script: &Script, files: &[String], suppress: bool, sep: u8, suff
     let mut bad = false;
     for path in files {
         if path == "-" {
-            eprintln!("sed: no input files while in-place editing");
+            diag!("sed: no input files while in-place editing");
             bad = true;
             continue;
         }
         if let Err(e) = File::open(path) {
-            eprintln!("sed: can't read {path}: {}", strerror(&e));
+            diag!("sed: can't read {path}: {}", strerror(&e));
             bad = true;
             continue;
         }
@@ -1916,13 +1917,13 @@ fn run_in_place(script: &Script, files: &[String], suppress: bool, sep: u8, suff
                 format!("{path}{suffix}")
             };
             if let Err(e) = fs::copy(path, &backup) {
-                eprintln!("sed: cannot back up {path}: {}", strerror(&e));
+                diag!("sed: cannot back up {path}: {}", strerror(&e));
                 bad = true;
                 continue;
             }
         }
         if let Err(e) = fs::write(path, &buf) {
-            eprintln!("sed: couldn't write {path}: {}", strerror(&e));
+            diag!("sed: couldn't write {path}: {}", strerror(&e));
             bad = true;
         }
         if let Some(code) = quit {

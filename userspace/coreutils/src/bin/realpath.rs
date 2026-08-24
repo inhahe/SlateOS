@@ -102,6 +102,7 @@
 //! not needed.
 
 use coreutils::canon::{self, Fs, Links, Mode, RealFs};
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quoteaf, quotef};
@@ -199,7 +200,7 @@ fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("realpath: {e}");
+            diag!("realpath: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }

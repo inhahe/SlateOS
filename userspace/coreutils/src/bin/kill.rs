@@ -46,6 +46,7 @@
 //! `USR1` and `USR2` — which after `TERM`, `HUP` and `KILL` are the signals
 //! scripts send most.
 
+use coreutils::diag;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, ErrorKind, Write};
@@ -370,7 +371,7 @@ fn write_out(text: &str) -> i32 {
         Ok(()) => 0,
         Err(e) if e.kind() == ErrorKind::BrokenPipe => 0,
         Err(e) => {
-            eprintln!("kill: write error: {}", strerror(&e));
+            diag!("kill: write error: {}", strerror(&e));
             1
         }
     }
@@ -381,9 +382,9 @@ fn main() {
     let action = match parse_args(&args) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("kill: {e}");
-            eprintln!("Usage: kill [-s SIGNAL | -SIGNAL] PID...");
-            eprintln!("       kill -l [EXIT_STATUS...]");
+            diag!("kill: {e}");
+            diag!("Usage: kill [-s SIGNAL | -SIGNAL] PID...");
+            diag!("       kill -l [EXIT_STATUS...]");
             process::exit(1);
         }
     };
@@ -406,7 +407,7 @@ fn main() {
                         lines.push('\n');
                     }
                     Err(e) => {
-                        eprintln!("kill: {e}");
+                        diag!("kill: {e}");
                         status = 1;
                     }
                 }
@@ -427,12 +428,12 @@ fn send_all(signal: i32, pids: &[OsString]) -> i32 {
     let mut status = 0;
     for pid_str in pids {
         let Some(pid) = text(pid_str).and_then(|t| t.parse::<i32>().ok()) else {
-            eprintln!("kill: {}: invalid process id", quote(&os_bytes(pid_str)));
+            diag!("kill: {}: invalid process id", quote(&os_bytes(pid_str)));
             status = 1;
             continue;
         };
         if let Err(err) = send_one(pid, signal) {
-            eprintln!(
+            diag!(
                 "kill: {}: {}",
                 quote(&os_bytes(pid_str)),
                 errno_text(err.raw_os_error(), &err)

@@ -5,7 +5,9 @@
 //!   Press Enter for next line, Space for next page, q to quit.
 //!   Without files, reads from stdin.
 
+use coreutils::diag;
 use coreutils::quote::quotef_os;
+use coreutils::stdfd;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -36,7 +38,7 @@ fn main() {
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("more: {}: {e}", quotef_os(path));
+                    diag!("more: {}: {e}", quotef_os(path));
                     continue;
                 }
             }
@@ -58,8 +60,7 @@ fn main() {
 
             if line_count >= lines_per_page {
                 let _ = out.flush();
-                eprint!("--More--");
-                let _ = io::stderr().flush();
+                prompt(b"--More--");
 
                 match read_key() {
                     Key::Quit => return,
@@ -67,11 +68,29 @@ fn main() {
                     Key::Page => line_count = 0,
                 }
 
-                eprint!("\r        \r");
-                let _ = io::stderr().flush();
+                prompt(b"\r        \r");
             }
         }
     }
+}
+
+/// Write the pager's prompt to descriptor 2, with no newline after it.
+///
+/// Not `eprint!`: that panics when the write fails, and the panic message then
+/// fails to print for the same reason, so `more f 2>&-` would abort with 134 in
+/// the middle of paging a file it was reading perfectly well.
+///
+/// Not [`stdfd::diag_bytes`] either, even though it is the same `write(2)`.
+/// That one records the failure in the crate-wide lost-diagnostic flag, and
+/// this is not a diagnostic — it is a prompt, the pager's half of a
+/// conversation with the terminal. Losing it does not mean the file was paged
+/// wrongly, so it must not turn a clean run into a failing exit status the way
+/// a lost *complaint* does.
+///
+/// Nothing is flushed afterwards because there is nothing to flush: unlike
+/// `io::stderr()`, this is one unbuffered write straight to the descriptor.
+fn prompt(bytes: &[u8]) {
+    let _ = stdfd::write_all(2, bytes);
 }
 
 #[derive(Debug, PartialEq, Eq)]

@@ -50,6 +50,7 @@
 //! a section switch — `coreutils-9.4/src/nl.c` did.
 //! `scripts/nl-diff.sh` is the executable form of every claim in this file.
 
+use coreutils::diag;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{quote, quotef_os};
 use coreutils::xnum;
@@ -214,7 +215,7 @@ fn main() -> ExitCode {
             // The message may be several lines: the deferred diagnostics are
             // joined into it, and only the first carries a `nl: ` prefix of its
             // own from here — the rest embed theirs. See `Deferred::into_error`.
-            eprintln!("nl: {e}");
+            diag!("nl: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }
@@ -963,7 +964,7 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
             Err(e) => {
                 // `quotef`, not `quote`: a file name in an I/O error is shell
                 // quoting with the quotes elided when they are not needed.
-                eprintln!("nl: {}: {}", quotef_os(path), errno_text(&e));
+                diag!("nl: {}: {}", quotef_os(path), errno_text(&e));
                 ok = false;
                 continue;
             }
@@ -973,18 +974,18 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
             Ok(false) => ok = false,
             Err(e) => {
                 let _ = out.flush();
-                eprintln!("nl: {}", errno_text(&e));
+                diag!("nl: {}", errno_text(&e));
                 return ExitCode::from(1);
             }
         }
         if let Err(e) = flush_error(&mut out) {
-            eprintln!("nl: {}", errno_text(&e));
+            diag!("nl: {}", errno_text(&e));
             return ExitCode::from(1);
         }
     }
 
     if let Err(e) = out.flush() {
-        eprintln!("nl: {}", errno_text(&e));
+        diag!("nl: {}", errno_text(&e));
         return ExitCode::from(1);
     }
     if ok {
@@ -1011,7 +1012,7 @@ fn number_stream(
                     // `error (EXIT_FAILURE, …)` from inside the print, so the
                     // lines already written stay written and nothing further is.
                     out.flush()?;
-                    eprintln!("nl: line number overflow");
+                    diag!("nl: line number overflow");
                     std::process::exit(1);
                 }
             }

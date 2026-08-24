@@ -49,6 +49,7 @@
 //! whole quoting grammar of its own and nothing here needs it yet; it is
 //! recorded in `todo.txt`.
 
+use coreutils::diag;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, ErrorKind, Write};
@@ -413,7 +414,7 @@ fn write_out(bytes: &[u8]) -> i32 {
         Ok(()) => 0,
         Err(e) if e.kind() == ErrorKind::BrokenPipe => 0,
         Err(e) => {
-            eprintln!("env: write error: {}", strerror(&e));
+            diag!("env: write error: {}", strerror(&e));
             EXIT_CANCELED
         }
     }
@@ -424,7 +425,7 @@ fn main() {
     let cfg = match parse_args(&args) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("env: {}", e.message);
+            diag!("env: {}", e.message);
             process::exit(e.status);
         }
     };
@@ -437,7 +438,7 @@ fn main() {
         if let Some(dir) = &cfg.chdir
             && let Err(e) = env::set_current_dir(dir)
         {
-            eprintln!(
+            diag!(
                 "env: cannot change directory to {}: {}",
                 quote_os(dir),
                 strerror(&e)
@@ -458,7 +459,7 @@ fn main() {
     match cmd.status() {
         Ok(status) => process::exit(exit_status_code(&status)),
         Err(e) => {
-            eprintln!("env: {}: {}", quotef_os(program), strerror(&e));
+            diag!("env: {}: {}", quotef_os(program), strerror(&e));
             process::exit(spawn_failure_status(e.kind()));
         }
     }

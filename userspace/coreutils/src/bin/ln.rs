@@ -68,6 +68,7 @@
 //! pointed-at directory instead of replacing the link — a link in a place the
 //! user never named, with no message.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::quoteaf_os;
@@ -148,7 +149,7 @@ fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("ln: {e}");
+            diag!("ln: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }

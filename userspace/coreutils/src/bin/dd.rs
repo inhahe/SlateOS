@@ -22,6 +22,7 @@
 //! the output is truncated only when `seek=` is absent, and every seek, skip,
 //! write and flush failure is fatal rather than ignored.
 
+use coreutils::diag;
 use coreutils::quote::quoteaf_os;
 use std::env;
 use std::fs::{File, OpenOptions};
@@ -57,7 +58,7 @@ fn main() {
     let ops = match parse_operands(&args) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("dd: {e}");
+            diag!("dd: {e}");
             process::exit(1);
         }
     };
@@ -85,7 +86,7 @@ fn main() {
             Ok(0) => break,
             Ok(n) => n,
             Err(e) => {
-                eprintln!("dd: read error: {e}");
+                diag!("dd: read error: {e}");
                 process::exit(1);
             }
         };
@@ -106,7 +107,7 @@ fn main() {
                 total_bytes = total_bytes.saturating_add(n as u64);
             }
             Err(e) => {
-                eprintln!("dd: write error: {e}");
+                diag!("dd: write error: {e}");
                 process::exit(1);
             }
         }
@@ -115,15 +116,15 @@ fn main() {
     // A failed flush loses the tail of the copy. Reporting success after that
     // is how a truncated file gets treated as a good one by whatever runs next.
     if let Err(e) = writer.flush() {
-        eprintln!("dd: write error: {e}");
+        diag!("dd: write error: {e}");
         process::exit(1);
     }
     let elapsed = start.elapsed();
     let secs = elapsed.as_secs_f64();
 
-    eprintln!("{blocks_in}+{partial_in} records in");
-    eprintln!("{blocks_out}+{partial_out} records out");
-    eprintln!("{}", format_rate_line(total_bytes, secs));
+    diag!("{blocks_in}+{partial_in} records in");
+    diag!("{blocks_out}+{partial_out} records out");
+    diag!("{}", format_rate_line(total_bytes, secs));
 }
 
 /// Open the input and position it past `skip=` blocks.
@@ -152,7 +153,7 @@ fn open_input(ops: &DdOperands, bs: usize) -> Box<dyn Read> {
                 Ok(0) => break,
                 Ok(n) => discarded = discarded.saturating_add(n as u64),
                 Err(e) => {
-                    eprintln!("dd: read error while skipping: {e}");
+                    diag!("dd: read error while skipping: {e}");
                     process::exit(1);
                 }
             }
@@ -163,14 +164,14 @@ fn open_input(ops: &DdOperands, bs: usize) -> Box<dyn Read> {
     let mut fh = match File::open(path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("dd: failed to open {}: {e}", quoteaf_os(path));
+            diag!("dd: failed to open {}: {e}", quoteaf_os(path));
             process::exit(1);
         }
     };
     if skip_bytes > 0
         && let Err(e) = fh.seek(SeekFrom::Start(skip_bytes))
     {
-        eprintln!(
+        diag!(
             "dd: cannot skip to offset {skip_bytes} in {}: {e}",
             quoteaf_os(path)
         );
@@ -203,7 +204,7 @@ fn open_output(ops: &DdOperands, bs: usize) -> Box<dyn Write> {
     {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("dd: failed to open {}: {e}", quoteaf_os(path));
+            diag!("dd: failed to open {}: {e}", quoteaf_os(path));
             process::exit(1);
         }
     };
@@ -212,7 +213,7 @@ fn open_output(ops: &DdOperands, bs: usize) -> Box<dyn Write> {
     {
         // Also previously ignored, which wrote the payload at offset 0 — over
         // the very data `seek=` was there to preserve.
-        eprintln!(
+        diag!(
             "dd: cannot seek to offset {seek_bytes} in {}: {e}",
             quoteaf_os(path)
         );

@@ -64,6 +64,8 @@
 #![cfg_attr(not(unix), allow(dead_code))]
 
 use charwidth::char_width;
+#[cfg(not(unix))]
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fnmatch::{Flags, fnmatch};
 use coreutils::getopt::{self, Opt, Program, Takes};
@@ -5101,7 +5103,7 @@ Exit status:
 
 #[cfg(not(unix))]
 fn main() -> ExitCode {
-    eprintln!("ls: unix-only utility; not supported on this platform");
+    diag!("ls: unix-only utility; not supported on this platform");
     ExitCode::from(2)
 }
 

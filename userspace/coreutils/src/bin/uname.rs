@@ -48,6 +48,7 @@
 //! name: it contains a space, and `uname -a` is routinely split on whitespace.
 //! One field that is two words silently shifts every field after it.
 
+use coreutils::diag;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -373,7 +374,7 @@ fn write_line(bytes: &[u8]) -> i32 {
         Ok(()) => 0,
         Err(e) if e.kind() == ErrorKind::BrokenPipe => 0,
         Err(e) => {
-            eprintln!("uname: write error: {}", strerror(&e));
+            diag!("uname: write error: {}", strerror(&e));
             1
         }
     }
@@ -409,7 +410,7 @@ fn main() {
     let request = match parse_args(&args) {
         Ok(request) => request,
         Err(message) => {
-            eprintln!("uname: {message}");
+            diag!("uname: {message}");
             process::exit(1);
         }
     };

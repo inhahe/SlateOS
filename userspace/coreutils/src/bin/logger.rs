@@ -10,6 +10,7 @@
 //! Output format:
 //!   <priority> YYYY-MM-DDTHH:MM:SS TAG: MESSAGE
 
+use coreutils::diag;
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
 use std::process;
@@ -193,7 +194,7 @@ fn main() {
     let parsed = match parse_args(&args) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("logger: {e}");
+            diag!("logger: {e}");
             process::exit(1);
         }
     };
@@ -201,7 +202,7 @@ fn main() {
     let pri = match parse_priority(&parsed.priority) {
         Some(p) => p,
         None => {
-            eprintln!("logger: unknown priority: {}", parsed.priority);
+            diag!("logger: unknown priority: {}", parsed.priority);
             process::exit(1);
         }
     };
@@ -223,7 +224,7 @@ fn main() {
                     );
                 }
                 Err(e) => {
-                    eprintln!("logger: {e}");
+                    diag!("logger: {e}");
                     process::exit(1);
                 }
             }

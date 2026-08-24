@@ -8,6 +8,7 @@
 //!
 //! Reads from /proc/meminfo.
 
+use coreutils::diag;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -38,7 +39,7 @@ fn main() {
     let meminfo_text = match fs::read_to_string("/proc/meminfo") {
         Ok(c) => c,
         Err(_) => {
-            eprintln!("free: cannot read /proc/meminfo");
+            diag!("free: cannot read /proc/meminfo");
             std::process::exit(1);
         }
     };

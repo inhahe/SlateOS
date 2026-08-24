@@ -132,6 +132,8 @@
 
 #![cfg_attr(not(unix), allow(dead_code))]
 
+#[cfg(not(unix))]
+use coreutils::diag;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::userspec::parse_user_only;
 use pwdb::Db;
@@ -672,7 +674,7 @@ fn print_stuff(
 
 #[cfg(not(unix))]
 fn main() {
-    eprintln!("id: unix-only utility; not supported on this platform");
+    diag!("id: unix-only utility; not supported on this platform");
     std::process::exit(1);
 }
 
@@ -683,6 +685,7 @@ mod imp {
     use super::{
         Ids, Output, Request, Settings, help_text, parse_args, print_stuff, resolve_operand,
     };
+    use coreutils::diag;
     use coreutils::errmsg::strerror;
     use coreutils::quote::{os_bytes, quote};
     use pwdb::Db;
@@ -759,7 +762,7 @@ mod imp {
     /// it is about.
     fn drain(out: &mut Output, sink: &mut impl Write) -> io::Result<()> {
         for message in out.errors.drain(..) {
-            eprintln!("id: {message}");
+            diag!("id: {message}");
         }
         let written = sink.write_all(&out.out);
         out.out.clear();
@@ -825,7 +828,7 @@ mod imp {
             }
             Ok(Request::Run(settings)) => settings,
             Err(e) => {
-                eprintln!("id: {e}");
+                diag!("id: {e}");
                 return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
             }
         };
@@ -839,11 +842,11 @@ mod imp {
         let mut sink = stdout.lock();
 
         if let Err(e) = run(&settings, &db, &mut out, &mut sink) {
-            eprintln!("id: write error: {}", strerror(&e));
+            diag!("id: write error: {}", strerror(&e));
             return ExitCode::from(1);
         }
         if let Err(e) = sink.flush() {
-            eprintln!("id: write error: {}", strerror(&e));
+            diag!("id: write error: {}", strerror(&e));
             return ExitCode::from(1);
         }
         if out.ok {

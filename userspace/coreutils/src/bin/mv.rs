@@ -74,6 +74,7 @@
 //! doing it wrong loses data quietly. It reports that it is not implemented
 //! rather than attempting a partial job. Logged in `known-issues.md`.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::quoteaf_os;
@@ -165,7 +166,7 @@ fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("mv: {e}");
+            diag!("mv: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }

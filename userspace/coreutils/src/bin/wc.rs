@@ -22,6 +22,7 @@
 //! (design-decisions.md, "osh's string layer is UTF-8, full stop").
 
 use charwidth::char_width;
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::filekind;
 use coreutils::getopt::{self, Program, Takes};
@@ -194,7 +195,7 @@ fn main() -> ExitCode {
             // The referral, when there is one, is part of the message, and only
             // the first line carries the `wc: ` prefix — which is what GNU
             // prints.
-            eprintln!("wc: {e}");
+            diag!("wc: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }
@@ -719,7 +720,7 @@ fn run(options: &Options, source: &Source) -> ExitCode {
     let inputs = match resolve(source) {
         Ok(inputs) => inputs,
         Err(e) => {
-            eprintln!("wc: {e}");
+            diag!("wc: {e}");
             return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
     };
@@ -738,7 +739,7 @@ fn run(options: &Options, source: &Source) -> ExitCode {
         // per-name complaint, not a fatal one — the names around it are still
         // counted, and only the exit status remembers.
         if name.as_deref() == Some(b"".as_slice()) {
-            eprintln!(
+            diag!(
                 "wc: {}:{}: invalid zero-length file name",
                 String::from_utf8_lossy(inputs.label.as_deref().unwrap_or(b"-")),
                 n.saturating_add(1)
@@ -749,7 +750,7 @@ fn run(options: &Options, source: &Source) -> ExitCode {
         let c = match read_input(name.as_deref()) {
             Ok(data) => count(&data),
             Err(message) => {
-                eprintln!("wc: {message}");
+                diag!("wc: {message}");
                 failed = true;
                 // Upstream still prints a row for an input it could name but
                 // not read — a directory reads as zero counts.

@@ -4,6 +4,7 @@
 //! redirects, chunked transfer-encoding, basic auth, custom headers, and
 //! progress indication.
 
+use coreutils::diag;
 use coreutils::quote::quote_os;
 use std::env;
 use std::fmt::Write as FmtWrite;
@@ -564,13 +565,13 @@ fn fetch_url(config: &Config, url_str: &str) -> i32 {
     let mut current_url = match ParsedUrl::parse(url_str) {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("fetch: invalid URL {}: {e}", quote_os(url_str));
+            diag!("fetch: invalid URL {}: {e}", quote_os(url_str));
             return EXIT_BAD_ARGS;
         }
     };
 
     if current_url.scheme == "https" {
-        eprintln!("fetch: HTTPS not yet supported (no TLS implementation)");
+        diag!("fetch: HTTPS not yet supported (no TLS implementation)");
         return EXIT_CONN_ERROR;
     }
 
@@ -584,15 +585,15 @@ fn fetch_url(config: &Config, url_str: &str) -> i32 {
         let request_method = if config.head_only { "HEAD" } else { &method };
 
         if config.verbose {
-            eprintln!(
+            diag!(
                 "> {request_method} {} HTTP/1.1",
                 current_url.request_target()
             );
-            eprintln!("> Host: {}", current_url.host);
+            diag!("> Host: {}", current_url.host);
             for (name, value) in &config.headers {
-                eprintln!("> {name}: {value}");
+                diag!("> {name}: {value}");
             }
-            eprintln!(">");
+            diag!(">");
         }
 
         let request = build_request(
@@ -611,9 +612,10 @@ fn fetch_url(config: &Config, url_str: &str) -> i32 {
         ) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!(
+                diag!(
                     "fetch: connection to {}:{} failed: {e}",
-                    current_url.host, current_url.port
+                    current_url.host,
+                    current_url.port
                 );
                 return EXIT_CONN_ERROR;
             }
@@ -621,7 +623,7 @@ fn fetch_url(config: &Config, url_str: &str) -> i32 {
 
         // Send request.
         if let Err(e) = conn.send_all(request.as_bytes()) {
-            eprintln!("fetch: send failed: {e}");
+            diag!("fetch: send failed: {e}");
             return EXIT_CONN_ERROR;
         }
 
@@ -629,20 +631,21 @@ fn fetch_url(config: &Config, url_str: &str) -> i32 {
         let response = match read_response(&mut conn) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("fetch: {e}");
+                diag!("fetch: {e}");
                 return EXIT_CONN_ERROR;
             }
         };
 
         if config.verbose {
-            eprintln!(
+            diag!(
                 "< HTTP/1.1 {} {}",
-                response.status_code, response.status_text
+                response.status_code,
+                response.status_text
             );
             for (name, value) in &response.headers {
-                eprintln!("< {name}: {value}");
+                diag!("< {name}: {value}");
             }
-            eprintln!("<");
+            diag!("<");
         }
 
         // Check for redirect.
@@ -654,10 +657,10 @@ fn fetch_url(config: &Config, url_str: &str) -> i32 {
                 match ParsedUrl::parse(&next_url) {
                     Ok(parsed) => {
                         if !config.quiet {
-                            eprintln!("fetch: following redirect to {next_url}");
+                            diag!("fetch: following redirect to {next_url}");
                         }
                         if parsed.scheme == "https" {
-                            eprintln!("fetch: HTTPS not yet supported (no TLS implementation)");
+                            diag!("fetch: HTTPS not yet supported (no TLS implementation)");
                             return EXIT_CONN_ERROR;
                         }
                         current_url = parsed;
@@ -665,19 +668,19 @@ fn fetch_url(config: &Config, url_str: &str) -> i32 {
                         continue;
                     }
                     Err(e) => {
-                        eprintln!("fetch: invalid redirect URL {}: {e}", quote_os(location));
+                        diag!("fetch: invalid redirect URL {}: {e}", quote_os(location));
                         return EXIT_HTTP_ERROR;
                     }
                 }
             }
         } else if is_redirect && redirects_remaining == 0 && config.follow_redirects {
-            eprintln!("fetch: too many redirects (max {})", config.max_redirects);
+            diag!("fetch: too many redirects (max {})", config.max_redirects);
             return EXIT_HTTP_ERROR;
         }
 
         // Print status to stderr.
         if !config.quiet {
-            eprintln!(
+            diag!(
                 "HTTP {} {} [{}]",
                 response.status_code,
                 response.status_text,
@@ -700,7 +703,7 @@ fn fetch_url(config: &Config, url_str: &str) -> i32 {
         // Determine output destination.
         let write_result = write_output(config, &current_url, &response.body);
         if let Err(e) = write_result {
-            eprintln!("fetch: write error: {e}");
+            diag!("fetch: write error: {e}");
             return EXIT_CONN_ERROR;
         }
 
@@ -746,13 +749,13 @@ fn write_output(config: &Config, url: &ParsedUrl, body: &[u8]) -> io::Result<()>
     if let Some(ref path) = config.output_file {
         std::fs::write(path, body)?;
         if !config.quiet {
-            eprintln!("Saved to: {path} [{}]", format_size(body.len()));
+            diag!("Saved to: {path} [{}]", format_size(body.len()));
         }
     } else if config.output_from_url {
         let filename = url.filename();
         std::fs::write(&filename, body)?;
         if !config.quiet {
-            eprintln!("Saved to: {filename} [{}]", format_size(body.len()));
+            diag!("Saved to: {filename} [{}]", format_size(body.len()));
         }
     } else {
         let stdout = io::stdout();
@@ -933,8 +936,8 @@ fn main() {
             process::exit(EXIT_OK);
         }
         Err(e) => {
-            eprintln!("fetch: {e}");
-            eprintln!("Try 'fetch --help' for usage information.");
+            diag!("fetch: {e}");
+            diag!("Try 'fetch --help' for usage information.");
             process::exit(EXIT_BAD_ARGS);
         }
     };

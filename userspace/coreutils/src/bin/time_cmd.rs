@@ -6,6 +6,7 @@
 //! Note: This is named time_cmd.rs to avoid conflict with Rust's
 //! std::time module. The binary is installed as "time".
 
+use coreutils::diag;
 use coreutils::quote::quotef_os;
 use std::env;
 use std::process::{self, Command};
@@ -15,7 +16,7 @@ fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
 
     if args.is_empty() {
-        eprintln!("time: missing command");
+        diag!("time: missing command");
         process::exit(1);
     }
 
@@ -27,7 +28,7 @@ fn main() {
     let status = match Command::new(cmd).args(cmd_args).status() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("time: {}: {e}", quotef_os(cmd));
+            diag!("time: {}: {e}", quotef_os(cmd));
             process::exit(127);
         }
     };
@@ -35,8 +36,11 @@ fn main() {
     let elapsed = start.elapsed();
     let total_secs = elapsed.as_secs_f64();
 
-    eprintln!();
-    eprintln!("real\t{}", format_real_line(total_secs));
+    // The blank line upstream prints before the timing block. `diag!("")` and
+    // not `eprintln!()`: an empty line is still a write to descriptor 2, and
+    // `eprintln!` answers a failed one with a panic that cannot print either.
+    diag!("");
+    diag!("real\t{}", format_real_line(total_secs));
     // We can't distinguish user/sys time without kernel support,
     // so just show real time.
 

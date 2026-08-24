@@ -78,6 +78,7 @@
 //! see the [mode section](#mode) below for the four behaviours that had to be
 //! measured to use it correctly here.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{quote_os, quoteaf_os};
@@ -173,7 +174,7 @@ fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("mkdir: {e}");
+            diag!("mkdir: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }

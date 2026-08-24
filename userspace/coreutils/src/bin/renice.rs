@@ -11,6 +11,7 @@
 //!   0  success
 //!   1  error
 
+use coreutils::diag;
 use std::env;
 use std::process;
 
@@ -121,9 +122,9 @@ fn main() {
     let parsed = match parse_args(&args) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("renice: {e}");
+            diag!("renice: {e}");
             if e == "missing operand" {
-                eprintln!("Usage: renice [-n INCREMENT] [-p PID...] [-u USER]");
+                diag!("Usage: renice [-n INCREMENT] [-p PID...] [-u USER]");
             }
             process::exit(1);
         }
@@ -143,14 +144,14 @@ fn main() {
         let uid: u32 = match _username.parse() {
             Ok(u) => u,
             Err(_) => {
-                eprintln!("renice: unknown user: {_username}");
-                eprintln!("  (numeric UID required until /etc/passwd lookup is implemented)");
+                diag!("renice: unknown user: {_username}");
+                diag!("  (numeric UID required until /etc/passwd lookup is implemented)");
                 process::exit(1);
             }
         };
 
         if let Err(e) = renice_target(PRIO_USER, uid, increment, absolute) {
-            eprintln!("renice: user {_username}: {e}");
+            diag!("renice: user {_username}: {e}");
             exit_code = 1;
         }
     }
@@ -158,7 +159,7 @@ fn main() {
     // Handle PID-based renice.
     for pid in &pids {
         if let Err(e) = renice_target(PRIO_PROCESS, *pid, increment, absolute) {
-            eprintln!("renice: PID {pid}: {e}");
+            diag!("renice: PID {pid}: {e}");
             exit_code = 1;
         }
     }

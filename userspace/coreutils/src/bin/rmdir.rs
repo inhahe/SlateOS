@@ -100,6 +100,7 @@
 //! script written to tolerate a non-empty directory would instead abort on one.
 //! Rejecting it says so; implementing it is a small change and a separate one.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{os_bytes, os_from_bytes, quoteaf_os};
@@ -171,7 +172,7 @@ fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("rmdir: {e}");
+            diag!("rmdir: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }

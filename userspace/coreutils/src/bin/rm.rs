@@ -48,6 +48,7 @@
 //! this `rm` has **no root failsafe at all**, where GNU's refuses `rm -rf /`
 //! by default. Logged in `known-issues.md`.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::quoteaf_os;
@@ -136,7 +137,7 @@ fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("rm: {e}");
+            diag!("rm: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }

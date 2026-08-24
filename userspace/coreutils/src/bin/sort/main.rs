@@ -71,6 +71,7 @@
 mod keydef;
 mod order;
 
+use coreutils::diag;
 use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::fs::File;
@@ -859,7 +860,7 @@ fn die(msg: &str) -> ! {
 }
 
 fn die_with(msg: &str, status: i32) -> ! {
-    eprintln!("sort: {msg}");
+    diag!("sort: {msg}");
     process::exit(status)
 }
 

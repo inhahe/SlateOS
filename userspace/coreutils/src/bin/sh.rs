@@ -22,6 +22,7 @@
 //!   - Logical operators: && and ||
 //!   - Script execution: source / .
 
+use coreutils::diag;
 use coreutils::quote::quotef_os;
 use std::collections::HashMap;
 use std::env;
@@ -58,13 +59,13 @@ fn main() {
                     process::exit(exit_code);
                 }
                 Err(e) => {
-                    eprintln!("sh: {}: {e}", quotef_os(path));
+                    diag!("sh: {}: {e}", quotef_os(path));
                     process::exit(127);
                 }
             }
         }
         Err(msg) => {
-            eprintln!("sh: {msg}");
+            diag!("sh: {msg}");
             process::exit(2);
         }
     }
@@ -329,7 +330,7 @@ fn execute_command(cmd: &str, state: &mut ShellState) -> i32 {
             match env::set_current_dir(dir) {
                 Ok(()) => 0,
                 Err(e) => {
-                    eprintln!("sh: cd: {dir}: {e}");
+                    diag!("sh: cd: {dir}: {e}");
                     1
                 }
             }
@@ -380,7 +381,7 @@ fn execute_command(cmd: &str, state: &mut ShellState) -> i32 {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
             if n > argc {
-                eprintln!("sh: shift: count exceeds positional parameters");
+                diag!("sh: shift: count exceeds positional parameters");
                 return 1;
             }
             for i in 1..=(argc - n) {
@@ -402,12 +403,12 @@ fn execute_command(cmd: &str, state: &mut ShellState) -> i32 {
                 match fs::read_to_string(path) {
                     Ok(content) => execute_script(&content, state),
                     Err(e) => {
-                        eprintln!("sh: {}: {e}", quotef_os(path));
+                        diag!("sh: {}: {e}", quotef_os(path));
                         1
                     }
                 }
             } else {
-                eprintln!("sh: source: filename argument required");
+                diag!("sh: source: filename argument required");
                 2
             }
         }
@@ -457,7 +458,7 @@ fn execute_external(words: &[String], redirects: &[(String, String)]) -> i32 {
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(126),
         Err(e) => {
-            eprintln!("sh: {}: {e}", words[0]);
+            diag!("sh: {}: {e}", words[0]);
             127
         }
     }
@@ -506,7 +507,7 @@ fn execute_pipeline(cmd: &str, state: &mut ShellState) -> i32 {
                 }
             }
             Err(e) => {
-                eprintln!("sh: {}: {e}", words[0]);
+                diag!("sh: {}: {e}", words[0]);
                 last_status = 127;
             }
         }

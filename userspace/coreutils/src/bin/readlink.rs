@@ -102,6 +102,7 @@
 //! there is no `unimplemented_*` diagnostic here.
 
 use coreutils::canon::{self, Fs, Mode, RealFs};
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quotef_os};
@@ -176,7 +177,7 @@ fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("readlink: {e}");
+            diag!("readlink: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }

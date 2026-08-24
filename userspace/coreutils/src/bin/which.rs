@@ -3,6 +3,7 @@
 //! Usage: which COMMAND...
 //!   Searches PATH for each COMMAND and prints the first match.
 
+use coreutils::diag;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -21,7 +22,7 @@ fn main() {
         match find_command(cmd, &dirs, |p| p.exists()) {
             Some(found) => println!("{}", found.display()),
             None => {
-                eprintln!("which: no {cmd} in ({path_var})");
+                diag!("which: no {cmd} in ({path_var})");
                 failed = true;
             }
         }

@@ -37,6 +37,7 @@
 //! tested one 4-line decoding helper. That is why nobody noticed that the
 //! program did nothing.
 
+use coreutils::diag;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -626,7 +627,7 @@ fn write_line(bytes: &[u8]) -> i32 {
         Ok(()) => 0,
         Err(e) if e.kind() == ErrorKind::BrokenPipe => 0,
         Err(e) => {
-            eprintln!("hostname: write error: {}", strerror(&e));
+            diag!("hostname: write error: {}", strerror(&e));
             1
         }
     }
@@ -721,7 +722,7 @@ fn main() {
     let action = match parse_args(&args) {
         Ok(action) => action,
         Err(message) => {
-            eprintln!("hostname: {message}");
+            diag!("hostname: {message}");
             process::exit(1);
         }
     };
@@ -729,7 +730,7 @@ fn main() {
     match run(&action) {
         Ok(status) => process::exit(status),
         Err(message) => {
-            eprintln!("hostname: {message}");
+            diag!("hostname: {message}");
             process::exit(1);
         }
     }

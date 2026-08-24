@@ -86,6 +86,7 @@
 //! parser; nothing below `run` is reachable from them, because what it does is
 //! make syscalls.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quotef, quotef_os};
@@ -192,7 +193,7 @@ fn main() -> ExitCode {
         }
         Ok(Request::Run(settings)) => run(&settings),
         Err(e) => {
-            eprintln!("tee: {e}");
+            diag!("tee: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }
@@ -309,7 +310,7 @@ fn run(settings: &Settings) -> ExitCode {
                 sink: Sink::File(f),
             }),
             Err(e) => {
-                eprintln!("tee: {}: {}", quotef_os(path), strerror(&e));
+                diag!("tee: {}: {}", quotef_os(path), strerror(&e));
                 ok = false;
                 // `error (output_error == exit || == exit_nopipe, …)`: in the
                 // exit modes a file that cannot be opened ends the run before
@@ -360,7 +361,7 @@ fn run(settings: &Settings) -> ExitCode {
                     let broken = e.kind() == io::ErrorKind::BrokenPipe;
                     let reportable = settings.output_error.reportable(broken);
                     if reportable {
-                        eprintln!("tee: {}: {}", out.label, strerror(&e));
+                        diag!("tee: {}: {}", out.label, strerror(&e));
                         ok = false;
                     }
                     outputs.remove(i);
@@ -376,7 +377,7 @@ fn run(settings: &Settings) -> ExitCode {
     }
 
     if let Some(e) = read_error {
-        eprintln!("tee: read error: {}", strerror(&e));
+        diag!("tee: read error: {}", strerror(&e));
         ok = false;
     }
 

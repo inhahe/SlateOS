@@ -148,6 +148,7 @@
 //! 0 on success, 1 on any failure — except under `--filter`, where a command
 //! that fails hands its own status back, so `--filter='exit 3'` exits 3.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{os_bytes, quote, quoteaf, quoteaf_os, quotef_os};
@@ -341,7 +342,7 @@ fn main() -> ExitCode {
     let request = match parse_args(&args) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("split: {}", e.message);
+            diag!("split: {}", e.message);
             return ExitCode::from(e.status);
         }
     };
@@ -357,7 +358,7 @@ fn main() -> ExitCode {
         Request::Run(options, file, prefix) => match run(&options, &file, &prefix) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("split: {}", e.message);
+                diag!("split: {}", e.message);
                 ExitCode::from(e.status)
             }
         },

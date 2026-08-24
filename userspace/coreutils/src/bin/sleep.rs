@@ -3,6 +3,7 @@
 //! Usage: sleep SECONDS
 //!   SECONDS may be an integer or a decimal number.
 
+use coreutils::diag;
 use std::env;
 use std::process;
 use std::thread;
@@ -14,7 +15,7 @@ fn main() {
     match parse_seconds(&args) {
         Ok(secs) => thread::sleep(Duration::from_secs_f64(secs)),
         Err(msg) => {
-            eprintln!("sleep: {msg}");
+            diag!("sleep: {msg}");
             process::exit(1);
         }
     }

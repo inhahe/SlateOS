@@ -158,6 +158,7 @@
 //! it would mean a date-shaped first operand sometimes being a date and
 //! sometimes being a file name.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quoteaf_os};
@@ -366,7 +367,7 @@ fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("touch: {e}");
+            diag!("touch: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }

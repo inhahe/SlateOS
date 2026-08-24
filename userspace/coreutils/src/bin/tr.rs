@@ -106,6 +106,7 @@
 //! `scripts/tr-diff.sh` runs this and glibc's `tr` over the same command lines
 //! and compares stdout, stderr and the exit status byte for byte.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::quote;
@@ -281,19 +282,19 @@ impl Refusal {
     fn report(&self) -> ExitCode {
         match self {
             Self::Getopt(e) => {
-                eprintln!("tr: {}", e.message());
+                diag!("tr: {}", e.message());
                 ExitCode::from(u8::try_from(e.status).unwrap_or(1))
             }
             Self::Plain(text) => {
-                eprintln!("tr: {text}");
+                diag!("tr: {text}");
                 ExitCode::FAILURE
             }
             Self::Operands { first, second } => {
-                eprintln!("tr: {first}");
+                diag!("tr: {first}");
                 if let Some(second) = second {
-                    eprintln!("{second}");
+                    diag!("{second}");
                 }
-                eprintln!("Try 'tr --help' for more information.");
+                diag!("Try 'tr --help' for more information.");
                 ExitCode::FAILURE
             }
         }
@@ -435,8 +436,8 @@ enum Trouble {
 impl Trouble {
     fn report(&self) -> ExitCode {
         match self {
-            Self::Read(e) => eprintln!("tr: read error: {}", strerror(e)),
-            Self::Write(e) => eprintln!("tr: write error: {}", strerror(e)),
+            Self::Read(e) => diag!("tr: read error: {}", strerror(e)),
+            Self::Write(e) => diag!("tr: write error: {}", strerror(e)),
         }
         ExitCode::FAILURE
     }
@@ -791,7 +792,7 @@ fn unescape(s: &[u8]) -> (Vec<u8>, Vec<bool>) {
             // an error because a lone `\` is what a shell hands over when the
             // user quoted one layer too few, and refusing would break scripts
             // that have "worked" for decades.
-            eprintln!("tr: warning: an unescaped backslash at end of string is not portable");
+            diag!("tr: warning: an unescaped backslash at end of string is not portable");
             out.push(b'\\');
             flags.push(false);
             at = at.saturating_add(1);
@@ -846,7 +847,7 @@ fn octal(s: &[u8], from: usize) -> (u8, usize) {
     if value > 255 && used == 3 {
         let third = s.get(from.saturating_add(2)).copied().unwrap_or(b'0');
         let two = value / 8;
-        eprintln!(
+        diag!(
             "tr: warning: the ambiguous octal escape \\{}{}{} is being\n\tinterpreted as the 2-byte sequence \\0{:o}, {}",
             char::from(s.get(from).copied().unwrap_or(b'0')),
             char::from(s.get(from.saturating_add(1)).copied().unwrap_or(b'0')),

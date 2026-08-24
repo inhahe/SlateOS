@@ -72,6 +72,7 @@
 //! choose whether a symlink or its target is copied. Every one of those, ignored,
 //! produces a destination that looks right and is not.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::quoteaf_os;
@@ -180,7 +181,7 @@ fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("cp: {e}");
+            diag!("cp: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }

@@ -71,6 +71,7 @@
 //! better than the alternative, which is treating `\1` as a literal `1` and
 //! quietly answering the wrong question. See `known-issues.md`.
 
+use coreutils::diag;
 use std::io::Write as _;
 use std::process;
 
@@ -112,8 +113,8 @@ fn main() {
     };
 
     if args.is_empty() {
-        eprintln!("expr: missing operand");
-        eprintln!("{USAGE}");
+        diag!("expr: missing operand");
+        diag!("{USAGE}");
         process::exit(2);
     }
 
@@ -143,7 +144,7 @@ fn main() {
 }
 
 fn die(msg: &str) -> ! {
-    eprintln!("expr: {msg}");
+    diag!("expr: {msg}");
     process::exit(2)
 }
 

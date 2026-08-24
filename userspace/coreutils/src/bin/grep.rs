@@ -56,6 +56,7 @@
 //! makes grep read such a stream, so `find -print0 | xargs -0 grep -z` and
 //! `grep -rlZ … | xargs -0` are the spellings that are actually correct.
 
+use coreutils::diag;
 use coreutils::quote::{self, quotef_os};
 use std::env;
 use std::fs::{self, File};
@@ -559,7 +560,7 @@ fn main() {
     let parsed = match parse_args(&args) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("grep: {e}");
+            diag!("grep: {e}");
             process::exit(2);
         }
     };
@@ -575,7 +576,7 @@ fn main() {
         match raw {
             Ok(raw) => patterns.extend(split_patterns(&raw)),
             Err(e) => {
-                eprintln!("grep: {}: {}", quotef_os(pf), strerror(&e));
+                diag!("grep: {}: {}", quotef_os(pf), strerror(&e));
                 process::exit(2);
             }
         }
@@ -584,7 +585,7 @@ fn main() {
     let pats = match compile_patterns(&patterns, &parsed.opts) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("grep: {e}");
+            diag!("grep: {e}");
             process::exit(2);
         }
     };
@@ -618,7 +619,7 @@ fn main() {
             if Path::new(path).is_dir() {
                 if !parsed.opts.recursive {
                     if !parsed.opts.no_messages {
-                        eprintln!("grep: {}: Is a directory", quotef_os(path));
+                        diag!("grep: {}: Is a directory", quotef_os(path));
                     }
                     // Named but not searched, so the run's answer is about
                     // less than it was asked about — status 2, as for a file
@@ -631,7 +632,7 @@ fn main() {
                 Ok(f) => Box::new(f),
                 Err(e) => {
                     if !parsed.opts.no_messages {
-                        eprintln!("grep: {}: {}", quotef_os(path), strerror(&e));
+                        diag!("grep: {}: {}", quotef_os(path), strerror(&e));
                     }
                     // A file that could not be read is an error, not an absence
                     // of matches: exiting 1 would tell a script the file has
@@ -672,7 +673,7 @@ fn main() {
             }
             Err(e) => {
                 if !parsed.opts.no_messages {
-                    eprintln!("grep: {}: {}", quotef_os(path), strerror(&e));
+                    diag!("grep: {}: {}", quotef_os(path), strerror(&e));
                 }
                 had_error = true;
             }
@@ -791,7 +792,7 @@ fn collect_files_recursive(dir: &Path, result: &mut Vec<String>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("grep: {}: {}", quotef_os(dir), strerror(&e));
+            diag!("grep: {}: {}", quotef_os(dir), strerror(&e));
             return;
         }
     };

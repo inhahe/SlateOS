@@ -97,6 +97,7 @@ mod parse;
 mod types;
 mod value;
 
+use coreutils::diag;
 use std::ffi::OsString;
 use std::process;
 
@@ -310,20 +311,20 @@ fn arg_bytes(a: &OsString) -> Str {
 /// A failure once the program is running, or before it because a file it named
 /// could not be opened.
 fn die(msg: &str) -> ! {
-    eprintln!("awk: {msg}");
+    diag!("awk: {msg}");
     process::exit(2)
 }
 
 /// A program that will not compile.
 fn die_program(msg: &str) -> ! {
-    eprintln!("awk: {msg}");
+    diag!("awk: {msg}");
     process::exit(1)
 }
 
 /// A command line that does not make sense.
 fn die_usage(msg: &str) -> ! {
-    eprintln!("awk: {msg}");
-    eprintln!("{USAGE}");
+    diag!("awk: {msg}");
+    diag!("{USAGE}");
     process::exit(1)
 }
 

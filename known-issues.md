@@ -71919,11 +71919,62 @@ them:
   `mkdir`, `mkfifo`, `ls`, `mv`, `od`, `readlink`, `realpath`, `rm`, `rmdir`,
   `sed`, `sort`, `touch` and `awk` still do.
 
+### Done, 2026-08-24 — step 3, the rest of the bins
+
+**290 `eprintln!` sites in 55 files converted to `diag!`**, plus the four that
+were not mechanical, so **no `eprintln!` or `eprint!` remains in the crate
+outside comments**. No bin can abort on an unwritable stderr any more.
+
+The mechanical part was a regex over `src/bin/**`, skipping comment lines, plus
+a `use coreutils::diag;` per file. Six files keep their sites inside an inner
+`mod imp`/`mod net`, which needs its *own* import — a `use`d `#[macro_export]`
+macro is a name in that module, not in its children. In five of those
+(`chmod`, `chown`, `cmp`, `id`, `ls`) the only *top-level* site is the
+`#[cfg(not(unix))]` stub `main`, so the file-level import is now
+`#[cfg(not(unix))] use coreutils::diag;` — unused on the real target
+otherwise. Only the x86_64-slateos build compiles `#[cfg(unix)] mod imp` at
+all, so the Windows host build cannot find any of this; `cargo +nightly build
+--bins` is the one that can.
+
+The four hand edits, and why each is not a plain substitution:
+
+| site | was | now | why |
+|---|---|---|---|
+| `find.rs` | `eprintln!()` | `diag!("")` | `diag!` is `format!` underneath and `format!()` has no format string |
+| `time_cmd.rs` | `eprintln!()` | `diag!("")` | same |
+| `more.rs` ×2 | `eprint!` + `io::stderr().flush()` | `prompt()` → `stdfd::write_all(2, …)` | no trailing newline, **and it must not set the flag** |
+
+`more`'s `--More--` is the one deliberate exception to "everything on
+descriptor 2 goes through `diag`". It is a prompt, not a complaint — the
+pager's half of a conversation with the terminal — so losing it does not mean
+the file was paged wrongly and must not turn a clean run into a failing
+status. `stdfd::write_all` is the same `write(2)` without the flag. The flush
+went with it: unlike `io::stderr()` there is no buffer to flush.
+
+**Non-diagnostic stderr output *should* set the flag, though** — checked
+against the real binaries rather than assumed, because it looked like the same
+exception as `more`'s and is not:
+
+```
+dd if=/dev/zero of=/dev/null count=1 2>/dev/full → 1     (2>&- → 1)
+ls / 2>/dev/full → 0    wc … 2>/dev/full → 0    seq 3 2>/dev/full → 0
+```
+
+`dd`'s `N+0 records in` statistics are its *output*, not a complaint, and the
+copy itself succeeded — yet GNU still exits 1, because `close_stdout` is
+registered with `atexit` and does not care *what* the unflushable bytes were.
+The utilities that write nothing to stderr keep their earned 0. So `dd`'s
+statistics, `fetch`'s `-v` trace and `time`'s timing line are all correctly
+routed through `diag!` now; the distinction that matters is not
+diagnostic-vs-output but whether the bytes were *the program's* at all, and
+`more`'s prompt is echo to a terminal rather than output.
+
 **Still open**, and re-scoped to the closed-descriptor sweep rather than to
-this entry: ~300 `eprintln!` sites across 59 files, plus step 2's hand-written
-tails in `env`, `ls` and `sort` (`tty`'s is done). Nothing there is a
-regression — those bins were never converted — but each is a 134 waiting for
-a caller who redirects stderr.
+this entry: the `io::stderr()` substitutions listed above, the `close_stderr`
+funnel for the ~65 bins that still lack one, and step 2's hand-written tails in
+`env`, `ls` and `sort` (`tty`'s is done). Until a bin has the funnel its flag
+is set and never read, so the sweep so far converts a 134 into the *old* status
+rather than into GNU's — an improvement with no regression, but not yet parity.
 
 **Found on the way, and not the same bug.** `wc >/dev/full` exits **0**
 silently — it never checks the write at all. `head >/dev/full` reports the

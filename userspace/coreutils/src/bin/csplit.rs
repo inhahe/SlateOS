@@ -118,6 +118,7 @@
 //! `on repetition 6` — the repetition whose piece was written in full — rather
 //! than at 7 with an empty piece.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{os_bytes, quote, quote_os, quoteaf_os, quotef_os};
@@ -232,7 +233,7 @@ fn main() -> ExitCode {
     let request = match parse_args(&args) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("csplit: {e}");
+            diag!("csplit: {e}");
             return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
     };
@@ -564,7 +565,7 @@ fn line_control(bytes: &[u8], last_line: &mut u64) -> Result<Control, Fail> {
     if value == *last_line {
         // A warning, not an error: GNU carries on and writes the empty piece.
         // Curly for the same measured reason as the error just above.
-        eprintln!(
+        diag!(
             "csplit: warning: line number {} is the same as preceding line number",
             quote(bytes)
         );
@@ -974,7 +975,7 @@ fn run(options: &Options, file: &OsString, patterns: &[OsString]) -> ExitCode {
         Some(f) => match SuffixFormat::parse(f) {
             Ok(parsed) => Some(parsed),
             Err(e) => {
-                eprintln!("csplit: {}", e.message);
+                diag!("csplit: {}", e.message);
                 return ExitCode::FAILURE;
             }
         },
@@ -984,7 +985,7 @@ fn run(options: &Options, file: &OsString, patterns: &[OsString]) -> ExitCode {
     let controls = match parse_patterns(patterns) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("csplit: {}", e.message);
+            diag!("csplit: {}", e.message);
             return ExitCode::FAILURE;
         }
     };
@@ -992,7 +993,7 @@ fn run(options: &Options, file: &OsString, patterns: &[OsString]) -> ExitCode {
     let data = match read_input(file) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("csplit: {e}");
+            diag!("csplit: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -1012,7 +1013,7 @@ fn run(options: &Options, file: &OsString, patterns: &[OsString]) -> ExitCode {
     match split(options, &lines, &controls, &mut sink) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("csplit: {}", e.message);
+            diag!("csplit: {}", e.message);
             if e.close {
                 sink.close();
             }

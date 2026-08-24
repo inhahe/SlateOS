@@ -1535,6 +1535,73 @@ mod tests {
         assert_eq!(rightwards, vec![1, 2, 4, 2, 7, 8]);
     }
 
+    /// Where the dialog *draws* its caret, in the order it drew it.
+    fn drawn_caret_x(dialog: &RunDialog, p: &Palette) -> f32 {
+        dialog
+            .render(p)
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::Line { x1, x2, y1, y2, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && y2 > y1 =>
+                {
+                    Some(x1)
+                }
+                _ => None,
+            })
+            .expect("the dialog draws a caret")
+    }
+
+    /// Moving the caret correctly is only half of §541 — it must also be
+    /// *drawn* where it moved to, and no test of `cursor` can see that half.
+    ///
+    /// The dialog used to place it at the width of `text[..cursor]`. A prefix
+    /// width is where the caret belongs only while the line runs in one
+    /// direction: with the visual arrows above walking `2, 4, 2` through the
+    /// Hebrew, a prefix measurement sends the drawn caret *backwards* on the
+    /// screen twice while the user is pressing Right. Asking the shaper
+    /// (`text::caret_x`) instead is what keeps the two halves agreeing.
+    ///
+    /// **A failure here is that disagreement**: six Rights, six strictly
+    /// increasing positions, because the arrow is walking the screen left to
+    /// right and nothing it does may go the other way.
+    #[test]
+    fn the_run_dialogs_drawn_caret_only_ever_moves_rightwards_under_the_right_arrow() {
+        let p = Palette::for_mode(false);
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        dialog.input.set_text("ab\u{05D0}\u{05D1}cd");
+        dialog.input.move_home(false);
+
+        let mut xs = vec![drawn_caret_x(&dialog, &p)];
+        for _ in 0..6 {
+            dialog.input.move_cursor_right(false);
+            xs.push(drawn_caret_x(&dialog, &p));
+        }
+        for pair in xs.windows(2) {
+            let (before, after) = (pair[0], pair[1]);
+            assert!(
+                after > before,
+                "the caret went from {before} to {after} on a Right press: {xs:?}"
+            );
+        }
+    }
+
+    /// A caret byte offset off a character boundary must not abort the process.
+    ///
+    /// This is not hypothetical tidiness. `&self.input.text[..self.input.cursor]`
+    /// panics on such an offset, and it sat inside `render` — so a cursor that
+    /// had drifted took the whole desktop shell down while merely *painting*
+    /// the dialog, with no user action involved beyond it being on screen.
+    #[test]
+    fn a_run_dialog_caret_off_a_character_boundary_draws_rather_than_panicking() {
+        let p = Palette::for_mode(false);
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        dialog.input.set_text("é");
+        dialog.input.cursor = TextCursor::from(1); // inside the two-byte letter
+        assert!(!dialog.render(&p).is_empty());
+    }
+
     #[test]
     fn a_shifted_arrow_extends_the_selection_and_an_unshifted_one_collapses_it() {
         let mut input = TextInput::new();

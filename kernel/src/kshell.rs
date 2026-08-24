@@ -11166,6 +11166,45 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // names are unique enough that no other rung can trip over them.
     }
 
+    serial_println!("  kshell::self_test 28: `ls -R` says which subtree it stopped at");
+    // The same silence as `find`'s, in the command most likely to meet it: a
+    // symlink loop is exactly what `ls`'s depth guard is for, and it answered by
+    // printing "ls: recursion limit reached" -- no path, no status -- in the
+    // middle of a long `-R` listing, where there is no way to tell which of the
+    // scrolled-past directories it belonged to.
+    //
+    // Unlike `find`, `ls` has no user-supplied depth, so there is no silent case
+    // to keep apart here: every hit on this limit is a refusal.
+    {
+        use crate::fs::vfs::Vfs;
+
+        // 34 levels: two past LS_DEPTH_CAP.
+        Vfs::mkdir_all(Path::new(
+            "/tmp/kshell_ls_deep/d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/d11/d12/d13/d14/d15/d16/d17\
+             /d18/d19/d20/d21/d22/d23/d24/d25/d26/d27/d28/d29/d30/d31/d32/d33/d34",
+        ))?;
+
+        let out = capture_command("ls -R /tmp/kshell_ls_deep");
+        assert_output_contains("the cap is named when it bites", &out, b"recursion limit");
+        // The path is the point: without it the line is unattributable, which is
+        // what it was before.
+        assert_output_contains("ls names the subtree it stopped at", &out, b"/d33");
+        assert_eq!(last_exit(), 1, "ls: a truncated listing is incomplete");
+
+        // A listing that fits under the cap is untouched by any of this. Its own
+        // fixture rather than the one rung 27 built: a rung that silently needs
+        // an earlier rung's leftovers fails for a reason that points at the
+        // wrong command the day someone reorders them.
+        Vfs::mkdir_all(Path::new("/tmp/kshell_ls_shallow/sub"))?;
+        let out = capture_command("ls -R /tmp/kshell_ls_shallow");
+        assert_output_lacks(
+            "an ordinary listing is not a complaint",
+            &out,
+            b"recursion limit",
+        );
+        assert_eq!(last_exit(), 0, "ls: a complete listing is success");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -12129,10 +12168,24 @@ fn cmd_ls(args: &str) {
     );
 }
 
+/// How deep `ls -R` will descend before giving up on a subtree.
+///
+/// A stack-safety limit against infinite recursion — a symlink loop, most
+/// obviously. Named rather than inlined because the limit is now *reported*
+/// when it bites, and the diagnostic and the check must not be able to drift
+/// apart.
+const LS_DEPTH_CAP: u32 = 32;
+
 /// Internal helper for ls: list one directory and optionally recurse.
 ///
-/// `depth` guards against infinite recursion (e.g., symlink loops);
-/// maximum depth is 32.
+/// `depth` guards against infinite recursion (e.g., symlink loops); the bound is
+/// [`LS_DEPTH_CAP`].
+///
+/// Sets a failing status itself rather than leaving it to `cmd_ls`, which is
+/// what it already does for an unreadable directory below. The usual reason a
+/// helper should stay silent — that only the caller knows whether one failure
+/// among several means the *command* failed — does not apply when the caller
+/// keeps no tally to decide with.
 #[allow(clippy::too_many_arguments)]
 fn ls_list_dir(
     path: &Path,
@@ -12145,8 +12198,19 @@ fn ls_list_dir(
     recursive: bool,
     depth: u32,
 ) {
-    if depth > 32 {
-        shell_println!("ls: recursion limit reached");
+    if depth > LS_DEPTH_CAP {
+        // Named the path and set a status, neither of which it used to do. `ls`
+        // has no equivalent of `find`'s user-supplied depth, so unlike there,
+        // every hit on this limit is a refusal: the directories below it exist
+        // and were not listed. Saying "recursion limit reached" without saying
+        // *where* also left the one useful fact out — in a `-R` walk the line
+        // arrives amid the listing of some unnamed directory.
+        shell_println!(
+            "ls: {}: recursion limit ({}) reached, not listed",
+            path.display(),
+            LS_DEPTH_CAP
+        );
+        set_exit(1);
         return;
     }
 

@@ -72862,3 +72862,48 @@ it is a check whose subject is wrong, and the fix is to change the question,
 not the threshold. Ask what the checker could observe that would be *actionable*
 — here, "does demand paging still work?" — rather than what it happens to have
 a counter for.
+
+### 2026-08-24 — a fourth shape: the assertion whose *input* takes the other branch
+
+Fixed in `326d4e0b9` (the test) and `e9c60b5c4` (a real bug it was hiding).
+
+Rung 23 of `kshell::self_test` asserted that `realpath /zzz_no_such_path`
+reports a failure and exits 1. It does neither, and never had. `resolve_inner`
+lets the **final** path component be absent — that is the open-with-create path
+— so resolution succeeds, `realpath` prints the canonical name, and `dispatch`'s
+entry stamp leaves the status at 0.
+
+That leniency is not a quirk to route around: it is exactly GNU `realpath`'s
+default mode, where every component except the last must exist (`-e` demands the
+last one too, `-m` demands none). **The command was right and the test was
+wrong** — it exercised the error arm with an input that takes the success arm.
+
+The rung now points its failing assertion at a path whose *parent* is missing,
+which is a genuine `NotFound`, and asserts the succeeding case beside it so the
+"missing final component is fine" rule is pinned as deliberate rather than left
+looking like the bug it isn't.
+
+**What the wrong test was hiding.** `cmd_realpath` passed the raw operand to
+`Vfs::resolve_path` instead of the shell's cwd-aware `resolve_path` helper.
+`normalize_path` unconditionally prepends `/`, so a relative argument was
+silently reinterpreted as absolute-from-root: `realpath foo` in `/tmp` answered
+`/foo` and exited 0. Making a relative path absolute is the command's entire
+purpose, so its only interesting input was the one it got wrong — and every
+assertion in the rung passed an absolute path, so none of them could have caught
+it. A regression that changes directory now sits beside them.
+
+**The lesson.** Bugs one and two were a verdict nobody read; the third was a
+verdict about the wrong thing. This one is a verdict about the wrong *input*:
+an assertion is only as good as the branch its argument actually reaches, and a
+test that has never passed is evidence about the test at least as often as about
+the code. Before tightening an assertion that fails, confirm the input reaches
+the branch being asserted — here, reading `resolve_inner` cost minutes and would
+have saved two 10-minute boot cycles.
+
+**And a note on cost.** Both diagnoses came from reading, not from booting, but
+what made the failure *legible* was the `assert_output_starts_with` helper added
+in `1123c4637`: it printed `actual output (18 bytes): /zzz_no_such_path` instead
+of repeating the test author's sentence. Auditing that commit then showed it had
+converted only 11 of 15 sites — the rewriter matched `&out`, and four captures
+are bound to other names (`0ddfaa5bc`). A mechanical sweep's own coverage is
+worth re-deriving from the source rather than from the count the sweep reported.

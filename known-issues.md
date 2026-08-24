@@ -50401,7 +50401,7 @@ guarantee, and on Windows the failure mode would be a sharing violation in
 whichever of the two processes lost the race. Wait for `[run-timeout] child
 exited` before running any cargo command against the same target directory.
 
-**Part 2 progress. 42 of 49 modules converted.**
+**Part 2 progress. 43 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -53193,6 +53193,142 @@ exited` before running any cargo command against the same target directory.
       lands at 3.14:1 on magenta. It shares those catches with the pin only
       because the pin happens to be watching the same two indices. Change the
       fixture and the pin stops seeing them; the ratio does not care.
+- [x] `calendar.rs` — 8 constants over 35 colour sites, done 2026-08-23. 113
+  tests in the module (ten new), harness defects Ax68–Xx69 (fifty).
+  - **The largest finding is not a colour at all: a field that round-tripped
+    perfectly and was never drawn.** `CalendarEvent::color` was parsed by
+    `import_text`, stored, and written back by `export_text` faithfully — and
+    the month grid's event dot drew a fixed `LAVENDER` that never looked at the
+    field. The only site that read it was the detail card, which appears only
+    for a day the user has *selected*. So a colour set in the calendar file
+    survived every save/load cycle intact while changing nothing the user could
+    see until they clicked the day. **A value that round-trips correctly and a
+    value that is used are unrelated properties**, and a round-trip test — which
+    this module had — asserts only the first. This is the generalisation of
+    module 41's delegate finding: there the unexercised thing was a function,
+    here it is a *read*.
+  - **It was nearly missed by the search that found everything else.** The sweep
+    for surviving colour work was `grep '\.color' | grep -v 'color:'` — strip
+    the struct-literal noise, keep the reads. But `color: event.dot_color(p)` is
+    a read *spelled* as a write, and the filter removed the one production line
+    that mattered along with the forty that did not. **A filter that removes the
+    noise can remove the signal with it** whenever the signal and the noise
+    share a shape. The read was found by reading the renderer instead.
+  - **`Option<Color>`, not a sentinel — design-decisions.md §528.** The tempting
+    non-decision is `.unwrap_or(p.blue)` inside `import_text`. That makes the
+    *parser* consult the palette, so the same file parses to different data
+    depending on which theme is active, and `export_text` then writes that
+    theme-dependent value back: merely opening the calendar in light mode would
+    rewrite every event the user never coloured. A display setting must not be
+    able to edit user data. `None` is resolved once, at draw time, by
+    `CalendarEvent::dot_color`.
+  - **Three contrast failures, all one shape: a fill role read as an ink.** The
+    adjacent months' day numbers were `SURFACE2` on `BASE` — 2.46:1 in Mocha and
+    **1.91:1** in Latte; the week-number gutter was the same; and the detail
+    card was `SURFACE0` with `SUBTEXT` on it, **3.40:1** in Latte. Surfaces sit
+    near the background — that is what they are for — so any `surface*` used as
+    ink is unreadable by construction, and the dark-mode-only review that
+    preceded these conversions could not see it because Mocha's surfaces are
+    further from its base than Latte's are from its.
+  - **The detail card is the one case where the *fill* had to move rather than
+    the ink.** No quiet role clears 4.5:1 against Latte `surface0`: `subtext1`,
+    the next rung up from the offending `subtext0`, still only reaches 4.05. So
+    the card became `mantle` — one step *away* from `base` in both modes, a
+    shallow well rather than a raised panel — which buys two readable ink tiers
+    at once (5.14 for the event time, 6.57 for its title in Latte). Worth
+    recording because the reflex in the previous forty-two modules was always to
+    move the ink; here that reflex has no solution.
+  - **Lesson 24 held again: a delegate is a site.** `render_tray_clock` is a
+    one-line forward to `ClockDisplay::render` and was called from nowhere in
+    the tree — every existing test called the inner function directly. It could
+    have dropped the palette, transposed x and y, or handed the clock a palette
+    of its own, and nothing would have failed. Two harness defects do exactly
+    that, and one test is the sole catcher of both.
+  - **The contrast test cannot catch a single defect in this module, and that is
+    correct.** `every_pairing_the_calendar_draws_clears_the_contrast_floor`
+    reads palette values and a hand-written table of which ink lands on which
+    fill; it never calls the renderer. So no defect in `calendar.rs` is declared
+    against it — the catchers would all be MISSING. It is not dead weight: it is
+    the only thing standing between the module and a repeat of the three bugs
+    above, and it would fail loudly if `appearance` moved a role. But it is a
+    claim about the *palette*, not about this file, and declaring it as a
+    catcher for a rendering defect would have been a declaration error in five
+    consecutive modules' worth of tradition. **A test can be correct, valuable,
+    and structurally incapable of catching any defect in the file it lives in.**
+  - **My hand-computed contrast figure was wrong, and only running it found
+    that.** I predicted Latte `accent` (which stock is `blue`, `#1D62EC`) on
+    Latte `base` at 4.415:1 and expected the new contrast test to fail on the
+    "Today" button. It passed; the measured value is **4.63:1**. The pairing is
+    genuinely thin but it clears the floor, and no code change was warranted.
+    The lesson is narrow and worth keeping: WCAG luminance is a gamma-corrected
+    weighted sum, estimating it by eye is estimating an exponential, and a
+    prediction that would have driven a code change has to be *computed*.
+  - **Sweep: 50 caught, 0 escaped, 0 never asked, 0 under-caught, 2
+    under-declared.** The preflight was `50 build, 0 do not, 0 not applied`, and
+    both runs ended `restored: all files match their recorded SHA-256`. No
+    declaration errors were found by reading this time — the first module in six
+    where the pre-run check against the test source turned up nothing, which is
+    what the previous five modules' errors were teaching.
+  - Catcher census (50 defects):
+
+    | Test | Caught | Sole catcher |
+    |---|---|---|
+    | `every_month_view_site_draws_the_role_it_claims` | 33 | 12 |
+    | `every_role_the_calendar_draws_moves_with_the_mode` | 13 | 0 |
+    | `every_colour_the_calendar_draws_comes_from_its_palette` | 12 | 0 |
+    | `every_year_view_site_draws_the_role_it_claims` | 11 | 9 |
+    | `the_tray_clock_delegate_draws_the_palette_it_is_handed` | 6 | 2 |
+    | `a_coloured_event_shows_the_users_colour_in_the_month_grid` | 6 | 0 |
+    | `the_today_button_wears_the_accent` | 3 | 2 |
+    | `an_uncoloured_event_round_trips_without_gaining_a_colour` | 2 | 2 |
+    | `the_dot_and_the_detail_bar_resolve_a_colour_the_same_way` | 2 | 0 |
+    | `the_selection_disc_is_drawn_on_the_cell_that_is_clicked` | 2 | 0 |
+    | `every_pairing_the_calendar_draws_clears_the_contrast_floor` | 0 | 0 |
+
+    - **Twenty-seven of the fifty are caught by exactly one test, and the
+      fifteen sole catches that lie outside the month-view pin are all sites a
+      general-purpose check cannot reach.** Nine are in the year view, which the
+      month-view pin never renders; two are behind the tray-clock delegate,
+      which nothing else in the tree calls; two are the "Today" button, which by
+      construction cannot coexist with a visible today cell and so is invisible
+      to the scene the pin uses; two are the file format, which no renderer test
+      touches at all. The other twelve sole catches belong to the pin, and are
+      the role swaps and fill-role-as-ink defects that are perfectly good
+      palette members drawn in the wrong place. Not one of the twenty-seven
+      would have been found by widening an existing test — each needed a fixture
+      that reaches the site.
+    - **The contrast test caught nothing, and could not have.** It is the first
+      test in this series with a zero, and the zero is structural rather than a
+      gap: it reads palette values and a hand-written table of which ink lands
+      on which fill, and never calls the renderer. Its job is to fail if
+      `appearance` moves a role, not if `calendar` misuses one. Recorded because
+      a zero row in this table has meant "the test is weak" in every previous
+      module, and here it means something else entirely.
+    - **Both under-declarations were the same accidental locator**, and it is a
+      shape worth naming.
+      `the_selection_disc_is_drawn_on_the_cell_that_is_clicked` is a *layout*
+      test: it finds the selection disc, takes its centre, and asserts the hit
+      test agrees. It finds it by matching `dark().surface0` — so its locator is
+      a role assertion it never meant to make, and changing the disc's role
+      makes `find_map` return nothing and the `.expect` fire before the geometry
+      it exists to check is reached. A real catch, but a fragile one: it
+      protects the role only for as long as nobody widens the locator, and it
+      reports the failure in the vocabulary of layout.
+    - **One of the two was also caught by a value collision in the mode test's
+      skip clause**, which is worth writing down because the same clause appears
+      in every module from 39 on. The clause exempts colours that are
+      legitimately identical in both modes by comparing *values*: `SHADOW`, the
+      accent, `readable_on(accent)`, and the user's event colour. For this
+      fixture's magenta accent, `readable_on` answers `#EFF1F5` — and Mocha
+      `surface0`'s `readable_on` is also `#EFF1F5`. So when the two discs are
+      swapped, today's ink is misfiled as "legitimately fixed", asserted equal
+      across modes, and fails because it is not. The collision only ever makes
+      the test *stricter* — a site wrongly classed as fixed is asserted equal,
+      never skipped — so it cannot hide a defect; it can only produce a failure
+      whose message points at the wrong reason. That is why it is documented
+      here and in the harness rather than tightened: keying the clause on sites
+      instead of values would mean deriving the site list from the renderer, and
+      lesson 22 says an expectation derived from the code under test is an echo.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

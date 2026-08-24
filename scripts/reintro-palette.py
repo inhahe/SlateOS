@@ -112,6 +112,7 @@ A11Y = "gui/desktop/src/accessibility_settings.rs"
 FOCUS = "gui/desktop/src/focus_assist.rs"
 PEEK = "gui/desktop/src/window_peek.rs"
 ABOUT = "gui/desktop/src/about.rs"
+CAL = "gui/desktop/src/calendar.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -19128,6 +19129,664 @@ DEFECTS = [
         ["desktop"],
         [
             'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the clock band's time is still Mocha TEXT",
+        CAL,
+        [
+            ('        let time_ink = p.text;',
+             '        let time_ink = Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+            'the_tray_clock_delegate_draws_the_palette_it_is_handed',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the clock band draws its time and its date in each other's roles",
+        CAL,
+        [
+            ('        let time_ink = p.text;\n        let date_ink = p.subtext0;',
+             '        let time_ink = p.subtext0;\n        let date_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'the_tray_clock_delegate_draws_the_palette_it_is_handed',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the clock band's extra-zone rows read a fill role as ink",
+        CAL,
+        [
+            ('        let zone_ink = p.subtext0;',
+             '        let zone_ink = p.surface2;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'the_tray_clock_delegate_draws_the_palette_it_is_handed',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the clock band builds a palette of its own, so the clock alone ignores the mode',
+        CAL,
+        [
+            ('        let time_ink = p.text;\n        let date_ink = p.subtext0;\n        let zone_ink = p.subtext0;',
+             '        let p = &Palette::for_mode(false);\n        let time_ink = p.text;\n        let date_ink = p.subtext0;\n        let zone_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+            'the_tray_clock_delegate_draws_the_palette_it_is_handed',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the popup background is still Mocha BASE',
+        CAL,
+        [
+            ('        let popup_bg = p.base;',
+             '        let popup_bg = Color::from_hex(0x1E1E2E);'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the popup border is still Mocha SURFACE1',
+        CAL,
+        [
+            ('        let popup_border = p.surface1;',
+             '        let popup_border = Color::from_hex(0x45475A);'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the popup fill and its border are drawn in each other's roles",
+        CAL,
+        [
+            ('        let popup_bg = p.base;\n        let popup_border = p.surface1;',
+             '        let popup_bg = p.surface1;\n        let popup_border = p.base;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the week-number gutter goes back to surface2, the 1.9:1 fill-role-as-ink',
+        CAL,
+        [
+            ('                    color: p.subtext0,\n                    font_size: layout.px(WEEK_NUM_FONT),',
+             '                    color: p.surface2,\n                    font_size: layout.px(WEEK_NUM_FONT),'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the month popup's drop shadow is drawn as a palette role instead of black",
+        CAL,
+        [
+            ('            color: Color::rgba(0, 0, 0, 100),\n            corner_radii: radii,',
+             '            color: p.crust,\n            corner_radii: radii,'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the clock band is handed a palette of its own rather than the popup's",
+        CAL,
+        [
+            ('.render(p, band.x',
+             '.render(&Palette::for_mode(false), band.x'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the day cells are handed a palette of their own, so only the grid ignores the mode',
+        CAL,
+        [
+            ('            self.render_day_cell(p, &mut cmds, &layout, index, cell, store);',
+             '            self.render_day_cell(&Palette::for_mode(false), &mut cmds, &layout, index, cell, store);'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the month view's navigation arrows are still Mocha SUBTEXT",
+        CAL,
+        [
+            ('        let arrow_ink = p.subtext0;\n        let month_ink = p.text;',
+             '        let arrow_ink = Color::from_hex(0xA6ADC8);\n        let month_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the navigation arrows and the month title are drawn in each other's roles",
+        CAL,
+        [
+            ('        let arrow_ink = p.subtext0;\n        let month_ink = p.text;',
+             '        let arrow_ink = p.text;\n        let month_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'the_today_button_wears_the_accent',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the Today button wears a fixed blue, so it stops agreeing with today's disc",
+        CAL,
+        [
+            ('        let today_ink = p.accent;',
+             '        let today_ink = p.blue;'),
+        ],
+        ["desktop"],
+        [
+            'the_today_button_wears_the_accent',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the Today button is drawn as ordinary text, so nothing marks it as a control',
+        CAL,
+        [
+            ('        let today_ink = p.accent;',
+             '        let today_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'the_today_button_wears_the_accent',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the day-of-week headers are still Mocha SUBTEXT',
+        CAL,
+        [
+            ('        let dow_ink = p.subtext0;',
+             '        let dow_ink = Color::from_hex(0xA6ADC8);'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the day-of-week headers read a fill role as ink',
+        CAL,
+        [
+            ('        let dow_ink = p.subtext0;',
+             '        let dow_ink = p.surface2;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: today's disc is a fixed blue, so it stops following the accent the user chose",
+        CAL,
+        [
+            ('        let today_disc = p.accent;\n        let selected_disc = p.surface0;',
+             '        let today_disc = p.blue;\n        let selected_disc = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the selection disc goes back to surface1, one rung too bright to sit under text',
+        CAL,
+        [
+            ('        let today_disc = p.accent;\n        let selected_disc = p.surface0;',
+             '        let today_disc = p.accent;\n        let selected_disc = p.surface1;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            # Reconciled after the sweep. This layout test finds the disc by
+            # matching `dark().surface0`, so its *locator* is a role assertion
+            # it never meant to make: change the role and `find_map` returns
+            # nothing, and the `.expect` fires before the geometry it exists to
+            # check is ever reached.
+            'the_selection_disc_is_drawn_on_the_cell_that_is_clicked',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: today's disc and the selection's are drawn in each other's roles",
+        CAL,
+        [
+            ('        let today_disc = p.accent;\n        let selected_disc = p.surface0;',
+             '        let today_disc = p.surface0;\n        let selected_disc = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
+            # Same accidental locator as the defect above.
+            'the_selection_disc_is_drawn_on_the_cell_that_is_clicked',
+            # Reconciled after the sweep, and caught by coincidence rather than
+            # by design. The mode test's skip clause is keyed on *values*, not
+            # on sites: it treats a colour as legitimately fixed when it equals
+            # `readable_on(dark.accent)`, which for this fixture's magenta is
+            # `#EFF1F5`. With the discs swapped, today's ink becomes
+            # `readable_on(surface0)` — also `#EFF1F5` in Mocha — so the clause
+            # misfiles a site that does move, demands it not move, and fails.
+            # The collision only ever makes the test stricter (a site wrongly
+            # classed as fixed is asserted equal, never skipped), so it cannot
+            # hide a defect; it can only produce a failure that needs reading.
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the adjacent months' day numbers go back to surface2, 1.91:1 in Latte",
+        CAL,
+        [
+            ('        } else if cell.current_month {\n            p.text\n        } else {\n            p.subtext0\n        };',
+             '        } else if cell.current_month {\n            p.text\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: this month's day numbers are drawn as quietly as the neighbouring months'",
+        CAL,
+        [
+            ('        } else if cell.current_month {\n            p.text\n        } else {\n            p.subtext0\n        };',
+             '        } else if cell.current_month {\n            p.subtext0\n        } else {\n            p.subtext0\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: today's number is a role rather than ink derived from whatever disc it sits on",
+        CAL,
+        [
+            ('        let text_color = if is_today {\n            readable_on(today_disc)\n        } else if cell.current_month {',
+             '        let text_color = if is_today {\n            p.text\n        } else if cell.current_month {'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the month-grid dot discards the colour the user gave the event',
+        CAL,
+        [
+            ('            let dot_color = match (first.color, is_today) {\n                (Some(chosen), _) => chosen,',
+             '            let dot_color = match (first.color, is_today) {\n                (Some(_), _) => p.lavender,'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: an uncoloured dot on today's disc ignores the disc and may vanish into it",
+        CAL,
+        [
+            ('                (None, true) => readable_on(today_disc),',
+             '                (None, true) => p.lavender,'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the uncoloured event dot reads a fill role as a mark on the base',
+        CAL,
+        [
+            ('                (None, false) => p.lavender,',
+             '                (None, false) => p.surface2,'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: an uncoloured event resolves to blue, which is also the stock accent',
+        CAL,
+        [
+            ('        self.color.unwrap_or(p.lavender)',
+             '        self.color.unwrap_or(p.blue)'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'the_dot_and_the_detail_bar_resolve_a_colour_the_same_way',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: dot_color ignores the colour the user chose and always answers the default',
+        CAL,
+        [
+            ('        self.color.unwrap_or(p.lavender)',
+             '        p.lavender'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'the_dot_and_the_detail_bar_resolve_a_colour_the_same_way',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the detail card goes back to surface0, where its time reads at 3.40:1 in Latte',
+        CAL,
+        [
+            ('        let card_bg = p.mantle;',
+             '        let card_bg = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the detail card is still Mocha MANTLE',
+        CAL,
+        [
+            ('        let card_bg = p.mantle;',
+             '        let card_bg = Color::from_hex(0x181825);'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: an event's time drops a rung to subtext0, the tier the card had to move to escape",
+        CAL,
+        [
+            ('        let time_ink = p.subtext1;',
+             '        let time_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the detail card's header and its event times are drawn in each other's roles",
+        CAL,
+        [
+            ('        let header_ink = p.text;\n        let time_ink = p.subtext1;',
+             '        let header_ink = p.subtext1;\n        let time_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the N-more overflow line reads a fill role as ink',
+        CAL,
+        [
+            ('        let more_ink = p.subtext1;',
+             '        let more_ink = p.surface1;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the detail card's colour bar ignores the event and draws a fixed role",
+        CAL,
+        [
+            ('                color: event.dot_color(p),',
+             '                color: p.lavender,'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the detail card builds a palette of its own, so only the card ignores the mode',
+        CAL,
+        [
+            ('        let card_bg = p.mantle;\n        let header_ink = p.text;',
+             '        let p = &Palette::for_mode(false);\n        let card_bg = p.mantle;\n        let header_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the year view's card is still Mocha BASE",
+        CAL,
+        [
+            ('        let card_bg = p.base;\n        let arrow_ink = p.subtext0;\n        let title_ink = p.text;',
+             '        let card_bg = Color::from_hex(0x1E1E2E);\n        let arrow_ink = p.subtext0;\n        let title_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the year view's arrows read a fill role as ink",
+        CAL,
+        [
+            ('        let arrow_ink = p.subtext0;\n        let title_ink = p.text;',
+             '        let arrow_ink = p.surface2;\n        let title_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the year view's arrows and its year label are drawn in each other's roles",
+        CAL,
+        [
+            ('        let arrow_ink = p.subtext0;\n        let title_ink = p.text;',
+             '        let arrow_ink = p.text;\n        let title_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the year view's drop shadow is drawn as a palette role instead of black",
+        CAL,
+        [
+            ('            color: Color::rgba(0, 0, 0, 100),\n            corner_radii: CornerRadii::all(layout.px(CARD_RADIUS)),',
+             '            color: p.crust,\n            corner_radii: CornerRadii::all(layout.px(CARD_RADIUS)),'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the year view builds a palette of its own, so one of the two views ignores the mode',
+        CAL,
+        [
+            ('        let card_bg = p.base;\n        let arrow_ink = p.subtext0;\n        let title_ink = p.text;',
+             '        let p = &Palette::for_mode(false);\n        let card_bg = p.base;\n        let arrow_ink = p.subtext0;\n        let title_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the mini months' today disc is a fixed blue, disagreeing with the day grid's",
+        CAL,
+        [
+            ('        let today_disc = p.accent;\n        let label_color = if is_current { today_disc } else { p.text };',
+             '        let today_disc = p.blue;\n        let label_color = if is_current { today_disc } else { p.text };'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a mini month's label is drawn as quietly as the day numbers inside it",
+        CAL,
+        [
+            ('        let today_disc = p.accent;\n        let label_color = if is_current { today_disc } else { p.text };',
+             '        let today_disc = p.accent;\n        let label_color = if is_current { today_disc } else { p.subtext0 };'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the current mini month's label stops following the disc drawn beneath it",
+        CAL,
+        [
+            ('        let today_disc = p.accent;\n        let label_color = if is_current { today_disc } else { p.text };',
+             '        let today_disc = p.accent;\n        let label_color = if is_current { p.blue } else { p.text };'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a mini month's day numbers read a fill role as ink",
+        CAL,
+        [
+            ('            let text_color = if is_today {\n                readable_on(today_disc)\n            } else {\n                p.subtext0\n            };',
+             '            let text_color = if is_today {\n                readable_on(today_disc)\n            } else {\n                p.surface2\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a mini month's today digit is a role rather than ink derived from its disc",
+        CAL,
+        [
+            ('            let text_color = if is_today {\n                readable_on(today_disc)\n            } else {\n                p.subtext0\n            };',
+             '            let text_color = if is_today {\n                p.text\n            } else {\n                p.subtext0\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the tray-clock delegate builds a palette of its own and drops the one it was handed',
+        CAL,
+        [
+            ('        clock.render(p, x, y, scale, utc_now, local)',
+             '        clock.render(&Palette::for_mode(false), x, y, scale, utc_now, local)'),
+        ],
+        ["desktop"],
+        [
+            'the_tray_clock_delegate_draws_the_palette_it_is_handed',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the tray-clock delegate transposes x and y on its way through',
+        CAL,
+        [
+            ('        clock.render(p, x, y, scale, utc_now, local)',
+             '        clock.render(p, y, x, scale, utc_now, local)'),
+        ],
+        ["desktop"],
+        [
+            'the_tray_clock_delegate_draws_the_palette_it_is_handed',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the year mode dispatches to the month view, so the year view is never drawn',
+        CAL,
+        [
+            ('            CalendarViewMode::Year => self.render_year_view(p, x, y, scale),',
+             '            CalendarViewMode::Year => self.render_month_view(p, x, y, scale, utc_now, store),'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: saving writes a colour line for every event, so an uncoloured one gains one',
+        CAL,
+        [
+            ('            if let Some(c) = event.color {',
+             '            {\n                let c = event.color.unwrap_or(Color::from_hex(0x89B4FA));'),
+        ],
+        ["desktop"],
+        [
+            'an_uncoloured_event_round_trips_without_gaining_a_colour',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: loading gives an event with no colour line a default, which saving then writes back',
+        CAL,
+        [
+            ('        let mut color: Option<Color> = None;',
+             '        let mut color: Option<Color> = Some(Color::from_hex(0x89B4FA));'),
+            ('                color = None;',
+             '                color = Some(Color::from_hex(0x89B4FA));'),
+        ],
+        ["desktop"],
+        [
+            'an_uncoloured_event_round_trips_without_gaining_a_colour',
         ],
     ),
 ]

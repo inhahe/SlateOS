@@ -54901,3 +54901,47 @@ TRIGGER
   live one), or the first SlateOS-native run of a utility under a shell that
   can write `<&-`.  Do it before either; it is a dozen lines and cannot break
   a caller that was already passing three open descriptors.
+
+================================================================================
+B: sweep every coreutils binary for the closed-standard-descriptor hazard
+   (lane B, 2026-08-24)
+================================================================================
+
+Rust's runtime tells every binary in userspace/coreutils the same two untruths
+about descriptors 0, 1 and 2, and both push the program toward reporting
+success where GNU reports failure:
+
+  1. sanitize_standard_fds reopens any *closed* standard descriptor on
+     /dev/null before main, so `prog >&-` and `prog >/dev/null` become
+     indistinguishable.
+  2. handle_ebadf, inside StdoutRaw/StderrRaw's Write impls, turns EBADF into
+     Ok(buf.len()) -- a write to a closed descriptor is reported as one that
+     fully succeeded.
+
+Net effect: `prog >&-` writes nothing, notices nothing and exits 0, where every
+GNU utility prints `prog: write error: Bad file descriptor` and exits nonzero.
+gnulib registers close_stdout with atexit in essentially every one of its
+programs for exactly this reason.
+
+The mechanism is now written and shared: userspace/coreutils/src/stdfd.rs ->
+guard_std_fds!() (an .init_array constructor, expanded in the *binary* because
+an .init_array entry inside an rlib is not reliably linked in), restore(), and
+Stream (a raw-descriptor buffered writer reproducing gnulib's close_stream
+rule: prev_fail || (fclose_fail && (some_pending || errno != EBADF))).
+
+DONE       nohup, nice -- both converted, both covered by their harnesses.
+REMAINING  every other binary in the crate.
+
+For each: decide whether its status or behaviour depends on a standard
+descriptor being open (for anything that writes to stdout, it does); if so,
+expand guard_std_fds!(), call stdfd::restore() first thing in main, route
+output through stdfd::Stream, and add `prog >&-` and `prog >/dev/full` cases to
+its differential harness.  cat, echo, yes, printf, seq, head, tail, wc, sort
+and the sum/digest family are where a pipeline is most likely to notice.
+
+TRIGGER
+  Do it as its own pass, ahead of further argv-utf8 conversions -- it is
+  mechanical, it is the same three edits per binary, and every harness written
+  before it exists is a harness that will need revisiting.  See
+  known-issues.md -> TD-B-EVERY-BINARY-IS-WRONG-ABOUT-A-CLOSED-STANDARD-
+  DESCRIPTOR.

@@ -70398,6 +70398,12 @@ wrong by default in Rust, silently and in the safe direction, which is the
 hard kind to notice. The two mechanisms above are the general answer; they are
 written in `nohup.rs` with enough commentary to be lifted.
 
+*Update, same day:* they **were** lifted, into `coreutils::stdfd`, when `nice`
+turned out to need them too; `nohup.rs` no longer carries its own copies. See
+`TD-B-EVERY-BINARY-IS-WRONG-ABOUT-A-CLOSED-STANDARD-DESCRIPTOR` below for the
+shared module and the bin-by-bin sweep that is still outstanding, and
+`design-decisions.md` §375 for why the startup hook has to be a macro.
+
 ### Why the harness needs a pseudo-terminal
 
 Every branch that makes `nohup` `nohup` is guarded by `isatty`. Run from a
@@ -70443,3 +70449,136 @@ Final: **75 passed, 0 differed, 2 differ on purpose**, plus 18 unit tests —
 one of which is an eight-row table over every `(stdin, stdout, stderr)`
 terminal combination, asserting the exact ordered list of lines GNU produced
 for each.
+
+## `nice` parsed the adjustment and then threw it away (lane B, 2026-08-24)
+
+**Status: FIXED.** `userspace/coreutils/src/bin/nice.rs` is a port of GNU
+coreutils 9.4's `src/nice.c`, verified case-by-case against the real binary by
+`scripts/nice-diff.sh` — **127 cases, 125 passed, 0 differed, 2 differ on
+purpose**, plus 25 unit tests.
+
+### What the old version did
+
+It accepted `-n N`, computed nothing from it, and ran the command at whatever
+niceness it had inherited. Eight separate defects, each of which a shipped
+`nice` would have been wrong about:
+
+| # | The old behaviour | GNU |
+|---|---|---|
+| 1 | `-n N` parsed, then discarded; the command ran unchanged | the niceness is actually set |
+| 2 | no default: `nice cmd` did nothing | `nice cmd` is `nice -n 10 cmd` |
+| 3 | the obsolete `-NUM` form was an unknown option | `nice -5 cmd` is an adjustment |
+| 4 | `argv` held as `Vec<String>` — a non-UTF-8 byte panicked | passed through untouched |
+| 5 | a failed `exec` exited 1 | 127 not found, 126 found-but-not-runnable |
+| 6 | a refused adjustment was fatal | a warning; the command still runs |
+| 7 | no query form: `nice` alone printed usage | prints the current niceness |
+| 8 | no `--adjustment`, no `--help`, no `--version` | all three |
+
+Defect 1 is the one that makes the rest secondary: a batch script asking for
+`nice -n 19 ./rebuild` got a full-priority rebuild, and nothing anywhere said
+so. Text and exit status were *correct* throughout — which is why the harness
+runs `nice` itself as the command under test in most cases, so that stdout
+carries the scheduling parameter and a comparison of text becomes a
+comparison of behaviour.
+
+### Why the scan is interleaved rather than a pre-pass
+
+The obsolete `-NUM` syntax cannot be described to getopt: `-5` is neither a
+short option cluster nor an operand. The tempting shape — walk the words once
+pulling out anything matching `-NUM`, then hand the rest to getopt — is wrong,
+and wrong in a way that only shows up on a valid command line: `nice -n -5
+cmd` would lose its `-5` to the pre-pass, and the `-n` would then report a
+missing argument. Upstream alternates instead, and so does this port: test the
+next word for the digit form, otherwise take **exactly one** item from getopt
+and resume at `optind`. That is what `Parser::optind()` was added to
+`src/getopt.rs` for.
+
+The digit test is `s[0] == '-' && ISDIGIT (s[1 + (s[1] == '-' || s[1] ==
+'+')])`, and the adjustment is `s + 1` — so `--5` is −5, `-+5` is +5, and
+`--` is not caught by it. `-5x` *is* caught, which is why it produces
+`invalid adjustment '5x'` rather than an unknown-option error.
+
+### A refused niceness is a warning; an undeliverable warning is fatal
+
+Unprivileged, a negative adjustment is refused by the kernel. GNU prints
+`nice: cannot set niceness: Permission denied` and **runs the command anyway**,
+returning the command's own status — treating it as fatal would break every
+`nice -n -5` in every script run by a non-root user. But upstream then checks
+`ferror (stderr)`, and if the warning could not be delivered it returns
+`EXIT_CANCELED` after all. Both halves are reproduced, and both are covered:
+`nice -n -5 true` is 0, `nice -n -5 true 2>&-` is 125.
+
+The same rule produces the finding most likely to trip a re-implementation:
+**`nice /nope 2>&-` exits 125, not 127.** The command was not found, but the
+report of that could not be delivered, and the undeliverable report wins.
+
+## TD-B-EVERY-BINARY-IS-WRONG-ABOUT-A-CLOSED-STANDARD-DESCRIPTOR — `coreutils::stdfd` exists now; the sweep does not (lane B, 2026-08-24)
+
+**Status: mechanism FIXED and shared; two binaries converted; the rest
+unaudited.**
+
+### The two lies
+
+Rust's runtime tells every binary in this crate the same two untruths about
+descriptors 0, 1 and 2, and both of them push the program toward reporting
+success:
+
+1. **`sanitize_standard_fds`** runs before `main` and reopens any *closed*
+   standard descriptor on `/dev/null`. By the time `main` sees the world,
+   `prog >&-` and `prog >/dev/null` are indistinguishable.
+2. **`handle_ebadf`** in `StdoutRaw`/`StderrRaw`'s `Write` impls turns `EBADF`
+   into `Ok(buf.len())`. Even with (1) defeated, a write to a closed
+   descriptor is reported as a write that fully succeeded.
+
+Together: `prog >&-` writes nothing, notices nothing and exits 0, where every
+GNU utility prints `prog: write error: Bad file descriptor` and exits nonzero.
+This is not a corner — gnulib registers `close_stdout` with `atexit` in
+essentially every one of its programs precisely because a report that did not
+arrive is a failure, and a pipeline that silently discards output is the thing
+that rule exists to prevent.
+
+### The answers, now in the library
+
+`userspace/coreutils/src/stdfd.rs`:
+
+- **`guard_std_fds!()`** — a `macro_rules!` the *binary* expands, installing an
+  `.init_array` ELF constructor that records which of 0/1/2 were closed. It
+  has to be a macro rather than a plain library item: an `.init_array` entry
+  inside an rlib is not reliably pulled into the link, because inclusion is by
+  object file and rustc's codegen-unit partitioning is not a stable interface.
+  The constructor is the one window in which the truth is still available —
+  it runs from `__libc_start_main`, before `lang_start` calls
+  `sanitize_standard_fds`.
+- **`stdfd::restore()`** — re-closes, at the top of `main`, whatever the
+  constructor saw closed.
+- **`stdfd::Stream`** — a buffered writer over a raw descriptor that calls
+  `write(2)` directly, so `EBADF` arrives as `EBADF`. It reproduces gnulib's
+  `close_stream` rule exactly, which is subtler than "did any write fail":
+  failure is `prev_fail || (fclose_fail && (some_pending || errno != EBADF))`.
+  That is why `nice true >&-` is 0 (nothing was owed) while `nice >&-` is 125
+  (a number was owed), and both were measured before being coded.
+
+### What is left
+
+`nohup` and `nice` are converted and covered by their harnesses. **Every other
+binary in the crate is still wrong by default**, in the silent direction.
+The remaining work is a bin-by-bin sweep: for each, decide whether its exit
+status or behaviour depends on a standard descriptor being open — for anything
+that writes to stdout, it does — and if so expand `guard_std_fds!()`, call
+`stdfd::restore()` first thing in `main`, route output through
+`stdfd::Stream`, and add `prog >&-` / `prog >/dev/full` cases to its harness.
+`cat`, `echo`, `yes`, `printf`, `seq`, `head`, `tail`, `wc`, `sort` and the
+`sum`/`digest` family are the ones a pipeline is most likely to notice.
+
+Recorded in `todo.txt` as well.
+
+### A general defect it exposed on the way
+
+`errmsg::strerror` fell back to `io::Error`'s `Display` for any errno stable
+`ErrorKind` cannot name, and that `Display` appends ` (os error N)`. `EBADF`
+is such an errno, so the first thing the new code printed was
+`nice: write error: Bad file descriptor (os error 9)` against GNU's
+`nice: write error: Bad file descriptor`. The suffix is std's, not POSIX's,
+and no utility this crate imitates has ever printed it — so *any* unnamed
+errno would have given the port away. `errmsg::host_text` now strips it,
+which fixes the whole family rather than `EBADF` alone.

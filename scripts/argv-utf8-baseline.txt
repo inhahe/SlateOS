@@ -24,7 +24,6 @@ userspace/coreutils/src/bin/free.rs:argv-as-string
 userspace/coreutils/src/bin/grep.rs:argv-as-string
 userspace/coreutils/src/bin/logger.rs:argv-as-string
 userspace/coreutils/src/bin/more.rs:argv-as-string
-userspace/coreutils/src/bin/nice.rs:argv-as-string
 userspace/coreutils/src/bin/patch.rs:argv-as-string
 userspace/coreutils/src/bin/ps.rs:argv-as-string
 userspace/coreutils/src/bin/renice.rs:argv-as-string

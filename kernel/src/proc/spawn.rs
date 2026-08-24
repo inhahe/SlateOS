@@ -99,6 +99,78 @@ fn pathz_missing(rung: &str, required: &[&str]) -> bool {
     false
 }
 
+/// Prerequisite gate stated over the rung's *fixture table* rather than over a
+/// hand-written subset of it.
+///
+/// Every ring-3 rung below stages a list of `(src, dst)` pairs out of the
+/// mounted rootfs, and every one of them used to gate on a hand-picked few of
+/// those sources — in practice just the rung-specific binary. All 30 omitted
+/// the dynamic loader and libc, which all 30 also stage. Two lists that must
+/// agree, written out separately at 30 sites, is a guarantee that they will
+/// not: the gate said "dash is present, run the rung", and the staging step
+/// was then left to invent an answer for an absent `ld-linux-x86-64.so.2`.
+///
+/// Taking the same `&[(src, dst)]` slice the staging step takes deletes the
+/// second list, so the gate cannot fall behind what the rung actually needs.
+fn pathz_fixtures_missing(rung: &str, fixtures: &[(&str, &str)]) -> bool {
+    for (src, _dst) in fixtures {
+        if !crate::fs::Vfs::exists(src) {
+            pathz_skip(format_args!("{rung}"), src);
+            return true;
+        }
+    }
+    false
+}
+
+/// Copy a rung's fixtures out of the mounted rootfs into the live filesystem,
+/// failing the rung — never skipping it — when a copy does not work.
+///
+/// This is the second half of the pair above, and the split between them is
+/// the point:
+///
+/// * **Absent source → skip.** An environment fact, looked up by
+///   [`pathz_fixtures_missing`] before the rung announces itself, and counted
+///   into the end-of-boot Path-Z verdict so the lost coverage is visible.
+/// * **Present source that will not copy → fail.** The prerequisite question
+///   has already been answered "yes". A `read_file` that then fails, or a
+///   `write_file` that will not write, is a defect in the VFS or in the
+///   permission gate in front of it — and these rungs are the things that
+///   would notice.
+///
+/// Before this existed, 31 hand-copied loops printed `SKIP (staging … failed)`
+/// and returned `Ok(())` for *both* cases. A VFS that had stopped copying
+/// files would have switched off all 31 ring-3 rungs and produced a boot log
+/// indistinguishable from a clean one: the same defect as
+/// `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`, one layer further in, and
+/// self-concealing rather than merely quiet.
+fn stage_pathz_fixtures(rung: &str, fixtures: &[(&str, &str)]) -> KernelResult<()> {
+    for (src, dst) in fixtures {
+        let bytes = match crate::fs::Vfs::read_file(*src) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   FAIL: {}: {} existed at the gate but reading it failed: {:?}",
+                    rung,
+                    src,
+                    e
+                );
+                return Err(KernelError::InternalError);
+            }
+        };
+        if let Err(e) = crate::fs::Vfs::write_file(*dst, &bytes) {
+            serial_println!(
+                "[spawn]   FAIL: {}: staging {} -> {} failed: {:?}",
+                rung,
+                src,
+                dst,
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    Ok(())
+}
+
 /// Print the end-of-boot Path-Z coverage verdict.
 ///
 /// Called once after the Path-Z sequence.  The wording is deliberately blunt on
@@ -3109,10 +3181,10 @@ pub fn self_test_linux_dynamic_interp() -> KernelResult<()> {
     let interp_elf = elf::build_linux_interp_exit_elf(INTERP_EXIT);
     if let Err(e) = crate::fs::Vfs::write_file(INTERP_PATH, &interp_elf) {
         serial_println!(
-            "[spawn]   Linux dynamic interp: SKIP (VFS write failed: {:?})",
+            "[spawn]   FAIL: Linux dynamic interp: VFS write failed: {:?}",
             e
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
 
     // Step 2: spawn a dynamically-linked executable naming that interpreter.
@@ -3229,10 +3301,10 @@ pub fn self_test_linux_file_mmap() -> KernelResult<()> {
     data[READ_OFF] = SENTINEL;
     if let Err(e) = crate::fs::Vfs::write_file(DATA_PATH, &data) {
         serial_println!(
-            "[spawn]   Linux file mmap (ring 3): SKIP (VFS write failed: {:?})",
+            "[spawn]   FAIL: Linux file mmap (ring 3): VFS write failed: {:?}",
             e
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
 
     // Step 2: spawn the mmap test program(s).  Each must hold a File
@@ -19669,10 +19741,10 @@ pub fn self_test_linux_fork_execve_wait() -> KernelResult<()> {
     let tgt_elf = elf::build_linux_exit_elf(SENTINEL as u8);
     if let Err(e) = crate::fs::Vfs::write_file(TGT_PATH, &tgt_elf) {
         serial_println!(
-            "[spawn]   Linux fork()+execve()+wait4() (ring 3): SKIP (VFS write failed: {:?})",
+            "[spawn]   FAIL: Linux fork()+execve()+wait4() (ring 3): VFS write failed: {:?}",
             e
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
 
     let exe_elf = elf::build_linux_fork_execve_wait_test_elf(TGT_PATH_NUL);
@@ -19790,11 +19862,11 @@ pub fn self_test_linux_pipe_fork_dup2_exec() -> KernelResult<()> {
     let tgt_elf = elf::build_linux_write_byte_exit_elf(SENTINEL as u8);
     if let Err(e) = crate::fs::Vfs::write_file(TGT_PATH, &tgt_elf) {
         serial_println!(
-            "[spawn]   Linux pipe2()+fork()+dup2()+execve()+read() (ring 3): SKIP (VFS write \
-             failed: {:?})",
+            "[spawn]   FAIL: Linux pipe2()+fork()+dup2()+execve()+read() (ring 3): VFS write \
+             failed: {:?}",
             e
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
 
     let exe_elf = elf::build_linux_pipe_fork_dup2_exec_test_elf(TGT_PATH_NUL);
@@ -20048,10 +20120,10 @@ pub fn self_test_linux_link() -> KernelResult<()> {
     // Stage the source file with a single known byte.
     if let Err(e) = crate::fs::Vfs::write_file(SRC_PATH, b"L") {
         serial_println!(
-            "[spawn]   Linux link() (ring 3): SKIP (ext4 /mnt write failed: {:?})",
+            "[spawn]   FAIL: Linux link() (ring 3): ext4 /mnt write failed: {:?}",
             e
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
 
     let exe_elf = elf::build_linux_link_test_elf(SRC_PATH_NUL, DST_PATH_NUL);
@@ -20193,18 +20265,32 @@ pub fn self_test_ext4_link_no_follow() -> KernelResult<()> {
     // Stage the target file and the symlink pointing at it.
     if let Err(e) = Vfs::write_file(TARGET, b"T") {
         serial_println!(
-            "[spawn]   link no-follow (ext4): SKIP (target write failed: {:?})",
+            "[spawn]   FAIL: link no-follow (ext4): target write failed: {:?}",
             e
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
-    if let Err(e) = Vfs::symlink(LINK, TARGET) {
-        drain(TARGET);
-        serial_println!(
-            "[spawn]   link no-follow (ext4): SKIP (symlink unsupported: {:?})",
-            e
-        );
-        return Ok(());
+    // Only `NotSupported` says "this filesystem has no symlinks", which is
+    // the shape the `link_no_follow` arm below already uses.  Reading *every*
+    // error that way meant a symlink implementation that had started
+    // returning the wrong error silenced the rung that tests it.
+    match Vfs::symlink(LINK, TARGET) {
+        Ok(()) => {}
+        Err(KernelError::NotSupported) => {
+            drain(TARGET);
+            serial_println!("[spawn]   link no-follow (ext4): SKIP (symlinks unsupported)");
+            return Ok(());
+        }
+        Err(e) => {
+            drain(TARGET);
+            serial_println!(
+                "[spawn]   FAIL: link no-follow (ext4): symlink({} -> {}) returned {:?}",
+                LINK,
+                TARGET,
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
     }
 
     let cleanup = || {
@@ -21942,10 +22028,15 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
 
     // No rootfs.ext4 attached → nothing staged at /mnt.  No-op (not a failure):
     // the image is git-ignored, so most environments legitimately lack it.
-    if pathz_missing(
-        "REAL glibc dynamic-execution (ring 3, Path Z)",
-        &[SRC_HELLO],
-    ) {
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_HELLO, DST_HELLO),
+    ];
+
+    if pathz_fixtures_missing("REAL glibc dynamic-execution (ring 3, Path Z)", FIXTURES) {
         return Ok(());
     }
 
@@ -21958,44 +22049,18 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
 
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_HELLO, DST_HELLO),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real glibc: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real glibc: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real glibc", FIXTURES)?;
 
     // Re-read the staged executable to hand its bytes to the spawner.
     let exe_elf = match crate::fs::Vfs::read_file(DST_HELLO) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real glibc: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_HELLO,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -22119,7 +22184,15 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
     const CAPTURE: &str = "/glibc-stdio-capture.tmp";
     const MAX_YIELDS: usize = 4096;
 
-    if pathz_missing("REAL glibc stdio (output) (ring 3, Path Z)", &[SRC_STDIO]) {
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_STDIO, DST_STDIO),
+    ];
+
+    if pathz_fixtures_missing("REAL glibc stdio (output) (ring 3, Path Z)", FIXTURES) {
         return Ok(());
     }
 
@@ -22130,43 +22203,17 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_STDIO, DST_STDIO),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real glibc stdio: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real glibc stdio: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real glibc stdio", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_STDIO) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc stdio: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real glibc stdio: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_STDIO,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -22182,10 +22229,10 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
         Ok(h) => h,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc stdio: SKIP (capture-file open failed: {:?})",
+                "[spawn]   FAIL: real glibc stdio: capture-file open failed: {:?}",
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -22331,10 +22378,12 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
     const CAPTURE: &str = "/glibc-full-capture.tmp";
     const MAX_YIELDS: usize = 4096;
 
-    if pathz_missing(
-        "REAL glibc argv/env/stdin/heap (ring 3, Path Z)",
-        &[SRC_FULL],
-    ) {
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] =
+        &[(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_FULL, DST_FULL)];
+
+    if pathz_fixtures_missing("REAL glibc argv/env/stdin/heap (ring 3, Path Z)", FIXTURES) {
         return Ok(());
     }
 
@@ -22344,39 +22393,17 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_FULL, DST_FULL)] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real glibc full: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real glibc full: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real glibc full", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_FULL) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc full: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real glibc full: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_FULL,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -22386,20 +22413,20 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
     let _ = crate::fs::Vfs::remove(INPUT);
     if let Err(e) = crate::fs::Vfs::write_file(INPUT, STDIN_BYTES) {
         serial_println!(
-            "[spawn]   real glibc full: SKIP (writing stdin input failed: {:?})",
+            "[spawn]   FAIL: real glibc full: writing stdin input failed: {:?}",
             e
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
     let stdin_handle = match handle::open(INPUT, handle::OpenFlags::READ) {
         Ok(h) => h,
         Err(e) => {
             let _ = crate::fs::Vfs::remove(INPUT);
             serial_println!(
-                "[spawn]   real glibc full: SKIP (stdin-file open failed: {:?})",
+                "[spawn]   FAIL: real glibc full: stdin-file open failed: {:?}",
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -22416,10 +22443,10 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
             let _ = handle::close(stdin_handle);
             let _ = crate::fs::Vfs::remove(INPUT);
             serial_println!(
-                "[spawn]   real glibc full: SKIP (capture-file open failed: {:?})",
+                "[spawn]   FAIL: real glibc full: capture-file open failed: {:?}",
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -22568,9 +22595,13 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
     // the bound quickly (no ready task → each yield returns immediately).
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_PT, DST_PT)];
+
+    if pathz_fixtures_missing(
         "REAL glibc pthread (clone+futex+TLS) (ring 3, Path Z)",
-        &[SRC_PT],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -22582,39 +22613,17 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_PT, DST_PT)] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real glibc pthread: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real glibc pthread: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real glibc pthread", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_PT) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc pthread: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real glibc pthread: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_PT,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -22628,10 +22637,10 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
         Ok(h) => h,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc pthread: SKIP (capture-file open failed: {:?})",
+                "[spawn]   FAIL: real glibc pthread: capture-file open failed: {:?}",
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -22784,9 +22793,13 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
     // Generous bound still tolerates scheduler jitter.
     const MAX_YIELDS: usize = 65_536;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_SIG, DST_SIG)];
+
+    if pathz_fixtures_missing(
         "REAL glibc signal (SA_SIGINFO handler, ring 3, Path Z)",
-        &[SRC_SIG],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -22798,39 +22811,17 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_SIG, DST_SIG)] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real glibc signal: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real glibc signal: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real glibc signal", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_SIG) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc signal: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real glibc signal: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_SIG,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -22844,10 +22835,10 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
         Ok(h) => h,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc signal: SKIP (capture-file open failed: {:?})",
+                "[spawn]   FAIL: real glibc signal: capture-file open failed: {:?}",
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -22992,9 +22983,17 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
     // Single-threaded, synchronous fault + siglongjmp — completes promptly.
     const MAX_YIELDS: usize = 65_536;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_FAULT, DST_FAULT),
+    ];
+
+    if pathz_fixtures_missing(
         "REAL glibc fault-signal (SIGSEGV handler, ring 3, Path Z)",
-        &[SRC_FAULT],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -23006,43 +23005,17 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_FAULT, DST_FAULT),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real glibc fault: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real glibc fault: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real glibc fault", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_FAULT) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc fault: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real glibc fault: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_FAULT,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -23056,10 +23029,10 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
         Ok(h) => h,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc fault: SKIP (capture-file open failed: {:?})",
+                "[spawn]   FAIL: real glibc fault: capture-file open failed: {:?}",
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -23205,9 +23178,17 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
     // Single-threaded, synchronous self-sigqueue — completes promptly.
     const MAX_YIELDS: usize = 65_536;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_SIGQUEUE, DST_SIGQUEUE),
+    ];
+
+    if pathz_fixtures_missing(
         "REAL glibc SI_QUEUE-payload (SIGUSR1 handler, ring 3, Path Z)",
-        &[SRC_SIGQUEUE],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -23219,43 +23200,17 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_SIGQUEUE, DST_SIGQUEUE),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real glibc sigqueue: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real glibc sigqueue: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real glibc sigqueue", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_SIGQUEUE) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc sigqueue: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real glibc sigqueue: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_SIGQUEUE,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -23269,10 +23224,10 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
         Ok(h) => h,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc sigqueue: SKIP (capture-file open failed: {:?})",
+                "[spawn]   FAIL: real glibc sigqueue: capture-file open failed: {:?}",
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -23418,9 +23373,18 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
     // single-process tests (the child re-runs ld.so), so allow extra yields.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_HELLO, DST_HELLO),
+        (SRC_FORKEXEC, DST_FORKEXEC),
+    ];
+
+    if pathz_fixtures_missing(
         "REAL glibc fork()+execl()+waitpid() (ring 3, Path Z)",
-        &[SRC_FORKEXEC],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -23430,44 +23394,17 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_HELLO, DST_HELLO),
-        (SRC_FORKEXEC, DST_FORKEXEC),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real glibc forkexec: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real glibc forkexec: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real glibc forkexec", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_FORKEXEC) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc forkexec: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real glibc forkexec: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_FORKEXEC,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -23481,10 +23418,10 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
         Ok(h) => h,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc forkexec: SKIP (capture-file open failed: {:?})",
+                "[spawn]   FAIL: real glibc forkexec: capture-file open failed: {:?}",
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -23626,9 +23563,18 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
     // once the child finishes its (in-budget) startup.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_EMIT, DST_EMIT),
+        (SRC_PIPE, DST_PIPE),
+    ];
+
+    if pathz_fixtures_missing(
         "REAL glibc pipe()+fork()+dup2()+execl()+read()+wait (ring 3, Path Z)",
-        &[SRC_PIPE],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -23640,44 +23586,17 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_EMIT, DST_EMIT),
-        (SRC_PIPE, DST_PIPE),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real glibc pipe: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real glibc pipe: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real glibc pipe", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_PIPE) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc pipe: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real glibc pipe: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_PIPE,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -23691,10 +23610,10 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
         Ok(h) => h,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc pipe: SKIP (capture-file open failed: {:?})",
+                "[spawn]   FAIL: real glibc pipe: capture-file open failed: {:?}",
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -23869,9 +23788,17 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
     // budget as the other real-glibc tests.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_REDIR, DST_REDIR),
+    ];
+
+    if pathz_fixtures_missing(
         "REAL glibc `cmd > file` output-redirection (ring 3, Path Z)",
-        &[SRC_REDIR],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -23883,43 +23810,17 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_REDIR, DST_REDIR),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real glibc redir: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real glibc redir: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real glibc redir", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_REDIR) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc redir: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real glibc redir: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_REDIR,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -24058,9 +23959,17 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
     // budget as the other real-glibc tests.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_REDIRIN, DST_REDIRIN),
+    ];
+
+    if pathz_fixtures_missing(
         "REAL glibc `cmd < file` input-redirection (ring 3, Path Z)",
-        &[SRC_REDIRIN],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -24072,43 +23981,17 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_REDIRIN, DST_REDIRIN),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real glibc redirin: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real glibc redirin: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real glibc redirin", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_REDIRIN) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real glibc redirin: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real glibc redirin: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_REDIRIN,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -24116,11 +23999,11 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
     // is the file the shell would have opened for `< file`.
     if let Err(e) = crate::fs::Vfs::write_file(IN_PATH, IN_CONTENT) {
         serial_println!(
-            "[spawn]   real glibc redirin: SKIP (staging input {} failed: {:?})",
+            "[spawn]   FAIL: real glibc redirin: staging input {} failed: {:?}",
             IN_PATH,
             e
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
 
     let argv: &[&[u8]] = &[b"/bin/redirin"];
@@ -24265,21 +24148,17 @@ pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
             );
             if let Err(e) = crate::fs::Vfs::write_file(DST_BASH, &bytes) {
                 serial_println!(
-                    "[spawn]   bash: SKIP (staging {} -> {} failed: {:?})",
+                    "[spawn]   FAIL: bash: staging {} -> {} failed: {:?}",
                     SRC_BASH,
                     DST_BASH,
                     e
                 );
-                return Ok(());
+                return Err(KernelError::InternalError);
             }
         }
         Err(e) => {
-            serial_println!(
-                "[spawn]   bash: SKIP (reading {} failed: {:?})",
-                SRC_BASH,
-                e
-            );
-            return Ok(());
+            serial_println!("[spawn]   FAIL: bash: reading {} failed: {:?}", SRC_BASH, e);
+            return Err(KernelError::InternalError);
         }
     }
 
@@ -24287,11 +24166,11 @@ pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   bash: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: bash: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_BASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -24518,21 +24397,21 @@ pub fn self_test_cpython_on_slateos_libc() -> KernelResult<()> {
             );
             if let Err(e) = crate::fs::Vfs::write_file(DST_PY, &bytes) {
                 serial_println!(
-                    "[spawn]   cpython: SKIP (staging {} -> {} failed: {:?})",
+                    "[spawn]   FAIL: cpython: staging {} -> {} failed: {:?}",
                     SRC_PY,
                     DST_PY,
                     e
                 );
-                return Ok(());
+                return Err(KernelError::InternalError);
             }
         }
         Err(e) => {
             serial_println!(
-                "[spawn]   cpython: SKIP (reading {} failed: {:?})",
+                "[spawn]   FAIL: cpython: reading {} failed: {:?}",
                 SRC_PY,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     }
 
@@ -24540,11 +24419,11 @@ pub fn self_test_cpython_on_slateos_libc() -> KernelResult<()> {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   cpython: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: cpython: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_PY,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -25010,21 +24889,21 @@ pub fn self_test_pkgconf_on_slateos_libc() -> KernelResult<()> {
             );
             if let Err(e) = crate::fs::Vfs::write_file(DST_PKGCONF, &bytes) {
                 serial_println!(
-                    "[spawn]   pkgconf: SKIP (staging {} -> {} failed: {:?})",
+                    "[spawn]   FAIL: pkgconf: staging {} -> {} failed: {:?}",
                     SRC_PKGCONF,
                     DST_PKGCONF,
                     e
                 );
-                return Ok(());
+                return Err(KernelError::InternalError);
             }
         }
         Err(e) => {
             serial_println!(
-                "[spawn]   pkgconf: SKIP (reading {} failed: {:?})",
+                "[spawn]   FAIL: pkgconf: reading {} failed: {:?}",
                 SRC_PKGCONF,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     }
 
@@ -25049,17 +24928,17 @@ pub fn self_test_pkgconf_on_slateos_libc() -> KernelResult<()> {
                 );
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
-                        "[spawn]   pkgconf: SKIP (staging {} -> {} failed: {:?})",
+                        "[spawn]   FAIL: pkgconf: staging {} -> {} failed: {:?}",
                         src,
                         dst,
                         e
                     );
-                    return Ok(());
+                    return Err(KernelError::InternalError);
                 }
             }
             Err(e) => {
-                serial_println!("[spawn]   pkgconf: SKIP (reading {} failed: {:?})", src, e);
-                return Ok(());
+                serial_println!("[spawn]   FAIL: pkgconf: reading {} failed: {:?}", src, e);
+                return Err(KernelError::InternalError);
             }
         }
     }
@@ -25075,12 +24954,12 @@ pub fn self_test_pkgconf_on_slateos_libc() -> KernelResult<()> {
         ),
         Err(e) => {
             serial_println!(
-                "[spawn]   pkgconf: SKIP ({} does not lstat: {:?} — pkgconf would drop it and \
-                 report every package missing)",
+                "[spawn]   FAIL: pkgconf: {} does not lstat: {:?} — pkgconf would drop it and \
+                 report every package missing",
                 PKGCONF_PC_DIR,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     }
 
@@ -25088,11 +24967,11 @@ pub fn self_test_pkgconf_on_slateos_libc() -> KernelResult<()> {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   pkgconf: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: pkgconf: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_PKGCONF,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -25219,9 +25098,14 @@ pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
     // streams, command parsing); keep the same generous budget.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] =
+        &[(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)];
+
+    if pathz_fixtures_missing(
         "REAL dash shell `echo > file` redirection (ring 3, Path Z)",
-        &[SRC_DASH],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -25233,39 +25117,17 @@ pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash redir: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash redir: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash redir", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash redir: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash redir: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -25414,9 +25276,18 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
     // keep the generous budget.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_DASH, DST_DASH),
+        (SRC_EMIT, DST_EMIT),
+    ];
+
+    if pathz_fixtures_missing(
         "REAL dash shell fork+exec of external `/bin/emit > file` (ring 3, Path Z)",
-        &[SRC_DASH, SRC_EMIT],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -25428,44 +25299,17 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_DASH, DST_DASH),
-        (SRC_EMIT, DST_EMIT),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash exec: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash exec: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash exec", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash exec: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash exec: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -25615,9 +25459,19 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
     // generous budget.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_DASH, DST_DASH),
+        (SRC_EMIT, DST_EMIT),
+        (SRC_COUNT, DST_COUNT),
+    ];
+
+    if pathz_fixtures_missing(
         "REAL dash shell pipeline `/bin/emit | /bin/countbytes > file` (ring 3, Path Z)",
-        &[SRC_DASH, SRC_EMIT, SRC_COUNT],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -25629,45 +25483,17 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_DASH, DST_DASH),
-        (SRC_EMIT, DST_EMIT),
-        (SRC_COUNT, DST_COUNT),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash pipe: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash pipe: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash pipe", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash pipe: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash pipe: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -25810,9 +25636,18 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
     // Three fork+exec+wait cycles under a shell; keep the generous budget.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_DASH, DST_DASH),
+        (SRC_EMIT, DST_EMIT),
+    ];
+
+    if pathz_fixtures_missing(
         "REAL dash shell loop `for i in a b c; do /bin/emit; done > file` (ring 3, Path Z)",
-        &[SRC_DASH, SRC_EMIT],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -25824,44 +25659,17 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_DASH, DST_DASH),
-        (SRC_EMIT, DST_EMIT),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash loop: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash loop: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash loop", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash loop: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash loop: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -26010,9 +25818,18 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
     // budget used by the other dash tests.
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_DASH, DST_DASH),
+        (SRC_EMIT, DST_EMIT),
+    ];
+
+    if pathz_fixtures_missing(
         "REAL dash shell script-from-stdin (no -c; ring 3, Path Z)",
-        &[SRC_DASH, SRC_EMIT],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -26024,44 +25841,17 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_DASH, DST_DASH),
-        (SRC_EMIT, DST_EMIT),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash script: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash script: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash script", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash script: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash script: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -26069,20 +25859,20 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
     let _ = crate::fs::Vfs::remove(SCRIPT);
     if let Err(e) = crate::fs::Vfs::write_file(SCRIPT, SCRIPT_BYTES) {
         serial_println!(
-            "[spawn]   real dash script: SKIP (writing script failed: {:?})",
+            "[spawn]   FAIL: real dash script: writing script failed: {:?}",
             e
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
     let script_handle = match handle::open(SCRIPT, handle::OpenFlags::READ) {
         Ok(h) => h,
         Err(e) => {
             let _ = crate::fs::Vfs::remove(SCRIPT);
             serial_println!(
-                "[spawn]   real dash script: SKIP (script open failed: {:?})",
+                "[spawn]   FAIL: real dash script: script open failed: {:?}",
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -26099,10 +25889,10 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
             let _ = handle::close(script_handle);
             let _ = crate::fs::Vfs::remove(SCRIPT);
             serial_println!(
-                "[spawn]   real dash script: SKIP (capture open failed: {:?})",
+                "[spawn]   FAIL: real dash script: capture open failed: {:?}",
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -26254,9 +26044,14 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
     const OUT_PATH: &str = "/glob-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] =
+        &[(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)];
+
+    if pathz_fixtures_missing(
         "REAL dash shell glob `echo /globdir/* > file` (ring 3, Path Z)",
-        &[SRC_DASH],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -26268,39 +26063,17 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash glob: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash glob: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash glob", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash glob: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash glob: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -26310,11 +26083,11 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
     for f in [GLOB_A, GLOB_B, GLOB_C] {
         if let Err(e) = crate::fs::Vfs::write_file(f, b"x") {
             serial_println!(
-                "[spawn]   real dash glob: SKIP (creating {} failed: {:?})",
+                "[spawn]   FAIL: real dash glob: creating {} failed: {:?}",
                 f,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     }
 
@@ -26458,9 +26231,18 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
     const OUT_PATH: &str = "/cmdsub-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_DASH, DST_DASH),
+        (SRC_EMIT, DST_EMIT),
+    ];
+
+    if pathz_fixtures_missing(
         "REAL dash shell command substitution `echo [$(/bin/emit)] > file` (ring 3, Path Z)",
-        &[SRC_DASH, SRC_EMIT],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -26472,44 +26254,17 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_DASH, DST_DASH),
-        (SRC_EMIT, DST_EMIT),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash cmdsub: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash cmdsub: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash cmdsub", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash cmdsub: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash cmdsub: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -26639,9 +26394,14 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
     const OUT_PATH: &str = "/cond-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] =
+        &[(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)];
+
+    if pathz_fixtures_missing(
         "REAL dash shell conditional `if [ \"$x\" = hello ]; then ...` (ring 3, Path Z)",
-        &[SRC_DASH],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -26653,39 +26413,17 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash cond: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash cond: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash cond", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash cond: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash cond: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -26812,9 +26550,14 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
     const OUT_PATH: &str = "/arith-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] =
+        &[(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)];
+
+    if pathz_fixtures_missing(
         "REAL dash shell arithmetic `echo $((x * y + 2))` (ring 3, Path Z)",
-        &[SRC_DASH],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -26826,39 +26569,17 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash arith: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash arith: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash arith", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash arith: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash arith: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -26986,9 +26707,14 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
     const OUT_PATH: &str = "/hd-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] =
+        &[(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)];
+
+    if pathz_fixtures_missing(
         "REAL dash shell here-document `read a <<EOF` (ring 3, Path Z)",
-        &[SRC_DASH],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -27000,39 +26726,17 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash heredoc: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash heredoc: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash heredoc", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash heredoc: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash heredoc: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -27163,9 +26867,18 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
     const OUT_PATH: &str = "/bg-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_DASH, DST_DASH),
+        (SRC_EMIT, DST_EMIT),
+    ];
+
+    if pathz_fixtures_missing(
         "REAL dash shell background job `/bin/emit > file & wait` (ring 3, Path Z)",
-        &[SRC_DASH, SRC_EMIT],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -27177,44 +26890,17 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_DASH, DST_DASH),
-        (SRC_EMIT, DST_EMIT),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash bgjob: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash bgjob: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash bgjob", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash bgjob: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash bgjob: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -27343,9 +27029,18 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
     const OUT_PATH: &str = "/pipe2-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_DASH, DST_DASH),
+        (SRC_EMIT, DST_EMIT),
+    ];
+
+    if pathz_fixtures_missing(
         "REAL dash shell pipeline `/bin/emit | while read ...` (ring 3, Path Z)",
-        &[SRC_DASH, SRC_EMIT],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -27357,44 +27052,17 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_DASH, DST_DASH),
-        (SRC_EMIT, DST_EMIT),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash pipeline: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash pipeline: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash pipeline", FIXTURES)?;
 
     let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash pipeline: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash pipeline: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -27529,9 +27197,14 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
     const OUT_PATH: &str = "/cwd-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] =
+        &[(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)];
+
+    if pathz_fixtures_missing(
         "REAL dash shell cwd `cd /cwdtest && pwd -P` (ring 3, Path Z)",
-        &[SRC_DASH],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -27543,29 +27216,7 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash cwd: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash cwd: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash cwd", FIXTURES)?;
 
     let _ = crate::fs::Vfs::mkdir_all(CWD_DIR);
 
@@ -27573,11 +27224,11 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash cwd: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash cwd: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -27706,9 +27357,14 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
     const WRONG_PATH: &str = "/relfile.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] =
+        &[(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)];
+
+    if pathz_fixtures_missing(
         "REAL dash shell relpath `cd /reltest && echo > relfile.txt` (ring 3, Path Z)",
-        &[SRC_DASH],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -27720,29 +27376,7 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash relpath: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash relpath: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash relpath", FIXTURES)?;
 
     let _ = crate::fs::Vfs::mkdir_all(REL_DIR);
     // Clear any stale outputs from a prior run so the existence checks below
@@ -27754,11 +27388,11 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash relpath: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash relpath: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -27895,9 +27529,14 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
     const OUT_PATH: &str = "/stat-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] =
+        &[(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)];
+
+    if pathz_fixtures_missing(
         "REAL dash shell statpath `[ -f /bin/dash ] && echo` (ring 3, Path Z)",
-        &[SRC_DASH],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -27909,29 +27548,7 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash statpath: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash statpath: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash statpath", FIXTURES)?;
 
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
@@ -27939,11 +27556,11 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash statpath: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash statpath: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -28066,9 +27683,14 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
     const OUT_PATH: &str = "/dirstat-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] =
+        &[(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)];
+
+    if pathz_fixtures_missing(
         "REAL dash shell dirstat `[ -d /bin ] && [ ! -f /bin ]` (ring 3, Path Z)",
-        &[SRC_DASH],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -28080,29 +27702,7 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash dirstat: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash dirstat: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash dirstat", FIXTURES)?;
 
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
@@ -28110,11 +27710,11 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash dirstat: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash dirstat: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -28237,9 +27837,14 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
     const OUT_PATH: &str = "/append-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if pathz_missing(
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] =
+        &[(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)];
+
+    if pathz_fixtures_missing(
         "REAL dash shell append `echo > f; echo >> f` (ring 3, Path Z)",
-        &[SRC_DASH],
+        FIXTURES,
     ) {
         return Ok(());
     }
@@ -28251,29 +27856,7 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real dash append: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real dash append: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real dash append", FIXTURES)?;
 
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
@@ -28281,11 +27864,11 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real dash append: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real dash append: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_DASH,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -28458,10 +28041,17 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
     // bounded poll loop extra headroom over the two-process shell tests.
     const MAX_YIELDS: usize = 524_288;
 
-    if pathz_missing(
-        "REAL GNU make (ring 3, Path Z)",
-        &[SRC_MAKE, SRC_SH, SRC_EMIT],
-    ) {
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_MAKE, DST_MAKE),
+        (SRC_SH, DST_SH),
+        (SRC_EMIT, DST_EMIT),
+    ];
+
+    if pathz_fixtures_missing("REAL GNU make (ring 3, Path Z)", FIXTURES) {
         return Ok(());
     }
 
@@ -28470,44 +28060,16 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_MAKE, DST_MAKE),
-        (SRC_SH, DST_SH),
-        (SRC_EMIT, DST_EMIT),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real make: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!(
-                    "[spawn]   real make: SKIP (reading {} failed: {:?})",
-                    src,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real make", FIXTURES)?;
 
     // Stage the Makefile and clear any stale recipe output.
     if let Err(e) = crate::fs::Vfs::write_file(MAKEFILE_PATH, MAKEFILE) {
         serial_println!(
-            "[spawn]   real make: SKIP (writing {} failed: {:?})",
+            "[spawn]   FAIL: real make: writing {} failed: {:?}",
             MAKEFILE_PATH,
             e
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
@@ -28515,11 +28077,11 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real make: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real make: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_MAKE,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -28706,7 +28268,16 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
     // The compiled program is tiny; a smaller budget suffices to run it.
     const RUN_MAX_YIELDS: usize = 524_288;
 
-    if pathz_missing("REAL C compiler (tcc, ring 3, Path Z)", &[SRC_TCC]) {
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_LIBM, DST_LIBM),
+        (SRC_TCC, DST_TCC),
+    ];
+
+    if pathz_fixtures_missing("REAL C compiler (tcc, ring 3, Path Z)", FIXTURES) {
         return Ok(());
     }
 
@@ -28715,39 +28286,16 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [
-        (SRC_LD, DST_LD),
-        (SRC_LIBC, DST_LIBC),
-        (SRC_LIBM, DST_LIBM),
-        (SRC_TCC, DST_TCC),
-    ] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   real cc: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!("[spawn]   real cc: SKIP (reading {} failed: {:?})", src, e);
-                return Ok(());
-            }
-        }
-    }
+    stage_pathz_fixtures("real cc", FIXTURES)?;
 
     // Stage the C source and clear any stale compiler/program output.
     if let Err(e) = crate::fs::Vfs::write_file(SRC_PATH, CC_SRC) {
         serial_println!(
-            "[spawn]   real cc: SKIP (writing {} failed: {:?})",
+            "[spawn]   FAIL: real cc: writing {} failed: {:?}",
             SRC_PATH,
             e
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
     let _ = crate::fs::Vfs::remove(OBJ_PATH);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
@@ -28756,11 +28304,11 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   real cc: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: real cc: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_TCC,
                 e
             );
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -28897,13 +28445,10 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
     ) {
         Ok(h) => h,
         Err(e) => {
-            serial_println!(
-                "[spawn]   real cc: SKIP (capture-file open failed: {:?})",
-                e
-            );
+            serial_println!("[spawn]   FAIL: real cc: capture-file open failed: {:?}", e);
             let _ = crate::fs::Vfs::remove(SRC_PATH);
             let _ = crate::fs::Vfs::remove(OBJ_PATH);
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -29512,11 +29057,11 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
 
     if let Err(e) = crate::fs::Vfs::write_file(SRC_PATH, hosted_src) {
         serial_println!(
-            "[spawn]   hosted cc: SKIP (writing {} failed: {:?})",
+            "[spawn]   FAIL: hosted cc: writing {} failed: {:?}",
             SRC_PATH,
             e
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
     let _ = crate::fs::Vfs::remove(OBJ_PATH);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
@@ -29525,11 +29070,11 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   hosted cc: SKIP (re-read /bin/tcc failed: {:?})",
+                "[spawn]   FAIL: hosted cc: re-reading /bin/tcc failed: {:?} -- this rung staged it moments ago",
                 e
             );
             let _ = crate::fs::Vfs::remove(SRC_PATH);
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -29760,22 +29305,25 @@ int main(void){\n\
     cleanup();
 
     if let Err(e) = crate::fs::Vfs::write_file(A_C, A_SRC) {
-        serial_println!("[spawn]   sep cc: SKIP (writing {} failed: {:?})", A_C, e);
+        serial_println!("[spawn]   FAIL: sep cc: writing {} failed: {:?}", A_C, e);
         cleanup();
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
     if let Err(e) = crate::fs::Vfs::write_file(B_C, B_SRC) {
-        serial_println!("[spawn]   sep cc: SKIP (writing {} failed: {:?})", B_C, e);
+        serial_println!("[spawn]   FAIL: sep cc: writing {} failed: {:?}", B_C, e);
         cleanup();
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
 
     let tcc_elf = match crate::fs::Vfs::read_file("/bin/tcc") {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   sep cc: SKIP (re-read /bin/tcc failed: {:?})", e);
+            serial_println!(
+                "[spawn]   FAIL: sep cc: re-reading /bin/tcc failed: {:?} -- this rung staged it moments ago",
+                e
+            );
             cleanup();
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -30054,10 +29602,11 @@ int main(void){\n\
         Err(e) => return Err(e),
     }
     // make + its recipe shell are the additional binaries this rung needs.
-    if pathz_missing(
-        "REAL make-drives-tcc build (ring 3, Path Z)",
-        &[SRC_MAKE, SRC_SH],
-    ) {
+    /// Every source here is checked by the gate below and copied by
+    /// `stage_pathz_fixtures`, so the two can never disagree.
+    const FIXTURES: &[(&str, &str)] = &[(SRC_MAKE, DST_MAKE), (SRC_SH, DST_SH)];
+
+    if pathz_fixtures_missing("REAL make-drives-tcc build (ring 3, Path Z)", FIXTURES) {
         return Ok(());
     }
 
@@ -30079,37 +29628,16 @@ int main(void){\n\
     cleanup();
 
     let _ = crate::fs::Vfs::mkdir_all("/bin");
-    for (src, dst) in [(SRC_MAKE, DST_MAKE), (SRC_SH, DST_SH)] {
-        match crate::fs::Vfs::read_file(src) {
-            Ok(bytes) => {
-                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
-                    serial_println!(
-                        "[spawn]   make+tcc: SKIP (staging {} -> {} failed: {:?})",
-                        src,
-                        dst,
-                        e
-                    );
-                    cleanup();
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                serial_println!("[spawn]   make+tcc: SKIP (reading {} failed: {:?})", src, e);
-                cleanup();
-                return Ok(());
-            }
-        }
+    if let Err(e) = stage_pathz_fixtures("make+tcc", FIXTURES) {
+        cleanup();
+        return Err(e);
     }
 
     for (path, data) in [(A_C, A_SRC), (B_C, B_SRC), (MAKEFILE, MAKEFILE_SRC)] {
         if let Err(e) = crate::fs::Vfs::write_file(path, data) {
-            serial_println!(
-                "[spawn]   make+tcc: SKIP (writing {} failed: {:?})",
-                path,
-                e
-            );
+            serial_println!("[spawn]   FAIL: make+tcc: writing {} failed: {:?}", path, e);
             cleanup();
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     }
 
@@ -30117,12 +29645,12 @@ int main(void){\n\
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   make+tcc: SKIP (re-read {} failed: {:?})",
+                "[spawn]   FAIL: make+tcc: re-reading {} failed: {:?} -- this rung staged it moments ago",
                 DST_MAKE,
                 e
             );
             cleanup();
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 
@@ -30360,13 +29888,13 @@ int main(void){\n\
     for (path, data) in [(HDR, HDR_SRC), (A_C, A_SRC), (B_C, B_SRC)] {
         if let Err(e) = crate::fs::Vfs::write_file(path, data) {
             serial_println!(
-                "[spawn]   {}: SKIP (writing {} failed: {:?})",
+                "[spawn]   FAIL: {}: writing {} failed: {:?}",
                 LABEL,
                 path,
                 e
             );
             cleanup();
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     }
 
@@ -30374,12 +29902,12 @@ int main(void){\n\
         Ok(b) => b,
         Err(e) => {
             serial_println!(
-                "[spawn]   {}: SKIP (re-read /bin/tcc failed: {:?})",
+                "[spawn]   FAIL: {}: re-reading /bin/tcc failed: {:?} -- this rung staged it moments ago",
                 LABEL,
                 e
             );
             cleanup();
-            return Ok(());
+            return Err(KernelError::InternalError);
         }
     };
 

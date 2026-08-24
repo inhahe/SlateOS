@@ -1601,3 +1601,173 @@ that has to be re-checked if the default changes. Nothing is blocked. The
 inconsistency that *was* dangerous — the piped half printing `1: alpha` while
 the file half printed `1:alpha` — is already fixed (`afe5b0ae2`); what remains
 here is only the choice of default.
+
+---
+
+## Should `oci run` refuse to start when an option cannot be applied? (lane A)
+
+**In short:** `oci run` starts a container. If you ask it for something extra —
+a shared folder (`-v`), a published port (`-p`), a file of labels or
+environment variables — and it cannot do that one thing, it currently prints a
+warning, starts the container anyway, and reports success. So you can ask for a
+container with your data folder attached, get one *without* it, and be told
+everything worked. Docker refuses to start at all in this situation. The
+question is which of those two behaviours we want.
+
+**Where:** `kernel/src/kshell.rs`, the `oci run` argument loop — eleven sites,
+all reading `[oci] Warning: could not …` or `[oci] Could not read …-file`.
+Raised during the exit-status sweep (`known-issues.md` →
+`A-KSHELL-3676-FAILING-COMMANDS-REPORTED-SUCCESS`), which deliberately left all
+eleven alone because changing the *status* without deciding the *contract*
+would be the dangerous half of the change on its own.
+
+### Why the sweep did not just fix it
+
+Every other failing command in the shell got a non-zero exit status. These
+eleven did not, because here a non-zero status is worse than the bug. The
+idiom `oci run … || cleanup` exists, and `cleanup` tears down a container.
+Flipping the status would make it tear down a container that is **up and
+running** — turning a wrong exit code into destroyed work. The rule the sweep
+used for this command instead was "did the container start?", and the one site
+that answers no (`Cannot allocate IP from network`) already sets a status and
+returns.
+
+That leaves the real question untouched: should asking for an option that
+cannot be applied mean the container should not have started?
+
+### Options
+
+**A — refuse to start (Docker's behaviour).** Validate every requested option
+before launching; if any cannot be applied, print the reason, start nothing,
+exit non-zero.
+*What changes:* `oci run -v /data:/data img` on an unmountable `/data` prints
+the error and you get **no container**, instead of a running container with no
+`/data`. `|| cleanup` becomes correct, because there is nothing to clean up.
+
+**B — start anyway, but exit non-zero** (today's behaviour plus a status).
+*What changes:* the container still starts without `/data`, but the command
+reports failure — so `|| cleanup` fires **against a live container** and
+destroys it. This is the option that looks like a small fix and is not.
+
+**C — leave exactly as is: warn, start, exit 0.**
+*What changes:* nothing. A script cannot tell that an option was dropped, and
+must inspect the container afterwards to find out.
+
+**D — split by option kind.** Treat options that change what the container *is*
+(`-v`, `-p`, `--label-file`, `--env-file`) as A, and options that are advisory
+(`--read-only` best-effort, tmpfs) as C.
+*What changes:* the dangerous ones fail closed, the cosmetic ones stay
+warnings. More faithful, and more code, and the boundary needs writing down or
+it will drift.
+
+### My recommendation
+
+**A**, matching Docker. The reason is that a container is not a partial
+artifact: you cannot inspect one to discover which options were silently
+dropped, so "started, but not as requested" is a state no caller can act on. A
+is also the only option under which the existing `|| cleanup` idiom is safe,
+because it guarantees there is nothing running to clean up. **D** is defensible
+if refusing to start over an unapplied tmpfs feels too strict — but it needs an
+explicit list, not a judgement call per site.
+
+**Not B.** It is the smallest diff and it is actively harmful.
+
+### If this is never answered
+
+Safe, and stable — today's behaviour destroys nothing and the sweep left it
+untouched on purpose. It does not degrade with time. What it costs is that
+`oci run` cannot be scripted reliably: any script that cares whether its
+options took effect has to verify them itself afterwards, and every such script
+is a place that would need revisiting if the contract later changes.
+
+---
+
+## The shell's `grep` ignores case and numbers lines by default, unlike every other Unix (lane A, 2026-08-24)
+
+**In short:** In our shell, typing `grep Error mylog.txt` also finds `error`
+and `ERROR`, and prints each result with a line number in front of it, like
+`42:error: disk full`. Real `grep` on Linux/macOS does neither: it matches
+`Error` exactly, and prints just the line. Our version behaves as though you
+had typed `grep -i -n`. This is very likely a deliberate choice made early on
+for interactive convenience, but it was never written down, and it means
+commands copied from any Unix documentation or tutorial quietly do something
+different here. The question is whether to keep it.
+
+Where it lives: `GrepFlags::new()` in `kernel/src/kshell.rs` (~94901), which
+sets `case_insensitive: true` with the comment *"default: case-insensitive
+(like original)"*, and `show_line_numbers: true`.
+
+### Why it is worth asking rather than just fixing
+
+Two things push this out of "obviously a bug":
+
+1. **The comment says it is intentional** — "like original" reads as
+   *preserve the behaviour kshell already had*, not as an oversight.
+2. **There is already an opt-out for the case half, and it is a made-up one.**
+   The shell accepts `-I` to mean "be case-sensitive after all". In GNU grep,
+   `-I` means something completely different (ignore binary files). So this is
+   not merely a changed default; a real flag has been re-purposed to undo it.
+   Restoring the GNU default would also have to decide what `-I` then means.
+
+The line-number half has no opt-out at all: there is no way to turn `-n` off.
+
+### What it costs today
+
+Copy-pasted commands silently mean something else. Two examples of the shape:
+
+| Written | Means elsewhere | Means here |
+|---|---|---|
+| `grep Error log` | lines containing `Error` | also `error`, `ERROR` |
+| `grep -c pat f` | a count | a count (unaffected — `-c` overrides output) |
+| `grep pat f \| cut -d: -f2` | the second `:`-field of the line | the *line*, because field 1 is now the line number |
+
+The last one is the sharp edge: `-n` on by default changes the *shape* of the
+output, so any pipeline that splits a grep result on `:` is reading one field
+off. Nothing errors; it just quietly reads the wrong column.
+
+It is also now load-bearing in a test. Self-test rung 25 asserts `1:alpha`
+rather than `alpha`, with a comment pointing here — so a change of default is a
+one-line test update, not a hunt.
+
+### The options
+
+**A — restore GNU defaults: case-sensitive, no line numbers.**
+*What changes:* `grep Error log` stops matching `error`; `grep pat f` prints
+`the matched line` instead of `42:the matched line`. `-i` and `-n` turn each
+back on. `-I` needs a new meaning (either drop it, or make it GNU's
+ignore-binary — which this shell already does implicitly under `-r`).
+
+**B — keep both defaults, and document them.**
+*What changes:* nothing in behaviour. `grep --help` and the shell's docs gain
+an explicit note that `-i -n` are implied, plus a way to switch them off.
+
+**C — split the two.** Restore GNU's case-sensitivity (the one that changes
+*which lines* you get, and can therefore hide a result you needed), keep `-n`
+(which only changes how they are printed).
+*What changes:* `grep Error log` stops matching `error`; output still carries
+line numbers.
+
+**D — keep case-insensitivity, drop the default `-n`.** The inverse of C.
+*What changes:* output shape matches GNU, so `:`-splitting pipelines work;
+matching stays lenient.
+
+### My recommendation
+
+**A**, with `-I` dropped rather than redefined. The value of matching the rest
+of Unix here is not aesthetic — it is that every piece of grep knowledge a user
+already has, and every command in every tutorial, becomes correct instead of
+subtly wrong. Convenience defaults are cheap to type back (`-i`, `-n`) and
+expensive to discover you were getting.
+
+If A feels too disruptive, **C** is the safer half-step: a wrong *set of lines*
+is a wrong answer, whereas a line-number prefix is visible on sight. **D** is
+the weakest — it fixes the cosmetic half and keeps the half that can hide a
+result.
+
+### If this is never answered
+
+Safe and stable; nothing degrades. The cost is ongoing and quiet: every
+`grep` command a user brings from outside behaves differently than they expect,
+and any pipeline that splits on `:` reads the wrong field. It also gets
+*slightly* more expensive to change over time, since each new script written
+against the current defaults is one more thing to check.

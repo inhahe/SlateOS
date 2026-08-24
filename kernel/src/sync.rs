@@ -435,7 +435,7 @@ impl<T> Mutex<T> {
         // `MutexGuard::drop`.  Done before spinning so the holder can't be
         // preempted while contended either.
         crate::sched::preempt_disable();
-        lockdep::lock_acquire(addr, self.name);
+        lockdep::lock_acquire(addr, self.name, lockdep::Acquire::Blocking);
 
         if tracking_enabled() {
             // Try the fast path: immediate acquisition.
@@ -538,7 +538,14 @@ impl<T> Mutex<T> {
         };
         // Only record if we actually got the lock — try_lock doesn't
         // block, so there's no ordering issue to detect on failure.
-        lockdep::lock_acquire(addr, self.name);
+        //
+        // `Acquire::Try` because there is none to detect on *success* either,
+        // as far as this acquisition's own incoming edges go: had the lock been
+        // held elsewhere we would have returned `None` above and released
+        // everything, so this side of a cycle can never be the stuck one. It is
+        // still pushed onto the held stack, because a blocking acquire nested
+        // inside this critical section can deadlock in the ordinary way.
+        lockdep::lock_acquire(addr, self.name, lockdep::Acquire::Try);
         if tracking_enabled() {
             self.stats.record_uncontended();
         }

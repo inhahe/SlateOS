@@ -54976,3 +54976,34 @@ TRIGGER
   harness written before it exists is a harness that will need revisiting.  See
   known-issues.md -> TD-B-EVERY-BINARY-IS-WRONG-ABOUT-A-CLOSED-STANDARD-
   DESCRIPTOR.
+
+## kshell `realpath` implements only GNU's default mode, not -e or -m (lane A, 2026-08-24)
+
+`cmd_realpath` (kernel/src/kshell.rs) accepts a single operand and no options.
+Its resolution semantics happen to match GNU `realpath`'s **default** mode
+exactly -- every path component except the last must exist -- because that is
+also what `Vfs::resolve_inner` does for the open-with-create path, which lets
+the final component be absent.
+
+Missing, and referenced from the doc comment on `cmd_realpath`:
+
+  - `-e` / `--canonicalize-existing`: every component including the last must
+    exist.  `Vfs::stat` on the resolved path is enough to add it.
+  - `-m` / `--canonicalize-missing`: no component need exist.  This one cannot
+    reuse `resolve_inner` at all -- it must not walk the filesystem, so it is
+    purely lexical normalisation of the cwd-joined path, i.e. the shell's own
+    `resolve_path` with no VFS call after it.
+  - `-s`/`--no-symlinks`, `--relative-to`, and multiple operands.
+
+WHY DEFERRED, NOT DONE NOW
+  Nothing in the tree calls `realpath` with options; the two real bugs found
+  here were the cwd one (fixed, e9c60b5c4) and a self-test that asserted the
+  wrong semantics (fixed, 326d4e0b9).  Adding three flags nobody invokes yet
+  would be untested surface.
+
+TRIGGER
+  The first script or test that wants an existence check.  `-e` is the one that
+  will be wanted first, and is a two-line addition; do it then, with a rung
+  asserting that `realpath -e /nonexistent` fails where plain `realpath` does
+  not.  That contrast is the whole point of the flag and is exactly the pair
+  rung 23 now pins for the default mode.

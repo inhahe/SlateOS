@@ -250,6 +250,115 @@ fn last_exit() -> u8 {
     LAST_EXIT.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Echo a captured command's output to serial if the command reported failure.
+///
+/// For self-test rungs that assert a *checker* succeeded. When one does not,
+/// `assert_eq!(last_exit(), 0)` reports `left: 1, right: 0` — a number, not a
+/// cause — and the report that would have named the cause is sitting in the
+/// capture buffer precisely because the rung put it there. `syshealth` prints
+/// seven `[PASS]`/`[FAIL]` rows; without this, finding which row was unhappy
+/// costs an entire extra boot, which is what it cost the first time.
+///
+/// Silent on success, so a green boot's log is unchanged.
+fn dump_if_failed(what: &str, out: &[u8]) {
+    use crate::serial_println;
+
+    if last_exit() == 0 {
+        return;
+    }
+    serial_println!(
+        "  !! `{}` reported exit {}; its output was:",
+        what,
+        last_exit()
+    );
+    dump_lines(out);
+}
+
+/// Print a captured buffer to serial, one indented line at a time.
+fn dump_lines(out: &[u8]) {
+    use crate::serial_println;
+
+    if out.is_empty() {
+        serial_println!("     <no output>");
+        return;
+    }
+    for line in out.split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        // Lossy on purpose: this is a diagnostic on a path that is already
+        // failing, and a panic inside it would replace the evidence with a
+        // different panic.
+        match core::str::from_utf8(line) {
+            Ok(s) => serial_println!("     {}", s),
+            Err(_) => serial_println!("     <{} non-UTF-8 bytes>", line.len()),
+        }
+    }
+}
+
+/// Assert a captured command's output begins with `expected`, and show what it
+/// actually produced when it does not.
+///
+/// The same lesson as [`dump_if_failed`], one layer up. A bare
+/// `assert!(out.starts_with(b"..."))` names only the *expectation*: when it
+/// trips, the panic repeats the message the test author wrote and says nothing
+/// about the bytes that were actually there. On a kernel whose only harness is
+/// a 13-minute QEMU boot, that is an entire cycle spent learning one string —
+/// which is exactly what rung 23's `realpath` assertion cost.
+///
+/// Panics on mismatch, after printing both sides, so the failing boot carries
+/// its own explanation.
+fn assert_output_starts_with(what: &str, out: &[u8], expected: &[u8]) {
+    use crate::serial_println;
+
+    if out.starts_with(expected) {
+        return;
+    }
+    serial_println!("  !! `{}`: output did not start as expected", what);
+    serial_println!("     expected prefix:");
+    dump_lines(expected);
+    serial_println!("     actual output ({} bytes):", out.len());
+    dump_lines(out);
+    panic!("`{}` output did not start with the expected prefix", what);
+}
+
+/// Assert a captured command's output does **not** contain `forbidden`.
+///
+/// The negative counterpart to [`assert_output_starts_with`], and it exists for
+/// a shape the positive form structurally cannot catch: a bug that consists of
+/// the command saying one sentence too many. `grep` printing
+/// "grep: no matches for 'p'" after failing to *open* the file is a claim about
+/// that file's contents which was never established — and because the sentence
+/// is exactly the one a genuinely empty search prints, every prefix assertion
+/// about the real diagnostic still passes with it there.
+///
+/// Panics on a hit, after printing both sides, so the failing boot carries its
+/// own explanation.
+fn assert_output_lacks(what: &str, out: &[u8], forbidden: &[u8]) {
+    use crate::serial_println;
+
+    // An empty needle is in every haystack, so a caller that passes one is
+    // asking a question with only one possible answer. Refuse it rather than
+    // fail confusingly.
+    assert!(
+        !forbidden.is_empty(),
+        "`{}`: assert_output_lacks needs a non-empty needle",
+        what
+    );
+
+    let present =
+        forbidden.len() <= out.len() && out.windows(forbidden.len()).any(|w| w == forbidden);
+    if !present {
+        return;
+    }
+    serial_println!("  !! `{}`: output contained text it must not", what);
+    serial_println!("     forbidden:");
+    dump_lines(forbidden);
+    serial_println!("     actual output ({} bytes):", out.len());
+    dump_lines(out);
+    panic!("`{}` output contained text it must not", what);
+}
+
 // ---------------------------------------------------------------------------
 // Working directory
 // ---------------------------------------------------------------------------
@@ -10384,9 +10493,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     {
         // A command body, deep inside a `cmd_*` function.
         let listed = capture_command("cgroup");
-        assert!(
-            listed.starts_with(b"=== Resource Control Groups"),
-            "`cgroup` output reaches the capture"
+        assert_output_starts_with(
+            "`cgroup` output reaches the capture",
+            &listed,
+            b"=== Resource Control Groups",
         );
 
         // A usage line inside the same command -- the diagnostic half.
@@ -10400,9 +10510,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // The sharpest one: a typo over SSH used to print on the host console
         // and show the remote user an empty line.
         let unknown = capture_command("zzz_no_such_command");
-        assert!(
-            unknown.starts_with(b"Unknown command: 'zzz_no_such_command'"),
-            "an unknown command tells the caller, not the console"
+        assert_output_starts_with(
+            "an unknown command tells the caller, not the console",
+            &unknown,
+            b"Unknown command: 'zzz_no_such_command'",
         );
 
         // The deliberate exclusion, asserted so it cannot be "finished" by
@@ -10431,10 +10542,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // a non-zero `--help` breaks.
     {
         let helped = capture_command("zip --help");
-        assert!(
-            helped.starts_with(b"Usage: zip "),
-            "`zip --help` prints the usage"
-        );
+        assert_output_starts_with("`zip --help` prints the usage", &helped, b"Usage: zip ");
         assert_eq!(last_exit(), 0, "`--help` was granted, so it succeeded");
 
         // Same command, same output, opposite status: with no arguments at
@@ -10447,9 +10555,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "`zip` with no arguments could not run");
 
         let helped = capture_command("fsck.ext4 --help");
-        assert!(
-            helped.starts_with(b"Usage: fsck.ext4 "),
-            "`fsck.ext4 --help` prints the usage"
+        assert_output_starts_with(
+            "`fsck.ext4 --help` prints the usage",
+            &helped,
+            b"Usage: fsck.ext4 ",
         );
         assert_eq!(last_exit(), 0, "`--help` is not a failure here either");
     }
@@ -10464,7 +10573,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // corroborate it. `tag` with an unknown subcommand falls through its
         // `_` arm after printing the usage.
         let out = capture_command("tag zzz_no_such_subcommand");
-        assert!(out.starts_with(b"Usage: tag "), "an unknown subcommand");
+        assert_output_starts_with("an unknown subcommand", &out, b"Usage: tag ");
         assert_eq!(last_exit(), 1, "an unknown subcommand is a failure");
 
         // ...and the word must lead the message, not merely appear in it.
@@ -10472,9 +10581,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // and ends on an indented row -- the exact shape of a usage error, and
         // a complete success.
         let out = capture_command("netusage stats");
-        assert!(
-            out.starts_with(b"Network Usage: "),
-            "`netusage stats` prints its report"
+        assert_output_starts_with(
+            "`netusage stats` prints its report",
+            &out,
+            b"Network Usage: ",
         );
         assert_eq!(last_exit(), 0, "a report header is not a usage error");
 
@@ -10501,9 +10611,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // arm, so this fails if the arm ever loses its status again.
     {
         let out = capture_command("cgroup delete 4294967295");
-        assert!(
-            out.starts_with(b"Error: "),
-            "deleting a nonexistent cgroup reports an error"
+        assert_output_starts_with(
+            "deleting a nonexistent cgroup reports an error",
+            &out,
+            b"Error: ",
         );
         assert_eq!(last_exit(), 1, "an operation that failed did not succeed");
 
@@ -10512,6 +10623,395 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let out = capture_command("echo ok");
         assert_eq!(out.as_slice(), b"ok\n");
         assert_eq!(last_exit(), 0, "a command that worked reports success");
+    }
+
+    serial_println!("  kshell::self_test 21: a checker's verdict lives in its status");
+    // The fourth shape, and the one with the highest stakes: a command whose
+    // *entire purpose* is to return a verdict, printing "FAILED" and reporting
+    // success. These are the commands that end up in boot scripts and health
+    // checks -- the one place where the status is the only thing read.
+    //
+    // The failing side cannot be exercised from a healthy kernel: `syshealth`
+    // only says ISSUES DETECTED when the heap really is corrupt. That is
+    // exactly why the bug survived so long, so what is asserted here is the
+    // passing side (a checker that passes must still report 0 -- otherwise a
+    // blanket `set_exit(1)` would "fix" the bug and break every caller) plus
+    // the failure this rung *can* force: a category that checks nothing.
+    {
+        let out = capture_command("syshealth");
+        assert_output_starts_with(
+            "`syshealth` ran its checks",
+            &out,
+            b"=== Active System Health Check ===",
+        );
+        // Echo the report before asserting on it. A bare `left: 1, right: 0`
+        // names a number, not a cause: this rung failed once for a real kernel
+        // fault (lockdep counted its own self-test's planted violations) and
+        // finding *which* of the seven checks was unhappy cost a whole extra
+        // boot. The checker already printed the answer; capturing it into a
+        // buffer is what threw it away.
+        dump_if_failed("syshealth", &out);
+        assert_eq!(last_exit(), 0, "a checker that passed reports success");
+
+        let out = capture_command("invariant");
+        assert_output_starts_with(
+            "`invariant` ran every category",
+            &out,
+            b"=== Kernel Invariant Check ",
+        );
+        dump_if_failed("invariant", &out);
+        assert_eq!(last_exit(), 0, "all invariants hold on a healthy kernel");
+
+        // A misspelled category checks nothing, and nothing checked is not a
+        // clean bill of health.
+        let out = capture_command("invariant zzz_no_such_category");
+        assert_output_starts_with(
+            "an unknown category is reported",
+            &out,
+            b"No invariants found for category ",
+        );
+        assert_eq!(last_exit(), 1, "a check that checked nothing did not pass");
+
+        // The other half of the rule: `diag` is a dashboard, and a dashboard
+        // that finds problems still succeeded at displaying them. This guards
+        // the distinction from being flattened in either direction.
+        let out = capture_command("diag");
+        assert!(!out.is_empty(), "`diag` printed its dashboard");
+        assert_eq!(
+            last_exit(),
+            0,
+            "a dashboard reports on the display, not the news"
+        );
+    }
+
+    serial_println!("  kshell::self_test 22: a failed lookup is not an answer of 'none'");
+    // The line the second `Err`-arm sweep had to draw. An `Err` arm is the
+    // failure path by construction, so unlike a fall-through it needs no
+    // vocabulary anchor -- but four of the 223 arms it covered were not
+    // failures at all, and a rule with no gate would have broken all four.
+    //
+    // The distinction, which is the one real shells already draw: asking for a
+    // **named item** that is not there is a failed lookup (`printenv FOO`,
+    // `git config --get`, and `grep` all exit non-zero for it), whereas asking
+    // about **state** and being told the state is a successful query
+    // (`getfacl` prints the permissions and exits 0 whatever they are).
+    {
+        // Named item, absent: a failed lookup.
+        let out = capture_command("envvars get zzz_no_such_variable");
+        assert_output_starts_with(
+            "the missing name is reported",
+            &out,
+            b"zzz_no_such_variable: not set",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "a lookup that found nothing did not succeed"
+        );
+
+        // State query answered "none": still a success. `seal check` was asked
+        // whether an operation is allowed and it answered; the answer being
+        // "no" is not the command failing.
+        let out = capture_command("seal check /zzz_no_such_path write");
+        assert!(!out.is_empty(), "`seal check` answered");
+        assert_eq!(last_exit(), 0, "answering the question is succeeding at it");
+    }
+
+    serial_println!("  kshell::self_test 23: a braced error arm still owes a status");
+    // The residue of the status sweep: `Err` arms with a `{ ... }` body. No
+    // mechanical pass reached them -- the brace-less rewriters skip them by
+    // construction, and the fall-through rule only fires when the diagnostic
+    // ends its block -- so they had to be read one at a time.
+    //
+    // Reading them turned up two things worth pinning down here. First, most
+    // of those braces are not a body anybody wrote: they are `cargo fmt`
+    // wrapping one long line, and the arm beside them already sets a status.
+    // Second, the ones that *are* deliberate divide on whether the arm hands
+    // its outcome back: an arm ending in `false` or `None` lets the caller
+    // decide, but one ending in a bare `shell_println!(..)` evaluates to `()`
+    // and defers to nobody -- so it owes the status itself.
+    {
+        // Asked for something the shell cannot do. This is the sharpest form
+        // of the bug: `netspeed test` announces it is unimplemented and then
+        // reports success, so `netspeed test || fallback` never falls back.
+        let out = capture_command("netspeed test");
+        assert_output_starts_with(
+            "`netspeed test` says it cannot do it",
+            &out,
+            b"Speed testing is not yet implemented.",
+        );
+        assert_eq!(last_exit(), 1, "a command that did nothing did not succeed");
+
+        // A failed resolution, and the same command succeeding, so the test
+        // pins the difference rather than just the failing side.
+        //
+        // The failing path needs **two** components, and the missing one has to
+        // be the parent. A single missing component is not an error at all:
+        // `resolve_inner` lets the *final* component be absent (that is the
+        // open-with-create path), so `realpath /zzz_no_such_path` resolves fine
+        // and exits 0. That is not a VFS quirk to work around -- it is exactly
+        // GNU `realpath`'s default mode, where every component except the last
+        // must exist (`-e` requires the last one too, `-m` requires none).
+        //
+        // This rung asserted the failing behaviour against `/zzz_no_such_path`
+        // and so had never once passed: it was testing the error arm with an
+        // input that takes the success arm. Do not "simplify" the path back to
+        // one component.
+        let out = capture_command("realpath /zzz_no_such_dir/zzz_no_such_path");
+        assert_output_starts_with(
+            "the failure names the path",
+            &out,
+            b"realpath: '/zzz_no_such_dir/zzz_no_such_path'",
+        );
+        assert_eq!(last_exit(), 1, "a path that does not resolve is an error");
+
+        // The other side of the same rule, asserted so the success arm above is
+        // pinned as deliberate rather than looking like the bug it isn't.
+        let out = capture_command("realpath /zzz_no_such_path");
+        assert_output_starts_with(
+            "a missing final component still canonicalises",
+            &out,
+            b"/zzz_no_such_path",
+        );
+        assert_eq!(
+            last_exit(),
+            0,
+            "GNU's default mode: only the parents must exist"
+        );
+
+        let out = capture_command("realpath /tmp");
+        assert_output_starts_with("`realpath /tmp` resolved", &out, b"/tmp");
+        assert_eq!(last_exit(), 0, "and resolving it is a success");
+
+        // A *relative* argument, which is the only input `realpath` exists for.
+        // It used to be handed to the VFS untouched, and `normalize_path`
+        // prepends `/` to anything it is given -- so this answered `/zzz_rel`
+        // from any working directory, with status 0. Every assertion above
+        // passes an absolute path and so could not have caught it.
+        let _ = capture_command("cd /tmp");
+        let out = capture_command("realpath zzz_rel");
+        assert_output_starts_with(
+            "a relative path resolves against the working directory",
+            &out,
+            b"/tmp/zzz_rel",
+        );
+        // Restore the working directory: later rungs, and the interactive
+        // shell this self-test runs inside, both assume it is still `/`.
+        let _ = capture_command("cd /");
+        assert_output_starts_with("cwd restored", &capture_command("pwd"), b"/\n");
+    }
+
+    serial_println!("  kshell::self_test 24: refusing to print the file is not printing it");
+    // `cat` will not push non-UTF-8 bytes through the text console -- that
+    // corrupts the terminal -- and prints a size instead. The refusal is
+    // right; reporting success for it was not. This is a *substitution*, not a
+    // failed read: `cat f > copy` writes a sentence of English where the file
+    // should have gone, and the output looks well-formed, so nothing
+    // downstream has any reason to look twice.
+    {
+        use crate::fs::vfs::Vfs;
+
+        let path = Path::new("/tmp/kshell_status_selftest_binary.bin");
+        Vfs::write_file(path, b"\xffPNG\x00\x01\x02")?;
+
+        let out = capture_command("cat /tmp/kshell_status_selftest_binary.bin");
+        assert_output_starts_with(
+            "`cat` refused the bytes and said so",
+            &out,
+            b"(binary file,",
+        );
+        assert_eq!(last_exit(), 1, "and refusing is not succeeding");
+
+        // The same command on text it *can* print, so the rung pins the
+        // difference rather than just asserting the failing side.
+        let text = Path::new("/tmp/kshell_status_selftest_binary.txt");
+        Vfs::write_file(text, b"plain\n")?;
+        let out = capture_command("cat /tmp/kshell_status_selftest_binary.txt");
+        assert_eq!(out.as_slice(), b"plain\n", "`cat` printed the text");
+        assert_eq!(last_exit(), 0, "printing the file is succeeding");
+
+        let _ = Vfs::remove(path);
+        let _ = Vfs::remove(text);
+    }
+
+    serial_println!("  kshell::self_test 25: 'found nothing' and 'could not look' differ");
+    // Every rung above this one asks whether a command distinguishes success
+    // from failure. `grep` needs a rung of its own because it has *three*
+    // answers, and the two failing ones are not interchangeable: 1 means the
+    // search completed and the pattern is absent, 2 means the search never
+    // happened. Collapsing 2 into 1 makes
+    //
+    //     grep pat missing-file || echo "not present"
+    //
+    // report a missing *file* as missing *text* -- an answer about the wrong
+    // subject, delivered in a form the caller cannot tell from a real one.
+    {
+        use crate::fs::vfs::Vfs;
+
+        let path = Path::new("/tmp/kshell_grep_status_selftest.txt");
+        Vfs::write_file(path, b"alpha\nbeta\n")?;
+
+        // 0: matched.
+        //
+        // `1:alpha`, not `alpha`: this shell's `grep` defaults to `-n` *and*
+        // `-i` (`GrepFlags::new`), unlike GNU's, which defaults to neither.
+        // Asserting the GNU shape here cost a boot cycle. The defaults are a
+        // deliberate divergence rather than a bug, and they are queued for the
+        // operator in `open-questions.md` -- so if they ever change, this rung
+        // and its sibling below are the two places to update.
+        let out = capture_command("grep alpha /tmp/kshell_grep_status_selftest.txt");
+        assert_output_starts_with("the match is printed", &out, b"1:alpha");
+        assert_eq!(last_exit(), 0, "a match is success");
+
+        // 1: searched the whole file, the pattern is not in it. This is the
+        // answer that must stay reserved -- `&&`/`||` chains depend on it.
+        let out = capture_command("grep zzz_absent /tmp/kshell_grep_status_selftest.txt");
+        assert_output_starts_with("and says so", &out, b"grep: no matches for");
+        assert_eq!(last_exit(), 1, "searched and found nothing");
+
+        // 2: never got to look. The file does not exist, so nothing whatsoever
+        // has been established about where the pattern is or is not.
+        let out = capture_command("grep alpha /zzz_no_such_dir/zzz_no_such_file");
+        assert_output_starts_with("the failure names the path", &out, b"grep: ");
+        assert_eq!(last_exit(), 2, "could not search is not 'found nothing'");
+        // And it must not have claimed a clean search on the way past: that
+        // sentence asserts something about the file's *contents*, which is
+        // exactly what was never read.
+        assert_output_lacks(
+            "a search that never happened reports no empty result",
+            &out,
+            b"no matches for",
+        );
+
+        // A mistyped directory under -r, which used to be the quietest of the
+        // lot: `stat` failed, the walk returned without a word, and the run
+        // ended indistinguishable from a clean search of an empty tree.
+        let out = capture_command("grep -r alpha /zzz_no_such_dir");
+        assert_output_starts_with("the walk names what it could not stat", &out, b"grep: ");
+        assert_eq!(last_exit(), 2, "an unwalkable tree is not an empty one");
+
+        // A usage error is 2 as well, for the same reason: returning 1 would
+        // answer a question about the file that grep never opened.
+        let out = capture_command("grep -Z alpha /tmp/kshell_grep_status_selftest.txt");
+        assert_output_starts_with("the bad flag is named", &out, b"grep: unknown flag");
+        assert_eq!(last_exit(), 2, "a usage error is not an absent pattern");
+
+        // The piped half must agree with the file half on all three, or
+        // `grep p f` and `cat f | grep p` answer `&&` differently.
+        // `2:beta` -- `beta` is the second line, and `-n` is on by default here
+        // too. That the two halves agree on the *shape* as well as the status is
+        // the point: `grep p f` and `cat f | grep p` used to differ by a space
+        // after the colon, and anything splitting on `:` could not compare them.
+        let out = capture_command("cat /tmp/kshell_grep_status_selftest.txt | grep beta");
+        assert_output_starts_with("the piped match is printed", &out, b"2:beta");
+        assert_eq!(last_exit(), 0, "piped: a match is success");
+
+        let out = capture_command("cat /tmp/kshell_grep_status_selftest.txt | grep zzz_absent");
+        assert_output_starts_with("piped: says so", &out, b"grep: no matches for");
+        assert_eq!(last_exit(), 1, "piped: searched and found nothing");
+
+        // The divergence this half was fixed for: the piped form dropped an
+        // unknown flag on the floor and searched anyway, so a typo silently
+        // changed what was searched for and still reported success.
+        let out = capture_command("cat /tmp/kshell_grep_status_selftest.txt | grep -Z beta");
+        assert_output_starts_with("piped: the bad flag is named", &out, b"grep: unknown flag");
+        assert_eq!(last_exit(), 2, "piped: a usage error is not a search");
+
+        // `-l` was in the same class as `-Z` until now: dropped on the floor, so
+        // `grep -l p f` named the file while `cat f | grep -l p` printed the
+        // matching *lines*. Two different answers to one question.
+        let out = capture_command("cat /tmp/kshell_grep_status_selftest.txt | grep -l beta");
+        assert_output_starts_with("piped -l names the input", &out, b"(standard input)");
+        assert_eq!(last_exit(), 0, "piped -l: a match is success");
+
+        // `-r` has no tree to walk on the right of a pipe, and says so rather
+        // than being mistaken for a typo.
+        let out = capture_command("cat /tmp/kshell_grep_status_selftest.txt | grep -r beta");
+        assert_output_starts_with("piped -r explains itself", &out, b"grep: -r: no directory");
+        assert_eq!(last_exit(), 2, "piped -r: nothing was searched");
+
+        // ...but a directory operand still reaches the file form, flags and all.
+        // This is why the delegation is decided before flags are rejected: the
+        // other order refuses this line as "-r on a pipe" and never looks.
+        let out = capture_command("echo ignored | grep -r alpha /zzz_no_such_dir");
+        assert_output_starts_with("the operand won over the pipe", &out, b"grep: ");
+        assert_eq!(last_exit(), 2, "and the file form's verdict came back");
+
+        let _ = Vfs::remove(path);
+    }
+
+    serial_println!("  kshell::self_test 26: a comparison not made is not a comparison");
+    // `cmp` and `diff` answer the same three-valued question as `grep`, and got
+    // it wrong in the most dangerous direction: *every* outcome left the status
+    // at the 0 `dispatch` sets before each command. So `cmp a b && cp a b` was
+    // told "identical" when the files differed, and when one of them did not
+    // exist at all.
+    //
+    // `diff` is worse still, because silence is its success: it prints nothing
+    // when the files match, so a run that refused to compare (unreadable file,
+    // past the line cap) was byte-identical *and* status-identical to a run
+    // that compared and found nothing. Nothing distinguished them at all.
+    {
+        use crate::fs::vfs::Vfs;
+
+        let a = Path::new("/tmp/kshell_cmp_selftest_a.txt");
+        let b = Path::new("/tmp/kshell_cmp_selftest_b.txt");
+        let same = Path::new("/tmp/kshell_cmp_selftest_same.txt");
+        Vfs::write_file(a, b"one\ntwo\n")?;
+        Vfs::write_file(b, b"one\nTWO\n")?;
+        Vfs::write_file(same, b"one\ntwo\n")?;
+
+        // 0: compared, identical.
+        let out =
+            capture_command("cmp /tmp/kshell_cmp_selftest_a.txt /tmp/kshell_cmp_selftest_same.txt");
+        assert_output_lacks("identical files are not 'differ'", &out, b"differ");
+        assert_eq!(last_exit(), 0, "cmp: identical is success");
+
+        // 1: compared, they differ. This is the answer `cmp a b && cp a b`
+        // depends on, and the one that used to come back as 0.
+        let out =
+            capture_command("cmp /tmp/kshell_cmp_selftest_a.txt /tmp/kshell_cmp_selftest_b.txt");
+        assert_output_lacks(
+            "differing files are not 'identical'",
+            &out,
+            b"are identical",
+        );
+        assert_eq!(last_exit(), 1, "cmp: differ is 1");
+
+        // 2: could not compare. Distinct from 1, because "they differ" is a
+        // claim about two files' contents and only one of these was read.
+        let out =
+            capture_command("cmp /tmp/kshell_cmp_selftest_a.txt /zzz_no_such_dir/zzz_no_file");
+        assert_output_starts_with("cmp names the file it could not read", &out, b"cmp: ");
+        assert_eq!(last_exit(), 2, "cmp: unread is not 'differ'");
+
+        // A usage error is 2 as well: 1 would report a mistyped command line as
+        // a real difference between files nothing ever opened.
+        let out = capture_command("cmp /tmp/kshell_cmp_selftest_a.txt");
+        assert_output_starts_with("cmp explains the usage", &out, b"Usage: cmp");
+        assert_eq!(last_exit(), 2, "cmp: a usage error is not a comparison");
+
+        // `diff`: silence means identical, so the status is the *only* thing
+        // separating these three.
+        let out = capture_command(
+            "diff /tmp/kshell_cmp_selftest_a.txt /tmp/kshell_cmp_selftest_same.txt",
+        );
+        assert_eq!(out.as_slice(), b"", "diff: identical prints nothing");
+        assert_eq!(last_exit(), 0, "diff: identical is success");
+
+        let out =
+            capture_command("diff /tmp/kshell_cmp_selftest_a.txt /tmp/kshell_cmp_selftest_b.txt");
+        assert_output_starts_with("diff prints a unified header", &out, b"--- ");
+        assert_eq!(last_exit(), 1, "diff: differ is 1");
+
+        let out =
+            capture_command("diff /tmp/kshell_cmp_selftest_a.txt /zzz_no_such_dir/zzz_no_file");
+        assert_output_starts_with("diff names the file it could not read", &out, b"diff: ");
+        assert_eq!(last_exit(), 2, "diff: unread is not 'identical'");
+
+        let _ = Vfs::remove(a);
+        let _ = Vfs::remove(b);
+        let _ = Vfs::remove(same);
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -11348,6 +11848,7 @@ fn cmd_blkread(args: &str) {
             }
             Err(e) => {
                 shell_println!("Error reading sector {}: {:?}", sector, e);
+                set_exit(1);
             }
         }
     });
@@ -11709,6 +12210,27 @@ fn cmd_cat(args: &str) {
                         "(binary file, {} bytes — use blkread for hex dump)",
                         data.len()
                     );
+                    // Three commands share this convention -- `cat` here, `nc`
+                    // and `container logs` -- and all three owe a status for
+                    // it, so the reasoning lives here once and they point at
+                    // it.
+                    //
+                    // The caller asked for the file's contents and did not get
+                    // them. They got a sentence *about* the file instead, and
+                    // exiting 0 claims that sentence is what they asked for.
+                    // `cat f > copy` then writes 46 bytes of English over what
+                    // should have been the file: not a failed read reported as
+                    // success, but a *substitution* reported as success, which
+                    // is worse -- the shape of the output is right, so nothing
+                    // downstream has any reason to look twice.
+                    //
+                    // The refusal itself is deliberate and stays: forcing
+                    // non-UTF-8 through a text console corrupts the terminal
+                    // state. It is also temporary. `shell_println_bytes` already
+                    // exists, and when the byte-clean work in
+                    // `TD-KSHELL-LINE-EDITOR-IS-UTF8` lands, `cat` emits the
+                    // bytes and this arm -- and its status -- goes away.
+                    set_exit(1);
                 }
             }
         }
@@ -12041,6 +12563,7 @@ fn cmd_df(args: &str) {
             }
             Err(e) => {
                 shell_println!("df: {:?}", e);
+                set_exit(1);
             }
         }
     } else {
@@ -12075,6 +12598,7 @@ fn cmd_df(args: &str) {
             }
             Err(e) => {
                 shell_println!("df: {:?}", e);
+                set_exit(1);
             }
         }
     }
@@ -12239,6 +12763,7 @@ fn cmd_chmod(args: &str) {
         }
         Err(e) => {
             shell_println!("chmod: {:?}", e);
+            set_exit(1);
         }
     }
 }
@@ -12297,6 +12822,7 @@ fn cmd_chown(args: &str) {
         }
         Err(e) => {
             shell_println!("chown: {:?}", e);
+            set_exit(1);
         }
     }
 }
@@ -12647,6 +13173,7 @@ fn cmd_append(args: &str) {
         }
         Err(e) => {
             shell_println!("append: {}: {:?}", path.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -12990,7 +13517,10 @@ fn cmd_locate(args: &str) {
                     if st.truncated { " [truncated]" } else { "" }
                 );
             }
-            Err(e) => shell_println!("Error rebuilding index: {:?}", e),
+            Err(e) => {
+                shell_println!("Error rebuilding index: {:?}", e);
+                set_exit(1);
+            }
         }
         return;
     }
@@ -13426,6 +13956,12 @@ fn cmd_dedup(args: &str) {
         );
         if delete_errors > 0 {
             shell_println!("  {} files could not be deleted.", delete_errors);
+            // The per-file arm above only counts; the count is the verdict.
+            // `dedup --delete` was asked to reclaim space and partly did not,
+            // so a script that reruns or alerts on failure has to be able to
+            // see that. Reporting success here means "every duplicate is gone"
+            // -- a claim this run just disproved on its own output.
+            set_exit(1);
         }
     } else if !delete_mode {
         shell_println!("(dry-run: no files deleted. Use --delete to remove duplicates.)");
@@ -13551,9 +14087,40 @@ fn cmd_integrity(args: &str) {
                             match integrity::verify_file(&resolved) {
                                 Ok(result) => {
                                     print_verify_result(&result);
+                                    // Verifying one file: this row *is* the
+                                    // verdict, there being no summary below it
+                                    // to carry one, so the status is set here
+                                    // and not inside the shared row printer --
+                                    // which also serves the directory walk,
+                                    // where a row must not decide the command.
+                                    //
+                                    // An integrity checker that prints
+                                    // "[MODIFY] /etc/passwd" and then reports
+                                    // success is the worst instance of this
+                                    // bug in the shell: the entire purpose of
+                                    // the command is to be the thing a script
+                                    // trusts, and `verify f || alarm` stayed
+                                    // silent on a tampered file.
+                                    //
+                                    // Which states count as failure follows
+                                    // `run_dir_verify`'s own verdict line
+                                    // rather than inventing a second rule:
+                                    // Modified, Missing and Error are changes,
+                                    // New is not (a file that was never in the
+                                    // baseline has not been altered).
+                                    use crate::fs::integrity::VerifyStatus;
+                                    if matches!(
+                                        result.status,
+                                        VerifyStatus::Modified
+                                            | VerifyStatus::Missing
+                                            | VerifyStatus::Error
+                                    ) {
+                                        set_exit(1);
+                                    }
                                 }
                                 Err(crate::error::KernelError::NotFound) => {
                                     shell_println!("{}: not in baseline", resolved.display());
+                                    set_exit(1);
                                 }
                                 Err(e) => {
                                     shell_println!("Error: {:?}", e);
@@ -13713,6 +14280,11 @@ fn run_dir_verify(dir: &Path) {
         shell_println!("  Status: ALL CLEAR ✓");
     } else {
         shell_println!("  Status: CHANGES DETECTED");
+        // The verdict line, so the verdict goes here -- not on the `[MODIFY]`
+        // rows above, which are a report. Same split as `syshealth`, and the
+        // same reason: a script running `verify /etc || alarm` reads the
+        // status and nothing else.
+        set_exit(1);
     }
 }
 
@@ -13827,7 +14399,10 @@ fn cmd_fhist(args: &str) {
                                 &hex[..12]
                             );
                         }
-                        Err(e) => shell_println!("Error restoring: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error restoring: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 None => {
@@ -16624,7 +17199,10 @@ fn cmd_fstx(args: &str) {
             };
             match transaction::commit(id) {
                 Ok(()) => shell_println!("Transaction {} committed successfully.", id.0),
-                Err(e) => shell_println!("Transaction {} failed: {:?}", id.0, e),
+                Err(e) => {
+                    shell_println!("Transaction {} failed: {:?}", id.0, e);
+                    set_exit(1);
+                }
             }
         }
         "rollback" | "abort" => {
@@ -17119,7 +17697,10 @@ fn cmd_fcompress(args: &str) {
                         shell_println!("  Size: {} bytes", info.stored_size);
                     }
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
+                Err(e) => {
+                    shell_println!("Error reading {}: {:?}", path.display(), e);
+                    set_exit(1);
+                }
             }
         }
         "compress" => {
@@ -17192,7 +17773,10 @@ fn cmd_fcompress(args: &str) {
                     fcompress::set_min_size(old_min);
                     fcompress::set_enabled(was_enabled);
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
+                Err(e) => {
+                    shell_println!("Error reading {}: {:?}", path.display(), e);
+                    set_exit(1);
+                }
             }
         }
         "decompress" | "expand" => {
@@ -17224,7 +17808,10 @@ fn cmd_fcompress(args: &str) {
                         None => shell_println!("Decompression failed."),
                     }
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
+                Err(e) => {
+                    shell_println!("Error reading {}: {:?}", path.display(), e);
+                    set_exit(1);
+                }
             }
         }
         _ => {
@@ -17318,12 +17905,21 @@ fn cmd_encrypt(args: &str) {
                                 data.len(),
                                 encrypted.len()
                             ),
-                            Err(e) => shell_println!("Error writing: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error writing: {:?}", e);
+                                set_exit(1);
+                            }
                         },
-                        Err(e) => shell_println!("Encryption failed: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Encryption failed: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
+                Err(e) => {
+                    shell_println!("Error reading {}: {:?}", path.display(), e);
+                    set_exit(1);
+                }
             }
         }
         "decrypt" | "dec" => {
@@ -17349,15 +17945,25 @@ fn cmd_encrypt(args: &str) {
                                 data.len(),
                                 plaintext.len()
                             ),
-                            Err(e) => shell_println!("Error writing: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error writing: {:?}", e);
+                                set_exit(1);
+                            }
                         },
                         Err(crate::error::KernelError::PermissionDenied) => {
                             shell_println!("Authentication failed — wrong key or file tampered.");
+                            set_exit(1);
                         }
-                        Err(e) => shell_println!("Decryption failed: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Decryption failed: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
+                Err(e) => {
+                    shell_println!("Error reading {}: {:?}", path.display(), e);
+                    set_exit(1);
+                }
             }
         }
         "read" | "cat" => {
@@ -17385,11 +17991,18 @@ fn cmd_encrypt(args: &str) {
                         }
                         Err(crate::error::KernelError::PermissionDenied) => {
                             shell_println!("Authentication failed — wrong key or tampered.");
+                            set_exit(1);
                         }
-                        Err(e) => shell_println!("Decryption failed: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Decryption failed: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
+                Err(e) => {
+                    shell_println!("Error reading {}: {:?}", path.display(), e);
+                    set_exit(1);
+                }
             }
         }
         "info" => {
@@ -17709,7 +18322,10 @@ fn cmd_tag(args: &str) {
 
             match tags::add(path, tag) {
                 Ok(()) => shell_println!("Tagged '{}' with '{}'", path, tag),
-                Err(e) => shell_println!("tag add: {:?}", e),
+                Err(e) => {
+                    shell_println!("tag add: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rm" | "remove" => {
@@ -17725,7 +18341,10 @@ fn cmd_tag(args: &str) {
 
             match tags::remove(path, tag) {
                 Ok(()) => shell_println!("Removed tag '{}' from '{}'", tag, path),
-                Err(e) => shell_println!("tag rm: {:?}", e),
+                Err(e) => {
+                    shell_println!("tag rm: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "get" | "show" => {
@@ -17743,7 +18362,10 @@ fn cmd_tag(args: &str) {
                         shell_println!("{}", t.join(", "));
                     }
                 }
-                Err(e) => shell_println!("tag get: {:?}", e),
+                Err(e) => {
+                    shell_println!("tag get: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "set" => {
@@ -17760,7 +18382,10 @@ fn cmd_tag(args: &str) {
             let tag_list: Vec<&str> = tag_str.split(',').map(|s| s.trim()).collect();
             match tags::set(path, &tag_list) {
                 Ok(()) => shell_println!("Set {} tag(s) on '{}'", tag_list.len(), path),
-                Err(e) => shell_println!("tag set: {:?}", e),
+                Err(e) => {
+                    shell_println!("tag set: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "clear" => {
@@ -17772,7 +18397,10 @@ fn cmd_tag(args: &str) {
 
             match tags::clear(rest) {
                 Ok(()) => shell_println!("Cleared all tags from '{}'", rest),
-                Err(e) => shell_println!("tag clear: {:?}", e),
+                Err(e) => {
+                    shell_println!("tag clear: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "search" | "find" => {
@@ -17805,7 +18433,10 @@ fn cmd_tag(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("tag search: {:?}", e),
+                Err(e) => {
+                    shell_println!("tag search: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -17824,7 +18455,10 @@ fn cmd_tag(args: &str) {
             shell_println!("Building tag index from '{}'...", root);
             match tags::build_index(root) {
                 Ok(count) => shell_println!("Indexed {} tagged file(s)", count),
-                Err(e) => shell_println!("tag index: {:?}", e),
+                Err(e) => {
+                    shell_println!("tag index: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" | "status" => {
@@ -17979,7 +18613,10 @@ fn cmd_diskuse(args: &str) {
             );
             shell_println!("  Duplicate names:     {}", report.wasted.duplicate_names);
         }
-        Err(e) => shell_println!("diskuse: {:?}", e),
+        Err(e) => {
+            shell_println!("diskuse: {:?}", e);
+            set_exit(1);
+        }
     }
 }
 
@@ -18021,7 +18658,10 @@ fn cmd_fshealth(_args: &str) {
                 }
             }
         }
-        Err(e) => shell_println!("fshealth: {:?}", e),
+        Err(e) => {
+            shell_println!("fshealth: {:?}", e);
+            set_exit(1);
+        }
     }
 }
 
@@ -18057,7 +18697,10 @@ fn cmd_fswatch(args: &str) {
 
             match notify::create_watch(path, mask, recursive) {
                 Ok(id) => shell_println!("Watch created: id={} path={}", id, path),
-                Err(e) => shell_println!("fswatch create: {:?}", e),
+                Err(e) => {
+                    shell_println!("fswatch create: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "read" => {
@@ -18114,7 +18757,10 @@ fn cmd_fswatch(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("fswatch read: {:?}", e),
+                Err(e) => {
+                    shell_println!("fswatch read: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "close" => {
@@ -18133,7 +18779,10 @@ fn cmd_fswatch(args: &str) {
             };
             match notify::close_watch(id) {
                 Ok(()) => shell_println!("Watch {} closed", id),
-                Err(e) => shell_println!("fswatch close: {:?}", e),
+                Err(e) => {
+                    shell_println!("fswatch close: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "pending" => {
@@ -18152,7 +18801,10 @@ fn cmd_fswatch(args: &str) {
             };
             match notify::pending_count(id) {
                 Ok(n) => shell_println!("{} event(s) pending", n),
-                Err(e) => shell_println!("fswatch pending: {:?}", e),
+                Err(e) => {
+                    shell_println!("fswatch pending: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         _ => {
@@ -18168,7 +18820,10 @@ fn cmd_fswatch(args: &str) {
                             id
                         );
                     }
-                    Err(e) => shell_println!("fswatch: {:?}", e),
+                    Err(e) => {
+                        shell_println!("fswatch: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: fswatch <path|create|read|close|pending>");
@@ -18625,6 +19280,7 @@ fn cmd_undelete(args: &str) {
                 Err(crate::error::KernelError::NotFound) => {
                     shell_println!("No recoverable data found for: {}", path);
                     shell_println!("Tip: use `undelete scan` to see what's available.");
+                    set_exit(1);
                 }
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
@@ -19545,7 +20201,10 @@ fn cmd_fsbench(args: &str) {
                         report.targets_met.1
                     );
                 }
-                Err(e) => shell_println!("Benchmark failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Benchmark failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "read" => {
@@ -23585,7 +24244,10 @@ fn cmd_toolbar(args: &str) {
         }
         "test" => match toolbar::self_test() {
             Ok(()) => shell_println!("All toolbar self-tests passed"),
-            Err(e) => shell_println!("Toolbar self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Toolbar self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (builds, actions) = toolbar::stats();
@@ -23914,7 +24576,10 @@ fn cmd_queryable(args: &str) {
         }
         "test" => match queryable::self_test() {
             Ok(()) => shell_println!("All queryable self-tests passed"),
-            Err(e) => shell_println!("Queryable self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Queryable self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (files, total_attrs, sets, gets, queries, indexes) = queryable::stats();
@@ -24080,7 +24745,10 @@ fn cmd_fcomment(args: &str) {
         }
         "test" => match fcomment::self_test() {
             Ok(()) => shell_println!("All fcomment self-tests passed"),
-            Err(e) => shell_println!("File comment self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("File comment self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (count, sets, gets, searches) = fcomment::stats();
@@ -24139,7 +24807,10 @@ fn cmd_rundialog(args: &str) {
                     rundialog::record(&cmd_text, Some(&result.path));
                     shell_println!("Recorded in history");
                 }
-                Err(e) => shell_println!("Could not resolve '{}': {:?}", cmd_text, e),
+                Err(e) => {
+                    shell_println!("Could not resolve '{}': {:?}", cmd_text, e);
+                    set_exit(1);
+                }
             }
         }
         "complete" | "comp" => {
@@ -24326,7 +24997,10 @@ fn cmd_rundialog(args: &str) {
         },
         "test" => match rundialog::self_test() {
             Ok(()) => shell_println!("All run dialog self-tests passed"),
-            Err(e) => shell_println!("Run dialog self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Run dialog self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (recent, aliases, cache, bookmarks, runs, completions) = rundialog::stats();
@@ -24538,7 +25212,10 @@ fn cmd_notifcenter(args: &str) {
         }
         "test" => match notifcenter::self_test() {
             Ok(()) => shell_println!("All notification center self-tests passed"),
-            Err(e) => shell_println!("Notification center self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Notification center self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (total, unread_n, muted, sends, dismisses) = notifcenter::stats();
@@ -24780,11 +25457,17 @@ fn cmd_appregistry(args: &str) {
                 "Registered built-in applications ({} total)",
                 appregistry::app_count()
             ),
-            Err(e) => shell_println!("Error registering builtins: {:?}", e),
+            Err(e) => {
+                shell_println!("Error registering builtins: {:?}", e);
+                set_exit(1);
+            }
         },
         "test" => match appregistry::self_test() {
             Ok(()) => shell_println!("All app registry self-tests passed"),
-            Err(e) => shell_println!("App registry self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("App registry self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (apps, mimes, reg_ops, lookup_ops) = appregistry::stats();
@@ -25000,7 +25683,10 @@ fn cmd_theme(args: &str) {
         }
         "test" => match theme::self_test() {
             Ok(()) => shell_println!("All theme self-tests passed"),
-            Err(e) => shell_println!("Theme self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Theme self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (mode, customs, overrides, queries, changes) = theme::stats();
@@ -25222,7 +25908,10 @@ fn cmd_hotkey(args: &str) {
         },
         "test" => match hotkeys::self_test() {
             Ok(()) => shell_println!("All hotkey self-tests passed"),
-            Err(e) => shell_println!("Hotkey self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Hotkey self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (total, enabled, dispatches, hits) = hotkeys::stats();
@@ -25565,7 +26254,10 @@ fn cmd_widgets(args: &str) {
             shell_println!("Running widget self-tests...");
             match widgets::self_test() {
                 Ok(()) => shell_println!("All widget tests passed"),
-                Err(e) => shell_println!("Test failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Test failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -25936,7 +26628,10 @@ fn cmd_soundmixer(args: &str) {
             shell_println!("Running sound mixer self-tests...");
             match soundmixer::self_test() {
                 Ok(()) => shell_println!("All sound mixer tests passed"),
-                Err(e) => shell_println!("Test failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Test failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -26333,7 +27028,10 @@ fn cmd_wallpaper(args: &str) {
             shell_println!("Running wallpaper self-tests...");
             match wallpaper::self_test() {
                 Ok(()) => shell_println!("All wallpaper tests passed"),
-                Err(e) => shell_println!("Test failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Test failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -26619,7 +27317,10 @@ fn cmd_credentials(args: &str) {
             shell_println!("Running credential store self-tests...");
             match credentials::self_test() {
                 Ok(()) => shell_println!("All credential tests passed"),
-                Err(e) => shell_println!("Test failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Test failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -26839,7 +27540,10 @@ fn cmd_power(args: &str) {
         }
         "test" => match power::self_test() {
             Ok(()) => shell_println!("All power tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (ev, id, so, bp) = power::stats();
@@ -27162,7 +27866,10 @@ fn cmd_display(args: &str) {
         }
         "test" => match display::self_test() {
             Ok(()) => shell_println!("All display tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (mc, changes) = display::stats();
@@ -27548,7 +28255,10 @@ fn cmd_vdesktop(args: &str) {
         }
         "test" => match vdesktop::self_test() {
             Ok(()) => shell_println!("All vdesktop tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (dc, wc, pc, sw, mv) = vdesktop::stats();
@@ -27769,7 +28479,10 @@ fn cmd_keylayout(args: &str) {
         },
         "test" => match keylayout::self_test() {
             Ok(()) => shell_println!("All keylayout tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (lc, rc, tc, sc) = keylayout::stats();
@@ -28070,7 +28783,10 @@ fn cmd_screenshot(args: &str) {
         }
         "test" => match screenshot::self_test() {
             Ok(()) => shell_println!("All screenshot tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (hc, cc) = screenshot::stats();
@@ -28423,7 +29139,10 @@ fn cmd_a11y(args: &str) {
         }
         "test" => match a11y::self_test() {
             Ok(()) => shell_println!("All a11y tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (tc, ec, ic, ac) = a11y::stats();
@@ -28647,7 +29366,10 @@ fn cmd_ime(args: &str) {
         },
         "test" => match ime::self_test() {
             Ok(()) => shell_println!("All IME tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (mc, ec, cc, kc) = ime::stats();
@@ -28910,7 +29632,10 @@ fn cmd_netindicator(args: &str) {
         },
         "test" => match netindicator::self_test() {
             Ok(()) => shell_println!("All netindicator tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (ic, wc, pc, sc, cc) = netindicator::stats();
@@ -29187,7 +29912,10 @@ fn cmd_winsnap(args: &str) {
         }
         "test" => match winsnap::self_test() {
             Ok(()) => shell_println!("All winsnap tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (sc, lc, ops) = winsnap::stats();
@@ -29523,7 +30251,10 @@ fn cmd_colorpicker(args: &str) {
         }
         "test" => match colorpicker::self_test() {
             Ok(()) => shell_println!("All colorpicker tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (ap, pc, rc, picks, samples) = colorpicker::stats();
@@ -29832,7 +30563,10 @@ fn cmd_cursorsettings(args: &str) {
         }
         "test" => match cursorsettings::self_test() {
             Ok(()) => shell_println!("All cursorsettings tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (tc, changes) = cursorsettings::stats();
@@ -30193,7 +30927,10 @@ fn cmd_kbsettings(args: &str) {
         }
         "test" => match kbsettings::self_test() {
             Ok(()) => shell_println!("All kbsettings tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (pc, oc, changes) = kbsettings::stats();
@@ -30382,7 +31119,10 @@ fn cmd_detailcols(args: &str) {
         }
         "test" => match detailcols::self_test() {
             Ok(()) => shell_println!("All detailcols tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (cc, bc, uc, qc) = detailcols::stats();
@@ -30708,7 +31448,10 @@ fn cmd_partmgr(args: &str) {
         }
         "test" => match partmgr::self_test() {
             Ok(()) => shell_println!("All partmgr tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (dc, pc, ops) = partmgr::stats();
@@ -30959,7 +31702,10 @@ fn cmd_locale(args: &str) {
         }
         "test" => match locale::self_test() {
             Ok(()) => shell_println!("All locale tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (lc, tc, changes) = locale::stats();
@@ -31129,7 +31875,10 @@ fn cmd_useracct(args: &str) {
                 } else {
                     match useracct::authenticate(parts[1], parts[2]) {
                         Ok(sid) => shell_println!("Logged in as '{}' (session={})", parts[1], sid),
-                        Err(e) => shell_println!("Auth failed: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Auth failed: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -31509,7 +32258,10 @@ fn cmd_useracct(args: &str) {
         }
         "test" => match useracct::self_test() {
             Ok(()) => shell_println!("useracct: all tests passed"),
-            Err(e) => shell_println!("useracct: test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("useracct: test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             #[inline(never)]
@@ -32166,7 +32918,10 @@ fn cmd_progmgr(args: &str) {
         }
         "test" => match progmgr::self_test() {
             Ok(()) => shell_println!("progmgr: all tests passed"),
-            Err(e) => shell_println!("progmgr: test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("progmgr: test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             #[inline(never)]
@@ -32595,7 +33350,10 @@ fn cmd_scriptlang(args: &str) {
         }
         "test" => match scriptlang::self_test() {
             Ok(()) => shell_println!("scriptlang: all tests passed"),
-            Err(e) => shell_println!("scriptlang: test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("scriptlang: test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("scriptlang — scripting language engine registry");
@@ -32937,7 +33695,10 @@ fn cmd_osreset(args: &str) {
         }
         "test" => match osreset::self_test() {
             Ok(()) => shell_println!("osreset: all tests passed"),
-            Err(e) => shell_println!("osreset: test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("osreset: test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("osreset — OS reset, repair, and rollback");
@@ -33272,7 +34033,10 @@ fn cmd_bootcfg(args: &str) {
         }
         "test" => match bootcfg::self_test() {
             Ok(()) => shell_println!("bootcfg: all tests passed"),
-            Err(e) => shell_println!("bootcfg: test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("bootcfg: test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("bootcfg — bootloader and boot entry management");
@@ -33554,7 +34318,10 @@ fn cmd_swapcfg(args: &str) {
         }
         "test" => match swapcfg::self_test() {
             Ok(()) => shell_println!("swapcfg: all tests passed"),
-            Err(e) => shell_println!("swapcfg: test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("swapcfg: test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("swapcfg — swap space configuration");
@@ -33880,7 +34647,10 @@ fn cmd_fstune(args: &str) {
         }
         "test" => match fstune::self_test() {
             Ok(()) => shell_println!("All tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => shell_println!(
             "Usage: fstune <list|info|create|remove|workload|blocksize|journal|commit|reserved|inode|alloc|discard|checksum|compress|apply|tradeoffs|stats|init|test>"
@@ -34172,7 +34942,10 @@ fn cmd_certmgr(args: &str) {
         }
         "test" => match certmgr::self_test() {
             Ok(()) => shell_println!("All tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => shell_println!(
             "Usage: certmgr <list|info|import|remove|san|service|status|autorenew|pin|renew|threshold|request|complete|requests|find|stats|init|test>"
@@ -34504,7 +35277,10 @@ fn cmd_installer(args: &str) {
         }
         "test" => match installer::self_test() {
             Ok(()) => shell_println!("All tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => shell_println!(
             "Usage: installer <list|info|create|remove|keyboard|scaling|workload|partition|check|install|firstboot|timezone|user|browser|theme|wifi|audio|complete|stats|init|test>"
@@ -34694,7 +35470,10 @@ fn cmd_timezone(args: &str) {
         }
         "test" => match timezone::self_test() {
             Ok(()) => shell_println!("All tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => shell_println!(
             "Usage: timezone <show|set|list|regions|detect|ntp|servers|addntp|rmntp|timefmt|datefmt|weekstart|seconds|showdate|stats|init|test>"
@@ -34930,7 +35709,10 @@ fn cmd_fontmgr(args: &str) {
         }
         "test" => match fontmgr::self_test() {
             Ok(()) => shell_println!("All tests passed"),
-            Err(e) => shell_println!("Test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => shell_println!(
             "Usage: fontmgr <list|families|info|install|uninstall|enable|disable|default|size|hint|antialias|dpi|find|stats|init|test>"
@@ -35379,7 +36161,10 @@ fn cmd_autostart(args: &str) {
         }
         "test" => match autostart::self_test() {
             Ok(()) => shell_println!("autostart: all tests passed."),
-            Err(e) => shell_println!("autostart: test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("autostart: test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("autostart — manage startup items");
@@ -35912,7 +36697,10 @@ fn cmd_schedtune(args: &str) {
         }
         "test" => match schedtune::self_test() {
             Ok(()) => shell_println!("schedtune: all tests passed."),
-            Err(e) => shell_println!("schedtune: test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("schedtune: test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             #[inline(never)]
@@ -36533,7 +37321,10 @@ fn cmd_mmtune(args: &str) {
         }
         "test" => match mmtune::self_test() {
             Ok(()) => shell_println!("mmtune: all tests passed."),
-            Err(e) => shell_println!("mmtune: test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("mmtune: test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             #[inline(never)]
@@ -36813,7 +37604,10 @@ fn cmd_capsettings(args: &str) {
                                     shell_println!("  {:?}", cap);
                                 }
                             }
-                            Err(e) => shell_println!("Error resolving caps: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error resolving caps: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
                     Err(e) => {
@@ -37104,7 +37898,10 @@ fn cmd_capsettings(args: &str) {
         }
         "test" => match capsettings::self_test() {
             Ok(()) => shell_println!("capsettings: all tests passed."),
-            Err(e) => shell_println!("capsettings: test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("capsettings: test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             #[inline(never)]
@@ -37540,7 +38337,10 @@ fn cmd_vpn(args: &str) {
         }
         "test" => match vpn::self_test() {
             Ok(()) => shell_println!("vpn: all tests passed."),
-            Err(e) => shell_println!("vpn: test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("vpn: test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("vpn — VPN connection management");
@@ -37885,7 +38685,10 @@ fn cmd_dyndns(args: &str) {
         }
         "test" => match dyndns::self_test() {
             Ok(()) => shell_println!("dyndns: all tests passed."),
-            Err(e) => shell_println!("dyndns: test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("dyndns: test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("dyndns — dynamic DNS and port forwarding");
@@ -38102,7 +38905,10 @@ fn cmd_loginscreen(args: &str) {
         }
         "test" => match loginscreen::self_test() {
             Ok(()) => shell_println!("loginscreen: all tests passed."),
-            Err(e) => shell_println!("loginscreen: test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("loginscreen: test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("loginscreen — login screen configuration");
@@ -38488,7 +39294,10 @@ fn cmd_appnotify(args: &str) {
         }
         "test" => match appnotify::self_test() {
             Ok(()) => shell_println!("appnotify: all tests passed"),
-            Err(e) => shell_println!("appnotify: test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("appnotify: test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("appnotify — per-app notification settings");
@@ -38813,7 +39622,10 @@ fn cmd_kernelbuild(args: &str) {
         }
         "test" => match kernelbuild::self_test() {
             Ok(()) => shell_println!("kernelbuild: all tests passed"),
-            Err(e) => shell_println!("kernelbuild: test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("kernelbuild: test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("kernelbuild — kernel/OS component build configuration");
@@ -39170,7 +39982,10 @@ fn cmd_wakesensor(args: &str) {
         }
         "test" => match wakesensor::self_test() {
             Ok(()) => shell_println!("wakesensor: all tests passed"),
-            Err(e) => shell_println!("wakesensor: test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("wakesensor: test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("wakesensor — webcam/mic-based screen wake (opt-in)");
@@ -39672,7 +40487,10 @@ fn cmd_netsettings(args: &str) {
         }
         "test" => match netsettings::self_test() {
             Ok(()) => shell_println!("netsettings: all tests passed"),
-            Err(e) => shell_println!("netsettings: test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("netsettings: test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             #[inline(never)]
@@ -39922,7 +40740,10 @@ fn cmd_sysinfo(args: &str) {
         }
         "test" => match sysinfo::self_test() {
             Ok(()) => shell_println!("sysinfo: all tests passed"),
-            Err(e) => shell_println!("sysinfo: test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("sysinfo: test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("sysinfo — system information explorer");
@@ -40166,7 +40987,10 @@ fn cmd_perfmon(args: &str) {
         }
         "test" => match perfmon::self_test() {
             Ok(()) => shell_println!("perfmon: all tests passed"),
-            Err(e) => shell_println!("perfmon: test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("perfmon: test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("perfmon — performance monitor / resource tracker");
@@ -40992,6 +41816,9 @@ fn cmd_sysdiag(args: &str) {
             if issues.is_empty() {
                 shell_println!("System health: OK — no issues detected");
             } else {
+                // No `set_exit(1)`: `diag` is a dashboard, not a checker. See
+                // the longer note on the same decision in `cmd_diag`'s overall
+                // assessment.
                 shell_println!("System health: {} issue(s)", issues.len());
                 for issue in &issues {
                     let sev = issue.severity.label();
@@ -42086,7 +42913,10 @@ fn cmd_envvars(args: &str) {
             if let Some(name) = parts.get(1) {
                 match envvars::get_system(name) {
                     Ok(val) => shell_println!("{}={}", name, val),
-                    Err(_) => shell_println!("{}: not set", name),
+                    Err(_) => {
+                        shell_println!("{}: not set", name);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: envvars get <NAME>");
@@ -42158,7 +42988,10 @@ fn cmd_envvars(args: &str) {
                             if let Some(name) = parts.get(3) {
                                 match envvars::get_user(uid, name) {
                                     Ok(val) => shell_println!("[uid {}] {}={}", uid, name, val),
-                                    Err(_) => shell_println!("{}: not set for uid {}", name, uid),
+                                    Err(_) => {
+                                        shell_println!("{}: not set for uid {}", name, uid);
+                                        set_exit(1);
+                                    }
                                 }
                             } else {
                                 shell_println!("Usage: envvars user <uid> get <NAME>");
@@ -51239,7 +52072,10 @@ fn cmd_elog(args: &str) {
         }
         "test" => match eventlog::self_test() {
             Ok(()) => shell_println!("Event log self-test: PASSED"),
-            Err(e) => shell_println!("Event log self-test: FAILED ({:?})", e),
+            Err(e) => {
+                shell_println!("Event log self-test: FAILED ({:?})", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let st = eventlog::stats();
@@ -51458,7 +52294,10 @@ fn cmd_logpersist(args: &str) {
         }
         "test" => match logpersist::self_test() {
             Ok(()) => shell_println!("Log persistence self-test: PASSED"),
-            Err(e) => shell_println!("Log persistence self-test: FAILED ({:?})", e),
+            Err(e) => {
+                shell_println!("Log persistence self-test: FAILED ({:?})", e);
+                set_exit(1);
+            }
         },
         "help" => {
             shell_println!("logpersist — event log persistence to disk");
@@ -51554,11 +52393,17 @@ fn cmd_svcstart(args: &str) {
                     shell_println!("  Level {}: {}", i, names.join(", "));
                 }
             }
-            Err(e) => shell_println!("Resolve failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Resolve failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "boot" => match svcstart::boot_services() {
             Ok(n) => shell_println!("Boot sequence complete: {} services started", n),
-            Err(e) => shell_println!("Boot failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Boot failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "crash" => {
             if let Some(id_str) = parts.get(1) {
@@ -51817,7 +52662,10 @@ fn cmd_svcstart(args: &str) {
         }
         "test" => match svcstart::self_test() {
             Ok(()) => shell_println!("Service startup self-test: PASSED"),
-            Err(e) => shell_println!("Service startup self-test: FAILED ({:?})", e),
+            Err(e) => {
+                shell_println!("Service startup self-test: FAILED ({:?})", e);
+                set_exit(1);
+            }
         },
         "help" => {
             shell_println!("svcstart — service startup orchestration");
@@ -51983,7 +52831,10 @@ fn cmd_drvmon(args: &str) {
         }
         "test" => match drvmon::self_test() {
             Ok(()) => shell_println!("Driver monitor self-test: PASSED"),
-            Err(e) => shell_println!("Driver monitor self-test: FAILED ({:?})", e),
+            Err(e) => {
+                shell_println!("Driver monitor self-test: FAILED ({:?})", e);
+                set_exit(1);
+            }
         },
         "help" => {
             shell_println!("drvmon — driver monitor (health, crash detection, auto-restart)");
@@ -53378,6 +54229,7 @@ fn cmd_httpc(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("Request failed: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -53398,6 +54250,7 @@ fn cmd_httpc(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("Request failed: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -53433,6 +54286,7 @@ fn cmd_httpc(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("Request failed: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -53448,7 +54302,10 @@ fn cmd_httpc(args: &str) {
         }
         "test" => match http::self_test() {
             Ok(()) => shell_println!("HTTP self-test: PASSED"),
-            Err(e) => shell_println!("HTTP self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("HTTP self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'httpc help'.", sub);
@@ -53641,7 +54498,10 @@ fn cmd_httpd(args: &str) {
         }
         "test" => match httpd::self_test() {
             Ok(()) => shell_println!("HTTPD self-test: PASSED"),
-            Err(e) => shell_println!("HTTPD self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("HTTPD self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'httpd help'.", sub);
@@ -53667,7 +54527,10 @@ fn cmd_ws(args: &str) {
         }
         "test" => match websocket::self_test() {
             Ok(()) => shell_println!("WebSocket self-test: PASSED"),
-            Err(e) => shell_println!("WebSocket self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("WebSocket self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         "key" => {
             let client_key = parts.get(1).copied().unwrap_or("");
@@ -53918,7 +54781,10 @@ fn cmd_dhcpd(args: &str) {
         }
         "test" => match dhcpd::self_test() {
             Ok(()) => shell_println!("DHCP server self-test: PASSED"),
-            Err(e) => shell_println!("DHCP server self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("DHCP server self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'dhcpd help'.", sub);
@@ -53970,7 +54836,10 @@ fn cmd_ntp(args: &str) {
                     let corrected = ntp::corrected_unix_secs();
                     shell_println!("Corrected Unix time: {}", corrected);
                 }
-                Err(e) => shell_println!("Sync failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Sync failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "sync6" => {
@@ -53984,7 +54853,10 @@ fn cmd_ntp(args: &str) {
                     let corrected = ntp::corrected_unix_secs();
                     shell_println!("Corrected Unix time: {}", corrected);
                 }
-                Err(e) => shell_println!("IPv6 sync failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("IPv6 sync failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "servers" => {
@@ -54065,7 +54937,10 @@ fn cmd_ntp(args: &str) {
         }
         "test" => match ntp::self_test() {
             Ok(()) => shell_println!("NTP self-test: PASSED"),
-            Err(e) => shell_println!("NTP self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("NTP self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         "help" => {
             shell_println!("ntp — NTP time synchronization");
@@ -54150,7 +55025,10 @@ fn cmd_mdns(args: &str) {
             shell_println!("Resolving {} ...", query);
             match mdns::resolve_local(&query) {
                 Ok(ip) => shell_println!("{} -> {}", query, ip),
-                Err(e) => shell_println!("Failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "resolve6" => {
@@ -54169,7 +55047,10 @@ fn cmd_mdns(args: &str) {
             shell_println!("Resolving {} (AAAA) ...", query);
             match mdns::resolve_local_v6(&query) {
                 Ok(ip6) => shell_println!("{} -> {}", query, ip6),
-                Err(e) => shell_println!("Failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "browse" => {
@@ -54223,7 +55104,10 @@ fn cmd_mdns(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Browse failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Browse failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "register" => {
@@ -54295,7 +55179,10 @@ fn cmd_mdns(args: &str) {
         }
         "test" => match mdns::self_test() {
             Ok(()) => shell_println!("mDNS self-test: PASSED"),
-            Err(e) => shell_println!("mDNS self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("mDNS self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         "help" => {
             shell_println!("mdns — mDNS / DNS-SD service discovery (IPv4 + IPv6)");
@@ -54430,7 +55317,10 @@ fn cmd_telnetd(args: &str) {
         }
         "test" => match telnet::self_test() {
             Ok(()) => shell_println!("Telnet self-test: PASSED"),
-            Err(e) => shell_println!("Telnet self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("Telnet self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         "help" => {
             shell_println!("telnetd — remote kernel shell server");
@@ -54501,7 +55391,10 @@ fn cmd_sshd(args: &str) {
         }
         "test" => match ssh::self_test() {
             Ok(()) => shell_println!("SSH self-test: PASSED"),
-            Err(e) => shell_println!("SSH self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("SSH self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         "help" => {
             shell_println!("sshd — secure remote kernel shell server");
@@ -54581,10 +55474,16 @@ fn cmd_tftp(args: &str) {
                     let local_path = alloc::format!("/{}", filename);
                     match crate::fs::vfs::Vfs::write_file(&local_path, &data) {
                         Ok(()) => shell_println!("Saved to {}", local_path),
-                        Err(e) => shell_println!("Save failed: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Save failed: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
-                Err(e) => shell_println!("Download failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Download failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "put" => {
@@ -54616,7 +55515,10 @@ fn cmd_tftp(args: &str) {
                     );
                     match tftp::put(ip, filename, &data) {
                         Ok(()) => shell_println!("Upload complete"),
-                        Err(e) => shell_println!("Upload failed: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Upload failed: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 Err(e) => {
@@ -54650,10 +55552,16 @@ fn cmd_tftp(args: &str) {
                     let local_path = alloc::format!("/{}", filename);
                     match crate::fs::vfs::Vfs::write_file(&local_path, &data) {
                         Ok(()) => shell_println!("Saved to {}", local_path),
-                        Err(e) => shell_println!("Save failed: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Save failed: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
-                Err(e) => shell_println!("Download failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Download failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "put6" => {
@@ -54685,7 +55593,10 @@ fn cmd_tftp(args: &str) {
                     );
                     match tftp::put_v6(ip6, filename, &data) {
                         Ok(()) => shell_println!("Upload complete"),
-                        Err(e) => shell_println!("Upload failed: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Upload failed: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 Err(e) => {
@@ -54710,7 +55621,10 @@ fn cmd_tftp(args: &str) {
         }
         "test" => match tftp::self_test() {
             Ok(()) => shell_println!("TFTP self-test: PASSED"),
-            Err(e) => shell_println!("TFTP self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("TFTP self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         "help" => {
             shell_println!("tftp — Trivial File Transfer Protocol (IPv4 + IPv6)");
@@ -54893,7 +55807,10 @@ fn cmd_netsyslog(args: &str) {
         }
         "test" => match syslog::self_test() {
             Ok(()) => shell_println!("Syslog self-test: PASSED"),
-            Err(e) => shell_println!("Syslog self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("Syslog self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         "help" => {
             shell_println!("syslog — network syslog client/receiver");
@@ -54939,7 +55856,10 @@ fn cmd_wol(args: &str) {
         }
         "test" => match wol::self_test() {
             Ok(()) => shell_println!("WoL self-test: PASSED"),
-            Err(e) => shell_println!("WoL self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("WoL self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             // Treat first arg as MAC address.
@@ -54956,7 +55876,10 @@ fn cmd_wol(args: &str) {
             shell_println!("Sending WoL magic packet to {} ...", mac);
             match wol::wake(mac, broadcast) {
                 Ok(()) => shell_println!("Magic packet sent"),
-                Err(e) => shell_println!("Failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
     }
@@ -55067,6 +55990,7 @@ fn cmd_pcap(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("Export failed: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -55082,7 +56006,10 @@ fn cmd_pcap(args: &str) {
         },
         "test" => match pcap::self_test() {
             Ok(()) => shell_println!("pcap self-test: PASSED"),
-            Err(e) => shell_println!("pcap self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("pcap self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'pcap help'.", sub);
@@ -55119,7 +56046,10 @@ fn cmd_traceroute(args: &str) {
         }
         "test" => match traceroute::self_test() {
             Ok(()) => shell_println!("traceroute self-test: PASSED"),
-            Err(e) => shell_println!("traceroute self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("traceroute self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             // First arg is an IP address.
@@ -55204,6 +56134,7 @@ fn cmd_traceroute(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("traceroute failed: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -55239,7 +56170,10 @@ fn cmd_traceroute6(args: &str) {
         }
         "test" => match traceroute::self_test() {
             Ok(()) => shell_println!("traceroute self-test: PASSED"),
-            Err(e) => shell_println!("traceroute self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("traceroute self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             // First arg is an IPv6 address or hostname.
@@ -55324,6 +56258,7 @@ fn cmd_traceroute6(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("traceroute6 failed: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -55397,7 +56332,10 @@ fn cmd_igmp(args: &str) {
         }
         "test" => match igmp::self_test() {
             Ok(()) => shell_println!("IGMP self-test: PASSED"),
-            Err(e) => shell_println!("IGMP self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("IGMP self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'igmp help'.", sub);
@@ -55474,7 +56412,10 @@ fn cmd_mld(args: &str) {
         }
         "test" => match mld::self_test() {
             Ok(()) => shell_println!("MLD self-test: PASSED"),
-            Err(e) => shell_println!("MLD self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("MLD self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'mld help'.", sub);
@@ -55563,7 +56504,10 @@ fn cmd_lldp(args: &str) {
         }
         "test" => match lldp::self_test() {
             Ok(()) => shell_println!("LLDP self-test: PASSED"),
-            Err(e) => shell_println!("LLDP self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("LLDP self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'lldp help'.", sub);
@@ -55632,7 +56576,10 @@ fn cmd_netstat(args: &str) {
         }
         "test" => match netstat::self_test() {
             Ok(()) => shell_println!("netstat self-test: PASSED"),
-            Err(e) => shell_println!("netstat self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("netstat self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         "-6" | "--ipv6" => {
             shell_print!("{}", netstat::format_ipv6_info());
@@ -55711,7 +56658,10 @@ fn cmd_ndisc(args: &str) {
                         shell_println!("{:<16}  {:<18}  {}", host.ip, host.mac, name);
                     }
                 }
-                Err(e) => shell_println!("Scan failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Scan failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "scan6" => {
@@ -55744,7 +56694,10 @@ fn cmd_ndisc(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Scan failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Scan failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "probe" => {
@@ -55761,7 +56714,10 @@ fn cmd_ndisc(args: &str) {
                             }
                         }
                         Ok(None) => shell_println!("  No response from {}", ip),
-                        Err(e) => shell_println!("  Probe failed: {:?}", e),
+                        Err(e) => {
+                            shell_println!("  Probe failed: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 None => shell_println!("Usage: ndisc probe <IP>"),
@@ -55782,7 +56738,10 @@ fn cmd_ndisc(args: &str) {
                             }
                         }
                         Ok(None) => shell_println!("  No response from {}", ip6),
-                        Err(e) => shell_println!("  Probe failed: {:?}", e),
+                        Err(e) => {
+                            shell_println!("  Probe failed: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 None => {
@@ -55867,7 +56826,10 @@ fn cmd_ndisc(args: &str) {
         }
         "test" => match ndisc::self_test() {
             Ok(()) => shell_println!("ndisc self-test: PASSED"),
-            Err(e) => shell_println!("ndisc self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("ndisc self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'ndisc help'.", sub);
@@ -55891,7 +56853,10 @@ fn cmd_bridge(args: &str) {
             }
             match crate::net::bridge::create_bridge(parts[1]) {
                 Ok(idx) => shell_println!("Bridge '{}' created (index {})", parts[1], idx),
-                Err(e) => shell_println!("brctl: create failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("brctl: create failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -55911,7 +56876,10 @@ fn cmd_bridge(args: &str) {
             };
             match crate::net::bridge::delete_bridge(idx) {
                 Ok(()) => shell_println!("Bridge {} deleted", idx),
-                Err(e) => shell_println!("brctl: delete failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("brctl: delete failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -55939,7 +56907,10 @@ fn cmd_bridge(args: &str) {
             };
             match crate::net::bridge::add_port(br_idx, port_id) {
                 Ok(()) => shell_println!("Port {} added to bridge {}", port_id, br_idx),
-                Err(e) => shell_println!("brctl: add port failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("brctl: add port failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -55967,7 +56938,10 @@ fn cmd_bridge(args: &str) {
             };
             match crate::net::bridge::remove_port(br_idx, port_id) {
                 Ok(()) => shell_println!("Port {} removed from bridge {}", port_id, br_idx),
-                Err(e) => shell_println!("brctl: remove port failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("brctl: remove port failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -55990,7 +56964,10 @@ fn cmd_bridge(args: &str) {
             };
             match crate::net::bridge::create_bond(parts[1], mode) {
                 Ok(idx) => shell_println!("Bond '{}' created (index {})", parts[1], idx),
-                Err(e) => shell_println!("brctl: create bond failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("brctl: create bond failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -56010,7 +56987,10 @@ fn cmd_bridge(args: &str) {
             };
             match crate::net::bridge::delete_bond(idx) {
                 Ok(()) => shell_println!("Bond {} deleted", idx),
-                Err(e) => shell_println!("brctl: delete failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("brctl: delete failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -56055,7 +57035,10 @@ fn cmd_bridge(args: &str) {
 
         "test" => match crate::net::bridge::self_test() {
             Ok(()) => shell_println!("bridge: all self-tests passed"),
-            Err(e) => shell_println!("bridge: self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("bridge: self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
 
         _ => {
@@ -56335,7 +57318,10 @@ fn cmd_socks(args: &str) {
                             );
                         }
                     }
-                    Err(e) => shell_println!("socks: connect failed: {:?}", e),
+                    Err(e) => {
+                        shell_println!("socks: connect failed: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Connecting via SOCKS5 proxy {}:{}...", proxy_ip, proxy_port);
@@ -56360,7 +57346,10 @@ fn cmd_socks(args: &str) {
                             );
                         }
                     }
-                    Err(e) => shell_println!("socks: connect failed: {:?}", e),
+                    Err(e) => {
+                        shell_println!("socks: connect failed: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -56388,7 +57377,10 @@ fn cmd_socks(args: &str) {
 
         "test" => match crate::net::socks::self_test() {
             Ok(()) => shell_println!("socks: all self-tests passed"),
-            Err(e) => shell_println!("socks: self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("socks: self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
 
         _ => {
@@ -56462,7 +57454,10 @@ fn cmd_qos(args: &str) {
 
             match crate::net::qos::add_rule(match_on, priority) {
                 Ok(()) => shell_println!("Rule added: {} {} → priority {}", kind, value, priority),
-                Err(e) => shell_println!("qos: add rule failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("qos: add rule failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -56529,7 +57524,10 @@ fn cmd_qos(args: &str) {
                     rate,
                     burst
                 ),
-                Err(e) => shell_println!("qos: rate limit failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("qos: rate limit failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -56624,7 +57622,10 @@ fn cmd_qos(args: &str) {
 
         "test" => match crate::net::qos::self_test() {
             Ok(()) => shell_println!("qos: all self-tests passed"),
-            Err(e) => shell_println!("qos: self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("qos: self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
 
         _ => {
@@ -56671,7 +57672,10 @@ fn cmd_vlan(args: &str) {
 
             match crate::net::vlan::add_vlan(vid, name) {
                 Ok(()) => shell_println!("VLAN {} added", vid),
-                Err(e) => shell_println!("vlan: add failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("vlan: add failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -56692,7 +57696,10 @@ fn cmd_vlan(args: &str) {
 
             match crate::net::vlan::remove_vlan(vid) {
                 Ok(()) => shell_println!("VLAN {} removed", vid),
-                Err(e) => shell_println!("vlan: remove failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("vlan: remove failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -56740,7 +57747,10 @@ fn cmd_vlan(args: &str) {
 
         "test" => match crate::net::vlan::self_test() {
             Ok(()) => shell_println!("vlan: all self-tests passed"),
-            Err(e) => shell_println!("vlan: self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("vlan: self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
 
         _ => {
@@ -56805,7 +57815,10 @@ fn cmd_smtp(args: &str) {
                         shell_println!("Message rejected: {}", result.server_reply);
                     }
                 }
-                Err(e) => shell_println!("smtp: send failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("smtp: send failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -56832,7 +57845,10 @@ fn cmd_smtp(args: &str) {
 
         "test" => match crate::net::smtp::self_test() {
             Ok(()) => shell_println!("smtp: all self-tests passed"),
-            Err(e) => shell_println!("smtp: self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("smtp: self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
 
         _ => {
@@ -56888,7 +57904,10 @@ fn cmd_ftp(args: &str) {
                         shell_println!("Login failed");
                     }
                 }
-                Err(e) => shell_println!("ftp: connect failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("ftp: connect failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -56928,7 +57947,10 @@ fn cmd_ftp(args: &str) {
                         shell_println!("  {}", line);
                     }
                 }
-                Err(e) => shell_println!("ftp: list failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("ftp: list failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -56975,7 +57997,10 @@ fn cmd_ftp(args: &str) {
                         shell_println!("  (binary data, {} bytes)", data.len());
                     }
                 }
-                Err(e) => shell_println!("ftp: download failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("ftp: download failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -57007,7 +58032,10 @@ fn cmd_ftp(args: &str) {
 
         "test" => match crate::net::ftp::self_test() {
             Ok(()) => shell_println!("ftp: all self-tests passed"),
-            Err(e) => shell_println!("ftp: self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("ftp: self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
 
         _ => {
@@ -57075,7 +58103,10 @@ fn cmd_snmp(args: &str) {
                 Ok(vb) => {
                     shell_println!("  {} = {}", vb.oid.to_string(), vb.value.display());
                 }
-                Err(e) => shell_println!("snmp: get failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("snmp: get failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -57216,7 +58247,10 @@ fn cmd_snmp(args: &str) {
                 Ok(vb) => {
                     shell_println!("  {} = {}", vb.oid.to_string(), vb.value.display());
                 }
-                Err(e) => shell_println!("snmp: get failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("snmp: get failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -57342,7 +58376,10 @@ fn cmd_snmp(args: &str) {
 
         "test" => match crate::net::snmp::self_test() {
             Ok(()) => shell_println!("snmp: all self-tests passed"),
-            Err(e) => shell_println!("snmp: self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("snmp: self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
 
         _ => {
@@ -57420,7 +58457,10 @@ fn cmd_iperf(args: &str) {
                         crate::net::iperf::format_bandwidth(result.throughput_bps)
                     );
                 }
-                Err(e) => shell_println!("iperf: test failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("iperf: test failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -57458,7 +58498,10 @@ fn cmd_iperf(args: &str) {
                         crate::net::iperf::format_bandwidth(result.throughput_bps)
                     );
                 }
-                Err(e) => shell_println!("iperf: server failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("iperf: server failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -57524,7 +58567,10 @@ fn cmd_iperf(args: &str) {
                         crate::net::iperf::format_duration(result.avg_jitter_ns)
                     );
                 }
-                Err(e) => shell_println!("iperf: test failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("iperf: test failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -57593,7 +58639,10 @@ fn cmd_iperf(args: &str) {
                         crate::net::iperf::format_duration(result.avg_jitter_ns)
                     );
                 }
-                Err(e) => shell_println!("iperf: test failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("iperf: test failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -57616,7 +58665,10 @@ fn cmd_iperf(args: &str) {
 
         "test" => match crate::net::iperf::self_test() {
             Ok(()) => shell_println!("iperf: all self-tests passed"),
-            Err(e) => shell_println!("iperf: self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("iperf: self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
 
         _ => {
@@ -57715,7 +58767,10 @@ fn cmd_nc(args: &str) {
                     // Close the connection.
                     crate::net::netcat::tcp_close(handle);
                 }
-                Err(e) => shell_println!("nc: connect failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("nc: connect failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -57758,7 +58813,10 @@ fn cmd_nc(args: &str) {
                     }
                     crate::net::netcat::tcp_close(handle);
                 }
-                Err(e) => shell_println!("nc: listen failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("nc: listen failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -57801,7 +58859,10 @@ fn cmd_nc(args: &str) {
                 Ok((handle, _)) => {
                     match crate::net::netcat::tcp_send(handle, data_str.as_bytes()) {
                         Ok(sent) => shell_println!("Sent {} bytes to {}:{}", sent, ip, port),
-                        Err(e) => shell_println!("nc: send failed: {:?}", e),
+                        Err(e) => {
+                            shell_println!("nc: send failed: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                     // Try to receive response.
                     match crate::net::netcat::tcp_recv(handle) {
@@ -57817,7 +58878,10 @@ fn cmd_nc(args: &str) {
                     }
                     crate::net::netcat::tcp_close(handle);
                 }
-                Err(e) => shell_println!("nc: connect failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("nc: connect failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -57856,7 +58920,10 @@ fn cmd_nc(args: &str) {
 
             match crate::net::netcat::udp_send(ip, port, data_str.as_bytes()) {
                 Ok(()) => shell_println!("Sent {} bytes (UDP) to {}:{}", data_str.len(), ip, port),
-                Err(e) => shell_println!("nc: udp send failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("nc: udp send failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -57897,7 +58964,10 @@ fn cmd_nc(args: &str) {
                 Ok(()) => {
                     shell_println!("Sent {} bytes (UDP6) to [{}]:{}", data_str.len(), ip6, port)
                 }
-                Err(e) => shell_println!("nc: udp6 send failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("nc: udp6 send failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -57943,7 +59013,10 @@ fn cmd_nc(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("nc: listen failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("nc: listen failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -58045,7 +59118,10 @@ fn cmd_nc(args: &str) {
 
         "test" => match crate::net::netcat::self_test() {
             Ok(()) => shell_println!("nc: all self-tests passed"),
-            Err(e) => shell_println!("nc: self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("nc: self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
 
         _ => {
@@ -59623,7 +60699,10 @@ fn cmd_servicemgr(args: &str) {
         }
         "test" => match servicemgr::self_test() {
             Ok(()) => shell_println!("Service manager self-test complete."),
-            Err(e) => shell_println!("Service manager self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("Service manager self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         "init" => {
             servicemgr::init_defaults();
@@ -68823,7 +69902,10 @@ fn cmd_multiclip(args: &str) {
             } else {
                 match multiclip::paste_slot(name) {
                     Ok(entry) => shell_println!("{}", entry.content),
-                    Err(e) => shell_println!("Slot '{}': {:?}", name, e),
+                    Err(e) => {
+                        shell_println!("Slot '{}': {:?}", name, e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -78843,6 +79925,7 @@ fn cmd_netspeed(args: &str) {
                     shell_println!(
                         "Use `netspeed bandwidth` to view real per-interface byte counters."
                     );
+                    set_exit(1);
                 }
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
@@ -81046,7 +82129,10 @@ fn cmd_nameservice(args: &str) {
                 Ok(r) => {
                     shell_println!("{} → {} (via {})", r.hostname, r.address, r.source.label())
                 }
-                Err(_) => shell_println!("Could not resolve '{}'.", name),
+                Err(_) => {
+                    shell_println!("Could not resolve '{}'.", name);
+                    set_exit(1);
+                }
             }
         }
         "hosts" => {
@@ -90810,7 +91896,10 @@ fn cmd_filepicker(args: &str) {
         }
         "test" => match filepicker::self_test() {
             Ok(()) => shell_println!("All file picker self-tests passed"),
-            Err(e) => shell_println!("File picker self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("File picker self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             #[inline(never)]
@@ -91130,7 +92219,10 @@ fn cmd_taskbar(args: &str) {
         }
         "test" => match taskbar::self_test() {
             Ok(()) => shell_println!("All taskbar self-tests passed"),
-            Err(e) => shell_println!("Taskbar self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Taskbar self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (pinned_n, running_n, window_n, pin_ops, win_ops) = taskbar::stats();
@@ -91408,7 +92500,10 @@ fn cmd_startmenu(args: &str) {
         },
         "test" => match startmenu::self_test() {
             Ok(()) => shell_println!("All start menu self-tests passed"),
-            Err(e) => shell_println!("Start menu self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Start menu self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (favs, qls, recent, opens, searches, launches) = startmenu::stats();
@@ -91721,7 +92816,10 @@ fn cmd_systray(args: &str) {
         }
         "test" => match systray::self_test() {
             Ok(()) => shell_println!("All system tray self-tests passed"),
-            Err(e) => shell_println!("System tray self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("System tray self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (icons, overrides, adds, clicks) = systray::stats();
@@ -91912,7 +93010,10 @@ fn cmd_fflags(args: &str) {
         }
         "test" => match immutable::self_test() {
             Ok(()) => shell_println!("All immutable self-tests passed"),
-            Err(e) => shell_println!("Immutable self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("Immutable self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (flagged, set_ops, check_ops) = immutable::stats();
@@ -92873,7 +93974,10 @@ fn cmd_setfacl(args: &str) {
 
             match acl::set_acl(&path, a) {
                 Ok(()) => shell_println!("ACL updated for {}", path.display()),
-                Err(e) => shell_println!("Error setting ACL: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error setting ACL: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -93779,7 +94883,20 @@ fn cmd_hexdump(args: &str) {
     }
 }
 
-/// Search for a pattern in a file (simple substring grep).
+// The `grep` family: flag parsing, the per-file search, the recursive walk, and
+// the tally that carries their verdict back to the caller.
+//
+// A plain comment, not a doc comment. It used to read `/// Search for a pattern
+// in a file (simple substring grep).` — left over from a function that no longer
+// exists here, so it was silently documenting whatever item happened to follow
+// it, which after this change would have been the depth limit.
+
+/// How deep `grep -r` will descend before giving up on a subtree.
+///
+/// Named rather than inlined because the limit is now *reported* when it bites,
+/// and the diagnostic and the check must not be able to drift apart.
+const MAX_GREP_DEPTH: usize = 16;
+
 /// Grep flags parsed from command-line arguments.
 struct GrepFlags {
     case_insensitive: bool,
@@ -93805,6 +94922,35 @@ impl GrepFlags {
             max_matches: 200,
         }
     }
+}
+
+/// What a `grep` run produced: what it found, and what it could not look at.
+///
+/// `grep` has **three** outcomes, not two. GNU exits 0 when it matched, 1 when
+/// it searched everywhere it was asked to and found nothing, and 2 when it
+/// could not *look* — an unreadable file, a directory it could not stat.
+///
+/// The search used to carry a bare match count, which folds the third outcome
+/// into the second: every failure to read ended as "no matches", exit 1. So
+/// `grep pat missing-file || echo "not present"` reported a missing *file* as
+/// missing *text*, and `grep -r pat /typo` reported a mistyped directory as a
+/// clean search of it. Both are the silent-success shape from the other end —
+/// the command does report something, it just reports the wrong one of two
+/// indistinguishable-looking answers.
+///
+/// Carrying the two numbers side by side is what lets the caller tell "looked
+/// and found nothing" from "never got to look".
+#[derive(Default)]
+struct GrepTally {
+    /// Lines matched across every target searched so far.
+    matches: usize,
+    /// Targets the search could not read: a file that failed to open, a path
+    /// that failed to stat, a subtree cut off by the depth limit.
+    ///
+    /// Counted rather than flagged because the count is worth reporting, and
+    /// because a partly-completed search is a different thing from one that
+    /// never started.
+    unreadable: usize,
 }
 
 /// Check if a character is a word boundary (not alphanumeric or underscore).
@@ -93857,6 +95003,14 @@ fn to_lower(s: &str) -> String {
     out
 }
 
+/// `grep [-ivclnwrI] PATTERN TARGET...` — search files, or trees with `-r`.
+///
+/// Exits with GNU's three-valued status: **0** matched, **1** searched
+/// everything it was asked to and found nothing, **2** could not search — an
+/// unreadable file, an unstattable path, a subtree cut off by the depth limit,
+/// or a usage error. See [`GrepTally`] for why the third value has to exist:
+/// without it, `grep pat missing-file || echo absent` reports a missing *file*
+/// as missing *text*.
 fn cmd_grep(args: &str) {
     let mut flags = GrepFlags::new();
     let mut words: alloc::vec::Vec<&str> = Vec::new();
@@ -93875,8 +95029,13 @@ fn cmd_grep(args: &str) {
                     'w' => flags.whole_word = true,
                     'r' | 'R' => flags.recursive = true,
                     _ => {
+                        // 2, not the shell's usual 1: within `grep`, 1 is the
+                        // reserved, meaningful answer "searched, found
+                        // nothing". A usage error that returned 1 would tell
+                        // `grep -Z pat f || echo absent` that the pattern is
+                        // absent from a file it never opened.
                         shell_println!("grep: unknown flag '-{}'", ch);
-                        set_exit(1);
+                        set_exit(2);
                         return;
                     }
                 }
@@ -93888,7 +95047,7 @@ fn cmd_grep(args: &str) {
 
     if words.is_empty() {
         shell_println!("Usage: grep [-ivclnwrI] <pattern> <file|dir> [file2 ...]");
-        set_exit(1);
+        set_exit(2);
         return;
     }
 
@@ -93897,7 +95056,7 @@ fn cmd_grep(args: &str) {
         &words[1..]
     } else {
         shell_println!("Usage: grep [-ivclnwrI] <pattern> <file|dir> [file2 ...]");
-        set_exit(1);
+        set_exit(2);
         return;
     };
 
@@ -93908,7 +95067,7 @@ fn cmd_grep(args: &str) {
     };
 
     let multi_file = targets.len() > 1 || flags.recursive;
-    let mut total_matches = 0usize;
+    let mut tally = GrepTally::default();
 
     for &target in targets {
         let path = resolve_path(target);
@@ -93918,7 +95077,7 @@ fn cmd_grep(args: &str) {
                 &pattern_cmp,
                 &flags,
                 multi_file,
-                &mut total_matches,
+                &mut tally,
                 0,
             );
         } else {
@@ -93927,33 +95086,56 @@ fn cmd_grep(args: &str) {
                 &pattern_cmp,
                 &flags,
                 multi_file,
-                &mut total_matches,
+                &mut tally,
             );
         }
-        if total_matches >= flags.max_matches {
+        if tally.matches >= flags.max_matches {
             break;
         }
     }
 
     if flags.count_only && !multi_file {
-        shell_println!("{}", total_matches);
-    } else if total_matches == 0 && !flags.count_only && !flags.files_only {
+        shell_println!("{}", tally.matches);
+    } else if tally.matches == 0 && !flags.count_only && !flags.files_only && tally.unreadable == 0
+    {
+        // Only claim "no matches" when the search actually completed. Saying it
+        // after a failure to read would assert the file's *contents* lack the
+        // pattern, which is precisely what was never established.
         shell_println!("grep: no matches for '{}'", pattern);
     }
-    // Same contract as the piped form above: no match is exit 1, whatever the
-    // output flags. The two halves must agree, or `grep pat f` and
-    // `cat f | grep pat` would answer `&&` differently.
-    if total_matches == 0 {
+
+    // GNU's three-way status: 0 matched, 1 searched and found nothing, 2 could
+    // not look. The failure to look outranks the empty result -- a run that
+    // could not read one of three files has not established that the pattern is
+    // absent, so it must not answer as though it had.
+    //
+    // Same contract as the piped form: no match is exit 1, whatever the output
+    // flags. The two halves must agree, or `grep pat f` and `cat f | grep pat`
+    // would answer `&&` differently.
+    if tally.unreadable > 0 {
+        set_exit(2);
+    } else if tally.matches == 0 {
         set_exit(1);
     }
 }
 
 /// Search a single file for grep matches.
-fn grep_file(path: &Path, pattern: &str, flags: &GrepFlags, multi_file: bool, total: &mut usize) {
+///
+/// Records both halves of the outcome in `tally`: matches found, and any
+/// failure to read this file. A caller cannot tell those apart from the match
+/// count alone — see [`GrepTally`].
+fn grep_file(
+    path: &Path,
+    pattern: &str,
+    flags: &GrepFlags,
+    multi_file: bool,
+    tally: &mut GrepTally,
+) {
     let data = match crate::fs::Vfs::read_file(path) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("grep: {}: {:?}", path.display(), e);
+            tally.unreadable = tally.unreadable.saturating_add(1);
             return;
         }
     };
@@ -93961,9 +95143,17 @@ fn grep_file(path: &Path, pattern: &str, flags: &GrepFlags, multi_file: bool, to
     let text = match core::str::from_utf8(&data) {
         Ok(s) => s,
         Err(_) => {
-            // Skip binary files silently in recursive mode.
+            // A binary file named explicitly is a file we were asked to search
+            // and did not: that is a failure to look, and it prints a
+            // diagnostic saying so, so it owes a non-zero status too.
+            //
+            // In recursive mode it is neither. `grep -r` walks whatever is
+            // there, and skipping the binaries it finds along the way is the
+            // expected behaviour rather than a refusal — hence silent, and not
+            // counted.
             if !flags.recursive {
                 shell_println!("grep: {}: binary file", path.display());
+                tally.unreadable = tally.unreadable.saturating_add(1);
             }
             return;
         }
@@ -93983,7 +95173,7 @@ fn grep_file(path: &Path, pattern: &str, flags: &GrepFlags, multi_file: bool, to
 
         if show {
             file_matches = file_matches.saturating_add(1);
-            *total = total.saturating_add(1);
+            tally.matches = tally.matches.saturating_add(1);
 
             if flags.files_only {
                 shell_println!("{}", path.display());
@@ -94002,7 +95192,7 @@ fn grep_file(path: &Path, pattern: &str, flags: &GrepFlags, multi_file: bool, to
                 }
             }
 
-            if *total >= flags.max_matches {
+            if tally.matches >= flags.max_matches {
                 shell_println!("... (showing first {} matches)", flags.max_matches);
                 return;
             }
@@ -94015,36 +95205,65 @@ fn grep_file(path: &Path, pattern: &str, flags: &GrepFlags, multi_file: bool, to
 }
 
 /// Recursively search a directory for grep matches (depth limit 16).
+///
+/// Every way this can decline to search something now says so and records it in
+/// `tally`. It previously had three bare `return`s — an unstattable path, an
+/// unreadable directory, and the depth cutoff — each of which left no trace at
+/// all, so `grep -r pat /typo` printed nothing and exited 1, exactly as a
+/// successful search of an empty tree does.
 fn grep_recursive(
     path: &Path,
     pattern: &str,
     flags: &GrepFlags,
     multi_file: bool,
-    total: &mut usize,
+    tally: &mut GrepTally,
     depth: usize,
 ) {
-    if depth > 16 || *total >= flags.max_matches {
+    // Two unrelated stopping conditions used to share one `if`. Only one of
+    // them is a failure: reaching the match cap is the ordinary, already-
+    // announced end of a successful search (`grep_file` prints "showing first
+    // N"), whereas running out of depth means a subtree was never looked at.
+    if tally.matches >= flags.max_matches {
+        return;
+    }
+    if depth > MAX_GREP_DEPTH {
+        shell_println!(
+            "grep: {}: recursion limit ({}) reached, not searched",
+            path.display(),
+            MAX_GREP_DEPTH
+        );
+        tally.unreadable = tally.unreadable.saturating_add(1);
         return;
     }
 
     // Check if path is a directory or file.
     let entry = match crate::fs::Vfs::stat(path) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(e) => {
+            shell_println!("grep: {}: {:?}", path.display(), e);
+            tally.unreadable = tally.unreadable.saturating_add(1);
+            return;
+        }
     };
 
     if entry.entry_type == crate::fs::vfs::EntryType::File {
-        grep_file(path, pattern, flags, multi_file, total);
+        grep_file(path, pattern, flags, multi_file, tally);
         return;
     }
 
     if entry.entry_type != crate::fs::vfs::EntryType::Directory {
+        // Neither file nor directory (a device node, a socket). Nothing to
+        // search and nothing withheld, so this one really is silent.
         return;
     }
 
     let entries = match crate::fs::Vfs::readdir(path) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(e) => {
+            shell_println!("grep: {}: {:?}", path.display(), e);
+            tally.unreadable = tally.unreadable.saturating_add(1);
+            return;
+        }
     };
 
     for child in &entries {
@@ -94061,7 +95280,7 @@ fn grep_recursive(
 
         match child.entry_type {
             crate::fs::vfs::EntryType::File => {
-                grep_file(&child_path, pattern, flags, multi_file, total);
+                grep_file(&child_path, pattern, flags, multi_file, tally);
             }
             crate::fs::vfs::EntryType::Directory => {
                 grep_recursive(
@@ -94069,14 +95288,14 @@ fn grep_recursive(
                     pattern,
                     flags,
                     multi_file,
-                    total,
+                    tally,
                     depth.saturating_add(1),
                 );
             }
             _ => {}
         }
 
-        if *total >= flags.max_matches {
+        if tally.matches >= flags.max_matches {
             return;
         }
     }
@@ -94085,11 +95304,21 @@ fn grep_recursive(
 /// Compare two files byte-by-byte.
 ///
 /// Usage: `cmp <file1> <file2>`
+///
+/// Exits with the same three-valued status as `grep`, and for the same reason:
+/// **0** the files are the same, **1** they differ, **2** the comparison could
+/// not be made — a file that would not open, or a usage error. Every one of
+/// those used to leave the status untouched, so a missing file was reported to
+/// `cmp a b && echo same` as *same*: `cmp` printed a diagnostic, returned 0, and
+/// the caller acted on a comparison that never happened.
 fn cmd_cmp(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
+        // 2, not 1: inside `cmp`, 1 is the reserved answer "compared them, they
+        // differ". A usage error returning 1 would report a mistyped command
+        // line as a real difference between two files nothing ever read.
         shell_println!("Usage: cmp <file1> <file2>");
-        set_exit(1);
+        set_exit(2);
         return;
     }
 
@@ -94100,6 +95329,7 @@ fn cmd_cmp(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("cmp: {}: {:?}", path1.display(), e);
+            set_exit(2);
             return;
         }
     };
@@ -94107,6 +95337,7 @@ fn cmd_cmp(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("cmp: {}: {:?}", path2.display(), e);
+            set_exit(2);
             return;
         }
     };
@@ -94118,6 +95349,9 @@ fn cmd_cmp(args: &str) {
             path2.display(),
             data1.len()
         );
+        // No `set_exit(0)`: `dispatch` zeroes the status before every command,
+        // so success is the state we are already in. Saying it again here would
+        // imply the other arms cannot rely on that, and they do.
         return;
     }
 
@@ -94143,6 +95377,10 @@ fn cmd_cmp(args: &str) {
         path2.display(),
         data2.len(),
     );
+    // The one outcome that has to be *said* in the status rather than only in
+    // the output: `cmp a b && cp a b` is the whole reason this command exists,
+    // and it was told "identical" every time the files differed.
+    set_exit(1);
 }
 
 /// Line-level diff between two text files (unified format).
@@ -94151,11 +95389,21 @@ fn cmd_cmp(args: &str) {
 ///
 /// Uses a simple LCS-based diff algorithm suitable for kernel context.
 /// Files are capped at 2000 lines to bound memory usage.
+///
+/// Exits with the same three-valued status as `cmp`: **0** identical, **1**
+/// they differ, **2** the comparison could not be made — an unreadable file, a
+/// usage error, or a file past the line cap. The last of those is why the
+/// distinction matters most here: `diff` prints *nothing at all* when the files
+/// are the same, so a run that declined to compare and a run that compared and
+/// found no difference were, before this, byte-identical **and**
+/// status-identical. There was no way for a caller to tell them apart.
 fn cmd_diff(args: &str) {
     let parts: Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
+        // 2, not 1: inside `diff`, 1 is the reserved answer "compared them,
+        // they differ".
         shell_println!("Usage: diff <file1> <file2>");
-        set_exit(1);
+        set_exit(2);
         return;
     }
 
@@ -94166,6 +95414,7 @@ fn cmd_diff(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("diff: {}: {:?}", path1.display(), e);
+            set_exit(2);
             return;
         }
     };
@@ -94173,12 +95422,14 @@ fn cmd_diff(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("diff: {}: {:?}", path2.display(), e);
+            set_exit(2);
             return;
         }
     };
 
     if data1 == data2 {
-        // Identical files — no output (like Unix diff).
+        // Identical files — no output (like Unix diff), and status 0, which
+        // `dispatch` has already set.
         return;
     }
 
@@ -94198,6 +95449,11 @@ fn cmd_diff(args: &str) {
             lines2.len(),
             MAX_LINES,
         );
+        // 2: this is a refusal to compare, not a comparison. Returning 0 here
+        // was the worst of the three -- the files are already known to differ
+        // (the byte compare above says so), and a silent 0 told the caller the
+        // opposite of a fact the command had in hand.
+        set_exit(2);
         return;
     }
 
@@ -94375,6 +95631,10 @@ fn cmd_diff(args: &str) {
         // newline differs. Show a minimal note.
         shell_println!("(files differ only in trailing newline)");
     }
+
+    // Reached only when `data1 != data2`, checked above, so every path here is
+    // a real difference regardless of how the hunks came out.
+    set_exit(1);
 }
 
 /// Pre-allocate disk space for a file.
@@ -94421,6 +95681,7 @@ fn cmd_fallocate(args: &str) {
         }
         Err(e) => {
             shell_println!("fallocate: {}: {:?}", path.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -94554,6 +95815,7 @@ fn cmd_lsp(args: &str) {
             }
             Err(e) => {
                 shell_println!("lsp: error: {:?}", e);
+                set_exit(1);
                 break;
             }
         }
@@ -94757,6 +96019,7 @@ fn cmd_umount(args: &str) {
         }
         Err(e) => {
             shell_println!("umount: {}: {:?}", path.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -94778,6 +96041,7 @@ fn cmd_sync() {
         }
         Err(e) => {
             shell_println!("sync: {:?}", e);
+            set_exit(1);
         }
     }
 }
@@ -95345,7 +96609,10 @@ fn cmd_gpu(args: &str) {
             };
             match crate::virtio::gpu::fill(color) {
                 Ok(()) => shell_println!("Filled display with color {:#010x}", color),
-                Err(e) => shell_println!("Fill failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Fill failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "flush" => {
@@ -95355,7 +96622,10 @@ fn cmd_gpu(args: &str) {
             }
             match crate::virtio::gpu::flush_full() {
                 Ok(()) => shell_println!("Display flushed"),
-                Err(e) => shell_println!("Flush failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Flush failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "test" => {
@@ -95388,7 +96658,10 @@ fn cmd_gpu(args: &str) {
             }
             match crate::virtio::gpu::flush_full() {
                 Ok(()) => shell_println!("Test pattern displayed (8 color bars)"),
-                Err(e) => shell_println!("Flush failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Flush failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         _ => {
@@ -95543,6 +96816,7 @@ fn cmd_dhcp() {
         }
         Err(e) => {
             shell_println!("DHCP failed: {:?}", e);
+            set_exit(1);
         }
     }
 }
@@ -95562,7 +96836,10 @@ fn cmd_dhcpv6(args: &str) {
                         shell_println!("  DNS server: {}", dns);
                     }
                 }
-                Err(e) => shell_println!("DHCPv6 discovery failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("DHCPv6 discovery failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "info" | "i" => {
@@ -95575,7 +96852,10 @@ fn cmd_dhcpv6(args: &str) {
                         shell_println!("  DNS server: {}", dns);
                     }
                 }
-                Err(e) => shell_println!("DHCPv6 info-request failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("DHCPv6 info-request failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "status" | "stats" => {
@@ -95596,7 +96876,10 @@ fn cmd_dhcpv6(args: &str) {
         }
         "test" => match crate::net::dhcpv6::self_test() {
             Ok(()) => shell_println!("DHCPv6 self-test: PASSED"),
-            Err(e) => shell_println!("DHCPv6 self-test FAILED: {:?}", e),
+            Err(e) => {
+                shell_println!("DHCPv6 self-test FAILED: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!("dhcpv6 — DHCPv6 client (IPv6 address/config)");
@@ -95652,6 +96935,7 @@ fn cmd_ping(args: &str) {
             }
             Err(e) => {
                 shell_println!("ping: send failed: {:?}", e);
+                set_exit(1);
             }
         }
 
@@ -95761,6 +97045,7 @@ fn cmd_ping6(args: &str) {
             }
             Err(e) => {
                 shell_println!("ping6: send failed: {:?}", e);
+                set_exit(1);
             }
         }
 
@@ -95819,7 +97104,10 @@ fn cmd_udp6(args: &str) {
             shell_println!("Sending {} bytes to [{}]:{} ...", msg.len(), dst, port);
             match crate::net::udp::send_v6(src_port, dst, port, msg.as_bytes()) {
                 Ok(()) => shell_println!("Sent."),
-                Err(e) => shell_println!("Send failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Send failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "listen" | "l" => {
@@ -96984,7 +98272,10 @@ fn cmd_wget(args: &str) {
                 }
                 shell_println!("\n--- End ({} bytes) ---", resp.body.len());
             }
-            Err(e) => shell_println!("HTTPS request failed: {:?}", e),
+            Err(e) => {
+                shell_println!("HTTPS request failed: {:?}", e);
+                set_exit(1);
+            }
         }
         return;
     }
@@ -97053,7 +98344,15 @@ fn cmd_wget(args: &str) {
         // Print as text.
         match core::str::from_utf8(&data) {
             Ok(text) => shell_print!("{}", text),
-            Err(_) => shell_print!("(binary: {} bytes)", data.len()),
+            // Same byte-clean refusal as `cat`, and a status for the same
+            // reason -- see the long comment there. Worse here, if anything:
+            // the placeholder is spliced into the *middle* of a stream, so a
+            // caller reading `nc` output gets a plausible-looking transcript
+            // with a sentence where a chunk of the peer's data should be.
+            Err(_) => {
+                shell_print!("(binary: {} bytes)", data.len());
+                set_exit(1);
+            }
         }
     }
 
@@ -97095,6 +98394,7 @@ fn cmd_dns(args: &str) {
             }
             Err(e) => {
                 shell_println!("AAAA resolution failed: {:?}", e);
+                set_exit(1);
             }
         }
     } else {
@@ -97105,6 +98405,7 @@ fn cmd_dns(args: &str) {
             }
             Err(e) => {
                 shell_println!("DNS resolution failed: {:?}", e);
+                set_exit(1);
             }
         }
     }
@@ -98274,7 +99575,8 @@ fn container_exec_rootfs(rest: &[&str]) {
                         code
                     ),
                     Err(e) => {
-                        shell_println!("[run-in] wait failed for pid {}: {:?}", spawned.pid, e)
+                        shell_println!("[run-in] wait failed for pid {}: {:?}", spawned.pid, e);
+                        set_exit(1);
                     }
                 }
                 // Unregister the finished process from container bookkeeping
@@ -98283,7 +99585,10 @@ fn container_exec_rootfs(rest: &[&str]) {
                 let _ = container::remove_process_task(id, spawned.pid, spawned.task_id);
             }
         }
-        Err(e) => shell_println!("[run-in] failed: {:?}", e),
+        Err(e) => {
+            shell_println!("[run-in] failed: {:?}", e);
+            set_exit(1);
+        }
     }
 }
 
@@ -99418,6 +100723,7 @@ fn cmd_container(args: &str) {
                     }
                     Err(crate::error::KernelError::InvalidArgument) => {
                         shell_println!("Container {} has no overlay rootfs (nothing to diff)", id);
+                        set_exit(1);
                     }
                     Err(e) => {
                         shell_println!("Container {}: Error: {:?}", id, e);
@@ -99659,7 +100965,8 @@ fn cmd_container(args: &str) {
                                         dst
                                     ),
                                     Err(e) => {
-                                        shell_println!("Failed to write '{}': {:?}", dst, e)
+                                        shell_println!("Failed to write '{}': {:?}", dst, e);
+                                        set_exit(1);
                                     }
                                 },
                                 Err(e) => {
@@ -99696,7 +101003,8 @@ fn cmd_container(args: &str) {
                                         }
                                     }
                                     Err(e) => {
-                                        shell_println!("Failed to archive '{}': {:?}", src, e)
+                                        shell_println!("Failed to archive '{}': {:?}", src, e);
+                                        set_exit(1);
                                     }
                                 }
                             }
@@ -99715,7 +101023,8 @@ fn cmd_container(args: &str) {
                                     }
                                 },
                                 Err(e) => {
-                                    shell_println!("Failed to read '{}': {:?}", src, e)
+                                    shell_println!("Failed to read '{}': {:?}", src, e);
+                                    set_exit(1);
                                 }
                             },
                             Err(e) => {
@@ -99931,7 +101240,8 @@ fn cmd_container(args: &str) {
                             out_path
                         ),
                         Err(e) => {
-                            shell_println!("Failed to write '{}': {:?}", out_path, e)
+                            shell_println!("Failed to write '{}': {:?}", out_path, e);
+                            set_exit(1);
                         }
                     },
                     Err(e) => {
@@ -100093,7 +101403,13 @@ fn cmd_container(args: &str) {
                         }
                         // Non-UTF-8 capture: don't force bytes through the text
                         // console — report the size (matches `cat`'s convention).
-                        Err(_) => shell_println!("(binary log, {} bytes)", data.len()),
+                        // The status goes with it, for the reason spelled out at
+                        // `cat`: `$(container logs 1)` that expands to a size in
+                        // English must not also report success.
+                        Err(_) => {
+                            shell_println!("(binary log, {} bytes)", data.len());
+                            set_exit(1);
+                        }
                     },
                     Err(e) => {
                         shell_println!("Error: {:?}", e);
@@ -100239,7 +101555,10 @@ fn cmd_container(args: &str) {
                         for name in parts.iter().skip(2) {
                             match crate::volume::remove(name) {
                                 Ok(()) => shell_println!("{}", name),
-                                Err(e) => shell_println!("{}: {:?}", name, e),
+                                Err(e) => {
+                                    shell_println!("{}: {:?}", name, e);
+                                    set_exit(1);
+                                }
                             }
                         }
                     }
@@ -100527,7 +101846,10 @@ fn cmd_container_network(parts: &[&str]) {
             for name in parts.iter().skip(2) {
                 match crate::cnetwork::remove(name) {
                     Ok(()) => shell_println!("{}", name),
-                    Err(e) => shell_println!("{}: {:?}", name, e),
+                    Err(e) => {
+                        shell_println!("{}: {:?}", name, e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -100910,12 +102232,18 @@ fn cmd_docker(args: &str) {
                             reference,
                             digest
                         ),
-                        Err(e) => shell_println!("commit tag failed: {:?}", e),
+                        Err(e) => {
+                            shell_println!("commit tag failed: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                     // Blobs are now copied into the store; drop the staging dir.
                     let _ = crate::fs::vfs::Vfs::remove_recursive(tmp);
                 }
-                Err(e) => shell_println!("commit failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("commit failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         // Named image store (`/var/lib/images`): `docker images` lists tagged
@@ -102525,7 +103853,10 @@ fn cmd_oci(args: &str) {
                             }
                         }
                     }
-                    Err(e) => shell_println!("Error loading image: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error loading image: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -102664,17 +103995,20 @@ fn cmd_oci(args: &str) {
                                         out_path
                                     ),
                                     Err(e) => {
-                                        shell_println!("Failed to write '{}': {:?}", out_path, e)
+                                        shell_println!("Failed to write '{}': {:?}", out_path, e);
+                                        set_exit(1);
                                     }
                                 }
                             }
                             Err(e) => {
-                                shell_println!("Failed to pack image '{}': {:?}", src, e)
+                                shell_println!("Failed to pack image '{}': {:?}", src, e);
+                                set_exit(1);
                             }
                         }
                     }
                     Err(e) => {
-                        shell_println!("Not a valid OCI image at '{}': {:?}", pack_dir, e)
+                        shell_println!("Not a valid OCI image at '{}': {:?}", pack_dir, e);
+                        set_exit(1);
                     }
                 }
                 if temp {
@@ -102738,11 +104072,14 @@ fn cmd_oci(args: &str) {
                                         ""
                                     }
                                 ),
-                                Err(e) => shell_println!(
-                                    "Loaded {} but store import failed: {:?}",
-                                    tar_path,
-                                    e
-                                ),
+                                Err(e) => {
+                                    shell_println!(
+                                        "Loaded {} but store import failed: {:?}",
+                                        tar_path,
+                                        e
+                                    );
+                                    set_exit(1);
+                                }
                             }
                         }
                         Err(e) => {
@@ -102855,15 +104192,21 @@ fn cmd_oci(args: &str) {
                                 if let Some(reference) = tag {
                                     match oci::store_tag_from_dir(dest, reference) {
                                         Ok(_) => shell_println!("Tagged -> {}", reference),
-                                        Err(e) => shell_println!(
-                                            "build succeeded but tag '{}' failed: {:?}",
-                                            reference,
-                                            e
-                                        ),
+                                        Err(e) => {
+                                            shell_println!(
+                                                "build succeeded but tag '{}' failed: {:?}",
+                                                reference,
+                                                e
+                                            );
+                                            set_exit(1);
+                                        }
                                     }
                                 }
                             }
-                            Err(e) => shell_println!("build failed: {}", e.describe()),
+                            Err(e) => {
+                                shell_println!("build failed: {}", e.describe());
+                                set_exit(1);
+                            }
                         }
                     }
                     Err(e) => {
@@ -102894,12 +104237,18 @@ fn cmd_oci(args: &str) {
                 if is_dir {
                     match oci::store_tag_from_dir(a, b) {
                         Ok(digest) => shell_println!("Tagged {} -> {} ({})", a, b, digest),
-                        Err(e) => shell_println!("tag failed: {:?}", e),
+                        Err(e) => {
+                            shell_println!("tag failed: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     match oci::store_add_tag(a, b) {
                         Ok(()) => shell_println!("Tagged {} -> {}", a, b),
-                        Err(e) => shell_println!("tag failed: {:?}", e),
+                        Err(e) => {
+                            shell_println!("tag failed: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -102924,7 +104273,10 @@ fn cmd_oci(args: &str) {
                             shell_println!("{:<28} {:<20} {:>10}", im.reference, short, im.size);
                         }
                     }
-                    Err(e) => shell_println!("images failed: {:?}", e),
+                    Err(e) => {
+                        shell_println!("images failed: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case();
@@ -102939,7 +104291,10 @@ fn cmd_oci(args: &str) {
                 };
                 match oci::store_remove(reference) {
                     Ok(()) => shell_println!("Untagged: {}", reference),
-                    Err(e) => shell_println!("rmi failed: {:?}", e),
+                    Err(e) => {
+                        shell_println!("rmi failed: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -102976,18 +104331,27 @@ fn cmd_oci(args: &str) {
                                 Ok(d) => {
                                     shell_println!("Tagged {} -> {} ({})", dest_dir, reference, d)
                                 }
-                                Err(e) => shell_println!("commit tag failed: {:?}", e),
+                                Err(e) => {
+                                    shell_println!("commit tag failed: {:?}", e);
+                                    set_exit(1);
+                                }
                             }
                         }
                     }
-                    Err(e) => shell_println!("commit failed: {:?}", e),
+                    Err(e) => {
+                        shell_println!("commit failed: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
         }
         "test" => match oci::self_test() {
             Ok(()) => shell_println!("OCI self-test passed."),
-            Err(e) => shell_println!("OCI self-test failed: {:?}", e),
+            Err(e) => {
+                shell_println!("OCI self-test failed: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             #[inline(never)]
@@ -103613,10 +104977,34 @@ fn cmd_uniq_input(args: &str, input: &[u8]) {
     }
 }
 
-/// Grep piped input for a pattern.  `args` is the search pattern (no file
-/// argument).  If `args` contains a space it is interpreted as
-/// `<pattern> <file>` and delegates to `cmd_grep`.
+/// Grep piped input for a pattern.  `args` carries the flags and the pattern;
+/// the text to search is `input`.
+///
+/// If `args` names a second positional word it looks like `<pattern> <file>`,
+/// and the whole thing is handed to [`cmd_grep`] — matching GNU, where an
+/// explicit file operand wins and the pipe is left unread.
+///
+/// Exits with the same three-valued status as the file form: 0 matched, 1
+/// searched and found nothing, 2 could not search at all (a usage error). There
+/// is no unreadable-target case here — the input arrived already read — so 2
+/// only ever comes from a bad argument.
 fn cmd_grep_input(args: &str, input: &str) {
+    // Decide *before* parsing flags whether this is really the file form.
+    //
+    // Flag rejection below is strict, and the two halves do not accept the same
+    // set: `-r` means nothing without a directory to walk. Rejecting first would
+    // therefore break `cat x | grep -r pat /dir`, which is a perfectly good file
+    // search that merely has a pipe attached — so the delegation has to be the
+    // first question asked, not the last.
+    let positional_count = args
+        .split_whitespace()
+        .filter(|w| !(w.starts_with('-') && w.len() > 1 && !w.starts_with("--")))
+        .count();
+    if positional_count >= 2 {
+        cmd_grep(args);
+        return;
+    }
+
     // Parse flags and find the pattern.
     let mut flags = GrepFlags::new();
     let mut positional: alloc::vec::Vec<&str> = Vec::new();
@@ -103631,7 +105019,33 @@ fn cmd_grep_input(args: &str, input: &str) {
                     'c' => flags.count_only = true,
                     'n' => flags.show_line_numbers = true,
                     'w' => flags.whole_word = true,
-                    _ => {}
+                    // `-l` used to be silently dropped here while the file half
+                    // honoured it, so `grep -l p f` named the file and
+                    // `cat f | grep -l p` printed the matching lines instead.
+                    // On a pipe the "file" is stdin, which GNU spells
+                    // `(standard input)`.
+                    'l' => flags.files_only = true,
+                    'r' | 'R' => {
+                        // Named, rather than lumped in with a typo, because it
+                        // is a real flag being refused for a real reason: there
+                        // is no tree to walk on the right of a pipe. (With a
+                        // directory operand this never runs — the delegation
+                        // above already sent it to the file form.)
+                        shell_println!("grep: -{}: no directory to search on piped input", ch);
+                        set_exit(2);
+                        return;
+                    }
+                    _ => {
+                        // The file form rejects an unknown flag; this one used
+                        // to drop it on the floor. So `grep -Z pat f` failed
+                        // while `cat f | grep -Z pat` quietly searched with -Z
+                        // ignored -- the two halves disagreeing about the same
+                        // argument, which the contract below forbids. A typo'd
+                        // flag must not silently change what was searched for.
+                        shell_println!("grep: unknown flag '-{}'", ch);
+                        set_exit(2);
+                        return;
+                    }
                 }
             }
         } else {
@@ -103639,16 +105053,13 @@ fn cmd_grep_input(args: &str, input: &str) {
         }
     }
 
-    // If there are 2+ positional args, it looks like "pattern file" — delegate.
-    if positional.len() >= 2 {
-        cmd_grep(args);
-        return;
-    }
-
     let pattern = match positional.first() {
         Some(p) => *p,
         None => {
+            // 2 for the same reason the file form uses it: 1 would claim the
+            // input does not contain a pattern that was never supplied.
             shell_println!("grep: no pattern specified");
+            set_exit(2);
             return;
         }
     };
@@ -103672,6 +105083,14 @@ fn cmd_grep_input(args: &str, input: &str) {
 
         if show {
             match_count = match_count.saturating_add(1);
+
+            if flags.files_only {
+                // `-l` asks *which* inputs contain the pattern, not where. One
+                // line, once, then stop reading: the rest of the pipe cannot
+                // change the answer.
+                shell_println!("(standard input)");
+                break;
+            }
 
             if !flags.count_only {
                 if flags.show_line_numbers {
@@ -103697,7 +105116,11 @@ fn cmd_grep_input(args: &str, input: &str) {
 
     if flags.count_only {
         shell_println!("{}", match_count);
-    } else if match_count == 0 {
+    } else if match_count == 0 && !flags.files_only {
+        // `-l` prints names, so its empty result is an empty list. Adding a
+        // sentence to it would put a non-name on a stream the caller is reading
+        // as names -- the same shape as the file half, which has always
+        // suppressed this line under `-l`.
         shell_println!("grep: no matches for '{}'", pattern);
     }
     // "Found nothing" is grep's documented exit 1, and it is the status the
@@ -106138,6 +107561,7 @@ fn cmd_readlink(args: &str) {
         }
         Err(e) => {
             shell_println!("readlink: '{}': {:?}", path, e);
+            set_exit(1);
         }
     }
 }
@@ -106191,6 +107615,7 @@ fn cmd_xattr(args: &str) {
             }
             Err(e) => {
                 shell_println!("xattr: list '{}': {:?}", file, e);
+                set_exit(1);
             }
         }
         return;
@@ -106226,6 +107651,7 @@ fn cmd_xattr(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("xattr: get '{}' from '{}': {:?}", key, file, e);
+                    set_exit(1);
                 }
             }
         }
@@ -106242,6 +107668,7 @@ fn cmd_xattr(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("xattr: set '{}' on '{}': {:?}", key, file, e);
+                    set_exit(1);
                 }
             }
         }
@@ -106257,6 +107684,7 @@ fn cmd_xattr(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("xattr: rm '{}' from '{}': {:?}", key, file, e);
+                    set_exit(1);
                 }
             }
         }
@@ -106309,7 +107737,10 @@ fn cmd_journal(args: &str) {
     if parts.first() == Some(&"--flush") || parts.first() == Some(&"-f") {
         match crate::fs::journal::flush() {
             Ok(()) => shell_println!("Journal flushed to disk."),
-            Err(e) => shell_println!("journal: flush failed: {:?}", e),
+            Err(e) => {
+                shell_println!("journal: flush failed: {:?}", e);
+                set_exit(1);
+            }
         }
         return;
     }
@@ -106503,16 +107934,25 @@ fn cmd_trash(args: &str) {
                     shell_println!("\n{} item(s) in recycle bin", items.len());
                 }
             }
-            Err(e) => shell_println!("trash: list failed: {:?}", e),
+            Err(e) => {
+                shell_println!("trash: list failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "--empty" => match crate::fs::trash::empty() {
             Ok(()) => shell_println!("Recycle bin emptied."),
-            Err(e) => shell_println!("trash: empty failed: {:?}", e),
+            Err(e) => {
+                shell_println!("trash: empty failed: {:?}", e);
+                set_exit(1);
+            }
         },
         "--prune" => match crate::fs::trash::auto_prune() {
             Ok(0) => shell_println!("No pruning needed (disk space OK)."),
             Ok(n) => shell_println!("Auto-pruned {} item(s).", n),
-            Err(e) => shell_println!("trash: prune failed: {:?}", e),
+            Err(e) => {
+                shell_println!("trash: prune failed: {:?}", e);
+                set_exit(1);
+            }
         },
         _ if args.starts_with("--restore ") => {
             let name = args.get(10..).unwrap_or("").trim();
@@ -106525,7 +107965,10 @@ fn cmd_trash(args: &str) {
                 Ok(original) => {
                     shell_println!("Restored '{}' to '{}'", name, original.display());
                 }
-                Err(e) => shell_println!("trash: restore '{}': {:?}", name, e),
+                Err(e) => {
+                    shell_println!("trash: restore '{}': {:?}", name, e);
+                    set_exit(1);
+                }
             }
         }
         _ if args.starts_with("--purge ") => {
@@ -106537,7 +107980,10 @@ fn cmd_trash(args: &str) {
             }
             match crate::fs::trash::purge_one(name) {
                 Ok(()) => shell_println!("Permanently deleted '{}'", name),
-                Err(e) => shell_println!("trash: purge '{}': {:?}", name, e),
+                Err(e) => {
+                    shell_println!("trash: purge '{}': {:?}", name, e);
+                    set_exit(1);
+                }
             }
         }
         _ => {
@@ -106545,7 +107991,10 @@ fn cmd_trash(args: &str) {
             let path = resolve_path(args);
             match crate::fs::trash::trash(&path) {
                 Ok(()) => shell_println!("Moved '{}' to recycle bin", path.display()),
-                Err(e) => shell_println!("trash: '{}': {:?}", path.display(), e),
+                Err(e) => {
+                    shell_println!("trash: '{}': {:?}", path.display(), e);
+                    set_exit(1);
+                }
             }
         }
     }
@@ -106612,6 +108061,22 @@ fn cmd_dirname(args: &str) {
 }
 
 /// `realpath PATH` — resolve a path following all symlinks.
+///
+/// A relative argument is made absolute against the shell's working directory
+/// by [`resolve_path`] *before* the VFS sees it. Handing the raw argument to
+/// `Vfs::resolve_path` looks equivalent and is not: `normalize_path`
+/// unconditionally prepends `/` to whatever it is given, so `realpath foo` from
+/// `/tmp` used to answer `/foo` — the wrong file, reported as a success. Making
+/// a relative path absolute is this command's entire purpose, so that was the
+/// one input it had to get right.
+///
+/// A missing *final* component is a success, deliberately: this is GNU
+/// `realpath`'s default mode, where every component except the last must exist
+/// (`-e` requires the last one as well, `-m` requires none). The VFS spells the
+/// same rule, since it is also what open-with-create needs. So
+/// `realpath /nonexistent` prints the canonical name and exits 0, while
+/// `realpath /nonexistent/child` fails — GNU behaviour, not an oversight.
+/// `-e` and `-m` are not implemented; see `todo.txt`.
 fn cmd_realpath(args: &str) {
     let path = args.trim();
     if path.is_empty() {
@@ -106620,12 +108085,19 @@ fn cmd_realpath(args: &str) {
         return;
     }
 
-    match crate::fs::Vfs::resolve_path(path) {
+    // Resolve against the working directory first, then follow symlinks.
+    let abs = resolve_path(path);
+    match crate::fs::Vfs::resolve_path(&abs) {
         Ok(resolved) => {
             shell_println!("{}", resolved.display());
         }
         Err(e) => {
-            shell_println!("realpath: '{}': {:?}", path, e);
+            // The absolute form, not the operand: when the failure is a
+            // relative path that resolved somewhere unexpected, the working
+            // directory is the very thing the reader needs to see. It also
+            // matches how `cd` and `cmp` report a path in this shell.
+            shell_println!("realpath: '{}': {:?}", abs.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -107696,14 +109168,21 @@ fn cmd_diag() {
     );
 
     // --- Page faults ---
+    //
+    // `fatal` counts *user* processes killed for an unhandled fault: the
+    // kernel-fatal path halts the machine, so a running shell can never see
+    // one. Killing a process that faulted with no handler is the kernel doing
+    // its job, so this row reports the number without calling it a problem —
+    // "FATAL FAULTS" read as a kernel malfunction and was never that. A
+    // program that *did* handle its fault is counted in `handled`, which
+    // separates a working fault handler from a crash.
     let pf = crate::mm::fault::fault_stats();
-    let status_pf = if pf.fatal > 0 { "FATAL FAULTS" } else { "OK" };
     shell_println!(
-        "  PgFaults:  resolved={}, cow={}, fatal={}  [{}]",
+        "  PgFaults:  resolved={}, cow={}, handled={}, killed-task={}  [OK]",
         pf.kernel_resolved.saturating_add(pf.user_resolved),
         pf.cow,
-        pf.fatal,
-        status_pf
+        pf.delivered,
+        pf.fatal
     );
 
     // --- TLB ---
@@ -107831,7 +109310,10 @@ fn cmd_diag() {
         + (heap.poison_violations > 0) as u8
         + (heap.double_free_violations > 0) as u8
         + (heap.redzone_violations > 0) as u8
-        + (pf.fatal > 0) as u8
+        // Deliberately not `pf.fatal`: see the PgFaults row above. A user
+        // process killed for an unhandled fault is correct kernel behaviour,
+        // and counting it as an issue made `diag` report a permanent problem
+        // that no operator could ever act on.
         + (violations > 0) as u8
         + (jitter_status == "HIGH") as u8
         + (lat_status == "HIGH") as u8
@@ -107843,6 +109325,16 @@ fn cmd_diag() {
             "  Overall: {} issue(s) detected — investigate above warnings",
             issues
         );
+        // Deliberately no `set_exit(1)`, unlike `syshealth` and `invariant`
+        // which do set one on their failing verdict. This is a *dashboard*, not
+        // a checker: it reads passive counters and renders them, the way `top`
+        // and `vmstat` do, and those exit 0 whether the machine is idle or on
+        // fire. A checker runs tests and its verdict is the answer; a dashboard
+        // displays state and the display succeeding is the answer.
+        //
+        // The distinction is not invented here -- `cmd_syshealth`'s own doc
+        // comment draws it: "Unlike 'diag' (which reads passive counters), this
+        // command actively tests kernel subsystem integrity."
     }
 }
 
@@ -108157,7 +109649,8 @@ fn cmd_pgfault() {
     shell_println!("");
     shell_println!("  Kernel-mode resolved:  {}", s.kernel_resolved);
     shell_println!("  User-mode resolved:    {}", s.user_resolved);
-    shell_println!("  Fatal (unresolvable):  {}", s.fatal);
+    shell_println!("  Handled by userspace:  {}", s.delivered);
+    shell_println!("  Fatal (task killed):   {}", s.fatal);
     shell_println!("");
     shell_println!("  By type:");
     shell_println!("    Copy-on-Write:       {}", s.cow);
@@ -108355,15 +109848,40 @@ fn cmd_syshealth() {
         }
     }
 
-    // Test 7: No fatal page faults.
+    // Test 7: Demand paging still resolves faults.
+    //
+    // This check used to read `fault_stats().fatal` and fail if any fatal
+    // fault had ever happened. That was the wrong question twice over.
+    //
+    // First, it is a *passive counter*, and this command's own doc comment
+    // draws the line: "Unlike `diag` (which reads passive counters), this
+    // command actively tests kernel subsystem integrity." Reading a counter
+    // here duplicated the `diag` row that already reports it.
+    //
+    // Second, and worse, the thing it counted is not a kernel health problem.
+    // A fatal user page fault means a program dereferenced something bad and
+    // had no handler, so the kernel killed it — that is the kernel working
+    // correctly, and no other OS calls itself unhealthy because a process
+    // segfaulted. A fatal *kernel* fault would be a real verdict, but that
+    // path ends in `halt_loop()`, so no shell ever runs to report it. The
+    // check could therefore only ever fail for the one reason that did not
+    // matter, and it did: it read `[FAIL] Page faults: 5 fatal fault(s)` on
+    // every boot, all five raised by boot self-tests deliberately provoking
+    // faults to prove fault handling works.
+    //
+    // What is worth asserting is that the resolver works *now* — so provoke a
+    // real fault and require it to be resolved, the way tests 1, 2 and 6
+    // actively exercise the allocators rather than reading their counters.
     {
-        let pf = crate::mm::fault::fault_stats();
-        if pf.fatal == 0 {
-            shell_println!("  [PASS] Page faults: no fatal faults since boot");
-            passed += 1;
-        } else {
-            shell_println!("  [FAIL] Page faults: {} fatal fault(s)", pf.fatal);
-            failed += 1;
+        match crate::mm::fault::probe_demand_page() {
+            Ok(()) => {
+                shell_println!("  [PASS] Demand paging: fault resolved, 16 KiB R/W OK");
+                passed += 1;
+            }
+            Err(e) => {
+                shell_println!("  [FAIL] Demand paging: {}", e.as_str());
+                failed += 1;
+            }
         }
     }
 
@@ -108379,6 +109897,18 @@ fn cmd_syshealth() {
         shell_println!("  System: ALL CHECKS PASSED");
     } else {
         shell_println!("  System: ISSUES DETECTED — investigate failures above");
+        // A checker's verdict belongs in its status, because the status is the
+        // only channel a script can read. `syshealth` is the `fsck` kind of
+        // command, not the `top` kind: it *runs* seven tests and the answer is
+        // pass or fail. Without this, a boot script's `syshealth || rescue`
+        // takes the healthy branch on a kernel with a corrupted heap -- the one
+        // case the check exists to catch.
+        //
+        // Note the fix is here and not at each `[FAIL]` row above. Those rows
+        // are a report; this line is the verdict, and a report row must not
+        // decide the command's status (see `vlan stats`, which is nothing but
+        // rows and one of which says "Unknown drops").
+        set_exit(1);
     }
 }
 
@@ -109452,7 +110982,10 @@ fn cmd_hotplug(args: &str) {
                 Ok(migrated) => {
                     shell_println!("CPU {} offlined ({} tasks migrated)", cpu, migrated)
                 }
-                Err(e) => shell_println!("Failed: {}", e),
+                Err(e) => {
+                    shell_println!("Failed: {}", e);
+                    set_exit(1);
+                }
             }
         }
         "online" => {
@@ -109468,7 +111001,10 @@ fn cmd_hotplug(args: &str) {
             };
             match crate::cpu_hotplug::online(cpu) {
                 Ok(()) => shell_println!("CPU {} is now online", cpu),
-                Err(e) => shell_println!("Failed: {}", e),
+                Err(e) => {
+                    shell_println!("Failed: {}", e);
+                    set_exit(1);
+                }
             }
         }
         _ => {
@@ -113125,6 +114661,7 @@ fn cmd_tar(args: &str) {
             }
             Err(e) => {
                 shell_println!("tar: write '{}': {:?}", archive_path.display(), e);
+                set_exit(1);
             }
         }
     } else if extract || list {
@@ -113297,6 +114834,7 @@ fn cmd_tar(args: &str) {
                             Ok(()) | Err(crate::error::KernelError::AlreadyExists) => {}
                             Err(e) => {
                                 shell_println!("tar: mkdir '{}': {:?}", out_path.display(), e);
+                                set_exit(1);
                             }
                         }
                         if verbose {
@@ -113321,6 +114859,7 @@ fn cmd_tar(args: &str) {
                             Ok(()) => {}
                             Err(e) => {
                                 shell_println!("tar: write '{}': {:?}", out_path.display(), e);
+                                set_exit(1);
                             }
                         }
                         if verbose {
@@ -113663,6 +115202,7 @@ fn cmd_unzip(args: &str) {
                 Err(e) => {
                     shell_println!("  unzip: mkdir '{}': {:?}", out_path.display(), e);
                     errors = errors.saturating_add(1);
+                    set_exit(1);
                 }
             }
             shell_println!("  creating: {}", out_path.display());
@@ -113684,6 +115224,7 @@ fn cmd_unzip(args: &str) {
             Err(e) => {
                 shell_println!("  unzip: '{}': {:?}", entry.name.display(), e);
                 errors = errors.saturating_add(1);
+                set_exit(1);
                 continue;
             }
         };
@@ -113701,6 +115242,7 @@ fn cmd_unzip(args: &str) {
             Err(e) => {
                 shell_println!("  unzip: write '{}': {:?}", out_path.display(), e);
                 errors = errors.saturating_add(1);
+                set_exit(1);
             }
         }
     }
@@ -113941,6 +115483,7 @@ fn cmd_cpio_extract(args: &[&str]) {
                     Err(e) => {
                         shell_println!("cpio: symlink '{}': {:?}", dest.display(), e);
                         errors = errors.wrapping_add(1);
+                        set_exit(1);
                     }
                 }
             }
@@ -113963,6 +115506,7 @@ fn cmd_cpio_extract(args: &[&str]) {
                     Err(e) => {
                         shell_println!("cpio: write '{}': {:?}", dest.display(), e);
                         errors = errors.wrapping_add(1);
+                        set_exit(1);
                     }
                 }
             }
@@ -114012,6 +115556,7 @@ fn cmd_cpio_create(args: &[&str]) {
                         Ok(d) => d,
                         Err(e) => {
                             shell_println!("cpio: read '{}': {:?}", path.display(), e);
+                            set_exit(1);
                             continue;
                         }
                     }
@@ -114044,6 +115589,7 @@ fn cmd_cpio_create(args: &[&str]) {
             }
             Err(e) => {
                 shell_println!("cpio: '{}': {:?}", path.display(), e);
+                set_exit(1);
             }
         }
     }
@@ -114072,6 +115618,7 @@ fn cmd_cpio_create(args: &[&str]) {
         }
         Err(e) => {
             shell_println!("cpio: write '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -114249,6 +115796,7 @@ fn cmd_ar_extract(args: &[&str]) {
             Err(e) => {
                 shell_println!("ar: write '{}': {:?}", dest.display(), e);
                 errors = errors.wrapping_add(1);
+                set_exit(1);
             }
         }
     }
@@ -114293,6 +115841,7 @@ fn cmd_ar_create(args: &[&str]) {
             }
             Err(e) => {
                 shell_println!("ar: read '{}': {:?}", path.display(), e);
+                set_exit(1);
             }
         }
     }
@@ -114321,6 +115870,7 @@ fn cmd_ar_create(args: &[&str]) {
         }
         Err(e) => {
             shell_println!("ar: write '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -114722,6 +116272,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
             Err(e) => {
                 shell_println!("dpkg: write '{}': {:?}", dest.display(), e);
                 errors = errors.wrapping_add(1);
+                set_exit(1);
             }
         }
     }
@@ -114891,6 +116442,7 @@ fn cmd_un7z(args: &str) {
             Err(e) => {
                 shell_println!("un7z: write '{}': {:?}", dest.display(), e);
                 errors = errors.wrapping_add(1);
+                set_exit(1);
             }
         }
     }
@@ -115082,11 +116634,13 @@ fn cmd_unrar(args: &str) {
                 Err(e) => {
                     shell_println!("unrar: write '{}': {:?}", dest.display(), e);
                     errors = errors.wrapping_add(1);
+                    set_exit(1);
                 }
             },
             Err(e) => {
                 shell_println!("unrar: extract '{}': {:?}", entry.name.display(), e);
                 errors = errors.wrapping_add(1);
+                set_exit(1);
             }
         }
     }
@@ -115279,6 +116833,7 @@ fn cmd_zip(args: &str) {
             Err(e) => {
                 shell_println!("  zip: read '{}': {:?}", abs_path.display(), e);
                 errors = errors.saturating_add(1);
+                set_exit(1);
                 continue;
             }
         };
@@ -115349,6 +116904,7 @@ fn cmd_crc32(args: &str) {
             }
             Err(e) => {
                 shell_println!("crc32: '{}': {:?}", path.display(), e);
+                set_exit(1);
             }
         }
     }
@@ -115495,6 +117051,7 @@ fn cmd_base64(args: &str) {
             }
             Err(e) => {
                 shell_println!("base64: decode error: {}", e);
+                set_exit(1);
             }
         }
     } else {
@@ -115552,11 +117109,13 @@ fn cmd_wipe(args: &str) {
                     }
                     Err(e) => {
                         shell_println!("wipe: remove '{}': {:?}", path.display(), e);
+                        set_exit(1);
                     }
                 }
             }
             Err(e) => {
                 shell_println!("wipe: '{}': {:?}", path.display(), e);
+                set_exit(1);
             }
         }
     }
@@ -115601,6 +117160,7 @@ fn cmd_checksum(args: &str) {
                     }
                     Err(e) => {
                         shell_println!("checksum: sha256 '{}': {:?}", path.display(), e);
+                        set_exit(1);
                     }
                 },
                 _ => {
@@ -115614,6 +117174,7 @@ fn cmd_checksum(args: &str) {
             },
             Err(e) => {
                 shell_println!("checksum: '{}': {:?}", path.display(), e);
+                set_exit(1);
             }
         }
     }
@@ -115729,6 +117290,7 @@ fn cmd_gunzip(args: &str) {
             }
             Err(e) => {
                 shell_println!("gzip: write '{}': {:?}", out.display(), e);
+                set_exit(1);
             }
         }
         return;
@@ -115811,6 +117373,7 @@ fn cmd_gunzip(args: &str) {
         }
         Err(e) => {
             shell_println!("gunzip: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -115933,6 +117496,7 @@ fn cmd_bunzip2(args: &str) {
         }
         Err(e) => {
             shell_println!("bunzip2: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -116035,6 +117599,7 @@ fn cmd_bzip2(args: &str) {
         }
         Err(e) => {
             shell_println!("bzip2: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -116129,6 +117694,7 @@ fn cmd_xz(args: &str) {
         }
         Err(e) => {
             shell_println!("xz: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -116243,6 +117809,7 @@ fn cmd_unxz(args: &str) {
         }
         Err(e) => {
             shell_println!("unxz: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -116370,6 +117937,7 @@ fn cmd_unzstd(args: &str) {
         }
         Err(e) => {
             shell_println!("unzstd: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -116473,6 +118041,7 @@ fn cmd_zstd(args: &str) {
         }
         Err(e) => {
             shell_println!("zstd: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -116605,6 +118174,7 @@ fn cmd_unlz4(args: &str) {
         }
         Err(e) => {
             shell_println!("unlz4: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -116700,6 +118270,7 @@ fn cmd_lz4(args: &str) {
         }
         Err(e) => {
             shell_println!("lz4: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -116795,6 +118366,7 @@ fn cmd_sed(args: &str) {
             Ok(d) => d,
             Err(e) => {
                 shell_println!("sed: '{}': {:?}", path.display(), e);
+                set_exit(1);
                 continue;
             }
         };
@@ -116853,6 +118425,7 @@ fn cmd_sed(args: &str) {
                 Ok(()) => {}
                 Err(e) => {
                     shell_println!("sed: write '{}': {:?}", path.display(), e);
+                    set_exit(1);
                 }
             }
         } else {
@@ -117157,6 +118730,7 @@ fn cmd_awk(args: &str) {
             Ok(d) => d,
             Err(e) => {
                 shell_println!("awk: '{}': {:?}", path.display(), e);
+                set_exit(1);
                 continue;
             }
         };
@@ -117679,6 +119253,10 @@ fn cmd_invariant(args: &str) {
     if results.total == 0 {
         shell_println!("No invariants found for category '{}'", category);
         shell_println!("Available: mm, sched, kernel, ipc, cap");
+        // A misspelled category checked *nothing* and must not look like a
+        // clean bill of health. `invariant mem || alert` (the category is
+        // `mm`) would otherwise pass silently forever.
+        set_exit(1);
         return;
     }
 
@@ -117705,6 +119283,12 @@ fn cmd_invariant(args: &str) {
         shell_println!("All {} invariants PASSED", results.total);
     } else {
         shell_println!("{} PASSED, {} FAILED", results.passed, results.failed);
+        // Same reason as `syshealth`: a command whose whole purpose is to
+        // return a verdict must put the verdict where a script can read it.
+        // This one printed the word FAILED and then told the caller it had
+        // succeeded, which is worse than not existing -- a missing command at
+        // least fails.
+        set_exit(1);
     }
 }
 
@@ -118502,7 +120086,10 @@ fn cmd_tsession(args: &str) {
                     shell_println!("Session {} not found", target_id);
                     set_exit(1);
                 }
-                Err(e) => shell_println!("Failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rename" | "name" => {
@@ -118532,7 +120119,10 @@ fn cmd_tsession(args: &str) {
             };
             match termsession::rename(target_id, new_name) {
                 Ok(()) => shell_println!("Session {} renamed to \"{}\"", target_id, new_name),
-                Err(e) => shell_println!("Failed: {:?}", e),
+                Err(e) => {
+                    shell_println!("Failed: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         _ => {

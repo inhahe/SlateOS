@@ -1583,10 +1583,29 @@ unsafe fn dispatch_or_kill_userspace_raw(
 
     if try_dispatch_user_exception(frame_ptr, saved_ptr, code, aux) {
         // Dispatched — the ISR stub will IRETQ to the handler.
+        if matches!(code, crate::proc::exception::ExceptionCode::AccessViolation) {
+            mm::fault::record_delivered();
+        }
         return;
     }
 
     // No handler — kill, recording crash details for the parent.
+    //
+    // This is the moment a page fault becomes *fatal*, and so the only place
+    // it may be counted as such.  `handle_page_fault` used to tally it on
+    // entry to the "unresolvable by the kernel" path, several recovery
+    // attempts too early: a fault the program itself went on to handle — via
+    // an SEH handler, or a Linux SIGSEGV handler that `siglongjmp`s away —
+    // was recorded as fatal even though the program survived it and kept
+    // running.  Two of the five "fatal" faults `syshealth` reported on every
+    // boot were of exactly that kind, and both were the *successful* outcome
+    // of a self-test proving fault delivery works.  The kill below diverges
+    // (`-> !`), so counting here rather than at the call site is not merely
+    // convenient — it is the last instant at which the count can be taken.
+    if matches!(code, crate::proc::exception::ExceptionCode::AccessViolation) {
+        mm::fault::record_fatal();
+    }
+
     // SAFETY: frame_ptr is valid; creating `&` for reading is fine.
     let frame_ref = unsafe { &*frame_ptr };
     let task_id = sched::current_task_id();
@@ -3288,9 +3307,12 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
             return; // Stack grew successfully — retry the instruction.
         }
 
-        // Unresolvable user fault — try a Linux fault signal, then SEH, then
-        // kill.
-        mm::fault::record_fatal();
+        // Unresolvable *by the kernel* — try a Linux fault signal, then SEH,
+        // then kill.  Deliberately no `record_fatal()` here: the program still
+        // has two chances to handle this fault, and counting it now would
+        // classify a fault the program survives as one that killed it.  The
+        // tally is taken on the kill path in `dispatch_or_kill_userspace_raw`,
+        // which is where the fault actually becomes fatal.
         log_exception(14, frame.rip, cr2);
         let present = if error & 1 != 0 {
             "present"
@@ -3320,11 +3342,14 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
                 SEGV_MAPERR
             };
             if try_deliver_linux_fault_signal(frame, SIGSEGV, si_code, cr2) {
+                mm::fault::record_delivered();
                 return; // Linux signal delivered — IRETQ into the handler.
             }
         }
 
         // Try SEH dispatch with AccessViolation code and CR2 as aux data.
+        // Whichever way this goes — handler dispatched or task killed — the
+        // outcome is tallied inside, at the point where it is decided.
         use crate::proc::exception::ExceptionCode;
         dispatch_or_kill_userspace(
             "Page Fault (#PF)",

@@ -40518,6 +40518,197 @@ already implies this; §272 is what it looks like when the skip decision is a
 
 ---
 
+## 273. lockdep records no incoming dependency edge for a `try_lock`, and tallies its own self-test's violations separately
+
+**Date:** 2026-08-24
+**Decided by:** Claude (autonomous)
+
+**In short:** The kernel has a lock-order checker that warns when two locks are
+taken in opposite orders by different code paths, because that can wedge the
+machine — each side sits waiting for the lock the other holds. It was crying
+wolf twice over. Once because it counted a "just try, and give up if it's
+busy" acquisition as one that could get stuck (it can't — giving up is the
+whole point). Once because its own boot-time self-test deliberately provokes
+three warnings to prove the detector works, and those three were being added to
+the tally of real ones. Both are now fixed, so "zero warnings" finally means
+"healthy" instead of "impossible".
+
+Both were found the same way, and that is the part worth remembering: by giving
+`syshealth` an exit status. Its check 5 — "no lockdep violations" — had been
+printing `[FAIL] Lockdep: 3 violation(s) detected` on *every boot since the
+validator landed*, and nobody noticed, because the command reported success
+whatever it printed. A checker whose verdict is not in its status is a checker
+nobody reads.
+
+### The `try_lock` half
+
+A deadlock needs both sides stuck. `Mutex::try_lock` is never stuck: if the
+lock is taken it returns `None` and the caller unwinds. So the edge
+*held → try_locked*, recorded because we happened to be holding something when
+a `try_lock` succeeded, describes a cycle that cannot close.
+
+Concretely: `sysctl::get` holds `sysctl-reg` across
+`fs::cache::try_flush_expired`'s `try_lock` of `CACHE`, while some other path
+takes `CACHE` then `sysctl-reg`. If that other path blocks on `sysctl-reg`, our
+path's `try_lock` simply fails, returns `None`, and releases `sysctl-reg`. The
+other path proceeds. There is no deadlock, and there never was.
+
+*What changes:* the warning stops appearing; `syshealth` check 5 can pass.
+
+**Alternatives considered:**
+
+- **Leave it and lower `syshealth`'s threshold** (e.g. "fail above 3"). Rejected
+  outright: it hard-codes a magic number that changes the moment the self-test
+  gains a case, and it papers over a false positive rather than removing it.
+- **Suppress the *outgoing* edges too** — treat a try-acquired lock as not held
+  at all. Wrong, and the more dangerous mistake because it is silent: a
+  `try_lock` that *succeeded* is genuinely held, so a blocking acquire nested
+  inside its critical section can deadlock in the completely ordinary way.
+  Linux keeps the lock in `curr->held_locks` for exactly this reason. The
+  self-test asserts this half explicitly.
+- **Report the inversion but do not count it.** Keeps the noise, loses the
+  signal — a warning nobody may act on trains readers to skip warnings.
+
+The precedent is direct: Linux's lockdep skips the whole dependency-add and
+deadlock-check block for a trylock (`validate_chain()`:
+`if (!hlock->trylock && hlock->check && …)`) while still pushing the lock onto
+the held stack. We now do the same, via a `lockdep::Acquire::{Blocking, Try}`
+argument passed at the two `sync::Mutex` call sites.
+
+### The self-test half
+
+`lockdep::self_test` inverts A→B, closes an A→B→C→A cycle, and re-acquires a
+held lock — three violations, on purpose, to prove the detector fires. They
+landed in the same counter as real ones, so `violation_count()` was
+permanently ≥ 3.
+
+The fix is a second tally (`SELF_TEST_VIOLATIONS`) plus an `IN_SELF_TEST` flag
+that routes reports to it, rather than the obvious alternative:
+
+- **Reset the counter when the self-test finishes.** Rejected on two grounds.
+  It would erase a *genuine* violation that happened to land inside the
+  self-test's window — unlikely on a single-threaded early boot, but a
+  validator that quietly discards evidence is the wrong thing to build. And it
+  leaves the self-test's own assertions with nothing to assert against; with
+  the split, the test checks both that it provoked what it meant to *and* that
+  it added nothing to the real tally.
+
+*What changes:* `violation_count()` and `diag`'s `Lockdep: violations=` read 0
+on a healthy boot instead of 3; the self-test's `Stats:` line reports the two
+numbers apart (`N deliberate violations, M real`).
+
+**Consequence to watch:** these two changes both make lockdep report *less*.
+That is the right direction for a validator whose reports were unactionable,
+but it means a future regression could hide behind them. The mitigation is the
+new self-test rung, which asserts both directions of the trylock rule, and the
+`syshealth` status itself — which is now, for the first time, a signal that a
+boot script could actually branch on.
+
+---
+
+## 274. A health check that has never once passed gets a new question, not a looser threshold: `syshealth` now provokes a page fault instead of counting old ones
+
+**Date:** 2026-08-24
+**Decided by:** Claude (autonomous)
+
+**In short:** The kernel has a `syshealth` command that prints seven pass/fail
+rows about its own condition. One of them, "page faults", said FAIL on every
+single boot — it counted every fault the kernel had ever failed to fix by
+itself, and complained if the number wasn't zero. Two problems. The number was
+wrong: it included faults the *program* went on to handle successfully and
+carry on from, which are the opposite of a crash. And the question was wrong:
+the rest were programs that crashed and were correctly killed, which is the
+kernel doing its job, not the kernel being ill. The row now runs a real test
+instead — it deliberately triggers a page fault and checks the kernel fixes it
+— so it can pass, and so a failure means something an operator can act on.
+
+This is the third bug behind the same `syshealth` exit status as §273's two,
+found by the same self-test rung. But its shape is different, and the
+difference is the point of this entry. §273's bugs were *a verdict nobody
+read*: the row printed FAIL and was ignored because the command still exited 0.
+This one would have survived that fix entirely. It reported loudly and
+correctly, forever, for a reason nobody could do anything about — which trains
+a reader to ignore the row just as thoroughly as a missing exit status does,
+and does it while looking like a working check.
+
+### The decision: change the subject, not the threshold
+
+The obvious repair, once the miscounting was fixed, was to keep the counter and
+relax what counts — ignore user-fatal faults, or ignore faults raised before
+the shell started, or subtract the ones the boot self-tests provoke on purpose
+(exactly the remedy §273 applied to lockdep's planted violations).
+
+Rejected, because it patches the symptom of a deeper mismatch. Ask what the
+check *could* observe that would be actionable, and the answer is: nothing.
+
+| Kind of fatal fault | Is it a kernel health problem? | Can `syshealth` ever see it? |
+|---|---|---|
+| Kernel-mode, unresolvable | Yes — always a kernel bug | **No.** That path ends in `halt_loop()`; no shell runs afterwards. |
+| User-mode, no handler | No — the kernel correctly killed a bad program | Yes, and it always will, so the row is permanently red |
+
+The one population worth a verdict is structurally invisible, and the one
+that's visible is not a verdict. No threshold fixes that. Any tuning would have
+produced a row that *usually* passes, which is worse than one that never does:
+it would look trustworthy while still being unable to report the thing it
+names.
+
+`syshealth`'s own doc comment already had the rule: "Unlike `diag` (which reads
+passive counters), this command actively tests kernel subsystem integrity."
+Checks 1, 2 and 6 obey it — they allocate a frame and free it, allocate 256
+bytes and read them back. Check 7 was reading a counter that `diag` already
+displayed. Making it active is not a new idea; it is the file's existing rule
+applied to the one row that had drifted from it.
+
+*What changes:* the row reads `[PASS] Demand paging: fault resolved, 16 KiB R/W
+OK` on a healthy kernel instead of `[FAIL] Page faults: 5 fatal fault(s)`, and
+a FAIL now names a stage (`fault returned but left the address unmapped`) that
+points at code rather than at history.
+
+### The counter is still fixed, and split
+
+Independently of where it's read, `record_fatal()` was being called several
+recovery attempts too early — see `known-issues.md` for the two faults it
+misclassified, both of which were self-tests *succeeding*. The tally moved to
+the kill path in `dispatch_or_kill_userspace_raw`, and a second counter,
+`FAULTS_DELIVERED`, records faults a userspace handler took.
+
+The alternative was to fold handled faults into `user_resolved`. Rejected: the
+memory access never succeeded, so calling it a resolution is a second, quieter
+lie in the same field. Three outcomes need three buckets — the kernel fixed it,
+the program handled it, nobody did.
+
+*What changes:* `pgfault` gains a "Handled by userspace" line; `diag`'s
+PgFaults row reports `handled=` and `killed-task=` and no longer labels the
+latter `FATAL FAULTS` or folds it into its issue count.
+
+### Alternatives rejected
+
+- **Delete check 7 and ship six rows.** Honest, and better than the status quo,
+  but it gives up a genuinely testable property. Demand paging is on the hot
+  path of every process start and every `mmap`; that it still works is exactly
+  what an *active* health check should establish.
+- **Flag the boot self-tests' deliberate faults, as §273 did for lockdep.**
+  Would have made the row green, and would have been the wrong lesson. Lockdep's
+  planted violations really are indistinguishable from real ones and really do
+  need a flag; here the deliberate faults fall out on the correct side of a
+  *correct* classification with no special case at all. Reaching for the same
+  mechanism twice would have hidden that the second bug had a different cause.
+- **Keep `AddressBusy` as a silent skip returning `Ok(())`,** as the boot-only
+  original did. That is this sweep's own bug class — a test reporting success
+  for something it never ran — sitting inside the test written to catch it. The
+  probe address is reserved and used by nothing else, so it being mapped means a
+  leak or a squatter, both real.
+
+**Consequence to watch:** check 7 now *does something* rather than reading a
+counter, so it can perturb the system it measures — it takes a real fault, and
+allocates and frees a 16 KiB frame per run. That is deliberate (it is what
+makes the check meaningful) and it is the same exposure checks 1, 2 and 6
+already carry. The risk it adds is a leak on a failure path making every
+subsequent run fail for the wrong reason; that specific bug existed in the
+boot-only version and is fixed, and `AddressBusy` is the tripwire if it recurs.
+
+---
+
 ## 531. Blur tint weights are anchored at the most-transparent setting and interpolated up to opaque, rather than being independent of the setting
 
 **Date:** 2026-08-24
@@ -41799,3 +41990,107 @@ have a test that watches the drawn caret rather than the cursor value —
 the only two such tests in the tree.
 
 `apps/editor` remains outside all of this, per §541.
+
+---
+
+## 275. A shell command that can fail to *look* gets three exit statuses, not two: `grep`, `cmp` and `diff` now answer 0/1/2
+
+**Date:** 2026-08-24
+**Decided by:** Claude (autonomous)
+
+**In short:** When you run `grep needle myfile` in the shell, it can end in
+three different ways: it found the word, it read the whole file and the word
+isn't there, or it never managed to open the file at all. Our shell only had
+two answers for that — "found it" and "didn't find it" — so the third one was
+being reported as the second. A script that says "if grep doesn't find the
+word, do X" would do X because the *file was missing*, which is a completely
+different situation and often means something is broken. The decision is to
+give these commands a third answer, matching what the standard Unix tools have
+always done: 0 = found / same, 1 = looked and didn't find / different, 2 =
+couldn't look.
+
+### The distinction
+
+Exit status (the number a command leaves behind for `&&`, `||` and `if` to
+read) is how one command tells the next one what happened. Two-valued status —
+"worked" or "didn't" — is right for most commands, because most commands only
+have those two outcomes.
+
+Search and compare commands do not. They have an outcome that is a *finding*,
+not a failure:
+
+| Status | `grep` | `cmp` / `diff` |
+|---|---|---|
+| **0** | matched | the files are the same |
+| **1** | searched it all, no match | the files differ |
+| **2** | could not search | could not compare |
+
+1 is a successful run reporting a negative result. 2 is a run that produced no
+result at all. Folding 2 into 1 does not merely lose detail — it replaces "I
+don't know" with a confident, wrong "no", and does so in the exact form the
+caller is waiting for. That is the same shape as the silent-success bugs this
+lane has been sweeping, arriving from the other end: the command *does* report
+something, it just reports the wrong one of two answers a caller cannot tell
+apart.
+
+Before this change:
+
+- `grep pat missing-file || echo "not present"` reported a missing *file* as
+  missing *text*.
+- `grep -r pat /typo` reported a mistyped directory as a clean search of it —
+  and printed nothing at all on the way past, because the walk's three failure
+  paths were bare `return`s.
+- `cmp a b && cp a b` was told "identical" whenever the files differed, because
+  every path in `cmp` left the status at the 0 the dispatcher sets.
+- `diff` was worst: silence is how it says "identical", so a run that *refused*
+  to compare (unreadable file, or a file past the 2000-line cap) was
+  byte-identical **and** status-identical to a successful comparison finding no
+  difference. Nothing distinguished them.
+
+### The alternatives
+
+**(a) Keep two values, and make "could not look" exit 1 (status quo).**
+Simplest, and consistent with every other command in the shell. It is what we
+had, and it is wrong for exactly the reason above: 1 already means something
+specific here, so overloading it destroys the meaning rather than extending it.
+
+**(b) Three values, GNU's assignment — chosen.** 0/1/2 as tabulated. Matches
+POSIX and GNU for all three commands, so a script written against real `grep`
+behaves the same here, and anyone reading the code recognises the convention
+without being taught it. Costs: callers that treat "non-zero" as one thing are
+unaffected; callers that specifically test `== 1` now get 2 in the
+could-not-look case, which is the entire point.
+
+**(c) Three values, but a distinct number per cause** (3 = unreadable file, 4 =
+bad flag, …). More informative, and gratuitously incompatible: no existing
+script or habit reads those numbers, and the distinction a caller actually acts
+on is "did you get an answer or not", which two failure values already carry.
+
+### The consequences worth knowing
+
+**Usage errors move from 1 to 2** in all three commands. This is the part that
+diverges from the rest of the shell, where a usage error is 1. Inside these
+three, 1 is a reserved, *meaningful* answer, so `grep -Z pat f || echo absent`
+returning 1 for a bad flag would assert that the pattern is absent from a file
+grep never opened. The general rule this instantiates: **a command that gives
+a finding a status number must not spend that number on anything else.**
+
+**A failure to look outranks an empty result.** `grep` tallies matches and
+unreadable targets side by side (`GrepTally`) and reports 2 if anything was
+unreadable, even if other targets were searched successfully. A run that could
+not read one of three files has not established the pattern is absent.
+
+**"No matches" is withheld when anything was unreadable.** The sentence
+`grep: no matches for 'p'` is a claim about a file's *contents*; printing it
+after a failed open asserts something never established. Same for `cmp`/`diff`,
+which now say nothing about sameness on a path that read nothing.
+
+**This is a template, not a one-off.** Any command whose failure to act is
+distinguishable from a negative finding belongs here. Candidates not yet
+converted: `test`/`[` (already 0/1 by POSIX and correct as-is), and `find` when
+a subtree is unreadable. The trigger for extending it is the question: *can
+this command's "no" mean either "I checked" or "I couldn't check"?* If yes, it
+needs the third value.
+
+**If a caller only ever tested for zero, nothing changes.** The change is
+strictly a refinement of the non-zero space.

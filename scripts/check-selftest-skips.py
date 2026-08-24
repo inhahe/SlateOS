@@ -104,6 +104,9 @@ _spec.loader.exec_module(_rl)
 # limitation (see the docstring), but the alternative -- following calls --
 # needs a resolver this family of checkers deliberately does not have.
 SELFTEST_NAME = re.compile(r"\A(?:self_test(?:_inner)?|self_test_.*|.*_self_test)\Z")
+# Any `name(` -- the callee half of a same-file call edge.  Deliberately
+# crude: over-approximating the call graph only widens what gets checked.
+CALL_IDENT = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 IS_RESULT = re.compile(r"\.is_(?:ok|err)\s*\(\s*\)")
 IF_LET_RESULT = re.compile(r"\bif\s+let\s+(?:Ok|Err)\s*\(")
@@ -174,11 +177,48 @@ def _depth_at(src: str, lo: int, pos: int) -> int:
 
 
 def _selftest_bodies(src: str) -> list[tuple[str, int, int]]:
-    out = []
-    for name, (b, e) in _rl.find_bodies(src).items():
-        if SELFTEST_NAME.match(name):
-            out.append((name, b, e))
-    return out
+    """Self-tests in this file, by name *and* by being called from one.
+
+    Name alone was not enough.  `ipc/io_ring.rs` splits its suite across
+    `test_fh_read_write`, `test_positioned_io` and friends, each called from
+    `self_test`; both of the first two skipped themselves on a failed
+    `/tmp` write, and neither was examined because neither is *called*
+    `self_test`.  A rule that stops at the entry point misses everything the
+    entry point delegates to, which is most of a large suite.
+
+    So: seed with the name match, then take the transitive closure over
+    same-file calls.  A `#[cfg(test)]` unit test named `test_foo` is not
+    reached, because nothing in a self-test calls it -- which is the
+    distinction that matters and the reason this is a call check rather than
+    a second name pattern.
+    """
+    bodies = _rl.find_bodies(src)
+    # One scan per body for *every* callee name, rather than one search per
+    # (body, candidate) pair.  The pairwise form was quadratic in the number
+    # of functions and pushed this gate past three minutes on the kernel --
+    # long enough that a boot test looked hung.  Extracting the call names
+    # once makes the closure a set lookup.
+    calls = {
+        name: {m.group(1) for m in CALL_IDENT.finditer(src, lo, hi)}
+        for name, (lo, hi) in bodies.items()
+    }
+    selected = {n for n in bodies if SELFTEST_NAME.match(n)}
+    frontier = set(selected)
+    while frontier:
+        nxt: set[str] = set()
+        for name in frontier:
+            lo, hi = bodies[name]
+            for cand in calls[name]:
+                if cand in selected or cand not in bodies:
+                    continue
+                # A recursive or self-overlapping span is not a call edge.
+                clo, chi = bodies[cand]
+                if clo >= lo and chi <= hi:
+                    continue
+                nxt.add(cand)
+        selected |= nxt
+        frontier = nxt
+    return [(n, bodies[n][0], bodies[n][1]) for n in sorted(selected)]
 
 
 def _branch_blocks(src: str, cond_end: int, body_end: int) -> list[tuple[int, int]]:

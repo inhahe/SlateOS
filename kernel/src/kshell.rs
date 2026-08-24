@@ -10852,8 +10852,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Vfs::write_file(path, b"alpha\nbeta\n")?;
 
         // 0: matched.
+        //
+        // `1:alpha`, not `alpha`: this shell's `grep` defaults to `-n` *and*
+        // `-i` (`GrepFlags::new`), unlike GNU's, which defaults to neither.
+        // Asserting the GNU shape here cost a boot cycle. The defaults are a
+        // deliberate divergence rather than a bug, and they are queued for the
+        // operator in `open-questions.md` -- so if they ever change, this rung
+        // and its sibling below are the two places to update.
         let out = capture_command("grep alpha /tmp/kshell_grep_status_selftest.txt");
-        assert_output_starts_with("the match is printed", &out, b"alpha");
+        assert_output_starts_with("the match is printed", &out, b"1:alpha");
         assert_eq!(last_exit(), 0, "a match is success");
 
         // 1: searched the whole file, the pattern is not in it. This is the
@@ -10891,8 +10898,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // The piped half must agree with the file half on all three, or
         // `grep p f` and `cat f | grep p` answer `&&` differently.
+        // `2:beta` -- `beta` is the second line, and `-n` is on by default here
+        // too. That the two halves agree on the *shape* as well as the status is
+        // the point: `grep p f` and `cat f | grep p` used to differ by a space
+        // after the colon, and anything splitting on `:` could not compare them.
         let out = capture_command("cat /tmp/kshell_grep_status_selftest.txt | grep beta");
-        assert_output_starts_with("the piped match is printed", &out, b"beta");
+        assert_output_starts_with("the piped match is printed", &out, b"2:beta");
         assert_eq!(last_exit(), 0, "piped: a match is success");
 
         let out = capture_command("cat /tmp/kshell_grep_status_selftest.txt | grep zzz_absent");

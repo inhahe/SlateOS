@@ -1679,3 +1679,95 @@ untouched on purpose. It does not degrade with time. What it costs is that
 `oci run` cannot be scripted reliably: any script that cares whether its
 options took effect has to verify them itself afterwards, and every such script
 is a place that would need revisiting if the contract later changes.
+
+---
+
+## The shell's `grep` ignores case and numbers lines by default, unlike every other Unix (lane A, 2026-08-24)
+
+**In short:** In our shell, typing `grep Error mylog.txt` also finds `error`
+and `ERROR`, and prints each result with a line number in front of it, like
+`42:error: disk full`. Real `grep` on Linux/macOS does neither: it matches
+`Error` exactly, and prints just the line. Our version behaves as though you
+had typed `grep -i -n`. This is very likely a deliberate choice made early on
+for interactive convenience, but it was never written down, and it means
+commands copied from any Unix documentation or tutorial quietly do something
+different here. The question is whether to keep it.
+
+Where it lives: `GrepFlags::new()` in `kernel/src/kshell.rs` (~94901), which
+sets `case_insensitive: true` with the comment *"default: case-insensitive
+(like original)"*, and `show_line_numbers: true`.
+
+### Why it is worth asking rather than just fixing
+
+Two things push this out of "obviously a bug":
+
+1. **The comment says it is intentional** — "like original" reads as
+   *preserve the behaviour kshell already had*, not as an oversight.
+2. **There is already an opt-out for the case half, and it is a made-up one.**
+   The shell accepts `-I` to mean "be case-sensitive after all". In GNU grep,
+   `-I` means something completely different (ignore binary files). So this is
+   not merely a changed default; a real flag has been re-purposed to undo it.
+   Restoring the GNU default would also have to decide what `-I` then means.
+
+The line-number half has no opt-out at all: there is no way to turn `-n` off.
+
+### What it costs today
+
+Copy-pasted commands silently mean something else. Two examples of the shape:
+
+| Written | Means elsewhere | Means here |
+|---|---|---|
+| `grep Error log` | lines containing `Error` | also `error`, `ERROR` |
+| `grep -c pat f` | a count | a count (unaffected — `-c` overrides output) |
+| `grep pat f \| cut -d: -f2` | the second `:`-field of the line | the *line*, because field 1 is now the line number |
+
+The last one is the sharp edge: `-n` on by default changes the *shape* of the
+output, so any pipeline that splits a grep result on `:` is reading one field
+off. Nothing errors; it just quietly reads the wrong column.
+
+It is also now load-bearing in a test. Self-test rung 25 asserts `1:alpha`
+rather than `alpha`, with a comment pointing here — so a change of default is a
+one-line test update, not a hunt.
+
+### The options
+
+**A — restore GNU defaults: case-sensitive, no line numbers.**
+*What changes:* `grep Error log` stops matching `error`; `grep pat f` prints
+`the matched line` instead of `42:the matched line`. `-i` and `-n` turn each
+back on. `-I` needs a new meaning (either drop it, or make it GNU's
+ignore-binary — which this shell already does implicitly under `-r`).
+
+**B — keep both defaults, and document them.**
+*What changes:* nothing in behaviour. `grep --help` and the shell's docs gain
+an explicit note that `-i -n` are implied, plus a way to switch them off.
+
+**C — split the two.** Restore GNU's case-sensitivity (the one that changes
+*which lines* you get, and can therefore hide a result you needed), keep `-n`
+(which only changes how they are printed).
+*What changes:* `grep Error log` stops matching `error`; output still carries
+line numbers.
+
+**D — keep case-insensitivity, drop the default `-n`.** The inverse of C.
+*What changes:* output shape matches GNU, so `:`-splitting pipelines work;
+matching stays lenient.
+
+### My recommendation
+
+**A**, with `-I` dropped rather than redefined. The value of matching the rest
+of Unix here is not aesthetic — it is that every piece of grep knowledge a user
+already has, and every command in every tutorial, becomes correct instead of
+subtly wrong. Convenience defaults are cheap to type back (`-i`, `-n`) and
+expensive to discover you were getting.
+
+If A feels too disruptive, **C** is the safer half-step: a wrong *set of lines*
+is a wrong answer, whereas a line-number prefix is visible on sight. **D** is
+the weakest — it fixes the cosmetic half and keeps the half that can hide a
+result.
+
+### If this is never answered
+
+Safe and stable; nothing degrades. The cost is ongoing and quiet: every
+`grep` command a user brings from outside behaves differently than they expect,
+and any pipeline that splits on `:` reads the wrong field. It also gets
+*slightly* more expensive to change over time, since each new script written
+against the current defaults is one more thing to check.

@@ -45846,10 +45846,7 @@ fn cmd_svcstart(args: &str) {
                 st.initial_backoff_ms,
                 st.max_backoff_ms
             );
-            if st.boot_end_ns > st.boot_start_ns {
-                let boot_ms = st.boot_end_ns.saturating_sub(st.boot_start_ns) / 1_000_000;
-                shell_println!("  Boot time:      {} ms", boot_ms);
-            }
+            shell_println!("  Boot time:      {}", st.boot_duration().label());
         }
         "levels" => {
             let levels = svcstart::start_levels();

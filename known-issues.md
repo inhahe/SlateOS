@@ -67826,10 +67826,11 @@ VFS call under a given guard. `net/tftp.rs` was named once and had three.
 
 ## TD-A-ASSERTIONS-THAT-A-CONSTANT-WOULD-PASS — the weak-proxy sweep (lane A, 2026-08-23)
 
-**Status:** three instances FIXED; the class is not closed.
+**Status:** all four known instances FIXED; the class is not closed — the
+*sweep* is what is unfinished, not any listed item.
 
 A self-test assertion is only worth its line if there is a plausible way for
-the code under test to be wrong and still fail it. Three shapes recur here
+the code under test to be wrong and still fail it. Four shapes recur here
 and none of them clear that bar:
 
 1. **`assert!(timestamp > 0)`.** Passes for a non-zero constant, for a value
@@ -67882,10 +67883,31 @@ and none of them clear that bar:
    decides to skip must be a statement about the environment, never a
    swallowed error from the code under test.
 
-**Also still open, same class:** `svcstart`'s `boot_start_ns`/`boot_end_ns`
-are only ever compared behind `if st.boot_end_ns > st.boot_start_ns`
-(`svcstart.rs:1128`, `kshell.rs:45849`), so a boot that never stamped the end
-prints nothing rather than failing anything. No test asserts either field.
+4. **A sentinel that two different states share, guarded by an `if` with no
+   `else`.** `svcstart`'s `boot_start_ns`/`boot_end_ns` were bare `u64`s
+   initialised to `0` and compared only behind
+   `if st.boot_end_ns > st.boot_start_ns` at both display sites
+   (`svcstart.rs`, `kshell.rs:45849`). "Never booted", "boot still running"
+   and "boot died before its end stamp" all rendered identically: as the
+   absence of a line. Nothing asserted either field, so they could have
+   stopped being written entirely and no view and no test would have said so.
+
+   Fixed 2026-08-23. Both fields became `Option<u64>` — the encoding
+   `StartNode::started_at_ns` in the same file already used, and for the same
+   stated reason ("never started" and "started at uptime 0" are different
+   answers). A `BootDuration` enum (`NotStarted` / `InProgress` /
+   `Complete`) classifies the pair, `StartupStats::boot_duration()` returns
+   it, and `BootDuration::label()` renders *every* variant, so
+   `/proc/svcstart` and `svcstart stats` now always carry a `Boot time:`
+   line. `boot_services` also clears the end stamp on entry, so a second run
+   that dies partway can no longer pair its fresh start against the previous
+   run's end.
+
+   Self-test 11 asserts all three states, and asserts the completed one by
+   **bracketing**: it reads the clock either side of `boot_services()` and
+   requires both stamps to land inside that window. `stamp > 0` would have
+   passed for a constant, for a value written once at init, and for a reading
+   from another clock; only the window shows the stamps came from that call.
 
 **How to find more:** grep the self-tests for `> 0)`, for `is_some()` on a
 field whose *value* is the thing under test, and for `if !x { print skip;

@@ -15,7 +15,6 @@
 
 userspace/coreutils/examples/extfloat-probe.rs:argv-as-string
 userspace/coreutils/src/bin/cal.rs:argv-as-string
-userspace/coreutils/src/bin/cmp.rs:argv-as-string
 userspace/coreutils/src/bin/dd.rs:argv-as-string
 userspace/coreutils/src/bin/df.rs:argv-as-string
 userspace/coreutils/src/bin/diff.rs:argv-as-string

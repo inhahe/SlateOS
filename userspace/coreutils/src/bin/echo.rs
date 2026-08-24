@@ -47,11 +47,15 @@
 //! `find` and `ls` use (`design-decisions.md` §374). The unit tests below
 //! cover the parser and the escape decoder as pure functions over bytes.
 
-use coreutils::errmsg::strerror;
 use coreutils::quote::os_bytes;
+use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::Write;
 use std::process::ExitCode;
+
+// Before `main`, so that a caller's `echo >&-` is still a closed descriptor
+// when `finish` writes to it. See `coreutils::stdfd`.
+coreutils::guard_std_fds!();
 
 /// What the command line asked for.
 #[derive(Debug, PartialEq, Eq)]
@@ -72,6 +76,7 @@ struct Settings {
 }
 
 fn main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     // Presence, not value: upstream is `!!getenv ("POSIXLY_CORRECT")`, so
     // `POSIXLY_CORRECT=` (set to nothing) still counts.
@@ -94,13 +99,21 @@ fn main() -> ExitCode {
 /// properties — one diagnostic, and a status of 1 — and makes `\c` (which ends
 /// the program early) need no special handling: it has already contributed
 /// whatever it contributed.
+///
+/// The write goes through [`Stream`] rather than `io::stdout()` because the
+/// status depends on it arriving, and std's stdout will not say when it did
+/// not: `StdoutRaw`'s `Write` impl maps `EBADF` to a full success. Buffering
+/// matters here for the same reason it does upstream — `echo -n >&-` owes the
+/// descriptor nothing and exits 0, while `echo >&-` owes it a newline and
+/// exits 1.
 fn finish(bytes: &[u8]) -> ExitCode {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    if let Err(e) = out.write_all(bytes).and_then(|()| out.flush()) {
+    let mut out = Stream::stdout();
+    // `Stream::write_all` records rather than returns; the verdict is `finish`.
+    let _ = out.write_all(bytes);
+    if let Err(e) = out.finish() {
         // Not silence: `echo hi > /dev/full` that exits 0 is a program telling
         // a script the write happened.
-        eprintln!("echo: write error: {}", strerror(&e));
+        stdfd::write_error("echo", &e);
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS

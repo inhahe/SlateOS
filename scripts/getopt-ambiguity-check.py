@@ -89,14 +89,19 @@ NOT_GNU = {
     "minishell",
 }
 
-TABLE_RE = re.compile(
-    r"const\s+LONG_OPTIONS\s*:\s*&\[\([^\]]*?\)\]\s*=\s*&\[(.*?)\n\];",
-    re.S,
-)
-ALIAS_RE = re.compile(
-    r"const\s+ALIASES\s*:\s*&\[\(&str,\s*&str\)\]\s*=\s*&\[(.*?)\];",
-    re.S,
-)
+# Only the *head* of the declaration is matched by regex; the body is then
+# taken by counting brackets in `slice_body` below.
+#
+# The earlier version ended these patterns at a literal `\n];`, which quietly
+# made the gate depend on how rustfmt had chosen to lay the table out. A table
+# short enough to fit on one line — `yes` has exactly two entries, so rustfmt
+# collapses it to `&[("help", …), ("version", …)];` — has no `];` at the start
+# of a line and was therefore not found at all. The failure is silent and reads
+# as reassurance: the bin falls through to "no LONG_OPTIONS table … not yet
+# converted?", which is a note the sweep prints routinely for bins that really
+# have none, and the summary still says "0 disagreement(s)".
+TABLE_HEAD_RE = re.compile(r"const\s+LONG_OPTIONS\s*:\s*&\[\([^\]]*?\)\]\s*=\s*")
+ALIAS_HEAD_RE = re.compile(r"const\s+ALIASES\s*:\s*&\[\(&str,\s*&str\)\]\s*=\s*")
 ENTRY_RE = re.compile(r'\(\s*"([^"]*)"\s*,')
 PAIR_RE = re.compile(r'\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*\)')
 
@@ -138,10 +143,47 @@ class Table:
         return "resolves"
 
 
+def slice_body(text: str, start: int) -> str | None:
+    """The contents of the `&[ … ]` beginning at or after ``start``.
+
+    Counting brackets rather than matching a closing delimiter is what makes
+    this independent of line breaks, so a one-line table and a fifty-line one
+    parse alike. String literals are skipped so a `]` or `"` inside a name
+    cannot end the slice early.
+    """
+    i = text.find("&[", start)
+    if i == -1 or text[start:i].strip():
+        return None  # something other than the slice literal follows the `=`
+    i += 1  # sit on the `[`
+    depth = 0
+    j = i
+    n = len(text)
+    while j < n:
+        c = text[j]
+        if c == '"':
+            j += 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+        elif c in "[(":
+            depth += 1
+        elif c in "])":
+            depth -= 1
+            if depth == 0:
+                return text[i + 1 : j]
+        j += 1
+    return None
+
+
+def strip_comments(body: str) -> str:
+    """Drop `//` comments so a name quoted in prose is not read as an entry."""
+    return "\n".join(re.sub(r"//.*$", "", line) for line in body.splitlines())
+
+
 def parse_table(path: Path) -> Table | None:
     text = path.read_text(encoding="utf-8", errors="replace")
-    m = TABLE_RE.search(text)
-    if not m:
+    m = TABLE_HEAD_RE.search(text)
+    body = slice_body(text, m.end()) if m else None
+    if body is None:
         d = DELEGATE_RE.search(text)
         if d and path.is_relative_to(BIN_DIR):
             shared = SRC_DIR / f"{d.group(1)}.rs"
@@ -155,17 +197,14 @@ def parse_table(path: Path) -> Table | None:
                     t.util = path.stem
                 return t
         return None
-    body = m.group(1)
-    # Strip line comments so a name quoted inside prose is not read as an entry.
-    body = "\n".join(re.sub(r"//.*$", "", line) for line in body.splitlines())
-    names = ENTRY_RE.findall(body)
+    names = ENTRY_RE.findall(strip_comments(body))
     if not names:
         return None
     table = Table(util=path.stem, names=names)
-    a = ALIAS_RE.search(text)
-    if a:
-        abody = "\n".join(re.sub(r"//.*$", "", line) for line in a.group(1).splitlines())
-        table.aliases = dict(PAIR_RE.findall(abody))
+    a = ALIAS_HEAD_RE.search(text)
+    abody = slice_body(text, a.end()) if a else None
+    if abody is not None:
+        table.aliases = dict(PAIR_RE.findall(strip_comments(abody)))
     return table
 
 

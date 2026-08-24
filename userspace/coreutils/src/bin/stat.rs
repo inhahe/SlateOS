@@ -1475,7 +1475,7 @@ mod imp {
         };
         // Reading the account database is not free, and most invocations do
         // not name a user. `%U`/`%G` are the only two directives that need it.
-        let needs_db = [b'U', b'G']
+        let needs_db = b"UG"
             .iter()
             .any(|&s| wants(&pieces, s) || wants(&pieces2, s));
         let db = if needs_db && stat_mode {

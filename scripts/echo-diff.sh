@@ -37,6 +37,13 @@
 # building the output and writing it once, but both print exactly
 # `echo: write error: No space left on device` and exit 1.
 #
+# That holds for a *closed* standard output too (`echo hi >&-`), which is the
+# harder half — Rust reopens a closed descriptor on /dev/null before `main` and
+# then reports writes to a closed one as successes, so getting this right took
+# `coreutils::stdfd` rather than an ordinary `write` call. Note that the answer
+# depends on whether anything was owed: `echo hi >&-` is an error and
+# `echo -n >&-` is not.
+#
 # Run `OURS=/usr/bin/echo ./scripts/echo-diff.sh` to confirm the harness still
 # discriminates: it should report every xfail as XPASS and nothing else.
 set -u
@@ -116,11 +123,20 @@ trap 'rm -rf "$bindir"' EXIT
 # exists for exactly one variable: `POSIXLY_CORRECT`, which changes echo more
 # than any option does.
 #
-# `TO_FULL` sends stdout to /dev/full, which is the only way to reach echo's
-# one diagnostic.
-ENVV=; TO_FULL=
+# `TO_FULL` sends stdout to /dev/full, which is one of the two ways to reach
+# echo's one diagnostic.
+#
+# `CLOSED` is the other: it runs the command with standard output *closed*
+# (`>&-`), which a shell can ask for and which the Rust runtime quietly refuses
+# to allow — it reopens the descriptor on /dev/null before `main`, and then
+# reports a write to a closed one as a full success. Together those turn
+# `echo hi >&-` into a silent 0 where GNU prints `echo: write error: Bad file
+# descriptor` and exits 1. The two knobs are not interchangeable: /dev/full
+# fails every write, whereas a closed descriptor only fails one that was
+# actually attempted, so `echo -n >&-` must still be a silent 0.
+ENVV=; TO_FULL=; CLOSED=
 
-reset_knobs() { ENVV=; TO_FULL=; }
+reset_knobs() { ENVV=; TO_FULL=; CLOSED=; }
 
 # Bytes, not text: an argument may hold anything but NUL, and a case whose
 # whole point is `\xff` must not be compared through something that would
@@ -141,7 +157,9 @@ compare() {
   for side in ours gnu; do
     if [ "$side" = ours ]; then out=$o_bin; err=$o_err
     else out=$g_bin; err=$g_err; fi
-    if [ -n "$TO_FULL" ]; then
+    if [ -n "$CLOSED" ]; then
+      timeout -k 2 60 env ${ENVV:+"$ENVV"} PATH="$bindir/$side" echo "$@" >&- 2>"$err"
+    elif [ -n "$TO_FULL" ]; then
       timeout -k 2 60 env ${ENVV:+"$ENVV"} PATH="$bindir/$side" echo "$@" >/dev/full 2>"$err"
     else
       timeout -k 2 60 env ${ENVV:+"$ENVV"} PATH="$bindir/$side" echo "$@" >"$out" 2>"$err"
@@ -182,7 +200,7 @@ report() {
 }
 
 # The label is built before `compare` runs, because `compare` resets the knobs.
-run_case() { local label="echo $*${ENVV:+  [$ENVV]}${TO_FULL:+  [>/dev/full]}"; compare "$@"; report "$label"; }
+run_case() { local label="echo $*${ENVV:+  [$ENVV]}${TO_FULL:+  [>/dev/full]}${CLOSED:+  [>&-]}"; compare "$@"; report "$label"; }
 
 # A case expected to differ, with the reason. Counted apart so that one which
 # starts agreeing is reported too: a stale xfail is a claim nobody rechecked.
@@ -326,6 +344,20 @@ TO_FULL=1; run_case hi
 TO_FULL=1; run_case -n hi
 TO_FULL=1; run_case -e 'a\cb'
 TO_FULL=1; run_case
+
+# --- standard output closed --------------------------------------------------
+# The distinction the buffering exists for: a case with something to write is
+# an error, a case with nothing to write is not. `echo -n` and `echo -e '\c'`
+# both produce no bytes at all, so nothing is ever owed to the descriptor and
+# both must exit 0 in silence — even though writing to it would have failed.
+CLOSED=1; run_case hi
+CLOSED=1; run_case
+CLOSED=1; run_case -n hi
+CLOSED=1; run_case -n
+CLOSED=1; run_case -e 'a\cb'
+CLOSED=1; run_case -e '\c'
+CLOSED=1; run_case --help
+CLOSED=1; run_case --version
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"

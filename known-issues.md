@@ -70922,3 +70922,488 @@ through the incremental `Sha256` rather than the one-shot `sha256`, and its
 FIPS vectors were repointed at the path the program actually takes. `md5sum`
 keeps MD5 locally because it has exactly one consumer; it moves out when it has
 two, for the same reason SHA-256 already did.
+
+## `yes` ran at 1.6 MiB/s — 1600× slower than GNU — and `yes --help` printed `--help` forever (lane B, 2026-08-24)
+
+**In short:** `yes` prints a line over and over until something stops it. Ours
+had three faults. It knew no options at all, so `yes --help` did not print help
+— it printed the word `--help` endlessly, and the only way out was Ctrl-C. It
+did one `write` system call per line, which is the one thing this particular
+program must not do, and measurement put it at **1.6 MiB/s against GNU's 2690
+MiB/s**. And it crashed outright on any argument holding a byte that is not
+valid UTF-8, which on this system is a legal thing to pass. Rewritten from GNU
+coreutils 9.4's `src/yes.c`, checked against the real GNU binary across 39
+cases; it now runs at 2634 MiB/s, within 2% of GNU.
+
+### Why the slowness is the whole point of this program and not a side note
+
+Every other utility in this section was judged on what it did. `yes` is judged
+on how fast it does it: it exists to feed an endless stream into something
+else, so its throughput *is* its behaviour. A `yes` that is correct and slow
+has failed at the only thing asked of it.
+
+The old loop was three lines and looked unimprovable:
+
+```rust
+let line = format!("{text}\n");
+let bytes = line.as_bytes();
+loop {
+    if out.write_all(bytes).is_err() { break; }
+}
+```
+
+The defect is invisible unless you know what `io::stdout()` does. It is
+`LineWriter`-backed, so a buffer holding a `\n` is flushed immediately — which
+means this writes `y\n` and then calls `write(2)`, two bytes at a time, roughly
+860,000 syscalls a second. Upstream's `yes.c` does the opposite and says so:
+it copies the record into a buffer, **doubles that buffer until it is at least
+`BUFSIZ`**, and then writes the whole buffer forever. The doubling is what
+keeps every write a whole number of records regardless of the record's length,
+so no record is ever split across a call. Ours now does the same, and the
+measured 1606× is that one change.
+
+The numbers were measured, not asserted: the old file was rebuilt from git at
+`-O` so the comparison is optimised-against-optimised, and all three binaries
+were run for three seconds into `dd bs=1M of=/dev/null`, best of three.
+
+| | throughput | vs GNU |
+|---|---|---|
+| old `yes` | 1.6 MiB/s | 0.06% |
+| new `yes` | 2634 MiB/s | 98% |
+| GNU 9.4 | 2690 MiB/s | — |
+
+### The other three defects
+
+1. **No option parsing whatsoever.** `--help` and `--version` were operands, so
+   `yes --help` printed the string `--help` on every line and never stopped.
+   That is worse than an unimplemented option, because the usual way a person
+   finds out what a program takes is the thing that hangs their terminal. `-x`
+   was likewise a string rather than an error. Both now go through
+   `coreutils::getopt` with the two-entry table upstream has, which also brings
+   abbreviation (`--h`, `--ver`) and glibc permutation — `yes a --help` prints
+   help, because upstream does not pass `+` and so an option keeps its meaning
+   after an operand. The harness checks all of that.
+2. **`Vec<String>` from `env::args()`, so a non-UTF-8 argument panicked** —
+   this is the `argv-utf8` finding that brought the program up for conversion.
+   `design.txt` allows every byte but `/` and NUL, so `yes "$(printf 'na\377me')"`
+   was a crash before a byte of output. Argv is `OsString` end to end now and
+   the bytes are only taken at the point the record is built.
+3. **Every write error was swallowed and reported as success.** The
+   `.is_err() { break }` above does not distinguish a reader that went away
+   from a disk that filled: `yes > /dev/full` exited **0 with no diagnostic**,
+   claiming to have done the job. GNU prints `yes: standard output: No space
+   left on device` and exits 1. Only `BrokenPipe` is quiet now, which is the
+   established convention here — `cut`, `head`, `tail` and `uniq` do the same,
+   because SlateOS has no `SIGPIPE` to die of (`design.txt`) and Rust masks it
+   anyway, so the case that kills GNU arrives as `EPIPE` instead.
+
+### What the harness had to solve that the others did not
+
+`scripts/yes-diff.sh` is the first in this family whose subject never exits.
+Two consequences shaped it:
+
+- **Every running case is bounded by `head -c 40000` and compared on a
+  digest.** The bound is deliberately several times the 8 KiB buffer, because
+  the failure the buffering could introduce — a record split across a write, or
+  a buffer that is not a whole number of records — is invisible in the first
+  4 KiB and unmistakable in 40 KB. Records of 3, 5 and 7 bytes, and one of
+  20,000, are in the case list for exactly that reason.
+- **The exit status could not be compared for those cases**, since both sides
+  are killed by the bound rather than finishing. Rather than let that silently
+  drop a real difference, the `EPIPE`-vs-`SIGPIPE` divergence is pulled out
+  into a single explicit `xfail` — so it is recorded once, in the summary,
+  instead of being smeared across every case as an unexamined exemption.
+
+Two further harness defects were found by running it rather than reading it:
+
+- **`PIPESTATUS` is a bashism, and `scripts/all-diff.sh` runs every harness as
+  `sh "$h"`.** Under a `sh` that is not bash it reads as empty — and empty
+  compares equal to empty, so *every status check in the harness would have
+  passed by vacuity* while appearing to run. The status is now carried out of
+  the pipeline in a file, and the harness was re-run under `dash` to prove it:
+  same 36/0/3.
+- **The abbreviation and permutation cases were comparing the full help text**,
+  so all six failed on the one difference already recorded as an `xfail`. Those
+  cases exist to ask *which* option resolved, not what it printed, so they now
+  compare stdout's class — `help` / `version` / `empty` / `stream` — while
+  still comparing stderr and status byte for byte. A known difference that
+  fails a case it is not about stops being a record and becomes noise.
+
+### A third gate defect: `getopt-ambiguity-check.py` could not see a table that fitted on one line
+
+Checking that the gate really covered the new program — rather than assuming it
+did, because the summary said `41 table(s) checked; 0 disagreement(s)` — showed
+that it did not. `python scripts/getopt-ambiguity-check.py yes` answered:
+
+```
+note: yes has no LONG_OPTIONS table, so there is nothing to compare
+      (not yet converted to coreutils::getopt?)
+0 table(s) checked; 0 disagreement(s).
+```
+
+The table exists. The pattern ended at a literal `\n];`, which made the gate
+depend on rustfmt's layout: `yes` has two options, so rustfmt collapses the
+table onto one line, there is no `];` at the start of a line, and the
+declaration was not found. This is the *second* time this gate has silently
+stopped seeing a program — the first was the `digest.c` delegation, recorded
+above — and both failures read as reassurance rather than as a warning, because
+"no table" is a note the sweep prints legitimately for the bins not yet
+converted.
+
+Fixed properly rather than by adding another alternative to the regex: only the
+declaration's head is matched by pattern now, and the body is taken by counting
+brackets (skipping string literals), so a one-line table and a fifty-line one
+parse alike and no future formatting choice can hide one.
+
+The fix was checked by diffing what the old and new parsers find across every
+bin, which is the only way to know a looser pattern did not also break
+something: **nothing lost, no table's contents changed, and four newly
+visible** — `md5sum` and `sha256sum` from the earlier delegation fix, `yes`,
+and **`tsort`, which nobody had noticed was uncovered either**. Both newly
+reachable tables were then run against their real GNU binaries and agree. The
+sweep is now `43 table(s) checked; 0 disagreement(s)`.
+
+### Deliberate divergences, all recorded as `xfail`
+
+Three: `--help` omits the GNU project's `Report bugs to:` block, `--version`
+names SlateOS, and the broken-pipe status above. Confirmed discriminating by
+running the harness with `OURS=/usr/bin/yes`, which turns all three into
+`XPASS` and nothing else — the flip is what proves the harness is testing our
+binary rather than agreeing with itself.
+
+Final: **36 passed, 0 differed, 3 differ on purpose**, plus 20 unit tests.
+
+## `nohup` ignored no hangup, and sent `nohup cmd > out.txt` to `nohup.out` instead (lane B, 2026-08-24)
+
+**In short:** `nohup` exists to let a command outlive the terminal it was
+started from. Ours did not do that: it never told the kernel to ignore the
+hangup signal, so a command run under it died with the terminal exactly as it
+would have without it — the program was a no-op with respect to its own name.
+It also captured the command's output into `nohup.out` *always*, including
+when the user had explicitly redirected it somewhere else, so
+`nohup cmd > out.txt` left `out.txt` empty and the output in a file the user
+had not asked for. Rewritten from GNU coreutils 9.4's `src/nohup.c`, checked
+against the real GNU binary across 77 cases, 41 of them under a
+pseudo-terminal.
+
+### The name was the specification, and the code did not implement it
+
+The old file contained no signal code at all. It spawned the command and
+waited for it:
+
+```rust
+match Command::new(&parsed.cmd).args(&parsed.cmd_args)...spawn() {
+    Ok(mut child) => match child.wait() { ... }
+```
+
+Two separate faults sit in those two lines.
+
+**No `SIGHUP` disposition was ever set.** `nohup` is one system call in a
+trench coat — `signal(SIGHUP, SIG_IGN)` before the command starts, so that the
+`SIGHUP` the kernel sends to a terminal's foreground group on hangup is
+discarded rather than killing the process. Without it the command dies on
+hangup, which is the exact event the user ran `nohup` to survive. Nothing else
+the program does matters if this is missing, and it was missing.
+
+**It spawned and waited instead of `exec`ing.** GNU replaces itself with the
+command, so once `nohup` has done its work no trace of it is left. Ours stayed
+alive as the command's parent — a process that itself had no `SIGHUP`
+protection, so the hangup that the child was (notionally) shielded from killed
+the shield. It also cost a process for the command's whole lifetime, and it
+lost the exit status of a command that died from a signal, mapping every such
+death to `126` via `status.code().unwrap_or(126)`.
+
+### `nohup cmd > out.txt` wrote to `nohup.out`, and the code said why
+
+```rust
+// Try to redirect stdout to nohup.out if it's a terminal.
+// In our minimal environment, we'll always redirect since we
+// can't easily check isatty.
+let output_file = OpenOptions::new().create(true).append(true).open("nohup.out");
+```
+
+Every clause of that comment is wrong, and the last one is checkable. The
+whole of `nohup`'s redirection behaviour is conditional on `isatty`: output is
+diverted to `nohup.out` **only** when it would otherwise go to the terminal.
+A user who redirects explicitly has already said where the output goes, and
+GNU's own `--help` tells them to — `To save output to FILE, use 'nohup COMMAND
+> FILE'.` Our `--help` said the same thing, above code that made it false.
+
+"We can't easily check `isatty`" was not true when it was written.
+`posix/src/ioctl.rs` — which exports `isatty` — was added on 2026-05-08.
+`nohup.rs` was added on 2026-05-17, nine days later. The comment is a guess
+about the tree recorded as a fact about it, and it survived three months
+because nothing tested the branch it excused.
+
+### The rest of the old program
+
+- **`nohup --help` tried to run a command called `--help`**, failing with `No
+  such file or directory` and status 127. The parser recognised no options at
+  all; the help text it did contain was unreachable.
+- **stdin and stderr were untouched.** GNU makes stdin unusable and points
+  stderr at wherever stdout went, both conditionally on `isatty`.
+- **No `$HOME` fallback.** GNU tries `./nohup.out` and then `$HOME/nohup.out`.
+- **`nohup.out` was created world-readable** (`0666 & ~umask`), rather than
+  `0600`. The output of a command you detached from your terminal is not
+  something to hand to the rest of the machine by default.
+- **The exit statuses were invented**: `127` for every spawn failure rather
+  than only for not-found, `126` for a failed `wait`, and `125` — `nohup`'s
+  own "I failed before the command started" status — used for nothing but the
+  argument error.
+- **`env::args()` as `Vec<String>`**, so any argument holding a byte that is
+  not valid UTF-8 aborted the process. That is what put this file on the
+  `argv-utf8` list, and it is the smallest of the faults above.
+
+### Six defects in the *replacement*, found by measuring GNU rather than recalling it
+
+The port was written from `nohup.c` and smoke-tested, and it looked right. It
+was then probed against the real `/usr/bin/nohup` seven times before a single
+harness case was written, and each round found something. None of these would
+have been caught by reading the source I was porting from, because each of
+them lives in a detail the source states obliquely or not at all.
+
+| What ours did | What GNU does | How it was found |
+|---|---|---|
+| Said `ignoring input` whenever stdin was a terminal | Says it only when *neither* stdout nor stderr is being redirected — otherwise the fact is folded into the longer sentence | Ran both with stdin a tty and stdout a pipe |
+| Opened `/dev/null` **read-only** for stdin | Opens it **write-only**, on purpose, so the command's *reads fail* rather than returning end-of-file | `ls -l /proc/self/fd/0` under each; `nohup cat` gives `cat: -: Bad file descriptor` |
+| Printed one `failed to open` line | Prints one per path tried, so the reader can see `$HOME` was tried too | Made both paths unwritable |
+| Requested mode `0600`, which `umask` then filtered | Brackets the open with `umask(0177)`, making the mode exact | Compared modes under `umask` 000, 077, 0200, 0466 |
+| Created no `nohup.out` when stdout was *closed* | Creates one, because the `dup2` that redirects stderr needs something on descriptor 1 | `nohup true >&-` vs `nohup true >&- 2>err` |
+| Exited 0 when its own diagnostic could not be delivered | Exits 125 — an unwritable stderr means the user cannot be told where the output went | `nohup true 2>&-` |
+
+The last one is the one worth dwelling on. `nohup`'s messages are not
+decoration: `appending output to 'nohup.out'` is the *only* record of where a
+detached command's output went. A `nohup` that cannot say it and starts the
+command anyway has silently lost the output. GNU treats that as a failure to
+perform the job, and now so do we.
+
+Two of these lose user data outright — the read-only `/dev/null` turns a
+failed read into an empty one, and the closed-stdout case discards the
+command's stderr instead of saving it.
+
+### Two places the Rust runtime lies about the standard descriptors, and how each is defeated
+
+Both faults below are the same shape: the standard library papers over a
+closed standard descriptor because for almost every program that is a
+kindness, and for *this* program it is the subject matter.
+
+**`sanitize_standard_fds`.** Before `main` runs, Rust reopens any of
+descriptors 0, 1 and 2 that is closed onto `/dev/null`. So by the time our
+code could look, `nohup cmd >&-` was indistinguishable from
+`nohup cmd >/dev/null` — and the two must behave differently, the first
+creating `nohup.out` and the second not.
+
+There is no runtime switch for this, so the answer is recorded *before* the
+runtime can destroy it, from an ELF constructor that `__libc_start_main` runs
+ahead of Rust's `lang_start`:
+
+```rust
+#[used]
+#[unsafe(link_section = ".init_array")]
+static RECORD_CLOSED_STD_FDS: extern "C" fn() = record_closed_std_fds;
+```
+
+`run` then closes again whatever the constructor saw closed. That the
+constructor really does run first was measured, not assumed — a standalone
+`rustc` probe reported `early(ctor)=100 late(main)=000` for `2>&-`.
+
+**`handle_ebadf`.** `StderrRaw`'s `Write` impl passes its result through the
+standard library's `handle_ebadf`, which turns `EBADF` into `Ok(buf.len())`:
+a write to a closed stderr is reported as a write that fully succeeded. This
+is why `nohup true 2>&-` exited 0 against GNU's 125 even after the descriptor
+bookkeeping above was correct — the write genuinely failed and the standard
+library said it had not. The fix is to stop asking it: the diagnostic path
+calls `write(2)` directly through a small `write_all_fd`, and reports what the
+kernel reported.
+
+**This is a hazard every binary in this tree shares**, not a `nohup`
+peculiarity. Any utility whose exit status or behaviour depends on whether a
+standard descriptor is open — and by POSIX that is a large family — will be
+wrong by default in Rust, silently and in the safe direction, which is the
+hard kind to notice. The two mechanisms above are the general answer; they are
+written in `nohup.rs` with enough commentary to be lifted.
+
+*Update, same day:* they **were** lifted, into `coreutils::stdfd`, when `nice`
+turned out to need them too; `nohup.rs` no longer carries its own copies. See
+`TD-B-EVERY-BINARY-IS-WRONG-ABOUT-A-CLOSED-STANDARD-DESCRIPTOR` below for the
+shared module and the bin-by-bin sweep that is still outstanding, and
+`design-decisions.md` §375 for why the startup hook has to be a macro.
+
+### Why the harness needs a pseudo-terminal
+
+Every branch that makes `nohup` `nohup` is guarded by `isatty`. Run from a
+pipe — which is how a test harness normally runs anything — the program
+redirects nothing, says nothing and creates no `nohup.out`. A harness built
+like `cut-diff.sh` would therefore exercise the argument parser and *nothing
+else* while reporting a full green column, which is a worse outcome than
+having no harness at all. `scripts/nohup-diff.sh` runs the interesting half of
+its cases under `script -qec`, so `isatty` answers yes and the redirections
+actually happen. All seven combinations of (stdin, stdout, stderr) being a
+terminal are covered.
+
+The comparison is also not text-only. `nohup`'s real output is a *file*, so
+every case compares a snapshot of the directory it ran in — each path with its
+octal mode and size — plus the bytes of every file. A port that printed the
+right sentence and created `nohup.out` world-readable, or empty, or in the
+wrong directory, would pass a text-only comparison and fail this one.
+
+Two harness bugs were found by running it with `OURS=/usr/bin/nohup`, which
+must turn every `xfail` into `XPASS` and change nothing else: the per-side
+temporary directory was leaking into the compared text, so the two
+`$HOME`-fallback cases could never have agreed; and the deliberate
+`kill -TERM` case emitted a `Terminated` line from the harness's own shell.
+
+### One latent bug the descriptor work exposed
+
+With descriptor 1 genuinely closed, the `open` of `nohup.out` lands *on*
+descriptor 1, because it is the lowest free number. The redirect helper would
+then `dup2(1, 1)` and drop the `File` — closing the descriptor it had just put
+in place, leaving the command with no stdout at all. It is fixed by taking the
+raw descriptor and returning early when it is already the target. The case is
+reachable only because the `.init_array` work above made it reachable; before
+that, the runtime's `/dev/null` was occupying descriptor 1 and the bug was
+merely waiting.
+
+### Deliberate divergences, both recorded as `xfail`
+
+The family's two: `--help` omits the GNU project's `Report bugs to:` block,
+and `--version` names SlateOS. Confirmed discriminating by running the harness
+with `OURS=/usr/bin/nohup`, which turns both into `XPASS` and nothing else.
+
+Final: **75 passed, 0 differed, 2 differ on purpose**, plus 18 unit tests —
+one of which is an eight-row table over every `(stdin, stdout, stderr)`
+terminal combination, asserting the exact ordered list of lines GNU produced
+for each.
+
+## `nice` parsed the adjustment and then threw it away (lane B, 2026-08-24)
+
+**Status: FIXED.** `userspace/coreutils/src/bin/nice.rs` is a port of GNU
+coreutils 9.4's `src/nice.c`, verified case-by-case against the real binary by
+`scripts/nice-diff.sh` — **127 cases, 125 passed, 0 differed, 2 differ on
+purpose**, plus 25 unit tests.
+
+### What the old version did
+
+It accepted `-n N`, computed nothing from it, and ran the command at whatever
+niceness it had inherited. Eight separate defects, each of which a shipped
+`nice` would have been wrong about:
+
+| # | The old behaviour | GNU |
+|---|---|---|
+| 1 | `-n N` parsed, then discarded; the command ran unchanged | the niceness is actually set |
+| 2 | no default: `nice cmd` did nothing | `nice cmd` is `nice -n 10 cmd` |
+| 3 | the obsolete `-NUM` form was an unknown option | `nice -5 cmd` is an adjustment |
+| 4 | `argv` held as `Vec<String>` — a non-UTF-8 byte panicked | passed through untouched |
+| 5 | a failed `exec` exited 1 | 127 not found, 126 found-but-not-runnable |
+| 6 | a refused adjustment was fatal | a warning; the command still runs |
+| 7 | no query form: `nice` alone printed usage | prints the current niceness |
+| 8 | no `--adjustment`, no `--help`, no `--version` | all three |
+
+Defect 1 is the one that makes the rest secondary: a batch script asking for
+`nice -n 19 ./rebuild` got a full-priority rebuild, and nothing anywhere said
+so. Text and exit status were *correct* throughout — which is why the harness
+runs `nice` itself as the command under test in most cases, so that stdout
+carries the scheduling parameter and a comparison of text becomes a
+comparison of behaviour.
+
+### Why the scan is interleaved rather than a pre-pass
+
+The obsolete `-NUM` syntax cannot be described to getopt: `-5` is neither a
+short option cluster nor an operand. The tempting shape — walk the words once
+pulling out anything matching `-NUM`, then hand the rest to getopt — is wrong,
+and wrong in a way that only shows up on a valid command line: `nice -n -5
+cmd` would lose its `-5` to the pre-pass, and the `-n` would then report a
+missing argument. Upstream alternates instead, and so does this port: test the
+next word for the digit form, otherwise take **exactly one** item from getopt
+and resume at `optind`. That is what `Parser::optind()` was added to
+`src/getopt.rs` for.
+
+The digit test is `s[0] == '-' && ISDIGIT (s[1 + (s[1] == '-' || s[1] ==
+'+')])`, and the adjustment is `s + 1` — so `--5` is −5, `-+5` is +5, and
+`--` is not caught by it. `-5x` *is* caught, which is why it produces
+`invalid adjustment '5x'` rather than an unknown-option error.
+
+### A refused niceness is a warning; an undeliverable warning is fatal
+
+Unprivileged, a negative adjustment is refused by the kernel. GNU prints
+`nice: cannot set niceness: Permission denied` and **runs the command anyway**,
+returning the command's own status — treating it as fatal would break every
+`nice -n -5` in every script run by a non-root user. But upstream then checks
+`ferror (stderr)`, and if the warning could not be delivered it returns
+`EXIT_CANCELED` after all. Both halves are reproduced, and both are covered:
+`nice -n -5 true` is 0, `nice -n -5 true 2>&-` is 125.
+
+The same rule produces the finding most likely to trip a re-implementation:
+**`nice /nope 2>&-` exits 125, not 127.** The command was not found, but the
+report of that could not be delivered, and the undeliverable report wins.
+
+## TD-B-EVERY-BINARY-IS-WRONG-ABOUT-A-CLOSED-STANDARD-DESCRIPTOR — `coreutils::stdfd` exists now; the sweep does not (lane B, 2026-08-24)
+
+**Status: mechanism FIXED and shared; two binaries converted; the rest
+unaudited.**
+
+### The two lies
+
+Rust's runtime tells every binary in this crate the same two untruths about
+descriptors 0, 1 and 2, and both of them push the program toward reporting
+success:
+
+1. **`sanitize_standard_fds`** runs before `main` and reopens any *closed*
+   standard descriptor on `/dev/null`. By the time `main` sees the world,
+   `prog >&-` and `prog >/dev/null` are indistinguishable.
+2. **`handle_ebadf`** in `StdoutRaw`/`StderrRaw`'s `Write` impls turns `EBADF`
+   into `Ok(buf.len())`. Even with (1) defeated, a write to a closed
+   descriptor is reported as a write that fully succeeded.
+
+Together: `prog >&-` writes nothing, notices nothing and exits 0, where every
+GNU utility prints `prog: write error: Bad file descriptor` and exits nonzero.
+This is not a corner — gnulib registers `close_stdout` with `atexit` in
+essentially every one of its programs precisely because a report that did not
+arrive is a failure, and a pipeline that silently discards output is the thing
+that rule exists to prevent.
+
+### The answers, now in the library
+
+`userspace/coreutils/src/stdfd.rs`:
+
+- **`guard_std_fds!()`** — a `macro_rules!` the *binary* expands, installing an
+  `.init_array` ELF constructor that records which of 0/1/2 were closed. It
+  has to be a macro rather than a plain library item: an `.init_array` entry
+  inside an rlib is not reliably pulled into the link, because inclusion is by
+  object file and rustc's codegen-unit partitioning is not a stable interface.
+  The constructor is the one window in which the truth is still available —
+  it runs from `__libc_start_main`, before `lang_start` calls
+  `sanitize_standard_fds`.
+- **`stdfd::restore()`** — re-closes, at the top of `main`, whatever the
+  constructor saw closed.
+- **`stdfd::Stream`** — a buffered writer over a raw descriptor that calls
+  `write(2)` directly, so `EBADF` arrives as `EBADF`. It reproduces gnulib's
+  `close_stream` rule exactly, which is subtler than "did any write fail":
+  failure is `prev_fail || (fclose_fail && (some_pending || errno != EBADF))`.
+  That is why `nice true >&-` is 0 (nothing was owed) while `nice >&-` is 125
+  (a number was owed), and both were measured before being coded.
+
+### What is left
+
+`nohup` and `nice` are converted and covered by their harnesses. **Every other
+binary in the crate is still wrong by default**, in the silent direction.
+The remaining work is a bin-by-bin sweep: for each, decide whether its exit
+status or behaviour depends on a standard descriptor being open — for anything
+that writes to stdout, it does — and if so expand `guard_std_fds!()`, call
+`stdfd::restore()` first thing in `main`, route output through
+`stdfd::Stream`, and add `prog >&-` / `prog >/dev/full` cases to its harness.
+`cat`, `echo`, `yes`, `printf`, `seq`, `head`, `tail`, `wc`, `sort` and the
+`sum`/`digest` family are the ones a pipeline is most likely to notice.
+
+Recorded in `todo.txt` as well.
+
+### A general defect it exposed on the way
+
+`errmsg::strerror` fell back to `io::Error`'s `Display` for any errno stable
+`ErrorKind` cannot name, and that `Display` appends ` (os error N)`. `EBADF`
+is such an errno, so the first thing the new code printed was
+`nice: write error: Bad file descriptor (os error 9)` against GNU's
+`nice: write error: Bad file descriptor`. The suffix is std's, not POSIX's,
+and no utility this crate imitates has ever printed it — so *any* unnamed
+errno would have given the port away. `errmsg::host_text` now strips it,
+which fixes the whole family rather than `EBADF` alone.

@@ -13737,6 +13737,36 @@ fn cmd_integrity(args: &str) {
                             match integrity::verify_file(&resolved) {
                                 Ok(result) => {
                                     print_verify_result(&result);
+                                    // Verifying one file: this row *is* the
+                                    // verdict, there being no summary below it
+                                    // to carry one, so the status is set here
+                                    // and not inside the shared row printer --
+                                    // which also serves the directory walk,
+                                    // where a row must not decide the command.
+                                    //
+                                    // An integrity checker that prints
+                                    // "[MODIFY] /etc/passwd" and then reports
+                                    // success is the worst instance of this
+                                    // bug in the shell: the entire purpose of
+                                    // the command is to be the thing a script
+                                    // trusts, and `verify f || alarm` stayed
+                                    // silent on a tampered file.
+                                    //
+                                    // Which states count as failure follows
+                                    // `run_dir_verify`'s own verdict line
+                                    // rather than inventing a second rule:
+                                    // Modified, Missing and Error are changes,
+                                    // New is not (a file that was never in the
+                                    // baseline has not been altered).
+                                    use crate::fs::integrity::VerifyStatus;
+                                    if matches!(
+                                        result.status,
+                                        VerifyStatus::Modified
+                                            | VerifyStatus::Missing
+                                            | VerifyStatus::Error
+                                    ) {
+                                        set_exit(1);
+                                    }
                                 }
                                 Err(crate::error::KernelError::NotFound) => {
                                     shell_println!("{}: not in baseline", resolved.display());
@@ -13900,6 +13930,11 @@ fn run_dir_verify(dir: &Path) {
         shell_println!("  Status: ALL CLEAR ✓");
     } else {
         shell_println!("  Status: CHANGES DETECTED");
+        // The verdict line, so the verdict goes here -- not on the `[MODIFY]`
+        // rows above, which are a report. Same split as `syshealth`, and the
+        // same reason: a script running `verify /etc || alarm` reads the
+        // status and nothing else.
+        set_exit(1);
     }
 }
 

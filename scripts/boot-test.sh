@@ -2516,6 +2516,57 @@ check_user_access_sites() {
 
 check_user_access_sites
 
+# Keep every path-taking VFS entry point behind the one permission gate.
+#
+# This guards the failure mode that no runtime test can see, because both
+# checks the gate runs fail *open*: a VFS method that forgets to call
+# `check_path_access` reads and writes files exactly as it always did, and a
+# test that exercises permitted access passes identically against a gate that
+# is not there.  Only the source-level invariant notices.
+#
+# It had already failed in both directions at once.  `file_tags::check_access`
+# was hand-written into sixteen call sites in fs/vfs.rs plus a seventeenth
+# copied into fs/handle.rs -- and missing from roughly twenty more entry points
+# nobody had remembered.  `acl::check_access`, the entire POSIX 1003.1e
+# evaluation algorithm, was called from nowhere at all: `setfacl` validated and
+# stored ACLs, `getfacl` read them back, procfs counted them, and no file
+# operation ever consulted one.
+check_vfs_permission_gate() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== VFS permission-gate check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the VFS permission gate ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-vfs-permission-gate.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each report above is a way for a file" >&2
+    echo "operation to bypass access control without anything noticing, since" >&2
+    echo "both the capability-tag and POSIX-ACL checks fail open." >&2
+    echo "" >&2
+    echo "A Vfs method that resolves a path must call check_path_access with" >&2
+    echo "the PathAccess it intends (Read / Write / Execute / Metadata).  If it" >&2
+    echo "genuinely acts on the filesystem rather than on the path -- statvfs," >&2
+    echo "trim, the mount table -- add it to UNGATED in the script with a" >&2
+    echo "reason, because that list is the audit trail." >&2
+    echo "" >&2
+    echo "acl::check_access and file_tags::check_access each have exactly one" >&2
+    echo "legal caller, inside the gate.  Route new checks through the gate" >&2
+    echo "rather than calling them directly: a hook you must remember at every" >&2
+    echo "entry point is a hook the next entry point will not have." >&2
+    exit 1
+}
+
+check_vfs_permission_gate
+
 # Keep `.unwrap()` / `.expect()` out of kernel production paths.
 #
 # The count reached zero on 2026-08-22 and the script that measured it was

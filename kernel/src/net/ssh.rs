@@ -285,6 +285,14 @@ struct Session {
     phase: SessionPhase,
     /// Whether this session slot is active.
     active: bool,
+    /// Whether `tick` currently has this session checked out for processing.
+    ///
+    /// While this is set, the slot holds an empty placeholder and the real
+    /// session lives on the tick's stack — see `tick` for why. `active` stays
+    /// true on the placeholder so the slot is not handed to a new connection,
+    /// but `tcp_handle` is *not* valid, so anything that would touch the
+    /// connection (`shutdown`) must skip the slot and leave it to the tick.
+    checked_out: bool,
     /// Receive buffer for incomplete packets.
     recv_buf: Vec<u8>,
     /// Client's version string (without trailing CRLF).
@@ -353,6 +361,7 @@ impl Session {
             tcp_handle: 0,
             phase: SessionPhase::Closed,
             active: false,
+            checked_out: false,
             recv_buf: Vec::new(),
             client_version: Vec::new(),
             server_version: Vec::new(),
@@ -413,6 +422,33 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static LISTEN_PORT: AtomicU16 = AtomicU16::new(DEFAULT_PORT);
 static LAST_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// Serialises `tick` against itself.
+///
+/// The tick used to hold `STATE` for its whole body, which gave that mutual
+/// exclusion for free — but it also meant the lock was held across
+/// `process_message`, and public-key authentication reads
+/// `~/.ssh/authorized_keys` through the VFS. The kernel's live lock order is
+/// *filesystem lock -> module state*, because `Vfs::readdir` takes a
+/// filesystem's lock and, for generated filesystems like procfs, calls back
+/// into arbitrary subsystems underneath it. Holding module state across a VFS
+/// call runs that order backwards; one CPU in each path wedges both. See
+/// `scripts/check-vfs-under-lock.py`, which enforces this.
+///
+/// The exclusion the tick actually needs is kept here instead, so `STATE` can
+/// be dropped while a session is processed. Note the rate limiter above it is
+/// not a substitute: its load/compare/store is not atomic, so two CPUs can
+/// both pass it.
+static TICKING: AtomicBool = AtomicBool::new(false);
+
+/// Releases the `TICKING` claim on every exit path, including panics.
+struct TickGuard;
+
+impl Drop for TickGuard {
+    fn drop(&mut self) {
+        TICKING.store(false, Ordering::Release);
+    }
+}
 
 // Statistics.
 static TOTAL_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
@@ -2229,6 +2265,14 @@ pub fn shutdown() {
     let mut guard = STATE.lock();
     if let Some(state) = guard.as_mut() {
         for session in &mut state.sessions {
+            // A checked-out slot is a placeholder: the tick owns the real
+            // session and `tcp_handle` here is 0, which is a valid handle
+            // belonging to somebody else. Sending a disconnect to it would
+            // corrupt an unrelated connection. `ENABLED` is already false, so
+            // the tick closes that session itself when it writes back.
+            if session.checked_out {
+                continue;
+            }
             if session.active {
                 // Best-effort disconnect.
                 let disconnect =
@@ -2277,10 +2321,85 @@ pub fn tick() {
     }
     LAST_TICK.store(now, Ordering::Relaxed);
 
-    let mut guard = STATE.lock();
-    let Some(state) = guard.as_mut() else { return };
+    // Claim the tick. Only one CPU runs the body at a time; see TICKING.
+    if TICKING
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let _ticking = TickGuard;
 
-    // Accept new connections.
+    // Accept new connections. Nothing on this path reaches the VFS, so it can
+    // run under the state lock; only the per-session processing below has to
+    // be moved out from under it.
+    let (host_key_seed, host_key_public) = {
+        let mut guard = STATE.lock();
+        let Some(state) = guard.as_mut() else { return };
+        accept_new_connections(state, now);
+        (state.host_key_seed, state.host_key_public)
+    };
+
+    // Process each active session with the state lock *dropped*.
+    //
+    // The session is moved out of its slot for the duration and an empty
+    // placeholder left behind, marked `checked_out` so nothing else mistakes
+    // it for a live connection. That is what makes the unlocked processing
+    // sound: the tick has exclusive ownership of the `Session` (guaranteed by
+    // TICKING), so no other CPU can observe it half-updated, and the slot
+    // still reads as `active` so it is not recycled underneath us.
+    for idx in 0..MAX_SESSIONS {
+        let mut session = {
+            let mut guard = STATE.lock();
+            let Some(state) = guard.as_mut() else { return };
+            let Some(slot) = state.sessions.get_mut(idx) else {
+                continue;
+            };
+            if !slot.active {
+                continue;
+            }
+            let mut placeholder = Session::new();
+            placeholder.active = true;
+            placeholder.checked_out = true;
+            core::mem::replace(slot, placeholder)
+        };
+
+        process_session(&mut session, &host_key_seed, &host_key_public);
+
+        let mut guard = STATE.lock();
+        if ENABLED.load(Ordering::Relaxed) && guard.is_some() {
+            if let Some(state) = guard.as_mut() {
+                if let Some(slot) = state.sessions.get_mut(idx) {
+                    *slot = session;
+                }
+            }
+            continue;
+        }
+
+        // `shutdown` ran while this session was checked out. It skipped the
+        // placeholder because it had no usable handle, so closing the real
+        // connection is our job, and there is nothing to put back.
+        if let Some(state) = guard.as_mut() {
+            if let Some(slot) = state.sessions.get_mut(idx) {
+                *slot = Session::new();
+            }
+        }
+        drop(guard);
+        if session.active {
+            let _ = super::tcp::close(session.tcp_handle);
+            crate::serial_println!(
+                "[ssh] Closed session checked out across shutdown ({:?}:{})",
+                session.remote_ip,
+                session.remote_port
+            );
+        }
+        session.reset();
+        return;
+    }
+}
+
+/// Accept pending inbound connections into free session slots.
+fn accept_new_connections(state: &mut SshState, now: u64) {
     if let Some(listener) = state.listener_handle {
         while let Ok(tcp_handle) = super::tcp::try_accept(listener) {
             // Find a free session slot.
@@ -2324,203 +2443,191 @@ pub fn tick() {
             }
         }
     }
+}
 
-    // Copy host key data out of state for use during message processing.
-    let host_key_seed = state.host_key_seed;
-    let host_key_public = state.host_key_public;
-
-    // Process each active session.
-    for session in &mut state.sessions {
-        if !session.active {
-            continue;
+/// Drive one checked-out session: drain its socket, run the protocol state
+/// machine, and close it if it reached `Closed`.
+///
+/// Called with no kernel lock held — `process_message` below reaches the VFS
+/// on the public-key authentication path, which must not happen underneath
+/// `STATE`. See `TICKING`.
+fn process_session(session: &mut Session, host_key_seed: &[u8; 32], host_key_public: &[u8; 32]) {
+    // Read available data from TCP.
+    match tcp_read(session.tcp_handle) {
+        Ok(data) if !data.is_empty() => {
+            session.bytes_rx = session.bytes_rx.saturating_add(data.len() as u64);
+            session.recv_buf.extend_from_slice(&data);
+            // Backstop. The readers below bound what they *consume*, but
+            // nothing bounded what accumulates, and this buffer is kernel
+            // heap fed by an unauthenticated peer. Past this point the
+            // bytes cannot be the prefix of any legal packet — the largest
+            // one that exists is `MAX_RECV_BUF` — so the peer is either
+            // broken or hostile, and either way the session is over.
+            if session.recv_buf.len() > MAX_RECV_BUF {
+                crate::serial_println!(
+                    "[ssh] Receive buffer overrun ({} bytes) — closing session",
+                    session.recv_buf.len()
+                );
+                session.phase = SessionPhase::Closed;
+            }
         }
+        Err(_) => {
+            // Connection error — close session.
+            session.phase = SessionPhase::Closed;
+        }
+        _ => {}
+    }
 
-        // Read available data from TCP.
-        match tcp_read(session.tcp_handle) {
-            Ok(data) if !data.is_empty() => {
-                session.bytes_rx = session.bytes_rx.saturating_add(data.len() as u64);
-                session.recv_buf.extend_from_slice(&data);
-                // Backstop. The readers below bound what they *consume*, but
-                // nothing bounded what accumulates, and this buffer is kernel
-                // heap fed by an unauthenticated peer. Past this point the
-                // bytes cannot be the prefix of any legal packet — the largest
-                // one that exists is `MAX_RECV_BUF` — so the peer is either
-                // broken or hostile, and either way the session is over.
-                if session.recv_buf.len() > MAX_RECV_BUF {
-                    crate::serial_println!(
-                        "[ssh] Receive buffer overrun ({} bytes) — closing session",
-                        session.recv_buf.len()
-                    );
+    // Check for closed TCP connection.
+    if super::tcp::is_remote_closed(session.tcp_handle) && session.recv_buf.is_empty() {
+        session.phase = SessionPhase::Closed;
+    }
+
+    // Phase-specific processing.
+    match session.phase {
+        SessionPhase::VersionExchange => {
+            match process_version_exchange(session) {
+                Ok(true) => {
+                    // Version exchange complete — send our KEXINIT.
+                    let kexinit = build_kexinit();
+                    session.server_kexinit_payload = kexinit.clone();
+                    if send_packet_plain(session.tcp_handle, &kexinit).is_err() {
+                        session.phase = SessionPhase::Closed;
+                    } else {
+                        session.phase = SessionPhase::WaitKexInit;
+                    }
+                }
+                Ok(false) => {} // Need more data.
+                Err(_) => {
+                    crate::serial_println!("[ssh] Version exchange failed");
                     session.phase = SessionPhase::Closed;
                 }
             }
-            Err(_) => {
-                // Connection error — close session.
-                session.phase = SessionPhase::Closed;
-            }
-            _ => {}
         }
 
-        // Check for closed TCP connection.
-        if super::tcp::is_remote_closed(session.tcp_handle) && session.recv_buf.is_empty() {
-            session.phase = SessionPhase::Closed;
-        }
-
-        // Phase-specific processing.
-        match session.phase {
-            SessionPhase::VersionExchange => {
-                match process_version_exchange(session) {
-                    Ok(true) => {
-                        // Version exchange complete — send our KEXINIT.
-                        let kexinit = build_kexinit();
-                        session.server_kexinit_payload = kexinit.clone();
-                        if send_packet_plain(session.tcp_handle, &kexinit).is_err() {
-                            session.phase = SessionPhase::Closed;
-                        } else {
-                            session.phase = SessionPhase::WaitKexInit;
-                        }
-                    }
-                    Ok(false) => {} // Need more data.
-                    Err(_) => {
-                        crate::serial_println!("[ssh] Version exchange failed");
+        SessionPhase::WaitKexInit | SessionPhase::WaitKexEcdhInit | SessionPhase::WaitNewKeys => {
+            // Read unencrypted packets.
+            loop {
+                let payload = match try_read_packet_plain(&mut session.recv_buf) {
+                    Ok(Some(payload)) => payload,
+                    // A legal prefix. Leave it buffered and come back.
+                    Ok(None) => break,
+                    // Unframeable. Nothing further from this peer can
+                    // rescue the byte stream, so drop the session rather
+                    // than leave undrainable bytes on the kernel heap.
+                    Err(e) => {
+                        crate::serial_println!("[ssh] Malformed packet ({e:?}) — closing session");
                         session.phase = SessionPhase::Closed;
+                        break;
                     }
-                }
-            }
+                };
 
-            SessionPhase::WaitKexInit
-            | SessionPhase::WaitKexEcdhInit
-            | SessionPhase::WaitNewKeys => {
-                // Read unencrypted packets.
-                loop {
-                    let payload = match try_read_packet_plain(&mut session.recv_buf) {
-                        Ok(Some(payload)) => payload,
-                        // A legal prefix. Leave it buffered and come back.
-                        Ok(None) => break,
-                        // Unframeable. Nothing further from this peer can
-                        // rescue the byte stream, so drop the session rather
-                        // than leave undrainable bytes on the kernel heap.
-                        Err(e) => {
-                            crate::serial_println!(
-                                "[ssh] Malformed packet ({e:?}) — closing session"
-                            );
-                            session.phase = SessionPhase::Closed;
-                            break;
-                        }
-                    };
-
-                    match process_message(session, &payload, &host_key_seed, &host_key_public) {
-                        Ok(responses) => {
-                            for resp in responses {
-                                // After NEWKEYS is sent, switch to encrypted mode
-                                // for outgoing messages.
-                                if session.phase == SessionPhase::WaitNewKeys
-                                    || session.phase == SessionPhase::WaitServiceRequest
-                                {
-                                    // Check if encryption just became active.
-                                    if session.encrypted {
-                                        if let Some(keys) = &session.keys {
-                                            let _ = send_packet_encrypted(
-                                                session.tcp_handle,
-                                                &resp,
-                                                session.s2c_seq,
-                                                &keys.s2c_main_key,
-                                                &keys.s2c_header_key,
-                                            );
-                                            session.s2c_seq += 1;
-                                        }
-                                    } else {
-                                        let _ = send_packet_plain(session.tcp_handle, &resp);
+                match process_message(session, &payload, host_key_seed, host_key_public) {
+                    Ok(responses) => {
+                        for resp in responses {
+                            // After NEWKEYS is sent, switch to encrypted mode
+                            // for outgoing messages.
+                            if session.phase == SessionPhase::WaitNewKeys
+                                || session.phase == SessionPhase::WaitServiceRequest
+                            {
+                                // Check if encryption just became active.
+                                if session.encrypted {
+                                    if let Some(keys) = &session.keys {
+                                        let _ = send_packet_encrypted(
+                                            session.tcp_handle,
+                                            &resp,
+                                            session.s2c_seq,
+                                            &keys.s2c_main_key,
+                                            &keys.s2c_header_key,
+                                        );
+                                        session.s2c_seq += 1;
                                     }
                                 } else {
                                     let _ = send_packet_plain(session.tcp_handle, &resp);
                                 }
+                            } else {
+                                let _ = send_packet_plain(session.tcp_handle, &resp);
                             }
                         }
-                        Err(e) => {
-                            crate::serial_println!("[ssh] Error processing message: {:?}", e);
-                            session.phase = SessionPhase::Closed;
-                            break;
-                        }
                     }
-
-                    if session.phase == SessionPhase::Closed {
+                    Err(e) => {
+                        crate::serial_println!("[ssh] Error processing message: {:?}", e);
+                        session.phase = SessionPhase::Closed;
                         break;
                     }
                 }
+
+                if session.phase == SessionPhase::Closed {
+                    break;
+                }
             }
+        }
 
-            SessionPhase::WaitServiceRequest
-            | SessionPhase::Authentication
-            | SessionPhase::Connected => {
-                // Read encrypted packets.
-                while let Some(keys) = &session.keys {
-                    let main_key = keys.c2s_main_key;
-                    let header_key = keys.c2s_header_key;
+        SessionPhase::WaitServiceRequest
+        | SessionPhase::Authentication
+        | SessionPhase::Connected => {
+            // Read encrypted packets.
+            while let Some(keys) = &session.keys {
+                let main_key = keys.c2s_main_key;
+                let header_key = keys.c2s_header_key;
 
-                    match try_read_packet_encrypted(
-                        &mut session.recv_buf,
-                        session.c2s_seq,
-                        &main_key,
-                        &header_key,
-                    ) {
-                        Ok(Some(payload)) => {
-                            session.c2s_seq += 1;
+                match try_read_packet_encrypted(
+                    &mut session.recv_buf,
+                    session.c2s_seq,
+                    &main_key,
+                    &header_key,
+                ) {
+                    Ok(Some(payload)) => {
+                        session.c2s_seq += 1;
 
-                            match process_message(
-                                session,
-                                &payload,
-                                &host_key_seed,
-                                &host_key_public,
-                            ) {
-                                Ok(responses) => {
-                                    for resp in responses {
-                                        if let Some(keys) = &session.keys {
-                                            let _ = send_packet_encrypted(
-                                                session.tcp_handle,
-                                                &resp,
-                                                session.s2c_seq,
-                                                &keys.s2c_main_key,
-                                                &keys.s2c_header_key,
-                                            );
-                                            session.s2c_seq += 1;
-                                        }
+                        match process_message(session, &payload, host_key_seed, host_key_public) {
+                            Ok(responses) => {
+                                for resp in responses {
+                                    if let Some(keys) = &session.keys {
+                                        let _ = send_packet_encrypted(
+                                            session.tcp_handle,
+                                            &resp,
+                                            session.s2c_seq,
+                                            &keys.s2c_main_key,
+                                            &keys.s2c_header_key,
+                                        );
+                                        session.s2c_seq += 1;
                                     }
                                 }
-                                Err(e) => {
-                                    crate::serial_println!("[ssh] Error: {:?}", e);
-                                    session.phase = SessionPhase::Closed;
-                                    break;
-                                }
+                            }
+                            Err(e) => {
+                                crate::serial_println!("[ssh] Error: {:?}", e);
+                                session.phase = SessionPhase::Closed;
+                                break;
                             }
                         }
-                        Ok(None) => break, // Need more data.
-                        Err(_) => {
-                            crate::serial_println!("[ssh] Decryption/MAC error");
-                            session.phase = SessionPhase::Closed;
-                            break;
-                        }
                     }
-
-                    if session.phase == SessionPhase::Closed {
+                    Ok(None) => break, // Need more data.
+                    Err(_) => {
+                        crate::serial_println!("[ssh] Decryption/MAC error");
+                        session.phase = SessionPhase::Closed;
                         break;
                     }
                 }
+
+                if session.phase == SessionPhase::Closed {
+                    break;
+                }
             }
-
-            SessionPhase::KeyExchange | SessionPhase::Closed => {}
         }
 
-        // Clean up closed sessions.
-        if session.phase == SessionPhase::Closed && session.active {
-            let _ = super::tcp::close(session.tcp_handle);
-            crate::serial_println!(
-                "[ssh] Session closed for {:?}:{}",
-                session.remote_ip,
-                session.remote_port
-            );
-            session.reset();
-        }
+        SessionPhase::KeyExchange | SessionPhase::Closed => {}
+    }
+
+    // Clean up closed sessions.
+    if session.phase == SessionPhase::Closed && session.active {
+        let _ = super::tcp::close(session.tcp_handle);
+        crate::serial_println!(
+            "[ssh] Session closed for {:?}:{}",
+            session.remote_ip,
+            session.remote_port
+        );
+        session.reset();
     }
 }
 

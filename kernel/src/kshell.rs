@@ -363,7 +363,7 @@ fn decompressed_output_path(input: &Path, table: &[(&[u8], &[u8])]) -> PathBuf {
 fn path_arg_as_str<'a>(path: &'a Path, cmd: &str) -> Option<&'a str> {
     let narrowed = path.to_str();
     if narrowed.is_none() {
-        crate::console_println!(
+        shell_println!(
             "{}: path is not valid UTF-8, which this command cannot accept yet: {}",
             cmd,
             path.display()
@@ -508,7 +508,7 @@ fn env_get(name: &str) -> Option<String> {
 /// Set an environment variable.  Returns false (and prints error) if readonly.
 fn env_set(name: &str, value: &str) -> bool {
     if is_readonly(name) {
-        crate::console_println!("{}: readonly variable", name);
+        shell_println!("{}: readonly variable", name);
         return false;
     }
     ENV_VARS
@@ -521,7 +521,7 @@ fn env_set(name: &str, value: &str) -> bool {
 /// Refuses to unset readonly variables.
 fn env_remove(name: &str) -> bool {
     if is_readonly(name) {
-        crate::console_println!("unset: {}: readonly variable", name);
+        shell_println!("unset: {}: readonly variable", name);
         return false;
     }
     ENV_VARS.lock().remove(name).is_some()
@@ -864,9 +864,7 @@ fn expand_vars(input: &str) -> String {
             // silently substituted because reaching it means one of those
             // sources stopped being UTF-8, which is a bug here and not bad
             // input — and a `from_utf8_lossy` would hide exactly that.
-            crate::console_println!(
-                "kshell: internal error: variable expansion produced invalid UTF-8"
-            );
+            shell_println!("kshell: internal error: variable expansion produced invalid UTF-8");
             String::new()
         }
     }
@@ -1274,7 +1272,7 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
             } else {
                 alloc::format!("{}: {}", name, msg)
             };
-            crate::console_println!("{}", error_msg);
+            shell_println!("{}", error_msg);
             set_exit(1);
         }
     } else if rest.starts_with(':')
@@ -2113,7 +2111,7 @@ fn handle_control_flow(line: &str) -> bool {
                 .trim();
 
             if condition.is_empty() {
-                crate::console_println!("Syntax error: {} requires a condition", first_word);
+                shell_println!("Syntax error: {} requires a condition", first_word);
                 return true;
             }
 
@@ -2149,7 +2147,7 @@ fn handle_control_flow(line: &str) -> bool {
                     // Split on `;` into init, cond, step.
                     let parts: Vec<&str> = inner.splitn(3, ';').collect();
                     if parts.len() != 3 {
-                        crate::console_println!(
+                        shell_println!(
                             "Syntax error: for ((...)) requires 3 semicolon-separated expressions"
                         );
                         return true;
@@ -2182,7 +2180,7 @@ fn handle_control_flow(line: &str) -> bool {
                     });
                     return true;
                 }
-                crate::console_println!("Syntax error: unterminated for ((...))");
+                shell_println!("Syntax error: unterminated for ((...))");
                 return true;
             }
 
@@ -2196,7 +2194,7 @@ fn handle_control_flow(line: &str) -> bool {
             let after_var = parts.next().unwrap_or("").trim();
 
             if variable.is_empty() {
-                crate::console_println!("Syntax error: for requires a variable name");
+                shell_println!("Syntax error: for requires a variable name");
                 return true;
             }
 
@@ -2204,7 +2202,7 @@ fn handle_control_flow(line: &str) -> bool {
             let words_part = if let Some(stripped) = after_var.strip_prefix("in") {
                 stripped.trim_start()
             } else {
-                crate::console_println!("Syntax error: for requires 'in' keyword");
+                shell_println!("Syntax error: for requires 'in' keyword");
                 return true;
             };
 
@@ -2217,7 +2215,7 @@ fn handle_control_flow(line: &str) -> bool {
                 .trim();
 
             if words_raw.is_empty() {
-                crate::console_println!("Syntax error: for requires a word list after 'in'");
+                shell_println!("Syntax error: for requires a word list after 'in'");
                 return true;
             }
 
@@ -2241,14 +2239,14 @@ fn handle_control_flow(line: &str) -> bool {
             let after_var = parts.next().unwrap_or("").trim();
 
             if variable.is_empty() {
-                crate::console_println!("Syntax error: select requires a variable name");
+                shell_println!("Syntax error: select requires a variable name");
                 return true;
             }
 
             let words_part = if let Some(stripped) = after_var.strip_prefix("in") {
                 stripped.trim_start()
             } else {
-                crate::console_println!("Syntax error: select requires 'in' keyword");
+                shell_println!("Syntax error: select requires 'in' keyword");
                 return true;
             };
 
@@ -2260,7 +2258,7 @@ fn handle_control_flow(line: &str) -> bool {
                 .trim();
 
             if words_raw.is_empty() {
-                crate::console_println!("Syntax error: select requires a word list after 'in'");
+                shell_println!("Syntax error: select requires a word list after 'in'");
                 return true;
             }
 
@@ -2279,7 +2277,7 @@ fn handle_control_flow(line: &str) -> bool {
             return true;
         }
         "done" => {
-            crate::console_println!("Syntax error: done without while/for/select");
+            shell_println!("Syntax error: done without while/for/select");
             return true;
         }
         "case" => {
@@ -2295,12 +2293,12 @@ fn handle_control_flow(line: &str) -> bool {
                 // `case in` — empty word.
                 ""
             } else {
-                crate::console_println!("Syntax error: case requires 'in' keyword");
+                shell_println!("Syntax error: case requires 'in' keyword");
                 return true;
             };
 
             if word_part.is_empty() {
-                crate::console_println!("Syntax error: case requires a word before 'in'");
+                shell_println!("Syntax error: case requires a word before 'in'");
                 return true;
             }
 
@@ -2315,7 +2313,7 @@ fn handle_control_flow(line: &str) -> bool {
             return true;
         }
         "esac" => {
-            crate::console_println!("Syntax error: esac without case");
+            shell_println!("Syntax error: esac without case");
             return true;
         }
         _ => {}
@@ -2325,7 +2323,7 @@ fn handle_control_flow(line: &str) -> bool {
         "if" => {
             let mut stack = CONTROL_STACK.lock();
             if stack.len() >= MAX_NESTING {
-                crate::console_println!("Error: maximum nesting depth ({}) exceeded", MAX_NESTING);
+                shell_println!("Error: maximum nesting depth ({}) exceeded", MAX_NESTING);
                 return true;
             }
 
@@ -2341,7 +2339,7 @@ fn handle_control_flow(line: &str) -> bool {
             // Extract the condition (everything after "if").
             let condition = trimmed.get(2..).unwrap_or("").trim();
             if condition.is_empty() {
-                crate::console_println!("Syntax error: if requires a condition");
+                shell_println!("Syntax error: if requires a condition");
                 CONTROL_STACK.lock().push(ControlState::ThenSkip);
                 return true;
             }
@@ -2373,7 +2371,7 @@ fn handle_control_flow(line: &str) -> bool {
         "elif" => {
             let mut stack = CONTROL_STACK.lock();
             if stack.is_empty() {
-                crate::console_println!("Syntax error: elif without if");
+                shell_println!("Syntax error: elif without if");
                 return true;
             }
 
@@ -2402,7 +2400,7 @@ fn handle_control_flow(line: &str) -> bool {
                         .trim();
 
                     if condition.is_empty() {
-                        crate::console_println!("Syntax error: elif requires a condition");
+                        shell_println!("Syntax error: elif requires a condition");
                         return true;
                     }
 
@@ -2430,7 +2428,7 @@ fn handle_control_flow(line: &str) -> bool {
         "else" => {
             let mut stack = CONTROL_STACK.lock();
             if stack.is_empty() {
-                crate::console_println!("Syntax error: else without if");
+                shell_println!("Syntax error: else without if");
                 return true;
             }
 
@@ -2448,7 +2446,7 @@ fn handle_control_flow(line: &str) -> bool {
         "fi" => {
             let mut stack = CONTROL_STACK.lock();
             if stack.is_empty() {
-                crate::console_println!("Syntax error: fi without if");
+                shell_println!("Syntax error: fi without if");
             } else {
                 stack.pop();
             }
@@ -2537,12 +2535,12 @@ fn execute_select(variable: &str, words_raw: &str, body: &[String]) {
     for _ in 0..100_u32 {
         // Display numbered menu.
         for (i, word) in words.iter().enumerate() {
-            crate::console_println!("{}) {}", i + 1, word);
+            shell_println!("{}) {}", i + 1, word);
         }
 
         // Prompt for selection.
         use crate::keyboard;
-        crate::console_print!("#? ");
+        shell_print!("#? ");
 
         // Read a line of input (reusing the simple line-reading approach).
         let mut buf = [0u8; 64];
@@ -2550,20 +2548,20 @@ fn execute_select(variable: &str, words_raw: &str, body: &[String]) {
         loop {
             let byte = keyboard::read_char();
             if byte == b'\n' || byte == b'\r' {
-                crate::console_print!("\n");
+                shell_print!("\n");
                 break;
             }
             if byte == 0x08 || byte == 0x7F {
                 // Backspace.
                 if len > 0 {
                     len -= 1;
-                    crate::console_print!("\x08 \x08");
+                    shell_print!("\x08 \x08");
                 }
                 continue;
             }
             if byte == 3 {
                 // Ctrl+C — cancel.
-                crate::console_println!();
+                shell_println!();
                 LOOP_BREAK.store(true, core::sync::atomic::Ordering::Relaxed);
                 break;
             }
@@ -2571,7 +2569,7 @@ fn execute_select(variable: &str, words_raw: &str, body: &[String]) {
                 if len < buf.len() {
                     buf[len] = byte;
                     len += 1;
-                    crate::console_print!("{}", byte as char);
+                    shell_print!("{}", byte as char);
                 }
             }
         }
@@ -2679,7 +2677,7 @@ fn execute_for_loop(variable: &str, words_raw: &str, body: &[String]) {
     let words = split_words(&expanded);
 
     if words.len() > 1000 {
-        crate::console_println!(
+        shell_println!(
             "Error: for loop word list too large ({} words, max 1000)",
             words.len(),
         );
@@ -2740,7 +2738,7 @@ fn execute_cfor_loop(init: &str, cond: &str, step: &str, body: &[String]) {
     loop {
         // Safety limit.
         if iteration >= MAX_ITERATIONS {
-            crate::console_println!(
+            shell_println!(
                 "Error: C-style for loop exceeded {} iterations — infinite loop?",
                 MAX_ITERATIONS,
             );
@@ -3086,12 +3084,12 @@ fn start_func_collection(name: &str, after_name: &str) -> bool {
         // Bare `name()` without `{` — we could require it, but let's
         // be lenient: start collecting, expect `{` on next line.
         // Actually, the POSIX way expects `{`, so error.
-        crate::console_println!(
+        shell_println!(
             "Syntax error: function '{}' requires a body (use {{ }})",
             name
         );
     } else {
-        crate::console_println!(
+        shell_println!(
             "Syntax error: unexpected '{}' in function definition",
             after_name
         );
@@ -3108,7 +3106,7 @@ fn execute_function(body: &[String], args: &[String]) {
     {
         let stack = POSITIONAL_PARAMS.lock();
         if stack.len() >= MAX_FUNC_DEPTH {
-            crate::console_println!(
+            shell_println!(
                 "Error: function call depth exceeded ({} levels)",
                 MAX_FUNC_DEPTH,
             );
@@ -3395,9 +3393,9 @@ impl<'a> Iterator for HistoryIter<'a> {
 /// This function never returns.  It prints a prompt, reads a line,
 /// executes the command, and repeats.
 pub fn run() -> ! {
-    crate::console_println!("");
-    crate::console_println!("Kernel debug shell. Type 'help' for commands.");
-    crate::console_println!("");
+    shell_println!("");
+    shell_println!("Kernel debug shell. Type 'help' for commands.");
+    shell_println!("");
 
     // Initialize cwd.
     {
@@ -3426,10 +3424,10 @@ pub fn run() -> ! {
             || FUNC_COLLECTOR.lock().is_some()
             || CASE_COLLECTOR.lock().is_some();
         if collecting {
-            crate::console_print!("> ");
+            shell_print!("> ");
         } else {
             let cwd = get_cwd();
-            crate::console_print!("{}> ", cwd.display());
+            shell_print!("{}> ", cwd.display());
         }
 
         // Read a line (blocking on keyboard).
@@ -3865,7 +3863,7 @@ fn read_line(buf: &mut String, history: &mut History) {
                         let sessions = crate::termsession::list();
                         for s in &sessions {
                             let marker = if s.active { "*" } else { " " };
-                            crate::console_println!(" {} {} {}", marker, s.id, s.name);
+                            shell_println!(" {} {} {}", marker, s.id, s.name);
                         }
                         // Reprint prompt.
                         let prompt = alloc::format!("{}> ", get_cwd().display());
@@ -5533,6 +5531,15 @@ fn execute(line: &str) {
     }
 
     // Trace: print expanded command if `set -x` is active.
+    //
+    // This is the one place in kshell that deliberately writes to the console
+    // rather than through `shell_println!`. Every other site was converted
+    // because bypassing the capture makes command output vanish under `$(…)`
+    // and over SSH/telnet — but xtrace is the exception, because bash sends it
+    // to *stderr*, which `$(…)` does not capture. Routing it through the shell
+    // writer would put `+ echo hi` inside the value of `x=$(echo hi)`: turning
+    // on tracing would silently corrupt every captured value in the script
+    // being traced. Do not "finish the conversion" by changing this one.
     if OPT_XTRACE.load(core::sync::atomic::Ordering::Relaxed) {
         crate::console_println!("+ {}", line);
     }
@@ -6230,7 +6237,7 @@ fn execute_input_redirect(command: &str, path: &str) {
     let data = match crate::fs::vfs::Vfs::read_file(&resolved) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("{}: {:?}", path, e);
+            shell_println!("{}: {:?}", path, e);
             set_exit(1);
             return;
         }
@@ -6246,7 +6253,7 @@ fn execute_input_redirect(command: &str, path: &str) {
         let output = capture.finish();
         if !output.is_empty() {
             if let Err(e) = redirect_write(redir.path, &output, redir.append) {
-                crate::console_println!("{}: cannot write: {:?}", redir.path, e);
+                shell_println!("{}: cannot write: {:?}", redir.path, e);
                 set_exit(1);
             }
         }
@@ -6324,7 +6331,7 @@ fn execute_redirect(command: &str, path: &str, append: bool) {
     // output did not reach the file the user named, so the line as a whole
     // did not do what it said.
     if let Err(e) = redirect_write(path, &output, append) {
-        crate::console_println!("{}: cannot write: {:?}", path, e);
+        shell_println!("{}: cannot write: {:?}", path, e);
         set_exit(1);
     }
 }
@@ -6368,7 +6375,7 @@ fn execute_heredoc(command: &str, suffix: &str, body: &str) {
         // Suffix is a bare redirect (e.g., "> /tmp/out" or ">> /tmp/out").
         if !output.is_empty() {
             if let Err(e) = redirect_write(path, &output, append) {
-                crate::console_println!("{}: cannot write: {:?}", path, e);
+                shell_println!("{}: cannot write: {:?}", path, e);
                 set_exit(1);
             }
         }
@@ -6413,7 +6420,7 @@ fn execute_pipe_chain(segments: &[&str]) {
     // Validate: no empty segments.
     for seg in segments {
         if seg.is_empty() {
-            crate::console_println!("Syntax error: empty pipe operand");
+            shell_println!("Syntax error: empty pipe operand");
             set_exit(1);
             return;
         }
@@ -6454,7 +6461,7 @@ fn execute_pipe_chain(segments: &[&str]) {
         let output = capture.finish();
         if !output.is_empty() {
             if let Err(e) = redirect_write(redir.path, &output, redir.append) {
-                crate::console_println!("{}: cannot write: {:?}", redir.path, e);
+                shell_println!("{}: cannot write: {:?}", redir.path, e);
                 set_exit(1);
             }
         }
@@ -6491,7 +6498,7 @@ fn shell_bytes_as_str<'a>(bytes: &'a [u8], what: &str) -> Option<&'a str> {
     match core::str::from_utf8(bytes) {
         Ok(s) => Some(s),
         Err(_) => {
-            crate::console_println!(
+            shell_println!(
                 "{what}: not valid UTF-8, and this stage cannot handle arbitrary bytes yet"
             );
             None
@@ -6524,7 +6531,7 @@ fn finish_ascii_scan(out: Vec<u8>, what: &str) -> String {
     match String::from_utf8(out) {
         Ok(s) => s,
         Err(_) => {
-            crate::console_println!("kshell: internal error: {what} produced invalid UTF-8");
+            shell_println!("kshell: internal error: {what} produced invalid UTF-8");
             String::new()
         }
     }
@@ -7305,9 +7312,9 @@ fn dispatch(line: &str) {
         "fsck" => {
             // Auto-dispatch: try ext4 first, then FAT.
             if args.trim().is_empty() {
-                crate::console_println!("Usage: fsck DEVICE  (auto-detects fs type)");
-                crate::console_println!("  fsck.fat DEVICE   — check FAT filesystem");
-                crate::console_println!("  fsck.ext4 DEVICE  — check ext4 filesystem");
+                shell_println!("Usage: fsck DEVICE  (auto-detects fs type)");
+                shell_println!("  fsck.fat DEVICE   — check FAT filesystem");
+                shell_println!("  fsck.ext4 DEVICE  — check ext4 filesystem");
             } else {
                 let dev = args
                     .split_whitespace()
@@ -7416,7 +7423,7 @@ fn dispatch(line: &str) {
                 if let Ok(code) = args.parse::<u8>() {
                     set_exit(code);
                 } else {
-                    crate::console_println!("return: invalid status '{}'", args);
+                    shell_println!("return: invalid status '{}'", args);
                     set_exit(1);
                 }
             }
@@ -7453,7 +7460,7 @@ fn dispatch(line: &str) {
                 let func_args: Vec<String> = split_words(args);
                 execute_function(&body, &func_args);
             } else {
-                crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
+                shell_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
                 set_exit(1);
             }
         }
@@ -7465,316 +7472,278 @@ fn dispatch(line: &str) {
 // ---------------------------------------------------------------------------
 
 fn cmd_help() {
-    crate::console_println!("Available commands:");
-    crate::console_println!("  help      Show this help message");
-    crate::console_println!("  meminfo   Show physical memory usage");
-    crate::console_println!("  ps        List scheduler tasks");
-    crate::console_println!("  clear     Clear the screen");
-    crate::console_println!("  uptime    Show system uptime (tick count)");
-    crate::console_println!("  echo ...  Echo text to console");
-    crate::console_println!("  time CMD  Time command execution (or show time with no args)");
-    crate::console_println!("  nproc     Show number of CPUs");
-    crate::console_println!("  irq       Show IRQ interrupt counts");
-    crate::console_println!("  pci       List PCI devices");
-    crate::console_println!("  disk      Show block device info");
-    crate::console_println!("  blkread N Hex-dump sector N from disk");
-    crate::console_println!("  cd [dir]  Change working directory");
-    crate::console_println!(
+    shell_println!("Available commands:");
+    shell_println!("  help      Show this help message");
+    shell_println!("  meminfo   Show physical memory usage");
+    shell_println!("  ps        List scheduler tasks");
+    shell_println!("  clear     Clear the screen");
+    shell_println!("  uptime    Show system uptime (tick count)");
+    shell_println!("  echo ...  Echo text to console");
+    shell_println!("  time CMD  Time command execution (or show time with no args)");
+    shell_println!("  nproc     Show number of CPUs");
+    shell_println!("  irq       Show IRQ interrupt counts");
+    shell_println!("  pci       List PCI devices");
+    shell_println!("  disk      Show block device info");
+    shell_println!("  blkread N Hex-dump sector N from disk");
+    shell_println!("  cd [dir]  Change working directory");
+    shell_println!(
         "  ls [-lahRStr] [path] List files (-l long, -a all, -h human, -R recurse, -S size-sort, -t time-sort, -r reverse)"
     );
-    crate::console_println!("  cat FILE  Print file contents");
-    crate::console_println!("  write F T Write text T to file F");
-    crate::console_println!("  rm [-r] F Delete a file (or directory tree with -r)");
-    crate::console_println!("  mkdir DIR Create a directory");
-    crate::console_println!("  rmdir DIR Remove an empty directory");
-    crate::console_println!("  stat FILE Show detailed file metadata");
-    crate::console_println!("  ln S D    Create hard link D pointing to S");
-    crate::console_println!("  cp [-r] S D Copy file (or dir tree with -r) S to D");
-    crate::console_println!("  mv S D    Move/rename file or directory");
-    crate::console_println!("  chmod M F Set permissions (octal, e.g., chmod 755 file)");
-    crate::console_println!("  chown U F Set owner (uid:gid, e.g., chown 1000:1000 file)");
-    crate::console_println!(
+    shell_println!("  cat FILE  Print file contents");
+    shell_println!("  write F T Write text T to file F");
+    shell_println!("  rm [-r] F Delete a file (or directory tree with -r)");
+    shell_println!("  mkdir DIR Create a directory");
+    shell_println!("  rmdir DIR Remove an empty directory");
+    shell_println!("  stat FILE Show detailed file metadata");
+    shell_println!("  ln S D    Create hard link D pointing to S");
+    shell_println!("  cp [-r] S D Copy file (or dir tree with -r) S to D");
+    shell_println!("  mv S D    Move/rename file or directory");
+    shell_println!("  chmod M F Set permissions (octal, e.g., chmod 755 file)");
+    shell_println!("  chown U F Set owner (uid:gid, e.g., chown 1000:1000 file)");
+    shell_println!(
         "  chattr +/-FLAGS F  Set/clear attributes (i=immutable a=append h=hidden s=system)"
     );
-    crate::console_println!("  lsattr F  Show file attributes (iahs flags)");
-    crate::console_println!(
+    shell_println!("  lsattr F  Show file attributes (iahs flags)");
+    shell_println!(
         "  touch [-d DATE | -r REF] F  Create file or set timestamps (-d YYYY-MM-DD, -r reffile)"
     );
-    crate::console_println!("  append F T Append text T to file F");
-    crate::console_println!("  tree [D]  Show directory tree recursively");
-    crate::console_println!("  du [-s] [-dN] [D]  Show disk usage (-s summary, -dN max depth)");
-    crate::console_println!(
-        "  find [D] [-name PAT] [-type f|d|l] [-size +N|-N] [-maxdepth N] [-empty]"
-    );
-    crate::console_println!("  locate [--update|--stats|--ext E|--size MIN-MAX] PATTERN");
-    crate::console_println!(
-        "  dedup [--dry-run|--delete|--stats] [--min-size N] [--max-size N] [DIR]"
-    );
-    crate::console_println!(
-        "  integrity [baseline|verify|stats|clear] [DIR]  File integrity monitoring"
-    );
-    crate::console_println!(
-        "  fhist [show|restore|record|clear|stats|list] [FILE]  File version history"
-    );
-    crate::console_println!("  df [path] Show filesystem space usage");
-    crate::console_println!("  sync      Flush all filesystems to disk");
-    crate::console_println!("  mount     List all mounted filesystems");
-    crate::console_println!("  umount P  Unmount filesystem at path P");
-    crate::console_println!("  wc FILE   Count lines, words, and bytes");
-    crate::console_println!("  head N F  Show first N lines of file");
-    crate::console_println!("  tail N F  Show last N lines of file");
-    crate::console_println!(
+    shell_println!("  append F T Append text T to file F");
+    shell_println!("  tree [D]  Show directory tree recursively");
+    shell_println!("  du [-s] [-dN] [D]  Show disk usage (-s summary, -dN max depth)");
+    shell_println!("  find [D] [-name PAT] [-type f|d|l] [-size +N|-N] [-maxdepth N] [-empty]");
+    shell_println!("  locate [--update|--stats|--ext E|--size MIN-MAX] PATTERN");
+    shell_println!("  dedup [--dry-run|--delete|--stats] [--min-size N] [--max-size N] [DIR]");
+    shell_println!("  integrity [baseline|verify|stats|clear] [DIR]  File integrity monitoring");
+    shell_println!("  fhist [show|restore|record|clear|stats|list] [FILE]  File version history");
+    shell_println!("  df [path] Show filesystem space usage");
+    shell_println!("  sync      Flush all filesystems to disk");
+    shell_println!("  mount     List all mounted filesystems");
+    shell_println!("  umount P  Unmount filesystem at path P");
+    shell_println!("  wc FILE   Count lines, words, and bytes");
+    shell_println!("  head N F  Show first N lines of file");
+    shell_println!("  tail N F  Show last N lines of file");
+    shell_println!(
         "  hexdump [-n N] F  Hex dump of file contents (default 512 bytes, -n 0 for all)"
     );
-    crate::console_println!("  lsof      List open file handles");
-    crate::console_println!("  lsp [N] D Paginated ls: show N entries at a time");
-    crate::console_println!(
+    shell_println!("  lsof      List open file handles");
+    shell_println!("  lsp [N] D Paginated ls: show N entries at a time");
+    shell_println!(
         "  grep [-ivclnwrI] PATTERN FILE  Search for pattern in files (-r recursive, -v invert, -c count, -w whole-word, -l files-only, -I case-sensitive)"
     );
-    crate::console_println!("  cmp F1 F2 Compare two files byte-by-byte");
-    crate::console_println!("  comm [-123] F1 F2  Compare sorted files (3-column output)");
-    crate::console_println!("  diff F1 F2 Line-level diff (unified format)");
-    crate::console_println!("  od [-A o|d|x|n] [-t o1|x1|d1|u1|c] [-N count] F  Octal/hex dump");
-    crate::console_println!("  cpuinfo   Show per-CPU utilization and scheduler counters");
-    crate::console_println!("  top       Compact system overview (uptime, memory, CPU, tasks)");
-    crate::console_println!("  vmstat    Show all VM statistics counters");
-    crate::console_println!("  schedstat Per-task scheduling fairness analysis");
-    crate::console_println!("  watchdog  Show per-CPU soft lockup watchdog status");
-    crate::console_println!("  kill TID  Terminate a task by ID");
-    crate::console_println!("  renice TID PRI  Change task priority (0=highest, 31=lowest)");
-    crate::console_println!("  throttle TID [%] Set/query CPU bandwidth quota");
-    crate::console_println!("  taskset TID [0xMASK] Set/query CPU affinity");
-    crate::console_println!("  slabinfo  Show per-size-class heap allocator statistics");
-    crate::console_println!("  fraginfo  Show heap internal fragmentation per size class");
-    crate::console_println!("  leakcheck Snapshot heap active counts for leak detection");
-    crate::console_println!("  stack     Show per-task kernel stack usage (high water mark)");
-    crate::console_println!("  wq        Show kernel workqueue status and statistics");
-    crate::console_println!("  ktimer    Show kernel timer statistics");
-    crate::console_println!("  rng       Show kernel CSPRNG statistics");
-    crate::console_println!("  supervisor Show task supervisor status");
-    crate::console_println!("  trace [N] Show last N kernel trace events (default 20)");
-    crate::console_println!("  lockdep [sub] Lock order validator (classes/edges/held/all)");
-    crate::console_println!("  bt        Show current kernel call stack (backtrace)");
-    crate::console_println!("  diag      One-stop system health diagnostic summary");
-    crate::console_println!("  exceptions Show per-vector exception/interrupt counts");
-    crate::console_println!("  exclog     Show recent exception event log");
-    crate::console_println!("  sysinfo    Show CPU vendor, brand, features (cpuid)");
-    crate::console_println!("  boottime   Show boot milestone timing");
-    crate::console_println!("  canary     Scan all task stack canaries for corruption");
-    crate::console_println!("  tlb        Show TLB shootdown statistics");
-    crate::console_println!("  pgfault    Show page fault statistics by type");
-    crate::console_println!("  irqrate    Show interrupt rates (IRQs/sec per vector)");
-    crate::console_println!("  kprofile   Kernel code profiler (cycle counts per region)");
-    crate::console_println!("  lockstats  Show spinlock contention statistics");
-    crate::console_println!("  idle       Show CPU idle state statistics (MWAIT/HLT)");
-    crate::console_println!("  kstat      Show system metrics history (1-min time series)");
-    crate::console_println!("  kwarn      Show kernel warnings (kwarn clear to reset)");
-    crate::console_println!("  loadavg    Show 1/5/15 minute system load averages");
-    crate::console_println!("  memtype    Show physical memory usage by type");
-    crate::console_println!("  sclatency  Show syscall latency histogram");
-    crate::console_println!("  irqoff     Show interrupt-disabled duration tracking");
-    crate::console_println!("  latency    Show scheduling latency histogram");
-    crate::console_println!("  pressure   Show memory pressure score (0-100)");
-    crate::console_println!("  sar        System activity reporter (compact one-liner)");
-    crate::console_println!("  syshealth  Active system integrity verification");
-    crate::console_println!("  jitter     Show timer interrupt jitter (inter-tick variance)");
-    crate::console_println!("  heapwm     Show heap allocation watermark (peak usage)");
-    crate::console_println!("  memmap     Show virtual address space layout");
-    crate::console_println!("  vmalloc    Show vmalloc (virtual kernel memory) statistics");
-    crate::console_println!("  rmap       Show reverse mapping (frame→PTE) statistics");
-    crate::console_println!(
-        "  profile [name]   Show/set workload profile (desktop/server/dev/gaming)"
-    );
-    crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
-    crate::console_println!("  sort FILE Sort lines of a file alphabetically");
-    crate::console_println!("  uniq FILE Remove adjacent duplicate lines");
-    crate::console_println!("  tee F T   Write text T to file F and display it");
-    crate::console_println!("  truncate N F Truncate file F to N bytes");
-    crate::console_println!("  sha256 F  Compute SHA-256 hash of file contents");
-    crate::console_println!("  sysctl .. List/get/set kernel parameters");
-    crate::console_println!("  hostname  Show or set system hostname");
-    crate::console_println!(
-        "  dd ..     Copy blocks between files (if=/of=/bs=/count=/skip=/seek=)"
-    );
-    crate::console_println!("  free      Show memory usage summary");
-    crate::console_println!("  flock [-s|-x|-u] FILE  Query/acquire/release advisory file locks");
-    crate::console_println!("  split [-l N|-b SIZE] FILE [PREFIX]  Split file into pieces");
-    crate::console_println!(
-        "  label [PATH] [NAME]  Show or set volume label for filesystem at PATH"
-    );
-    crate::console_println!("  lsblk     List block devices with sizes");
-    crate::console_println!("  glob P    Expand glob pattern (e.g., /tmp/*.txt)");
-    crate::console_println!("  readlink P Show symlink target");
-    crate::console_println!("  symlink T P Create symlink at P pointing to T");
-    crate::console_println!("  xattr F .. Extended attributes (list/get/set/rm)");
-    crate::console_println!("  watch P [-r] Monitor filesystem changes (press key to stop)");
-    crate::console_println!("  journal [-n N] Show filesystem change journal entries");
-    crate::console_println!("  basename P Extract filename from path");
-    crate::console_println!("  dirname P  Extract directory from path");
-    crate::console_println!("  realpath P Resolve path (follow symlinks)");
-    crate::console_println!("  pwd        Print working directory");
-    crate::console_println!("  id         Show current task identity");
-    crate::console_println!("  mktemp [D] Create temporary file (default /tmp)");
-    crate::console_println!(
+    shell_println!("  cmp F1 F2 Compare two files byte-by-byte");
+    shell_println!("  comm [-123] F1 F2  Compare sorted files (3-column output)");
+    shell_println!("  diff F1 F2 Line-level diff (unified format)");
+    shell_println!("  od [-A o|d|x|n] [-t o1|x1|d1|u1|c] [-N count] F  Octal/hex dump");
+    shell_println!("  cpuinfo   Show per-CPU utilization and scheduler counters");
+    shell_println!("  top       Compact system overview (uptime, memory, CPU, tasks)");
+    shell_println!("  vmstat    Show all VM statistics counters");
+    shell_println!("  schedstat Per-task scheduling fairness analysis");
+    shell_println!("  watchdog  Show per-CPU soft lockup watchdog status");
+    shell_println!("  kill TID  Terminate a task by ID");
+    shell_println!("  renice TID PRI  Change task priority (0=highest, 31=lowest)");
+    shell_println!("  throttle TID [%] Set/query CPU bandwidth quota");
+    shell_println!("  taskset TID [0xMASK] Set/query CPU affinity");
+    shell_println!("  slabinfo  Show per-size-class heap allocator statistics");
+    shell_println!("  fraginfo  Show heap internal fragmentation per size class");
+    shell_println!("  leakcheck Snapshot heap active counts for leak detection");
+    shell_println!("  stack     Show per-task kernel stack usage (high water mark)");
+    shell_println!("  wq        Show kernel workqueue status and statistics");
+    shell_println!("  ktimer    Show kernel timer statistics");
+    shell_println!("  rng       Show kernel CSPRNG statistics");
+    shell_println!("  supervisor Show task supervisor status");
+    shell_println!("  trace [N] Show last N kernel trace events (default 20)");
+    shell_println!("  lockdep [sub] Lock order validator (classes/edges/held/all)");
+    shell_println!("  bt        Show current kernel call stack (backtrace)");
+    shell_println!("  diag      One-stop system health diagnostic summary");
+    shell_println!("  exceptions Show per-vector exception/interrupt counts");
+    shell_println!("  exclog     Show recent exception event log");
+    shell_println!("  sysinfo    Show CPU vendor, brand, features (cpuid)");
+    shell_println!("  boottime   Show boot milestone timing");
+    shell_println!("  canary     Scan all task stack canaries for corruption");
+    shell_println!("  tlb        Show TLB shootdown statistics");
+    shell_println!("  pgfault    Show page fault statistics by type");
+    shell_println!("  irqrate    Show interrupt rates (IRQs/sec per vector)");
+    shell_println!("  kprofile   Kernel code profiler (cycle counts per region)");
+    shell_println!("  lockstats  Show spinlock contention statistics");
+    shell_println!("  idle       Show CPU idle state statistics (MWAIT/HLT)");
+    shell_println!("  kstat      Show system metrics history (1-min time series)");
+    shell_println!("  kwarn      Show kernel warnings (kwarn clear to reset)");
+    shell_println!("  loadavg    Show 1/5/15 minute system load averages");
+    shell_println!("  memtype    Show physical memory usage by type");
+    shell_println!("  sclatency  Show syscall latency histogram");
+    shell_println!("  irqoff     Show interrupt-disabled duration tracking");
+    shell_println!("  latency    Show scheduling latency histogram");
+    shell_println!("  pressure   Show memory pressure score (0-100)");
+    shell_println!("  sar        System activity reporter (compact one-liner)");
+    shell_println!("  syshealth  Active system integrity verification");
+    shell_println!("  jitter     Show timer interrupt jitter (inter-tick variance)");
+    shell_println!("  heapwm     Show heap allocation watermark (peak usage)");
+    shell_println!("  memmap     Show virtual address space layout");
+    shell_println!("  vmalloc    Show vmalloc (virtual kernel memory) statistics");
+    shell_println!("  rmap       Show reverse mapping (frame→PTE) statistics");
+    shell_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
+    shell_println!("  fallocate N F Pre-allocate N bytes for file F");
+    shell_println!("  sort FILE Sort lines of a file alphabetically");
+    shell_println!("  uniq FILE Remove adjacent duplicate lines");
+    shell_println!("  tee F T   Write text T to file F and display it");
+    shell_println!("  truncate N F Truncate file F to N bytes");
+    shell_println!("  sha256 F  Compute SHA-256 hash of file contents");
+    shell_println!("  sysctl .. List/get/set kernel parameters");
+    shell_println!("  hostname  Show or set system hostname");
+    shell_println!("  dd ..     Copy blocks between files (if=/of=/bs=/count=/skip=/seek=)");
+    shell_println!("  free      Show memory usage summary");
+    shell_println!("  flock [-s|-x|-u] FILE  Query/acquire/release advisory file locks");
+    shell_println!("  split [-l N|-b SIZE] FILE [PREFIX]  Split file into pieces");
+    shell_println!("  label [PATH] [NAME]  Show or set volume label for filesystem at PATH");
+    shell_println!("  lsblk     List block devices with sizes");
+    shell_println!("  glob P    Expand glob pattern (e.g., /tmp/*.txt)");
+    shell_println!("  readlink P Show symlink target");
+    shell_println!("  symlink T P Create symlink at P pointing to T");
+    shell_println!("  xattr F .. Extended attributes (list/get/set/rm)");
+    shell_println!("  watch P [-r] Monitor filesystem changes (press key to stop)");
+    shell_println!("  journal [-n N] Show filesystem change journal entries");
+    shell_println!("  basename P Extract filename from path");
+    shell_println!("  dirname P  Extract directory from path");
+    shell_println!("  realpath P Resolve path (follow symlinks)");
+    shell_println!("  pwd        Print working directory");
+    shell_println!("  id         Show current task identity");
+    shell_println!("  mktemp [D] Create temporary file (default /tmp)");
+    shell_println!(
         "  mkfs.fat [-L LABEL] DEVICE  Format device as FAT16/FAT32 (auto-selects type)"
     );
-    crate::console_println!(
-        "  fsck.fat [-a] DEVICE        Check/repair FAT filesystem consistency"
-    );
-    crate::console_println!(
-        "  fsck.ext4 [-v] DEVICE       Check ext4 filesystem consistency (read-only)"
-    );
-    crate::console_println!(
+    shell_println!("  fsck.fat [-a] DEVICE        Check/repair FAT filesystem consistency");
+    shell_println!("  fsck.ext4 [-v] DEVICE       Check ext4 filesystem consistency (read-only)");
+    shell_println!(
         "  tar -cf A F.. | -xf A [-C D] | -tf A  Create/extract/list USTAR archives (.tar.gz/.tar.bz2/.tar.xz/.tar.zst/.tar.lz4 supported)"
     );
-    crate::console_println!("  gunzip F [-o OUT]  Decompress gzip file (gzip -d alias)");
-    crate::console_println!("  bunzip2 F [-o OUT] Decompress bzip2 file (bzcat alias)");
-    crate::console_println!(
-        "  bzip2 [-N] F [-o OUT]  Compress file with bzip2 (-1..-9 block size)"
-    );
-    crate::console_println!("  unxz F [-o OUT]    Decompress XZ/LZMA2 file (xzcat alias)");
-    crate::console_println!("  xz F [-o OUT]      Compress file with XZ/LZMA2");
-    crate::console_println!("  unzstd F [-o OUT]  Decompress Zstandard file (zstdcat alias)");
-    crate::console_println!(
-        "  zstd [-s] F [-o OUT]   Compress file with Zstandard (-s = store mode)"
-    );
-    crate::console_println!("  unlz4 F [-o OUT]   Decompress LZ4 file (lz4cat alias)");
-    crate::console_println!("  lz4 F [-o OUT]     Compress file with LZ4 (fast)");
-    crate::console_println!(
-        "  unzip [-l] F [-d DIR]  List or extract ZIP archive (stored + deflated)"
-    );
-    crate::console_println!("  un7z [-l] F [-d DIR]   List or extract 7-zip archive");
-    crate::console_println!(
-        "  unrar [-l] F [-d DIR]  List or extract RAR5 archive (stored entries only)"
-    );
-    crate::console_println!(
-        "  cpio -i|-t [-d DIR] < F.cpio  Extract or list CPIO archive (newc format)"
-    );
-    crate::console_println!("  cpio -o F.cpio FILE..  Create CPIO archive from files");
-    crate::console_println!(
+    shell_println!("  gunzip F [-o OUT]  Decompress gzip file (gzip -d alias)");
+    shell_println!("  bunzip2 F [-o OUT] Decompress bzip2 file (bzcat alias)");
+    shell_println!("  bzip2 [-N] F [-o OUT]  Compress file with bzip2 (-1..-9 block size)");
+    shell_println!("  unxz F [-o OUT]    Decompress XZ/LZMA2 file (xzcat alias)");
+    shell_println!("  xz F [-o OUT]      Compress file with XZ/LZMA2");
+    shell_println!("  unzstd F [-o OUT]  Decompress Zstandard file (zstdcat alias)");
+    shell_println!("  zstd [-s] F [-o OUT]   Compress file with Zstandard (-s = store mode)");
+    shell_println!("  unlz4 F [-o OUT]   Decompress LZ4 file (lz4cat alias)");
+    shell_println!("  lz4 F [-o OUT]     Compress file with LZ4 (fast)");
+    shell_println!("  unzip [-l] F [-d DIR]  List or extract ZIP archive (stored + deflated)");
+    shell_println!("  un7z [-l] F [-d DIR]   List or extract 7-zip archive");
+    shell_println!("  unrar [-l] F [-d DIR]  List or extract RAR5 archive (stored entries only)");
+    shell_println!("  cpio -i|-t [-d DIR] < F.cpio  Extract or list CPIO archive (newc format)");
+    shell_println!("  cpio -o F.cpio FILE..  Create CPIO archive from files");
+    shell_println!(
         "  ar t F.a | ar x F.a [-d DIR] | ar r F.a FILE..  List/extract/create ar archive"
     );
-    crate::console_println!("  dpkg -I|-c|-x F.deb [-d DIR]  Inspect/list/extract Debian package");
-    crate::console_println!("  zip [-0] [-r] F.zip FILE..  Create ZIP archive (deflate or stored)");
-    crate::console_println!("  crc32 FILE    Compute CRC32C checksum");
-    crate::console_println!("  base64 [-d] F Encode file to Base64 (or -d to decode)");
-    crate::console_println!("  checksum [-t sha256|crc32] FILE  Compute file checksum");
-    crate::console_println!("  wipe FILE     Secure delete (zero-fill + remove)");
-    crate::console_println!(
-        "  sed [-i] [-n] 's/old/new/[g]' FILE  Stream editor (substitute/delete/print)"
-    );
-    crate::console_println!(
-        "  awk [-F sep] 'program' FILE  Text processing ($1..$N, NR, NF, /pattern/)"
-    );
-    crate::console_println!("  run FILE  Load and execute an ELF binary");
-    crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
-    crate::console_println!("  net       Show network interface info");
-    crate::console_println!("  mouse     Show PS/2 mouse status and recent events");
-    crate::console_println!("  audio     Intel HD Audio status/play/stop");
-    crate::console_println!("  gfx [sub] Framebuffer graphics (demo/cursor/clear)");
-    crate::console_println!("  desktop   Launch graphical desktop compositor demo");
-    crate::console_println!("  dhcp      Obtain an IP address via DHCP");
-    crate::console_println!("  ping IP   Send ICMP echo requests (ping)");
-    crate::console_println!("  dns NAME  Resolve a domain name to IP");
-    crate::console_println!("  wget URL  Fetch a URL via HTTP GET");
-    crate::console_println!("  firewall  Manage packet filtering (fw alias)");
-    crate::console_println!("  nat       NAT/masquerade management (enable/disable/list/flush)");
-    crate::console_println!("  version   Show kernel version");
-    crate::console_println!("  uname [-asnrvmo] Print system information");
-    crate::console_println!("  source F  Execute kshell commands from file F");
-    crate::console_println!("  seq N [M] Print numbers from 1..N or N..M");
-    crate::console_println!("  nl [F]    Number lines of file (or piped input)");
-    crate::console_println!("  rev [F]   Reverse order of lines in file (or piped)");
-    crate::console_println!("  sleep N   Pause for N milliseconds");
-    crate::console_println!("  printenv  Show environment variables");
-    crate::console_println!("  export N=V Set environment variable");
-    crate::console_println!("  unset N   Remove environment variable");
-    crate::console_println!("  alias N=V Define command alias");
-    crate::console_println!("  unalias N Remove command alias");
-    crate::console_println!("  dmesg [-n] Show kernel log messages");
-    crate::console_println!("  file F    Identify file type by extension");
-    crate::console_println!("  mime F    Show MIME content type (magic + extension)");
-    crate::console_println!("  printf FMT .. Formatted output (%s %d %x %o %c)");
-    crate::console_println!(
-        "  trash F   Move file to recycle bin (--list/--restore/--empty/--prune)"
-    );
-    crate::console_println!("  cut -d/-f/-c  Extract columns/fields from text");
-    crate::console_println!("  tr SET1 SET2  Translate/delete characters");
-    crate::console_println!("  tac [F]   Print lines in reverse order");
-    crate::console_println!("  fold [-w N] F Wrap lines to N columns (default 80)");
-    crate::console_println!("  paste F1 F2   Merge lines from files");
-    crate::console_println!("  yes [STR]  Repeat STR (default 'y') indefinitely");
-    crate::console_println!("  xargs [-n N] CMD  Run CMD with piped input as arguments");
-    crate::console_println!(
+    shell_println!("  dpkg -I|-c|-x F.deb [-d DIR]  Inspect/list/extract Debian package");
+    shell_println!("  zip [-0] [-r] F.zip FILE..  Create ZIP archive (deflate or stored)");
+    shell_println!("  crc32 FILE    Compute CRC32C checksum");
+    shell_println!("  base64 [-d] F Encode file to Base64 (or -d to decode)");
+    shell_println!("  checksum [-t sha256|crc32] FILE  Compute file checksum");
+    shell_println!("  wipe FILE     Secure delete (zero-fill + remove)");
+    shell_println!("  sed [-i] [-n] 's/old/new/[g]' FILE  Stream editor (substitute/delete/print)");
+    shell_println!("  awk [-F sep] 'program' FILE  Text processing ($1..$N, NR, NF, /pattern/)");
+    shell_println!("  run FILE  Load and execute an ELF binary");
+    shell_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
+    shell_println!("  net       Show network interface info");
+    shell_println!("  mouse     Show PS/2 mouse status and recent events");
+    shell_println!("  audio     Intel HD Audio status/play/stop");
+    shell_println!("  gfx [sub] Framebuffer graphics (demo/cursor/clear)");
+    shell_println!("  desktop   Launch graphical desktop compositor demo");
+    shell_println!("  dhcp      Obtain an IP address via DHCP");
+    shell_println!("  ping IP   Send ICMP echo requests (ping)");
+    shell_println!("  dns NAME  Resolve a domain name to IP");
+    shell_println!("  wget URL  Fetch a URL via HTTP GET");
+    shell_println!("  firewall  Manage packet filtering (fw alias)");
+    shell_println!("  nat       NAT/masquerade management (enable/disable/list/flush)");
+    shell_println!("  version   Show kernel version");
+    shell_println!("  uname [-asnrvmo] Print system information");
+    shell_println!("  source F  Execute kshell commands from file F");
+    shell_println!("  seq N [M] Print numbers from 1..N or N..M");
+    shell_println!("  nl [F]    Number lines of file (or piped input)");
+    shell_println!("  rev [F]   Reverse order of lines in file (or piped)");
+    shell_println!("  sleep N   Pause for N milliseconds");
+    shell_println!("  printenv  Show environment variables");
+    shell_println!("  export N=V Set environment variable");
+    shell_println!("  unset N   Remove environment variable");
+    shell_println!("  alias N=V Define command alias");
+    shell_println!("  unalias N Remove command alias");
+    shell_println!("  dmesg [-n] Show kernel log messages");
+    shell_println!("  file F    Identify file type by extension");
+    shell_println!("  mime F    Show MIME content type (magic + extension)");
+    shell_println!("  printf FMT .. Formatted output (%s %d %x %o %c)");
+    shell_println!("  trash F   Move file to recycle bin (--list/--restore/--empty/--prune)");
+    shell_println!("  cut -d/-f/-c  Extract columns/fields from text");
+    shell_println!("  tr SET1 SET2  Translate/delete characters");
+    shell_println!("  tac [F]   Print lines in reverse order");
+    shell_println!("  fold [-w N] F Wrap lines to N columns (default 80)");
+    shell_println!("  paste F1 F2   Merge lines from files");
+    shell_println!("  yes [STR]  Repeat STR (default 'y') indefinitely");
+    shell_println!("  xargs [-n N] CMD  Run CMD with piped input as arguments");
+    shell_println!(
         "  strings [-n N] F  Extract printable strings from binary file (min length N, default 4)"
     );
-    crate::console_println!(
-        "  column [-t] [-s SEP] F  Format text into aligned columns (-t table mode)"
-    );
-    crate::console_println!(
-        "  date [+FMT] Show date/time (format: %Y %m %d %H %M %S %a %b %F %T %s)"
-    );
-    crate::console_println!("  cal [M] [Y] Show monthly calendar (current month if no args)");
-    crate::console_println!("  test EXPR / [ EXPR ]  Conditional expressions");
-    crate::console_println!("  expr EXPR  Evaluate arithmetic expression");
-    crate::console_println!("  read [-p PROMPT] VAR  Read user input into variable");
-    crate::console_println!("  eval ARGS  Concatenate args and execute as command");
-    crate::console_println!("  select VAR in WORDS  Interactive menu (numbered choice)");
-    crate::console_println!("  declare -a/-f  List arrays / functions");
-    crate::console_println!("  mapfile ARR  Read lines into array variable");
-    crate::console_println!("  readonly VAR  Mark variable as read-only");
-    crate::console_println!("  trap CMD SIG  Set signal handler (EXIT/ERR/INT)");
-    crate::console_println!("  set -e/-x  errexit / xtrace shell options");
-    crate::console_println!("  which/type CMD  Show command type (builtin/alias/function)");
-    crate::console_println!("");
-    crate::console_println!("I/O redirection:");
-    crate::console_println!("  cmd > file   Write output to file (overwrite)");
-    crate::console_println!("  cmd >> file  Append output to file");
-    crate::console_println!("  cmd1 | cmd2  Pipe output of cmd1 into cmd2");
-    crate::console_println!("  cmd < file   Read input from file");
-    crate::console_println!("  cmd <<DELIM  Here-document (multi-line input to cmd)");
-    crate::console_println!("  cmd <<-DELIM Here-doc with leading tab stripping");
-    crate::console_println!("  cmd <<'D'    Here-doc without variable expansion");
-    crate::console_println!("Variable expansion:");
-    crate::console_println!("  $NAME / ${{NAME}}  Expand environment variable");
-    crate::console_println!("  $(command)       Command substitution (capture output)");
-    crate::console_println!("  $((expr))        Arithmetic expansion");
-    crate::console_println!("  $1..$9 $# $@     Positional params (in functions)");
-    crate::console_println!("  $$               Literal dollar sign");
-    crate::console_println!("String operations:");
-    crate::console_println!("  ${{VAR:N}}  ${{VAR:N:L}}  Substring (offset, offset+length)");
-    crate::console_println!("  ${{VAR/pat/rep}}       Replace first match");
-    crate::console_println!("  ${{VAR//pat/rep}}      Replace all matches");
-    crate::console_println!("  ${{VAR^}} ${{VAR^^}}     Uppercase first / all chars");
-    crate::console_println!("  ${{VAR,}} ${{VAR,,}}     Lowercase first / all chars");
-    crate::console_println!("Control flow:");
-    crate::console_println!("  if COND; then ... elif COND; then ... else ... fi");
-    crate::console_println!("  while COND; do ... done  (max 1000 iterations)");
-    crate::console_println!("  until COND; do ... done  (loop until true)");
-    crate::console_println!("  for VAR in WORDS; do ... done");
-    crate::console_println!("  for ((i=0; i<N; i=i+1)); do ... done  (C-style)");
-    crate::console_println!("  case VAR in pat) ... ;; esac  (pattern matching)");
-    crate::console_println!("  break / continue  Loop control");
-    crate::console_println!("  cmd1 && cmd2  Run cmd2 only if cmd1 succeeds");
-    crate::console_println!("  cmd1 || cmd2  Run cmd2 only if cmd1 fails");
-    crate::console_println!("  cmd1 ; cmd2   Run cmd2 regardless");
-    crate::console_println!("Functions:");
-    crate::console_println!("  name() {{ body; }}  Define a function");
-    crate::console_println!("  name arg1 arg2   Call function ($1, $2, $#, $@)");
-    crate::console_println!("  declare -f       List all defined functions");
-    crate::console_println!("  unset -f NAME    Remove a function definition");
-    crate::console_println!("  return [N]       Return from function with status N");
-    crate::console_println!("  local VAR=VALUE  Function-scoped variable (restored on return)");
-    crate::console_println!("Arrays:");
-    crate::console_println!("  arr=(a b c)      Declare array");
-    crate::console_println!("  ${{arr[0]}}        Access element (0-based)");
-    crate::console_println!("  ${{arr[@]}}        All elements (space-separated)");
-    crate::console_println!("  ${{#arr[@]}}       Array length");
-    crate::console_println!("  arr[N]=value     Set element N");
-    crate::console_println!("  unset arr        Remove array");
-    crate::console_println!("  unset arr[N]     Clear element N");
-    crate::console_println!("  declare -a       List all arrays");
-    crate::console_println!("  reboot    Reboot the system");
+    shell_println!("  column [-t] [-s SEP] F  Format text into aligned columns (-t table mode)");
+    shell_println!("  date [+FMT] Show date/time (format: %Y %m %d %H %M %S %a %b %F %T %s)");
+    shell_println!("  cal [M] [Y] Show monthly calendar (current month if no args)");
+    shell_println!("  test EXPR / [ EXPR ]  Conditional expressions");
+    shell_println!("  expr EXPR  Evaluate arithmetic expression");
+    shell_println!("  read [-p PROMPT] VAR  Read user input into variable");
+    shell_println!("  eval ARGS  Concatenate args and execute as command");
+    shell_println!("  select VAR in WORDS  Interactive menu (numbered choice)");
+    shell_println!("  declare -a/-f  List arrays / functions");
+    shell_println!("  mapfile ARR  Read lines into array variable");
+    shell_println!("  readonly VAR  Mark variable as read-only");
+    shell_println!("  trap CMD SIG  Set signal handler (EXIT/ERR/INT)");
+    shell_println!("  set -e/-x  errexit / xtrace shell options");
+    shell_println!("  which/type CMD  Show command type (builtin/alias/function)");
+    shell_println!("");
+    shell_println!("I/O redirection:");
+    shell_println!("  cmd > file   Write output to file (overwrite)");
+    shell_println!("  cmd >> file  Append output to file");
+    shell_println!("  cmd1 | cmd2  Pipe output of cmd1 into cmd2");
+    shell_println!("  cmd < file   Read input from file");
+    shell_println!("  cmd <<DELIM  Here-document (multi-line input to cmd)");
+    shell_println!("  cmd <<-DELIM Here-doc with leading tab stripping");
+    shell_println!("  cmd <<'D'    Here-doc without variable expansion");
+    shell_println!("Variable expansion:");
+    shell_println!("  $NAME / ${{NAME}}  Expand environment variable");
+    shell_println!("  $(command)       Command substitution (capture output)");
+    shell_println!("  $((expr))        Arithmetic expansion");
+    shell_println!("  $1..$9 $# $@     Positional params (in functions)");
+    shell_println!("  $$               Literal dollar sign");
+    shell_println!("String operations:");
+    shell_println!("  ${{VAR:N}}  ${{VAR:N:L}}  Substring (offset, offset+length)");
+    shell_println!("  ${{VAR/pat/rep}}       Replace first match");
+    shell_println!("  ${{VAR//pat/rep}}      Replace all matches");
+    shell_println!("  ${{VAR^}} ${{VAR^^}}     Uppercase first / all chars");
+    shell_println!("  ${{VAR,}} ${{VAR,,}}     Lowercase first / all chars");
+    shell_println!("Control flow:");
+    shell_println!("  if COND; then ... elif COND; then ... else ... fi");
+    shell_println!("  while COND; do ... done  (max 1000 iterations)");
+    shell_println!("  until COND; do ... done  (loop until true)");
+    shell_println!("  for VAR in WORDS; do ... done");
+    shell_println!("  for ((i=0; i<N; i=i+1)); do ... done  (C-style)");
+    shell_println!("  case VAR in pat) ... ;; esac  (pattern matching)");
+    shell_println!("  break / continue  Loop control");
+    shell_println!("  cmd1 && cmd2  Run cmd2 only if cmd1 succeeds");
+    shell_println!("  cmd1 || cmd2  Run cmd2 only if cmd1 fails");
+    shell_println!("  cmd1 ; cmd2   Run cmd2 regardless");
+    shell_println!("Functions:");
+    shell_println!("  name() {{ body; }}  Define a function");
+    shell_println!("  name arg1 arg2   Call function ($1, $2, $#, $@)");
+    shell_println!("  declare -f       List all defined functions");
+    shell_println!("  unset -f NAME    Remove a function definition");
+    shell_println!("  return [N]       Return from function with status N");
+    shell_println!("  local VAR=VALUE  Function-scoped variable (restored on return)");
+    shell_println!("Arrays:");
+    shell_println!("  arr=(a b c)      Declare array");
+    shell_println!("  ${{arr[0]}}        Access element (0-based)");
+    shell_println!("  ${{arr[@]}}        All elements (space-separated)");
+    shell_println!("  ${{#arr[@]}}       Array length");
+    shell_println!("  arr[N]=value     Set element N");
+    shell_println!("  unset arr        Remove array");
+    shell_println!("  unset arr[N]     Clear element N");
+    shell_println!("  declare -a       List all arrays");
+    shell_println!("  reboot    Reboot the system");
 }
 
 // Division-by-constant conversions are safe (1024 never overflows).
@@ -7782,25 +7751,25 @@ fn cmd_help() {
 fn cmd_meminfo() {
     match crate::mm::frame::stats() {
         Some(stats) => {
-            crate::console_println!("Physical memory:");
+            shell_println!("Physical memory:");
             // Each frame is 16 KiB.
             let free_kib = stats.free_frames.saturating_mul(16);
             let total_kib = stats.total_frames.saturating_mul(16);
             let used = stats.total_frames.saturating_sub(stats.free_frames);
             let used_kib = used.saturating_mul(16);
-            crate::console_println!(
+            shell_println!(
                 "  Total: {} frames ({} KiB / {} MiB)",
                 stats.total_frames,
                 total_kib,
                 total_kib / 1024
             );
-            crate::console_println!(
+            shell_println!(
                 "  Used:  {} frames ({} KiB / {} MiB)",
                 used,
                 used_kib,
                 used_kib / 1024
             );
-            crate::console_println!(
+            shell_println!(
                 "  Free:  {} frames ({} KiB / {} MiB)",
                 stats.free_frames,
                 free_kib,
@@ -7808,26 +7777,26 @@ fn cmd_meminfo() {
             );
         }
         None => {
-            crate::console_println!("Error: frame allocator not initialized");
+            shell_println!("Error: frame allocator not initialized");
         }
     }
 
     // Heap allocator stats (always available, lock-free).
     let h = crate::mm::heap::stats();
-    crate::console_println!("Kernel heap:");
-    crate::console_println!(
+    shell_println!("Kernel heap:");
+    shell_println!(
         "  Slab:  {} allocs, {} frees (live: {})",
         h.slab_allocs,
         h.slab_frees,
         h.slab_allocs.saturating_sub(h.slab_frees)
     );
-    crate::console_println!(
+    shell_println!(
         "  Large: {} allocs, {} frees (live: {})",
         h.large_allocs,
         h.large_frees,
         h.large_allocs.saturating_sub(h.large_frees)
     );
-    crate::console_println!(
+    shell_println!(
         "  Refills: {}, Failures: {}",
         h.slab_refills,
         h.alloc_failures
@@ -7842,8 +7811,8 @@ fn cmd_meminfo() {
     } else {
         0
     };
-    crate::console_println!("Zero pool:");
-    crate::console_println!(
+    shell_println!("Zero pool:");
+    shell_println!(
         "  Cached: {} frames, Hits: {}, Misses: {} ({}% hit rate)",
         pool_count,
         pool_hits,
@@ -7859,8 +7828,8 @@ fn cmd_meminfo() {
         crate::mm::pressure::PressureLevel::Medium => "medium",
         crate::mm::pressure::PressureLevel::Critical => "CRITICAL",
     };
-    crate::console_println!("Pressure:");
-    crate::console_println!(
+    shell_println!("Pressure:");
+    shell_println!(
         "  Level: {}, Shrinkers: {}, Notified: {}, Freed: {} objects",
         level_str,
         pi.active_shrinkers,
@@ -7871,8 +7840,8 @@ fn cmd_meminfo() {
     // Swap summary.
     let (swap_total, swap_used, swap_devs) = crate::mm::swap::summary();
     if swap_devs > 0 || swap_total > 0 {
-        crate::console_println!("Swap:");
-        crate::console_println!(
+        shell_println!("Swap:");
+        shell_println!(
             "  {} KiB used / {} KiB total ({} device{})",
             swap_used / 1024,
             swap_total / 1024,
@@ -7885,7 +7854,7 @@ fn cmd_meminfo() {
     let oom_events = crate::mm::oom::oom_event_count();
     let oom_kills = crate::mm::oom::oom_kill_count();
     if oom_events > 0 {
-        crate::console_println!("OOM: {} events, {} kills", oom_events, oom_kills);
+        shell_println!("OOM: {} events, {} kills", oom_events, oom_kills);
     }
 }
 
@@ -8806,7 +8775,7 @@ fn cmd_history(args: &str) {
                     shell_println!("History cleared.");
                 }
                 Err(e) => {
-                    crate::console_println!(
+                    shell_println!(
                         "history: cleared in memory, but could not remove {}: {}",
                         HISTORY_FILE,
                         e
@@ -10350,6 +10319,54 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "a command that worked still reports 0");
     }
 
+    serial_println!("  kshell::self_test 17: command output goes to the shell, not the console");
+    // 2,334 sites printed with `console_println!` instead of `shell_println!`.
+    // The console writer bypasses the capture entirely, so those commands
+    // produced *nothing* for `$(…)` and nothing for a user on the far end of
+    // SSH or telnet -- their output appeared on the host's physical console
+    // instead. This is the same silent-success shape again: the caller does not
+    // get an error, it gets an empty string and carries on.
+    {
+        // A command body, deep inside a `cmd_*` function.
+        let listed = capture_command("cgroup");
+        assert!(
+            listed.starts_with(b"=== Resource Control Groups"),
+            "`cgroup` output reaches the capture"
+        );
+
+        // A usage line inside the same command -- the diagnostic half.
+        let usage = capture_command("cgroup delete");
+        assert_eq!(
+            usage.as_slice(),
+            b"Usage: cgroup delete <id>\n",
+            "a usage diagnostic reaches the capture too"
+        );
+
+        // The sharpest one: a typo over SSH used to print on the host console
+        // and show the remote user an empty line.
+        let unknown = capture_command("zzz_no_such_command");
+        assert!(
+            unknown.starts_with(b"Unknown command: 'zzz_no_such_command'"),
+            "an unknown command tells the caller, not the console"
+        );
+
+        // The deliberate exclusion, asserted so it cannot be "finished" by
+        // accident: `set -x` tracing is stderr-like in bash, so it must *not*
+        // land in a capture -- otherwise `x=$(echo hi)` would be "+ echo hi\nhi".
+        let _ = capture_command("set -x");
+        let traced = capture_command("echo hi");
+        assert_eq!(
+            traced.as_slice(),
+            b"hi\n",
+            "xtrace stays on the console; a capture holds only the output"
+        );
+        let _ = capture_command("set +x");
+        assert!(
+            !OPT_XTRACE.load(core::sync::atomic::Ordering::Relaxed),
+            "the self-test must not leave xtrace on behind it"
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -10370,7 +10387,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 /// Escape sequences: `\n`, `\t`, `\\`, `\0`.
 fn cmd_printf(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: printf FORMAT [ARGS...]");
+        shell_println!("Usage: printf FORMAT [ARGS...]");
         return;
     }
 
@@ -10538,7 +10555,7 @@ fn cmd_date(args: &str) {
     let fmt = if let Some(f) = args.strip_prefix('+') {
         f
     } else {
-        crate::console_println!("Usage: date [+FORMAT]");
+        shell_println!("Usage: date [+FORMAT]");
         set_exit(1);
         return;
     };
@@ -10698,11 +10715,11 @@ fn cmd_time_cmd(args: &str) {
     let us = (elapsed_ns % 1_000_000) / 1_000;
 
     if secs > 0 {
-        crate::console_println!("\nreal\t{}m{}.{:03}s", secs / 60, secs % 60, ms);
+        shell_println!("\nreal\t{}m{}.{:03}s", secs / 60, secs % 60, ms);
     } else if ms > 0 {
-        crate::console_println!("\nreal\t0m0.{:03}s", ms);
+        shell_println!("\nreal\t0m0.{:03}s", ms);
     } else {
-        crate::console_println!("\nreal\t{}us", us);
+        shell_println!("\nreal\t{}us", us);
     }
 }
 
@@ -10738,7 +10755,7 @@ fn cmd_strings(args: &str) {
     }
 
     if path_arg.is_empty() {
-        crate::console_println!("Usage: strings [-n MIN] <file>");
+        shell_println!("Usage: strings [-n MIN] <file>");
         set_exit(1);
         return;
     }
@@ -10747,7 +10764,7 @@ fn cmd_strings(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("strings: {}: {:?}", path.display(), e);
+            shell_println!("strings: {}: {:?}", path.display(), e);
             set_exit(1);
             return;
         }
@@ -10759,14 +10776,14 @@ fn cmd_strings(args: &str) {
             current.push(b as char);
         } else {
             if current.len() >= min_len {
-                crate::console_println!("{}", current);
+                shell_println!("{}", current);
             }
             current.clear();
         }
     }
     // Flush trailing run.
     if current.len() >= min_len {
-        crate::console_println!("{}", current);
+        shell_println!("{}", current);
     }
 }
 
@@ -10781,8 +10798,8 @@ fn cmd_strings(args: &str) {
 /// the terminal width.
 fn cmd_column(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: column [-t] [-s SEP] <file>");
-        crate::console_println!("   or: ... | column -t");
+        shell_println!("Usage: column [-t] [-s SEP] <file>");
+        shell_println!("   or: ... | column -t");
         set_exit(1);
         return;
     }
@@ -10806,7 +10823,7 @@ fn cmd_column(args: &str) {
     }
 
     if file_path.is_empty() {
-        crate::console_println!("column: no input file");
+        shell_println!("column: no input file");
         set_exit(1);
         return;
     }
@@ -10815,7 +10832,7 @@ fn cmd_column(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("column: {}: {:?}", path.display(), e);
+            shell_println!("column: {}: {:?}", path.display(), e);
             set_exit(1);
             return;
         }
@@ -10827,7 +10844,7 @@ fn cmd_column(args: &str) {
 /// column from piped input.
 fn cmd_column_input(args: &str, input: &str) {
     if input.is_empty() && args.is_empty() {
-        crate::console_println!("Usage: ... | column [-t] [-s SEP]");
+        shell_println!("Usage: ... | column [-t] [-s SEP]");
         set_exit(1);
         return;
     }
@@ -10855,7 +10872,7 @@ fn cmd_column_input(args: &str, input: &str) {
         let data = match crate::fs::Vfs::read_file(&path) {
             Ok(d) => d,
             Err(e) => {
-                crate::console_println!("column: {}: {:?}", path.display(), e);
+                shell_println!("column: {}: {:?}", path.display(), e);
                 set_exit(1);
                 return;
             }
@@ -10915,14 +10932,14 @@ fn column_format(text: &str, table_mode: bool, sep: Option<char>) {
                     }
                 }
             }
-            crate::console_println!("{}", out);
+            shell_println!("{}", out);
         }
     } else {
         // Simple mode: print lines as-is (no table formatting).
         // A full implementation would fill the terminal width, but
         // without terminal width info we just print each line.
         for line in &lines {
-            crate::console_println!("{}", line);
+            shell_println!("{}", line);
         }
     }
 }
@@ -10955,12 +10972,12 @@ fn cmd_cal(args: &str) {
                         // Show just one month — default to current month.
                         (u32::from(dt.month), v)
                     } else {
-                        crate::console_println!("Usage: cal [MONTH] [YEAR]");
+                        shell_println!("Usage: cal [MONTH] [YEAR]");
                         set_exit(1);
                         return;
                     }
                 } else {
-                    crate::console_println!("Usage: cal [MONTH] [YEAR]");
+                    shell_println!("Usage: cal [MONTH] [YEAR]");
                     set_exit(1);
                     return;
                 }
@@ -10969,14 +10986,14 @@ fn cmd_cal(args: &str) {
                 let m = parts[0].parse::<u32>().unwrap_or(0);
                 let y = parts[1].parse::<u32>().unwrap_or(0);
                 if m < 1 || m > 12 || y < 1 || y > 9999 {
-                    crate::console_println!("Usage: cal [MONTH (1-12)] [YEAR (1-9999)]");
+                    shell_println!("Usage: cal [MONTH (1-12)] [YEAR (1-9999)]");
                     set_exit(1);
                     return;
                 }
                 (m, y)
             }
             _ => {
-                crate::console_println!("Usage: cal [MONTH] [YEAR]");
+                shell_println!("Usage: cal [MONTH] [YEAR]");
                 set_exit(1);
                 return;
             }
@@ -11097,13 +11114,13 @@ fn day_of_week(year: u32, month: u32, day: u32) -> u32 {
 fn cmd_pci() {
     let devices = crate::pci::scan_bus0();
     if devices.is_empty() {
-        crate::console_println!("No PCI devices found.");
+        shell_println!("No PCI devices found.");
         return;
     }
 
     for dev in &devices {
         let desc = crate::pciids::describe(dev.vendor_id, dev.device_id, dev.class, dev.subclass);
-        crate::console_println!(
+        shell_println!(
             "{:02x}:{:02x}.{} {:04x}:{:04x} {} (IRQ {})",
             dev.address.bus,
             dev.address.device,
@@ -11114,7 +11131,7 @@ fn cmd_pci() {
             dev.irq_line,
         );
     }
-    crate::console_println!("{} device(s)", devices.len());
+    shell_println!("{} device(s)", devices.len());
 }
 
 // Sector formatting uses small arithmetic on known-bounded values.
@@ -11122,14 +11139,14 @@ fn cmd_pci() {
 fn cmd_disk() {
     let devices = crate::blkdev::list_devices_full();
     if devices.is_empty() {
-        crate::console_println!("No block devices registered.");
+        shell_println!("No block devices registered.");
         return;
     }
-    crate::console_println!("Block devices:");
+    shell_println!("Block devices:");
     for dev in &devices {
         let kib = dev.sector_count.saturating_mul(u64::from(dev.sector_size)) / 1024;
         let mib = kib / 1024;
-        crate::console_println!(
+        shell_println!(
             "  {} — {} sectors ({} KiB / {} MiB){}",
             dev.name,
             dev.sector_count,
@@ -11146,8 +11163,8 @@ fn cmd_blkread(args: &str) {
     // Parse: "blkread <sector>" or "blkread <device> <sector>"
     let (dev_name, sector) = parse_blkread_args(args);
     let Some(sector) = sector else {
-        crate::console_println!("Usage: blkread [device] <sector>");
-        crate::console_println!("  e.g., blkread 0  or  blkread vda 0");
+        shell_println!("Usage: blkread [device] <sector>");
+        shell_println!("  e.g., blkread 0  or  blkread vda 0");
         return;
     };
 
@@ -11155,18 +11172,18 @@ fn cmd_blkread(args: &str) {
         let mut buf = [0u8; crate::blkdev::SECTOR_SIZE];
         match dev.read_sector(sector, &mut buf) {
             Ok(()) => {
-                crate::console_println!("Sector {} on {}:", sector, dev_name);
+                shell_println!("Sector {} on {}:", sector, dev_name);
                 // Print 32 rows of 16 bytes each (512 bytes total).
                 for row in 0..32 {
                     let offset = row * 16;
-                    crate::console_print!("  {:04x}:", offset);
+                    shell_print!("  {:04x}:", offset);
                     for col in 0..16 {
                         if let Some(&byte) = buf.get(offset + col) {
-                            crate::console_print!(" {:02x}", byte);
+                            shell_print!(" {:02x}", byte);
                         }
                     }
                     // ASCII column.
-                    crate::console_print!("  |");
+                    shell_print!("  |");
                     for col in 0..16 {
                         if let Some(&byte) = buf.get(offset + col) {
                             let ch = if byte >= 0x20 && byte < 0x7F {
@@ -11174,19 +11191,19 @@ fn cmd_blkread(args: &str) {
                             } else {
                                 '.'
                             };
-                            crate::console_print!("{}", ch);
+                            shell_print!("{}", ch);
                         }
                     }
-                    crate::console_println!("|");
+                    shell_println!("|");
                 }
             }
             Err(e) => {
-                crate::console_println!("Error reading sector {}: {:?}", sector, e);
+                shell_println!("Error reading sector {}: {:?}", sector, e);
             }
         }
     });
     if result.is_none() {
-        crate::console_println!("No block device '{}' found.", dev_name);
+        shell_println!("No block device '{}' found.", dev_name);
     }
 }
 
@@ -11280,7 +11297,7 @@ fn cmd_ls(args: &str) {
                     't' => sort_by_time = true,
                     'r' => reverse_sort = true,
                     _ => {
-                        crate::console_println!("ls: unknown option -{}", ch);
+                        shell_println!("ls: unknown option -{}", ch);
                         set_exit(1);
                         return;
                     }
@@ -11327,7 +11344,7 @@ fn ls_list_dir(
     depth: u32,
 ) {
     if depth > 32 {
-        crate::console_println!("ls: recursion limit reached");
+        shell_println!("ls: recursion limit reached");
         return;
     }
 
@@ -11340,7 +11357,7 @@ fn ls_list_dir(
     let entries = match crate::fs::Vfs::readdir(path) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!("ls: {}: {:?}", path.display(), e);
+            shell_println!("ls: {}: {:?}", path.display(), e);
             set_exit(1);
             return;
         }
@@ -11520,7 +11537,7 @@ fn ls_list_dir(
 
 fn cmd_cat(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: cat <filename>");
+        shell_println!("Usage: cat <filename>");
         return;
     }
 
@@ -11546,7 +11563,7 @@ fn cmd_cat(args: &str) {
             }
         }
         Err(e) => {
-            crate::console_println!("cat: {}: {:?}", path.display(), e);
+            shell_println!("cat: {}: {:?}", path.display(), e);
             set_exit(1);
         }
     }
@@ -11558,7 +11575,7 @@ fn cmd_write(args: &str) {
     let filename = match parts.next() {
         Some(f) if !f.is_empty() => f,
         _ => {
-            crate::console_println!("Usage: write <filename> <text>");
+            shell_println!("Usage: write <filename> <text>");
             return;
         }
     };
@@ -11573,10 +11590,10 @@ fn cmd_write(args: &str) {
 
     match crate::fs::Vfs::write_file(&path, &data) {
         Ok(()) => {
-            crate::console_println!("Wrote {} bytes to {}", data.len(), path.display());
+            shell_println!("Wrote {} bytes to {}", data.len(), path.display());
         }
         Err(e) => {
-            crate::console_println!("write: {}: {:?}", path.display(), e);
+            shell_println!("write: {}: {:?}", path.display(), e);
             set_exit(1);
         }
     }
@@ -11600,7 +11617,7 @@ fn cmd_rm(args: &str) {
     };
 
     if args.is_empty() {
-        crate::console_println!("Usage: rm [-r] <filename>");
+        shell_println!("Usage: rm [-r] <filename>");
         return;
     }
 
@@ -11609,20 +11626,20 @@ fn cmd_rm(args: &str) {
     if recursive {
         match crate::fs::Vfs::remove_recursive(&path) {
             Ok(count) => {
-                crate::console_println!("Removed {} ({} items)", path.display(), count);
+                shell_println!("Removed {} ({} items)", path.display(), count);
             }
             Err(e) => {
-                crate::console_println!("rm: {}: {:?}", path.display(), e);
+                shell_println!("rm: {}: {:?}", path.display(), e);
                 set_exit(1);
             }
         }
     } else {
         match crate::fs::Vfs::remove(&path) {
             Ok(()) => {
-                crate::console_println!("Deleted {}", path.display());
+                shell_println!("Deleted {}", path.display());
             }
             Err(e) => {
-                crate::console_println!("rm: {}: {:?}", path.display(), e);
+                shell_println!("rm: {}: {:?}", path.display(), e);
                 set_exit(1);
             }
         }
@@ -11631,7 +11648,7 @@ fn cmd_rm(args: &str) {
 
 fn cmd_mkdir(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: mkdir [-p] <dirname>");
+        shell_println!("Usage: mkdir [-p] <dirname>");
         return;
     }
 
@@ -11639,7 +11656,7 @@ fn cmd_mkdir(args: &str) {
     let (recursive, dir_arg) = if args.starts_with("-p ") {
         (true, args.get(3..).unwrap_or("").trim())
     } else if args == "-p" {
-        crate::console_println!("Usage: mkdir [-p] <dirname>");
+        shell_println!("Usage: mkdir [-p] <dirname>");
         return;
     } else {
         (false, args)
@@ -11655,10 +11672,10 @@ fn cmd_mkdir(args: &str) {
 
     match result {
         Ok(()) => {
-            crate::console_println!("Created directory {}", path.display());
+            shell_println!("Created directory {}", path.display());
         }
         Err(e) => {
-            crate::console_println!("mkdir: {}: {:?}", path.display(), e);
+            shell_println!("mkdir: {}: {:?}", path.display(), e);
             set_exit(1);
         }
     }
@@ -11666,7 +11683,7 @@ fn cmd_mkdir(args: &str) {
 
 fn cmd_rmdir(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: rmdir <dirname>");
+        shell_println!("Usage: rmdir <dirname>");
         return;
     }
 
@@ -11674,10 +11691,10 @@ fn cmd_rmdir(args: &str) {
 
     match crate::fs::Vfs::rmdir(&path) {
         Ok(()) => {
-            crate::console_println!("Removed directory {}", path.display());
+            shell_println!("Removed directory {}", path.display());
         }
         Err(e) => {
-            crate::console_println!("rmdir: {}: {:?}", path.display(), e);
+            shell_println!("rmdir: {}: {:?}", path.display(), e);
             set_exit(1);
         }
     }
@@ -11687,7 +11704,7 @@ fn cmd_rmdir(args: &str) {
 #[allow(clippy::cast_possible_truncation)]
 fn cmd_stat(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: stat <path>");
+        shell_println!("Usage: stat <path>");
         return;
     }
 
@@ -11702,18 +11719,18 @@ fn cmd_stat(args: &str) {
                 crate::fs::EntryType::VolumeLabel => "volume label",
                 crate::fs::EntryType::CharDevice => "character special file",
             };
-            crate::console_println!("  File: {}", path.display());
-            crate::console_println!(
+            shell_println!("  File: {}", path.display());
+            shell_println!(
                 "  Size: {}  Blocks: {}  Type: {}",
                 meta.size,
                 meta.blocks,
                 type_str
             );
-            crate::console_println!("  Links: {}", meta.nlinks);
+            shell_println!("  Links: {}", meta.nlinks);
             if meta.permissions != 0 {
                 let perms = format_perms(meta.permissions);
                 let perm_str = core::str::from_utf8(&perms).unwrap_or("---------");
-                crate::console_println!(
+                shell_println!(
                     "  Perms: {:04o} ({})  Uid: {}  Gid: {}",
                     meta.permissions,
                     perm_str,
@@ -11736,19 +11753,15 @@ fn cmd_stat(args: &str) {
                 if a.contains(crate::fs::FileAttr::SYSTEM) {
                     flags.push_str("system ");
                 }
-                crate::console_println!("  Attrs: {}", flags.trim_end());
+                shell_println!("  Attrs: {}", flags.trim_end());
             }
 
             // Show filesystem type via VFS mount table.
             if let Ok(info) = crate::fs::Vfs::statvfs(&path) {
                 if info.volume_label.is_empty() {
-                    crate::console_println!(
-                        "  FS:   {} (block size: {})",
-                        info.fs_type,
-                        info.block_size
-                    );
+                    shell_println!("  FS:   {} (block size: {})", info.fs_type, info.block_size);
                 } else {
-                    crate::console_println!(
+                    shell_println!(
                         "  FS:   {} \"{}\" (block size: {})",
                         info.fs_type,
                         info.volume_label,
@@ -11764,14 +11777,14 @@ fn cmd_stat(args: &str) {
                     format_epoch_ns(ns)
                 }
             };
-            crate::console_println!("  Created:  {}", ns_to_display(meta.created_ns));
-            crate::console_println!("  Modified: {}", ns_to_display(meta.modified_ns));
-            crate::console_println!("  Accessed: {}", ns_to_display(meta.accessed_ns));
-            crate::console_println!("  Changed:  {}", ns_to_display(meta.changed_ns));
+            shell_println!("  Created:  {}", ns_to_display(meta.created_ns));
+            shell_println!("  Modified: {}", ns_to_display(meta.modified_ns));
+            shell_println!("  Accessed: {}", ns_to_display(meta.accessed_ns));
+            shell_println!("  Changed:  {}", ns_to_display(meta.changed_ns));
 
             // Show extended attributes if any.
             if !meta.xattrs.is_empty() {
-                crate::console_println!("  Xattrs:");
+                shell_println!("  Xattrs:");
                 for (key, value) in &meta.xattrs {
                     if value.len() <= 64 {
                         // Short value — display inline.
@@ -11780,15 +11793,15 @@ fn cmd_stat(args: &str) {
                         } else {
                             alloc::format!("({} bytes, binary)", value.len())
                         };
-                        crate::console_println!("    {} = {}", key, display);
+                        shell_println!("    {} = {}", key, display);
                     } else {
-                        crate::console_println!("    {} ({} bytes)", key, value.len());
+                        shell_println!("    {} ({} bytes)", key, value.len());
                     }
                 }
             }
         }
         Err(e) => {
-            crate::console_println!("stat: {}: {:?}", path.display(), e);
+            shell_println!("stat: {}: {:?}", path.display(), e);
             set_exit(1);
         }
     }
@@ -11798,7 +11811,7 @@ fn cmd_stat(args: &str) {
 fn cmd_ln(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
-        crate::console_println!("Usage: ln <source> <link-name>");
+        shell_println!("Usage: ln <source> <link-name>");
         return;
     }
 
@@ -11810,10 +11823,10 @@ fn cmd_ln(args: &str) {
 
     match crate::fs::Vfs::link(&src_path, &dst_path) {
         Ok(()) => {
-            crate::console_println!("{} -> {}", dst_path.display(), src_path.display());
+            shell_println!("{} -> {}", dst_path.display(), src_path.display());
         }
         Err(e) => {
-            crate::console_println!("ln: {:?}", e);
+            shell_println!("ln: {:?}", e);
             set_exit(1);
         }
     }
@@ -11833,7 +11846,7 @@ fn cmd_df(args: &str) {
         // Show all mounts.
         match crate::fs::Vfs::mount_info() {
             Ok(mounts) => {
-                crate::console_println!(
+                shell_println!(
                     "{:<12} {:>10} {:>10} {:>10} {:>5}  {:<16} {}",
                     "Filesystem",
                     "Size",
@@ -11848,7 +11861,7 @@ fn cmd_df(args: &str) {
                     let free = info.free_bytes();
                     let used = info.used_bytes();
                     let pct = info.usage_percent();
-                    crate::console_println!(
+                    shell_println!(
                         "{:<12} {:>10} {:>10} {:>10} {:>4}%  {:<16} {}",
                         info.fs_type,
                         format_bytes(total),
@@ -11870,7 +11883,7 @@ fn cmd_df(args: &str) {
                 }
             }
             Err(e) => {
-                crate::console_println!("df: {:?}", e);
+                shell_println!("df: {:?}", e);
             }
         }
     } else {
@@ -11878,7 +11891,7 @@ fn cmd_df(args: &str) {
         let path = resolve_path(args);
         match crate::fs::Vfs::statvfs(&path) {
             Ok(info) => {
-                crate::console_println!(
+                shell_println!(
                     "{:<12} {:>10} {:>10} {:>10} {:>5}  {:<16} {}",
                     "Filesystem",
                     "Size",
@@ -11892,7 +11905,7 @@ fn cmd_df(args: &str) {
                 let free = info.free_bytes();
                 let used = info.used_bytes();
                 let pct = info.usage_percent();
-                crate::console_println!(
+                shell_println!(
                     "{:<12} {:>10} {:>10} {:>10} {:>4}%  {:<16} {}",
                     info.fs_type,
                     format_bytes(total),
@@ -11904,7 +11917,7 @@ fn cmd_df(args: &str) {
                 );
             }
             Err(e) => {
-                crate::console_println!("df: {:?}", e);
+                shell_println!("df: {:?}", e);
             }
         }
     }
@@ -11969,7 +11982,7 @@ fn cmd_cp(args: &str) {
 
     let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
-        crate::console_println!("Usage: cp [-r] <source> <dest>");
+        shell_println!("Usage: cp [-r] <source> <dest>");
         return;
     }
 
@@ -11982,7 +11995,7 @@ fn cmd_cp(args: &str) {
     if recursive {
         match crate::fs::Vfs::copy_recursive(&src_path, &dst_path) {
             Ok(size) => {
-                crate::console_println!(
+                shell_println!(
                     "'{}' -> '{}' ({} bytes copied)",
                     src_path.display(),
                     dst_path.display(),
@@ -11990,14 +12003,14 @@ fn cmd_cp(args: &str) {
                 );
             }
             Err(e) => {
-                crate::console_println!("cp: {:?}", e);
+                shell_println!("cp: {:?}", e);
                 set_exit(1);
             }
         }
     } else {
         match crate::fs::Vfs::copy(&src_path, &dst_path) {
             Ok(size) => {
-                crate::console_println!(
+                shell_println!(
                     "'{}' -> '{}' ({} bytes)",
                     src_path.display(),
                     dst_path.display(),
@@ -12005,7 +12018,7 @@ fn cmd_cp(args: &str) {
                 );
             }
             Err(e) => {
-                crate::console_println!("cp: {:?}", e);
+                shell_println!("cp: {:?}", e);
                 set_exit(1);
             }
         }
@@ -12016,7 +12029,7 @@ fn cmd_cp(args: &str) {
 fn cmd_mv(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
-        crate::console_println!("Usage: mv <source> <dest>");
+        shell_println!("Usage: mv <source> <dest>");
         return;
     }
 
@@ -12028,10 +12041,10 @@ fn cmd_mv(args: &str) {
 
     match crate::fs::Vfs::rename(&src_path, &dst_path) {
         Ok(()) => {
-            crate::console_println!("'{}' -> '{}'", src_path.display(), dst_path.display());
+            shell_println!("'{}' -> '{}'", src_path.display(), dst_path.display());
         }
         Err(e) => {
-            crate::console_println!("mv: {:?}", e);
+            shell_println!("mv: {:?}", e);
             set_exit(1);
         }
     }
@@ -12041,8 +12054,8 @@ fn cmd_mv(args: &str) {
 fn cmd_chmod(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
-        crate::console_println!("Usage: chmod <mode> <path>");
-        crate::console_println!("  mode: octal (e.g., 755, 644)");
+        shell_println!("Usage: chmod <mode> <path>");
+        shell_println!("  mode: octal (e.g., 755, 644)");
         return;
     }
 
@@ -12052,7 +12065,7 @@ fn cmd_chmod(args: &str) {
     let mode = match u16::from_str_radix(mode_str, 8) {
         Ok(m) => m,
         Err(_) => {
-            crate::console_println!("chmod: invalid mode '{}' (use octal, e.g., 755)", mode_str);
+            shell_println!("chmod: invalid mode '{}' (use octal, e.g., 755)", mode_str);
             return;
         }
     };
@@ -12061,10 +12074,10 @@ fn cmd_chmod(args: &str) {
 
     match crate::fs::Vfs::set_permissions(&path, mode) {
         Ok(()) => {
-            crate::console_println!("{}: mode set to {:04o}", path.display(), mode);
+            shell_println!("{}: mode set to {:04o}", path.display(), mode);
         }
         Err(e) => {
-            crate::console_println!("chmod: {:?}", e);
+            shell_println!("chmod: {:?}", e);
         }
     }
 }
@@ -12073,8 +12086,8 @@ fn cmd_chmod(args: &str) {
 fn cmd_chown(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
-        crate::console_println!("Usage: chown <uid:gid> <path>");
-        crate::console_println!("  e.g., chown 1000:1000 /home/user");
+        shell_println!("Usage: chown <uid:gid> <path>");
+        shell_println!("  e.g., chown 1000:1000 /home/user");
         return;
     }
 
@@ -12088,14 +12101,14 @@ fn cmd_chown(args: &str) {
         let uid = match uid_s.parse::<u32>() {
             Ok(u) => u,
             Err(_) => {
-                crate::console_println!("chown: invalid uid '{}'", uid_s);
+                shell_println!("chown: invalid uid '{}'", uid_s);
                 return;
             }
         };
         let gid = match gid_s.parse::<u32>() {
             Ok(g) => g,
             Err(_) => {
-                crate::console_println!("chown: invalid gid '{}'", gid_s);
+                shell_println!("chown: invalid gid '{}'", gid_s);
                 return;
             }
         };
@@ -12105,7 +12118,7 @@ fn cmd_chown(args: &str) {
         match owner_str.parse::<u32>() {
             Ok(u) => (u, u),
             Err(_) => {
-                crate::console_println!("chown: invalid owner '{}'", owner_str);
+                shell_println!("chown: invalid owner '{}'", owner_str);
                 return;
             }
         }
@@ -12115,10 +12128,10 @@ fn cmd_chown(args: &str) {
 
     match crate::fs::Vfs::set_owner(&path, uid, gid) {
         Ok(()) => {
-            crate::console_println!("{}: owner set to {}:{}", path.display(), uid, gid);
+            shell_println!("{}: owner set to {}:{}", path.display(), uid, gid);
         }
         Err(e) => {
-            crate::console_println!("chown: {:?}", e);
+            shell_println!("chown: {:?}", e);
         }
     }
 }
@@ -12139,10 +12152,10 @@ fn cmd_chown(args: &str) {
 fn cmd_chattr(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
-        crate::console_println!("Usage: chattr [+|-]FLAGS FILE");
-        crate::console_println!("  +FLAGS  set attributes    -FLAGS  clear attributes");
-        crate::console_println!("  =       clear all attributes");
-        crate::console_println!("  Flags: i=immutable a=append-only h=hidden s=system");
+        shell_println!("Usage: chattr [+|-]FLAGS FILE");
+        shell_println!("  +FLAGS  set attributes    -FLAGS  clear attributes");
+        shell_println!("  =       clear all attributes");
+        shell_println!("  Flags: i=immutable a=append-only h=hidden s=system");
         set_exit(1);
         return;
     }
@@ -12159,7 +12172,7 @@ fn cmd_chattr(args: &str) {
     } else if let Some(f) = flag_str.strip_prefix('-') {
         ('-', f)
     } else {
-        crate::console_println!("chattr: expected +FLAGS, -FLAGS, or =");
+        shell_println!("chattr: expected +FLAGS, -FLAGS, or =");
         set_exit(1);
         return;
     };
@@ -12173,7 +12186,7 @@ fn cmd_chattr(args: &str) {
             'h' => mask = mask.union(crate::fs::FileAttr::HIDDEN),
             's' => mask = mask.union(crate::fs::FileAttr::SYSTEM),
             _ => {
-                crate::console_println!("chattr: unknown flag '{}'", ch);
+                shell_println!("chattr: unknown flag '{}'", ch);
                 set_exit(1);
                 return;
             }
@@ -12184,7 +12197,7 @@ fn cmd_chattr(args: &str) {
     let current_attrs = match crate::fs::Vfs::metadata(&path) {
         Ok(meta) => meta.attributes,
         Err(e) => {
-            crate::console_println!("chattr: {}: {:?}", path.display(), e);
+            shell_println!("chattr: {}: {:?}", path.display(), e);
             set_exit(1);
             return;
         }
@@ -12217,10 +12230,10 @@ fn cmd_chattr(args: &str) {
             if desc.is_empty() {
                 desc.push_str("(none)");
             }
-            crate::console_println!("{}: attributes = {}", path.display(), desc);
+            shell_println!("{}: attributes = {}", path.display(), desc);
         }
         Err(e) => {
-            crate::console_println!("chattr: {:?}", e);
+            shell_println!("chattr: {:?}", e);
             set_exit(1);
         }
     }
@@ -12231,7 +12244,7 @@ fn cmd_chattr(args: &str) {
 /// Usage: `lsattr FILE`
 fn cmd_lsattr(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: lsattr <path>");
+        shell_println!("Usage: lsattr <path>");
         set_exit(1);
         return;
     }
@@ -12262,10 +12275,10 @@ fn cmd_lsattr(args: &str) {
             } else {
                 '-'
             });
-            crate::console_println!("{} {}", flags, path.display());
+            shell_println!("{} {}", flags, path.display());
         }
         Err(e) => {
-            crate::console_println!("lsattr: {}: {:?}", path.display(), e);
+            shell_println!("lsattr: {}: {:?}", path.display(), e);
             set_exit(1);
         }
     }
@@ -12282,7 +12295,7 @@ fn cmd_lsattr(args: &str) {
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_touch(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: touch [-d DATETIME | -r REFFILE] <path>");
+        shell_println!("Usage: touch [-d DATETIME | -r REFFILE] <path>");
         return;
     }
 
@@ -12303,7 +12316,7 @@ fn cmd_touch(args: &str) {
     }
 
     if file_path.is_empty() {
-        crate::console_println!("touch: missing file operand");
+        shell_println!("touch: missing file operand");
         set_exit(1);
         return;
     }
@@ -12316,7 +12329,7 @@ fn cmd_touch(args: &str) {
         match parse_datetime_to_ns(ds) {
             Some(ns) => ns,
             None => {
-                crate::console_println!(
+                shell_println!(
                     "touch: invalid date '{}' (use YYYY-MM-DD or YYYY-MM-DD HH:MM:SS or epoch secs)",
                     ds
                 );
@@ -12330,7 +12343,7 @@ fn cmd_touch(args: &str) {
         match crate::fs::Vfs::metadata(&ref_path) {
             Ok(meta) => meta.modified_ns,
             Err(e) => {
-                crate::console_println!("touch: {}: {:?}", ref_path.display(), e);
+                shell_println!("touch: {}: {:?}", ref_path.display(), e);
                 set_exit(1);
                 return;
             }
@@ -12345,10 +12358,10 @@ fn cmd_touch(args: &str) {
             // File exists — update timestamps.
             match crate::fs::Vfs::set_times(&path, timestamp, timestamp) {
                 Ok(()) => {
-                    crate::console_println!("{}: timestamps updated", path.display());
+                    shell_println!("{}: timestamps updated", path.display());
                 }
                 Err(e) => {
-                    crate::console_println!("touch: {}: {:?}", path.display(), e);
+                    shell_println!("touch: {}: {:?}", path.display(), e);
                     set_exit(1);
                 }
             }
@@ -12357,10 +12370,10 @@ fn cmd_touch(args: &str) {
             // File doesn't exist — create empty file.
             match crate::fs::Vfs::write_file(&path, &[]) {
                 Ok(()) => {
-                    crate::console_println!("{}: created", path.display());
+                    shell_println!("{}: created", path.display());
                 }
                 Err(e) => {
-                    crate::console_println!("touch: {}: {:?}", path.display(), e);
+                    shell_println!("touch: {}: {:?}", path.display(), e);
                     set_exit(1);
                 }
             }
@@ -12450,7 +12463,7 @@ fn cmd_append(args: &str) {
     let filename = match parts.next() {
         Some(f) if !f.is_empty() => f,
         _ => {
-            crate::console_println!("Usage: append <filename> <text>");
+            shell_println!("Usage: append <filename> <text>");
             return;
         }
     };
@@ -12463,10 +12476,10 @@ fn cmd_append(args: &str) {
     }
     match crate::fs::Vfs::append(&path, &data) {
         Ok(()) => {
-            crate::console_println!("Appended {} bytes to {}", data.len(), path.display());
+            shell_println!("Appended {} bytes to {}", data.len(), path.display());
         }
         Err(e) => {
-            crate::console_println!("append: {}: {:?}", path.display(), e);
+            shell_println!("append: {}: {:?}", path.display(), e);
         }
     }
 }
@@ -12479,11 +12492,11 @@ fn cmd_tree(args: &str) {
         resolve_path(args)
     };
 
-    crate::console_println!("{}", path.display());
+    shell_println!("{}", path.display());
     let mut dirs: u64 = 0;
     let mut files: u64 = 0;
     tree_recurse(Path::new(&path), "", &mut dirs, &mut files, 0);
-    crate::console_println!("\n{} directories, {} files", dirs, files);
+    shell_println!("\n{} directories, {} files", dirs, files);
 }
 
 /// Internal recursive helper for tree display.
@@ -12509,7 +12522,7 @@ fn tree_recurse(path: &Path, prefix: &str, dirs: &mut u64, files: &mut u64, dept
             _ => "",
         };
 
-        crate::console_println!(
+        shell_println!(
             "{}{}{}{}",
             prefix,
             connector,
@@ -12564,7 +12577,7 @@ fn cmd_du(args: &str) {
     };
 
     let total = du_recurse(Path::new(&path), 0, max_depth, summary_only);
-    crate::console_println!("{}\t{}", format_bytes(total), path.display());
+    shell_println!("{}\t{}", format_bytes(total), path.display());
 }
 
 /// Recursively calculate total size of a directory tree.
@@ -12594,7 +12607,7 @@ fn du_recurse(path: &Path, depth: usize, max_depth: usize, summary_only: bool) -
                 summary_only,
             );
             if !summary_only && depth < max_depth {
-                crate::console_println!("{}\t{}", format_bytes(subdir_total), child_path.display());
+                shell_println!("{}\t{}", format_bytes(subdir_total), child_path.display());
             }
             total = total.saturating_add(subdir_total);
         }
@@ -12626,14 +12639,14 @@ fn du_recurse(path: &Path, depth: usize, max_depth: usize, summary_only: bool) -
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_find(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: find [PATH] [PREDICATES...]");
-        crate::console_println!("  Predicates:");
-        crate::console_println!("    -name PATTERN   Glob match on filename");
-        crate::console_println!("    -type f|d|l     File type (f=file, d=dir, l=symlink)");
-        crate::console_println!("    -size +N|-N|N   Size filter (suffixes: c, k, M, G)");
-        crate::console_println!("    -maxdepth N     Limit recursion depth");
-        crate::console_println!("    -empty          Empty files or directories");
-        crate::console_println!("  Example: find /tmp -name *.txt -type f");
+        shell_println!("Usage: find [PATH] [PREDICATES...]");
+        shell_println!("  Predicates:");
+        shell_println!("    -name PATTERN   Glob match on filename");
+        shell_println!("    -type f|d|l     File type (f=file, d=dir, l=symlink)");
+        shell_println!("    -size +N|-N|N   Size filter (suffixes: c, k, M, G)");
+        shell_println!("    -maxdepth N     Limit recursion depth");
+        shell_println!("    -empty          Empty files or directories");
+        shell_println!("  Example: find /tmp -name *.txt -type f");
         return;
     }
 
@@ -12748,9 +12761,7 @@ fn cmd_locate(args: &str) {
 
     // `updatedb` with no args → rebuild
     if parts.is_empty() {
-        crate::console_println!(
-            "Usage: locate [--update|--stats|--ext E|--size MIN-MAX|--path] PATTERN"
-        );
+        shell_println!("Usage: locate [--update|--stats|--ext E|--size MIN-MAX|--path] PATTERN");
         return;
     }
 
@@ -12798,11 +12809,11 @@ fn cmd_locate(args: &str) {
         if !st.initialized {
             index::init(index::default_config());
         }
-        crate::console_println!("Rebuilding file index...");
+        shell_println!("Rebuilding file index...");
         match index::rebuild() {
             Ok(()) => {
                 let st = index::stats();
-                crate::console_println!(
+                shell_println!(
                     "Done: {} entries indexed ({} bytes, {} extensions){}",
                     st.total_entries,
                     st.total_size,
@@ -12810,7 +12821,7 @@ fn cmd_locate(args: &str) {
                     if st.truncated { " [truncated]" } else { "" }
                 );
             }
-            Err(e) => crate::console_println!("Error rebuilding index: {:?}", e),
+            Err(e) => shell_println!("Error rebuilding index: {:?}", e),
         }
         return;
     }
@@ -12819,33 +12830,33 @@ fn cmd_locate(args: &str) {
     if do_stats {
         let st = index::stats();
         if !st.initialized {
-            crate::console_println!("Index not initialized. Run `locate --update` first.");
+            shell_println!("Index not initialized. Run `locate --update` first.");
             return;
         }
-        crate::console_println!("=== File Index Statistics ===");
-        crate::console_println!("  Entries:     {}", st.total_entries);
-        crate::console_println!("  Total size:  {} bytes", st.total_size);
-        crate::console_println!("  Extensions:  {}", st.extension_count);
-        crate::console_println!("  Rebuilds:    {}", st.rebuild_count);
+        shell_println!("=== File Index Statistics ===");
+        shell_println!("  Entries:     {}", st.total_entries);
+        shell_println!("  Total size:  {} bytes", st.total_size);
+        shell_println!("  Extensions:  {}", st.extension_count);
+        shell_println!("  Rebuilds:    {}", st.rebuild_count);
         // How old the snapshot is decides whether a `locate` hit can be
         // trusted. The index recorded this from the start but nothing ever
         // showed it, so the one question a user of a cached index actually has
         // was the one the stats screen could not answer.
         match index::age_of_last_rebuild_ns() {
-            None => crate::console_println!("  Last build:  never"),
+            None => shell_println!("  Last build:  never"),
             Some(age_ns) => {
-                crate::console_println!("  Last build:  {}s ago", age_ns / 1_000_000_000)
+                shell_println!("  Last build:  {}s ago", age_ns / 1_000_000_000)
             }
         }
-        crate::console_println!("  Truncated:   {}", st.truncated);
-        crate::console_println!("  Initialized: {}", st.initialized);
+        shell_println!("  Truncated:   {}", st.truncated);
+        shell_println!("  Initialized: {}", st.initialized);
         return;
     }
 
     // Ensure index is built.
     let st = index::stats();
     if !st.initialized || st.total_entries == 0 {
-        crate::console_println!("Index empty or not built. Run `locate --update` first.");
+        shell_println!("Index empty or not built. Run `locate --update` first.");
         return;
     }
 
@@ -12868,12 +12879,12 @@ fn cmd_locate(args: &str) {
             )
         }
     } else {
-        crate::console_println!("No search pattern given.");
+        shell_println!("No search pattern given.");
         return;
     };
 
     if results.is_empty() {
-        crate::console_println!("No matches found.");
+        shell_println!("No matches found.");
         return;
     }
 
@@ -12881,7 +12892,7 @@ fn cmd_locate(args: &str) {
     let max_display = 100;
     for (i, entry) in results.iter().enumerate() {
         if i >= max_display {
-            crate::console_println!(
+            shell_println!(
                 "... and {} more ({} total)",
                 results.len().saturating_sub(max_display),
                 results.len()
@@ -12894,11 +12905,11 @@ fn cmd_locate(args: &str) {
             crate::fs::EntryType::Symlink => 'l',
             _ => '?',
         };
-        crate::console_println!("{} {:>8}  {}", type_char, entry.size, entry.path.display());
+        shell_println!("{} {:>8}  {}", type_char, entry.size, entry.path.display());
     }
 
     if results.len() <= max_display {
-        crate::console_println!(
+        shell_println!(
             "({} match{})",
             results.len(),
             if results.len() == 1 { "" } else { "es" }
@@ -18174,7 +18185,7 @@ fn cmd_archive(args: &str) {
     match sub {
         "list" | "ls" | "t" => {
             if parts.len() < 2 {
-                crate::console_println!("Usage: archive list <file>");
+                shell_println!("Usage: archive list <file>");
                 set_exit(1);
                 return;
             }
@@ -18198,24 +18209,20 @@ fn cmd_archive(args: &str) {
                             shell_println!("({} entries)", entries.len());
                         }
                         Err(e) => {
-                            crate::console_println!(
-                                "archive: cannot list {}: {}",
-                                path.display(),
-                                e
-                            );
+                            shell_println!("archive: cannot list {}: {}", path.display(), e);
                             set_exit(1);
                         }
                     }
                 }
                 Err(e) => {
-                    crate::console_println!("archive: cannot read {}: {}", path.display(), e);
+                    shell_println!("archive: cannot read {}: {}", path.display(), e);
                     set_exit(1);
                 }
             }
         }
         "extract" | "x" => {
             if parts.len() < 2 {
-                crate::console_println!("Usage: archive extract <file> [dest]");
+                shell_println!("Usage: archive extract <file> [dest]");
                 set_exit(1);
                 return;
             }
@@ -18239,35 +18246,31 @@ fn cmd_archive(args: &str) {
                         // otherwise `archive extract x && build` proceeds
                         // against a tree missing the files that failed.
                         if !result.errors.is_empty() {
-                            crate::console_println!(
+                            shell_println!(
                                 "archive: {} entr{} could not be extracted:",
                                 result.errors.len(),
                                 if result.errors.len() == 1 { "y" } else { "ies" }
                             );
                             for e in &result.errors {
-                                crate::console_println!("  ! {}", e);
+                                shell_println!("  ! {}", e);
                             }
                             set_exit(1);
                         }
                     }
                     Err(e) => {
-                        crate::console_println!(
-                            "archive: cannot extract {}: {}",
-                            path.display(),
-                            e
-                        );
+                        shell_println!("archive: cannot extract {}: {}", path.display(), e);
                         set_exit(1);
                     }
                 },
                 Err(e) => {
-                    crate::console_println!("archive: cannot read {}: {}", path.display(), e);
+                    shell_println!("archive: cannot read {}: {}", path.display(), e);
                     set_exit(1);
                 }
             }
         }
         "get" => {
             if parts.len() < 3 {
-                crate::console_println!("Usage: archive get <archive> <entry_name>");
+                shell_println!("Usage: archive get <archive> <entry_name>");
                 set_exit(1);
                 return;
             }
@@ -18283,7 +18286,7 @@ fn cmd_archive(args: &str) {
                         }
                     }
                     Err(e) => {
-                        crate::console_println!(
+                        shell_println!(
                             "archive: cannot extract {} from {}: {}",
                             entry_name,
                             path.display(),
@@ -18293,14 +18296,14 @@ fn cmd_archive(args: &str) {
                     }
                 },
                 Err(e) => {
-                    crate::console_println!("archive: cannot read {}: {}", path.display(), e);
+                    shell_println!("archive: cannot read {}: {}", path.display(), e);
                     set_exit(1);
                 }
             }
         }
         "detect" | "info" => {
             if parts.len() < 2 {
-                crate::console_println!("Usage: archive detect <file>");
+                shell_println!("Usage: archive detect <file>");
                 set_exit(1);
                 return;
             }
@@ -18324,7 +18327,7 @@ fn cmd_archive(args: &str) {
                                     // answer being unavailable, not a yes --
                                     // `archive detect f && archive extract f`
                                     // must not run the second half.
-                                    crate::console_println!(
+                                    shell_println!(
                                         "archive: {}: unknown archive format",
                                         path.display()
                                     );
@@ -18335,17 +18338,15 @@ fn cmd_archive(args: &str) {
                     }
                 }
                 Err(e) => {
-                    crate::console_println!("archive: cannot read {}: {}", path.display(), e);
+                    shell_println!("archive: cannot read {}: {}", path.display(), e);
                     set_exit(1);
                 }
             }
         }
         "create" => {
             if parts.len() < 4 {
-                crate::console_println!(
-                    "Usage: archive create <format> <output> <file1> [file2] ..."
-                );
-                crate::console_println!("Formats: zip, tar, cpio, ar");
+                shell_println!("Usage: archive create <format> <output> <file1> [file2] ...");
+                shell_println!("Formats: zip, tar, cpio, ar");
                 set_exit(1);
                 return;
             }
@@ -18355,7 +18356,7 @@ fn cmd_archive(args: &str) {
                 "cpio" => archive::ArchiveFormat::Cpio,
                 "ar" => archive::ArchiveFormat::Ar,
                 other => {
-                    crate::console_println!(
+                    shell_println!(
                         "archive: unknown format: {}. Use: zip, tar, cpio, ar",
                         other
                     );
@@ -18385,12 +18386,12 @@ fn cmd_archive(args: &str) {
                     }
                     Err(e) => {
                         unreadable = unreadable.saturating_add(1);
-                        crate::console_println!("archive: cannot read {}: {}", path.display(), e);
+                        shell_println!("archive: cannot read {}: {}", path.display(), e);
                     }
                 }
             }
             if entries.is_empty() {
-                crate::console_println!("archive: no readable files to archive");
+                shell_println!("archive: no readable files to archive");
                 set_exit(1);
                 return;
             }
@@ -18398,7 +18399,7 @@ fn cmd_archive(args: &str) {
             // for N files; producing one with fewer under the name they chose
             // is the outcome that is discovered too late to fix.
             if unreadable != 0 {
-                crate::console_println!(
+                shell_println!(
                     "archive: refusing to create {} -- {} of {} input(s) could not be read",
                     output.display(),
                     unreadable,
@@ -18416,16 +18417,12 @@ fn cmd_archive(args: &str) {
                         entries.len()
                     ),
                     Err(e) => {
-                        crate::console_println!(
-                            "archive: error writing {}: {}",
-                            output.display(),
-                            e
-                        );
+                        shell_println!("archive: error writing {}: {}", output.display(), e);
                         set_exit(1);
                     }
                 },
                 Err(e) => {
-                    crate::console_println!("archive: error creating archive: {}", e);
+                    shell_println!("archive: error creating archive: {}", e);
                     set_exit(1);
                 }
             }
@@ -18443,25 +18440,21 @@ fn cmd_archive(args: &str) {
             // to say so; a `help` subcommand is the way to ask for this text
             // deliberately, and it exits 0.
             if !sub.is_empty() && sub != "help" {
-                crate::console_println!("archive: unknown command: {}", sub);
+                shell_println!("archive: unknown command: {}", sub);
             }
-            crate::console_println!("Usage: archive <command> [args]");
-            crate::console_println!();
-            crate::console_println!("Commands:");
-            crate::console_println!("  list <file>                        List archive contents");
-            crate::console_println!(
-                "  extract <file> [dest]              Extract all to directory"
-            );
-            crate::console_println!(
-                "  get <archive> <entry>              Extract single entry to stdout"
-            );
-            crate::console_println!("  detect <file>                      Detect archive format");
-            crate::console_println!("  create <fmt> <output> <files...>   Create archive");
-            crate::console_println!("  stats                              Show operation counts");
-            crate::console_println!("  help                               Show this text");
-            crate::console_println!();
-            crate::console_println!("Supported formats: ZIP, TAR, CPIO, AR, RAR5, 7z");
-            crate::console_println!("Create supports: zip, tar, cpio, ar");
+            shell_println!("Usage: archive <command> [args]");
+            shell_println!();
+            shell_println!("Commands:");
+            shell_println!("  list <file>                        List archive contents");
+            shell_println!("  extract <file> [dest]              Extract all to directory");
+            shell_println!("  get <archive> <entry>              Extract single entry to stdout");
+            shell_println!("  detect <file>                      Detect archive format");
+            shell_println!("  create <fmt> <output> <files...>   Create archive");
+            shell_println!("  stats                              Show operation counts");
+            shell_println!("  help                               Show this text");
+            shell_println!();
+            shell_println!("Supported formats: ZIP, TAR, CPIO, AR, RAR5, 7z");
+            shell_println!("Create supports: zip, tar, cpio, ar");
             if sub != "help" {
                 set_exit(1);
             }
@@ -85880,7 +85873,7 @@ fn parse_perm_str(s: &str) -> Option<crate::fs::acl::AclPerm> {
 /// - Character specials: "character special"
 fn cmd_file(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: file <path>");
+        shell_println!("Usage: file <path>");
         set_exit(1);
         return;
     }
@@ -85891,7 +85884,7 @@ fn cmd_file(args: &str) {
     let entry = match crate::fs::Vfs::lstat(&path) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!("file: {}: {:?}", path.display(), e);
+            shell_println!("file: {}: {:?}", path.display(), e);
             set_exit(1);
             return;
         }
@@ -86425,7 +86418,7 @@ fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, count: &mut u64, 
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_wc(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: wc <file>");
+        shell_println!("Usage: wc <file>");
         return;
     }
 
@@ -86434,7 +86427,7 @@ fn cmd_wc(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("wc: {}: {:?}", path.display(), e);
+            shell_println!("wc: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -86475,7 +86468,7 @@ fn cmd_head(args: &str) {
             Err(_) => (10, args), // Default to 10 lines if first arg isn't a number.
         }
     } else {
-        crate::console_println!("Usage: head [N] <file>");
+        shell_println!("Usage: head [N] <file>");
         return;
     };
 
@@ -86484,7 +86477,7 @@ fn cmd_head(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("head: {}: {:?}", path.display(), e);
+            shell_println!("head: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -86509,7 +86502,7 @@ fn cmd_tail(args: &str) {
             Err(_) => (10, args),
         }
     } else {
-        crate::console_println!("Usage: tail [N] <file>");
+        shell_println!("Usage: tail [N] <file>");
         return;
     };
 
@@ -86518,7 +86511,7 @@ fn cmd_tail(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("tail: {}: {:?}", path.display(), e);
+            shell_println!("tail: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -86541,7 +86534,7 @@ fn cmd_tail(args: &str) {
 /// Use `-n 0` for no limit (shows entire file).
 fn cmd_hexdump(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: hexdump [-n count] <file>");
+        shell_println!("Usage: hexdump [-n count] <file>");
         return;
     }
 
@@ -86568,7 +86561,7 @@ fn cmd_hexdump(args: &str) {
     }
 
     if file_path.is_empty() {
-        crate::console_println!("Usage: hexdump [-n count] <file>");
+        shell_println!("Usage: hexdump [-n count] <file>");
         return;
     }
 
@@ -86577,7 +86570,7 @@ fn cmd_hexdump(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("hexdump: {}: {:?}", path.display(), e);
+            shell_println!("hexdump: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -86723,7 +86716,7 @@ fn cmd_grep(args: &str) {
                     'w' => flags.whole_word = true,
                     'r' | 'R' => flags.recursive = true,
                     _ => {
-                        crate::console_println!("grep: unknown flag '-{}'", ch);
+                        shell_println!("grep: unknown flag '-{}'", ch);
                         return;
                     }
                 }
@@ -86734,7 +86727,7 @@ fn cmd_grep(args: &str) {
     }
 
     if words.is_empty() {
-        crate::console_println!("Usage: grep [-ivclnwrI] <pattern> <file|dir> [file2 ...]");
+        shell_println!("Usage: grep [-ivclnwrI] <pattern> <file|dir> [file2 ...]");
         return;
     }
 
@@ -86742,7 +86735,7 @@ fn cmd_grep(args: &str) {
     let targets = if words.len() > 1 {
         &words[1..]
     } else {
-        crate::console_println!("Usage: grep [-ivclnwrI] <pattern> <file|dir> [file2 ...]");
+        shell_println!("Usage: grep [-ivclnwrI] <pattern> <file|dir> [file2 ...]");
         return;
     };
 
@@ -86783,7 +86776,7 @@ fn cmd_grep(args: &str) {
     if flags.count_only && !multi_file {
         shell_println!("{}", total_matches);
     } else if total_matches == 0 && !flags.count_only && !flags.files_only {
-        crate::console_println!("grep: no matches for '{}'", pattern);
+        shell_println!("grep: no matches for '{}'", pattern);
     }
     // Same contract as the piped form above: no match is exit 1, whatever the
     // output flags. The two halves must agree, or `grep pat f` and
@@ -86798,7 +86791,7 @@ fn grep_file(path: &Path, pattern: &str, flags: &GrepFlags, multi_file: bool, to
     let data = match crate::fs::Vfs::read_file(path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("grep: {}: {:?}", path.display(), e);
+            shell_println!("grep: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -86808,7 +86801,7 @@ fn grep_file(path: &Path, pattern: &str, flags: &GrepFlags, multi_file: bool, to
         Err(_) => {
             // Skip binary files silently in recursive mode.
             if !flags.recursive {
-                crate::console_println!("grep: {}: binary file", path.display());
+                shell_println!("grep: {}: binary file", path.display());
             }
             return;
         }
@@ -86933,7 +86926,7 @@ fn grep_recursive(
 fn cmd_cmp(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
-        crate::console_println!("Usage: cmp <file1> <file2>");
+        shell_println!("Usage: cmp <file1> <file2>");
         return;
     }
 
@@ -86943,20 +86936,20 @@ fn cmd_cmp(args: &str) {
     let data1 = match crate::fs::Vfs::read_file(&path1) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("cmp: {}: {:?}", path1.display(), e);
+            shell_println!("cmp: {}: {:?}", path1.display(), e);
             return;
         }
     };
     let data2 = match crate::fs::Vfs::read_file(&path2) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("cmp: {}: {:?}", path2.display(), e);
+            shell_println!("cmp: {}: {:?}", path2.display(), e);
             return;
         }
     };
 
     if data1 == data2 {
-        crate::console_println!(
+        shell_println!(
             "{} and {} are identical ({} bytes)",
             path1.display(),
             path2.display(),
@@ -86977,7 +86970,7 @@ fn cmd_cmp(args: &str) {
 
     // If no difference in common prefix, the difference is the length.
     let diff_at = diff_offset.unwrap_or(min_len);
-    crate::console_println!(
+    shell_println!(
         "{} {} differ: byte {}, {} size={}, {} size={}",
         path1.display(),
         path2.display(),
@@ -86998,7 +86991,7 @@ fn cmd_cmp(args: &str) {
 fn cmd_diff(args: &str) {
     let parts: Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
-        crate::console_println!("Usage: diff <file1> <file2>");
+        shell_println!("Usage: diff <file1> <file2>");
         return;
     }
 
@@ -87008,14 +87001,14 @@ fn cmd_diff(args: &str) {
     let data1 = match crate::fs::Vfs::read_file(&path1) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("diff: {}: {:?}", path1.display(), e);
+            shell_println!("diff: {}: {:?}", path1.display(), e);
             return;
         }
     };
     let data2 = match crate::fs::Vfs::read_file(&path2) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("diff: {}: {:?}", path2.display(), e);
+            shell_println!("diff: {}: {:?}", path2.display(), e);
             return;
         }
     };
@@ -87035,7 +87028,7 @@ fn cmd_diff(args: &str) {
 
     const MAX_LINES: usize = 2000;
     if lines1.len() > MAX_LINES || lines2.len() > MAX_LINES {
-        crate::console_println!(
+        shell_println!(
             "diff: files too large for line diff ({} vs {} lines, max {}). Use cmp instead.",
             lines1.len(),
             lines2.len(),
@@ -87101,8 +87094,8 @@ fn cmd_diff(args: &str) {
     drop(dp);
 
     // Print header.
-    crate::console_println!("--- {}", path1.display());
-    crate::console_println!("+++ {}", path2.display());
+    shell_println!("--- {}", path1.display());
+    shell_println!("+++ {}", path2.display());
 
     // Group edits into hunks (unified diff with 3 lines context).
     const CONTEXT: usize = 3;
@@ -87189,7 +87182,7 @@ fn cmd_diff(args: &str) {
             }
         }
 
-        crate::console_println!(
+        shell_println!(
             "@@ -{},{} +{},{} @@",
             old_start,
             old_count,
@@ -87208,7 +87201,7 @@ fn cmd_diff(args: &str) {
                     Edit::Remove => '-',
                     Edit::Add => '+',
                 };
-                crate::console_println!("{}{}", prefix, line_text);
+                shell_println!("{}{}", prefix, line_text);
             }
         }
     }
@@ -87216,7 +87209,7 @@ fn cmd_diff(args: &str) {
     if hunks.is_empty() {
         // Should not happen since data1 != data2, but could if only trailing
         // newline differs. Show a minimal note.
-        crate::console_println!("(files differ only in trailing newline)");
+        shell_println!("(files differ only in trailing newline)");
     }
 }
 
@@ -87226,8 +87219,8 @@ fn cmd_diff(args: &str) {
 fn cmd_fallocate(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
-        crate::console_println!("Usage: fallocate <size> <file>");
-        crate::console_println!("  Size can be suffixed with K, M, G (e.g., 4K, 1M)");
+        shell_println!("Usage: fallocate <size> <file>");
+        shell_println!("  Size can be suffixed with K, M, G (e.g., 4K, 1M)");
         return;
     }
 
@@ -87250,7 +87243,7 @@ fn cmd_fallocate(args: &str) {
         match num_part.parse::<u64>() {
             Ok(n) => n.saturating_mul(multiplier),
             Err(_) => {
-                crate::console_println!("fallocate: invalid size '{}'", size_str);
+                shell_println!("fallocate: invalid size '{}'", size_str);
                 return;
             }
         }
@@ -87258,10 +87251,10 @@ fn cmd_fallocate(args: &str) {
 
     match crate::fs::Vfs::fallocate(&path, size) {
         Ok(()) => {
-            crate::console_println!("fallocate: reserved {} bytes for {}", size, path.display());
+            shell_println!("fallocate: reserved {} bytes for {}", size, path.display());
         }
         Err(e) => {
-            crate::console_println!("fallocate: {}: {:?}", path.display(), e);
+            shell_println!("fallocate: {}: {:?}", path.display(), e);
         }
     }
 }
@@ -87270,11 +87263,11 @@ fn cmd_fallocate(args: &str) {
 fn cmd_lsof() {
     let handles = crate::fs::handle::list_handles();
     if handles.is_empty() {
-        crate::console_println!("No open file handles.");
+        shell_println!("No open file handles.");
         return;
     }
 
-    crate::console_println!(
+    shell_println!(
         "{:<7} {:<5} {:<12} {:<12} {}",
         "HANDLE",
         "FLAGS",
@@ -87305,7 +87298,7 @@ fn cmd_lsof() {
             flags.push('-');
         }
 
-        crate::console_println!(
+        shell_println!(
             "{:<7} {:<5} {:<12} {:<12} {}",
             h.id,
             flags,
@@ -87315,7 +87308,7 @@ fn cmd_lsof() {
         );
     }
 
-    crate::console_println!("\nTotal: {} open handles", handles.len());
+    shell_println!("\nTotal: {} open handles", handles.len());
 }
 
 /// Paginated directory listing.
@@ -87348,18 +87341,18 @@ fn cmd_lsp(args: &str) {
         match crate::fs::Vfs::readdir_at(path, offset, page_size) {
             Ok((entries, total)) => {
                 if offset == 0 {
-                    crate::console_println!(
+                    shell_println!(
                         "Directory '{}' — {} entries (page size {})",
                         path,
                         total,
                         page_size,
                     );
-                    crate::console_println!("{:<5} {:<8} {:<12} {}", "TYPE", "SIZE", "NAME", "",);
+                    shell_println!("{:<5} {:<8} {:<12} {}", "TYPE", "SIZE", "NAME", "",);
                 }
 
                 if entries.is_empty() {
                     if offset == 0 {
-                        crate::console_println!("  (empty directory)");
+                        shell_println!("  (empty directory)");
                     }
                     break;
                 }
@@ -87372,22 +87365,17 @@ fn cmd_lsp(args: &str) {
                         crate::fs::vfs::EntryType::VolumeLabel => "VOL",
                         crate::fs::vfs::EntryType::CharDevice => "CHR",
                     };
-                    crate::console_println!(
-                        "{:<5} {:<8} {}",
-                        type_str,
-                        entry.size,
-                        entry.name.display(),
-                    );
+                    shell_println!("{:<5} {:<8} {}", type_str, entry.size, entry.name.display(),);
                 }
 
                 offset += entries.len();
 
                 if offset >= total {
-                    crate::console_println!("--- end ({}/{} entries shown) ---", offset, total,);
+                    shell_println!("--- end ({}/{} entries shown) ---", offset, total,);
                     break;
                 }
 
-                crate::console_println!(
+                shell_println!(
                     "--- {}/{} shown, press Enter for next page ---",
                     offset,
                     total,
@@ -87399,7 +87387,7 @@ fn cmd_lsp(args: &str) {
                 read_line(&mut dummy, &mut h);
             }
             Err(e) => {
-                crate::console_println!("lsp: error: {:?}", e);
+                shell_println!("lsp: error: {:?}", e);
                 break;
             }
         }
@@ -87412,11 +87400,11 @@ fn cmd_mount(args: &str) {
         // List all mounts with options.
         let mounts = crate::fs::Vfs::mounts_full();
         if mounts.is_empty() {
-            crate::console_println!("No filesystems mounted.");
+            shell_println!("No filesystems mounted.");
         } else {
-            crate::console_println!("{:<12} {:<16} {}", "Type", "Mount point", "Options");
+            shell_println!("{:<12} {:<16} {}", "Type", "Mount point", "Options");
             for (path, fs_type, options) in &mounts {
-                crate::console_println!(
+                shell_println!(
                     "{:<12} {:<16} {}",
                     fs_type,
                     path.display(),
@@ -87452,20 +87440,20 @@ fn cmd_mount(args: &str) {
     if let Some(opts) = opts_str {
         if opts.contains("remount") {
             if positional.is_empty() {
-                crate::console_println!("mount: remount requires a mount point");
+                shell_println!("mount: remount requires a mount point");
                 set_exit(1);
                 return;
             }
             let mount_path_resolved = resolve_path(positional[0]);
             let mount_opts = crate::fs::vfs::MountOptions::parse(opts);
             match crate::fs::Vfs::remount(&mount_path_resolved, mount_opts) {
-                Ok(()) => crate::console_println!(
+                Ok(()) => shell_println!(
                     "Remounted {} with options: {}",
                     mount_path_resolved.display(),
                     mount_opts.to_string(),
                 ),
                 Err(e) => {
-                    crate::console_println!("mount: remount failed: {:?}", e);
+                    shell_println!("mount: remount failed: {:?}", e);
                     set_exit(1);
                 }
             }
@@ -87477,15 +87465,15 @@ fn cmd_mount(args: &str) {
         (positional[0], positional[1])
     } else if positional.len() == 1 && fs_type.is_some() {
         // mount -t type <device-or-path> — missing mount path
-        crate::console_println!("Usage: mount [-t type] [-o options] <device|none> <mount-path>");
-        crate::console_println!("       mount -o remount[,ro|rw|noatime] <mount-path>");
+        shell_println!("Usage: mount [-t type] [-o options] <device|none> <mount-path>");
+        shell_println!("       mount -o remount[,ro|rw|noatime] <mount-path>");
         set_exit(1);
         return;
     } else {
-        crate::console_println!("Usage: mount [-t type] [-o options] <device|none> <mount-path>");
-        crate::console_println!("       mount -o remount[,ro|rw|noatime] <mount-path>");
-        crate::console_println!("Types: ext4, memfs, procfs, devfs, sysfs, iso9660");
-        crate::console_println!("Options: ro, rw, noatime, noexec, nosuid");
+        shell_println!("Usage: mount [-t type] [-o options] <device|none> <mount-path>");
+        shell_println!("       mount -o remount[,ro|rw|noatime] <mount-path>");
+        shell_println!("Types: ext4, memfs, procfs, devfs, sysfs, iso9660");
+        shell_println!("Options: ro, rw, noatime, noexec, nosuid");
         set_exit(1);
         return;
     };
@@ -87534,7 +87522,7 @@ fn cmd_mount(args: &str) {
             } else if crate::fs::zfs::probe(device) {
                 crate::fs::zfs::mount(device, &mount_path_resolved)
             } else {
-                crate::console_println!(
+                shell_println!(
                     "mount: could not detect filesystem on '{}' (try -t to specify type)",
                     device
                 );
@@ -87543,7 +87531,7 @@ fn cmd_mount(args: &str) {
             }
         }
         other => {
-            crate::console_println!("mount: unknown filesystem type '{}'", other);
+            shell_println!("mount: unknown filesystem type '{}'", other);
             set_exit(1);
             return;
         }
@@ -87568,7 +87556,7 @@ fn cmd_mount(args: &str) {
             } else {
                 String::from("rw")
             };
-            crate::console_println!(
+            shell_println!(
                 "Mounted {} at {} ({})",
                 device,
                 mount_path_resolved.display(),
@@ -87576,7 +87564,7 @@ fn cmd_mount(args: &str) {
             );
         }
         Err(e) => {
-            crate::console_println!(
+            shell_println!(
                 "mount: failed to mount {} at {}: {:?}",
                 device,
                 mount_path_resolved.display(),
@@ -87590,7 +87578,7 @@ fn cmd_mount(args: &str) {
 /// Unmount a filesystem.
 fn cmd_umount(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: umount <mount-path>");
+        shell_println!("Usage: umount <mount-path>");
         return;
     }
 
@@ -87598,10 +87586,10 @@ fn cmd_umount(args: &str) {
 
     match crate::fs::Vfs::unmount(&path) {
         Ok(()) => {
-            crate::console_println!("{}: unmounted", path.display());
+            shell_println!("{}: unmounted", path.display());
         }
         Err(e) => {
-            crate::console_println!("umount: {}: {:?}", path.display(), e);
+            shell_println!("umount: {}: {:?}", path.display(), e);
         }
     }
 }
@@ -87613,23 +87601,23 @@ fn cmd_sync() {
     match crate::fs::Vfs::sync() {
         Ok(()) => {
             if expired > 0 {
-                crate::console_println!(
+                shell_println!(
                     "All filesystems synced ({} expired cache entries flushed).",
                     expired
                 );
             } else {
-                crate::console_println!("All filesystems synced.");
+                shell_println!("All filesystems synced.");
             }
         }
         Err(e) => {
-            crate::console_println!("sync: {:?}", e);
+            shell_println!("sync: {:?}", e);
         }
     }
 }
 
 fn cmd_run(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: run <elf-file>");
+        shell_println!("Usage: run <elf-file>");
         return;
     }
 
@@ -87639,12 +87627,12 @@ fn cmd_run(args: &str) {
     let elf_data = match crate::fs::Vfs::read_file(&path) {
         Ok(data) => data,
         Err(e) => {
-            crate::console_println!("run: {}: {:?}", path.display(), e);
+            shell_println!("run: {}: {:?}", path.display(), e);
             return;
         }
     };
 
-    crate::console_println!("Loading {} ({} bytes)...", path.display(), elf_data.len());
+    shell_println!("Loading {} ({} bytes)...", path.display(), elf_data.len());
 
     // Spawn a new process from the ELF data.  `path` is the resolved
     // absolute path of the binary; record it so /proc/<pid>/exe works.
@@ -87653,7 +87641,7 @@ fn cmd_run(args: &str) {
 
     match crate::proc::spawn::spawn_process(&elf_data, &options) {
         Ok(result) => {
-            crate::console_println!(
+            shell_println!(
                 "Process '{}' spawned: pid={}, tid={}, entry={:#x}",
                 name,
                 result.pid,
@@ -87662,7 +87650,7 @@ fn cmd_run(args: &str) {
             );
         }
         Err(e) => {
-            crate::console_println!("run: failed to spawn: {:?}", e);
+            shell_println!("run: failed to spawn: {:?}", e);
         }
     }
 }
@@ -87674,13 +87662,13 @@ fn cmd_mkelf() {
     let exit_elf = crate::proc::elf::build_test_elf_public();
     match crate::fs::Vfs::write_file("/EXIT.ELF", &exit_elf) {
         Ok(()) => {
-            crate::console_println!(
+            shell_println!(
                 "Created /EXIT.ELF ({} bytes) — calls SYS_EXIT(0)",
                 exit_elf.len()
             );
         }
         Err(e) => {
-            crate::console_println!("mkelf: failed to write EXIT.ELF: {:?}", e);
+            shell_println!("mkelf: failed to write EXIT.ELF: {:?}", e);
         }
     }
 
@@ -87688,22 +87676,22 @@ fn cmd_mkelf() {
     let hello_elf = crate::proc::elf::build_hello_elf();
     match crate::fs::Vfs::write_file("/HELLO.ELF", &hello_elf) {
         Ok(()) => {
-            crate::console_println!(
+            shell_println!(
                 "Created /HELLO.ELF ({} bytes) — prints to console, then exits",
                 hello_elf.len()
             );
         }
         Err(e) => {
-            crate::console_println!("mkelf: failed to write HELLO.ELF: {:?}", e);
+            shell_println!("mkelf: failed to write HELLO.ELF: {:?}", e);
         }
     }
-    crate::console_println!("Run them with: run EXIT.ELF / run HELLO.ELF");
+    shell_println!("Run them with: run EXIT.ELF / run HELLO.ELF");
 }
 
 fn cmd_net() {
     let info = crate::net::interface::info();
     if !info.up {
-        crate::console_println!("No network interface.");
+        shell_println!("No network interface.");
         return;
     }
 
@@ -87718,44 +87706,44 @@ fn cmd_net() {
         "unknown"
     };
 
-    crate::console_println!("Network interface: {}", nic_name);
-    crate::console_println!("  MAC address:  {}", info.mac);
-    crate::console_println!("  IPv4 address: {}", info.ip);
-    crate::console_println!("  Subnet mask:  {}", info.subnet_mask);
-    crate::console_println!("  Gateway:      {}", info.gateway);
-    crate::console_println!("  DNS server:   {}", info.dns);
+    shell_println!("Network interface: {}", nic_name);
+    shell_println!("  MAC address:  {}", info.mac);
+    shell_println!("  IPv4 address: {}", info.ip);
+    shell_println!("  Subnet mask:  {}", info.subnet_mask);
+    shell_println!("  Gateway:      {}", info.gateway);
+    shell_println!("  DNS server:   {}", info.dns);
     // IPv6 link-local address derived from MAC (modified EUI-64, RFC 4291).
     let ipv6_ll = crate::net::ipv6::Ipv6Addr::from_mac_link_local(&info.mac);
-    crate::console_println!("  IPv6 LL:      {}", ipv6_ll);
+    shell_println!("  IPv6 LL:      {}", ipv6_ll);
     // SLAAC global addresses from Router Advertisements.
     let (slaac_addrs, slaac_count) = crate::net::icmpv6::slaac_addresses();
     for i in 0..slaac_count {
         if let Some((addr, prefix_len)) = slaac_addrs.get(i) {
-            crate::console_println!("  IPv6 global:  {}/{}", addr, prefix_len);
+            shell_println!("  IPv6 global:  {}/{}", addr, prefix_len);
         }
     }
     if crate::net::icmpv6::ra_received() {
         if let Some(rdnss) = crate::net::icmpv6::slaac_rdnss() {
-            crate::console_println!("  IPv6 DNS:     {}", rdnss);
+            shell_println!("  IPv6 DNS:     {}", rdnss);
         }
     }
-    crate::console_println!("  DHCP state:   {}", crate::net::dhcp::state_str());
+    shell_println!("  DHCP state:   {}", crate::net::dhcp::state_str());
 
     // Show link status for e1000.
     if let Some(link) = crate::e1000::with_device(|dev| dev.link_up()) {
-        crate::console_println!("  Link status:  {}", if link { "UP" } else { "DOWN" });
+        shell_println!("  Link status:  {}", if link { "UP" } else { "DOWN" });
     }
 
     // Also show RX buffer status from the virtio-net NIC.
     let rx_info = crate::virtio::net::with_device(|dev| dev.rx_pending());
     if let Some(pending) = rx_info {
-        crate::console_println!("  RX buffers:   {} pending", pending);
+        shell_println!("  RX buffers:   {} pending", pending);
     }
 }
 
 fn cmd_mouse() {
     if !crate::mouse::is_initialized() {
-        crate::console_println!("PS/2 mouse: not initialized");
+        shell_println!("PS/2 mouse: not initialized");
         return;
     }
     let scroll = if crate::mouse::has_scroll_wheel() {
@@ -87766,10 +87754,10 @@ fn cmd_mouse() {
     let events = crate::mouse::event_count();
     let x = crate::mouse::accum_x();
     let y = crate::mouse::accum_y();
-    crate::console_println!("PS/2 mouse:");
-    crate::console_println!("  Scroll wheel: {}", scroll);
-    crate::console_println!("  Events:       {}", events);
-    crate::console_println!("  Cumulative:   ({}, {})", x, y);
+    shell_println!("PS/2 mouse:");
+    shell_println!("  Scroll wheel: {}", scroll);
+    shell_println!("  Events:       {}", events);
+    shell_println!("  Cumulative:   ({}, {})", x, y);
 
     // Drain and show the last few pending events (up to 5).
     let mut shown = 0u32;
@@ -87786,7 +87774,7 @@ fn cmd_mouse() {
                 7 => " [L+R+M]",
                 _ => " [?]",
             };
-            crate::console_println!(
+            shell_println!(
                 "  Event: dx={:+4} dy={:+4} dz={:+2}{}",
                 ev.dx,
                 ev.dy,
@@ -87797,10 +87785,10 @@ fn cmd_mouse() {
         shown += 1;
     }
     if shown > 5 {
-        crate::console_println!("  ... and {} more events", shown - 5);
+        shell_println!("  ... and {} more events", shown - 5);
     }
     if shown == 0 {
-        crate::console_println!("  (no pending events)");
+        shell_println!("  (no pending events)");
     }
 }
 
@@ -87813,17 +87801,17 @@ fn cmd_audio(args: &str) {
                 let codecs = crate::hda::codec_count();
                 let vid = crate::hda::vendor_id().unwrap_or(0);
                 let streams = crate::hda::stream_counts();
-                crate::console_println!("Intel HD Audio:");
-                crate::console_println!("  Codecs:  {}", codecs);
+                shell_println!("Intel HD Audio:");
+                shell_println!("  Codecs:  {}", codecs);
                 if vid != 0 {
-                    crate::console_println!(
+                    shell_println!(
                         "  Vendor:  {:04x}:{:04x}",
                         (vid >> 16) & 0xFFFF,
                         vid & 0xFFFF
                     );
                 }
                 if let Some((iss, oss, bss)) = streams {
-                    crate::console_println!(
+                    shell_println!(
                         "  Streams: {} input, {} output, {} bidirectional",
                         iss,
                         oss,
@@ -87831,69 +87819,69 @@ fn cmd_audio(args: &str) {
                     );
                 }
             } else {
-                crate::console_println!("Intel HD Audio: not detected");
+                shell_println!("Intel HD Audio: not detected");
             }
 
             // Virtio-sound status.
             let (avail, outputs, inputs, playing) = crate::virtio::sound::status_info();
             if avail {
-                crate::console_println!("Virtio Sound:");
-                crate::console_println!("  Output streams: {}", outputs);
-                crate::console_println!("  Input streams:  {}", inputs);
-                crate::console_println!("  Playing: {}", if playing { "yes" } else { "no" });
+                shell_println!("Virtio Sound:");
+                shell_println!("  Output streams: {}", outputs);
+                shell_println!("  Input streams:  {}", inputs);
+                shell_println!("  Playing: {}", if playing { "yes" } else { "no" });
             } else {
-                crate::console_println!("Virtio Sound: not detected");
+                shell_println!("Virtio Sound: not detected");
             }
 
             // AC97 status.
             let (ac97_avail, ac97_rate, ac97_playing, ac97_vendor) = crate::ac97::status_info();
             if ac97_avail {
-                crate::console_println!("AC97 Audio:");
-                crate::console_println!("  Codec: {:08x}", ac97_vendor);
-                crate::console_println!("  Rate:  {} Hz", ac97_rate);
-                crate::console_println!("  Playing: {}", if ac97_playing { "yes" } else { "no" });
+                shell_println!("AC97 Audio:");
+                shell_println!("  Codec: {:08x}", ac97_vendor);
+                shell_println!("  Rate:  {} Hz", ac97_rate);
+                shell_println!("  Playing: {}", if ac97_playing { "yes" } else { "no" });
             } else {
-                crate::console_println!("AC97: not detected");
+                shell_println!("AC97: not detected");
             }
 
             // PC speaker is always available.
-            crate::console_println!("PC Speaker: available");
+            shell_println!("PC Speaker: available");
         }
         "play" => {
             // Try virtio-sound first (better quality), fall back to HDA, then AC97, then pcspk.
             if crate::virtio::sound::is_available() {
-                crate::console_println!("Playing via virtio-sound (440 Hz, 1 sec)...");
+                shell_println!("Playing via virtio-sound (440 Hz, 1 sec)...");
                 match crate::virtio::sound::play_test_tone(1000) {
-                    Ok(()) => crate::console_println!("Done."),
-                    Err(e) => crate::console_println!("Virtio-sound error: {:?}", e),
+                    Ok(()) => shell_println!("Done."),
+                    Err(e) => shell_println!("Virtio-sound error: {:?}", e),
                 }
             } else if crate::hda::is_initialized() {
                 match crate::hda::configure_output() {
                     Ok(()) => {
                         if let Err(e) = crate::hda::fill_test_tone() {
-                            crate::console_println!("Failed to generate tone: {:?}", e);
+                            shell_println!("Failed to generate tone: {:?}", e);
                             return;
                         }
                         if let Err(e) = crate::hda::start_playback() {
-                            crate::console_println!("Failed to start playback: {:?}", e);
+                            shell_println!("Failed to start playback: {:?}", e);
                             return;
                         }
-                        crate::console_println!("Playing 440 Hz test tone via HDA...");
-                        crate::console_println!("Use 'audio stop' to stop.");
+                        shell_println!("Playing 440 Hz test tone via HDA...");
+                        shell_println!("Use 'audio stop' to stop.");
                     }
-                    Err(e) => crate::console_println!("Failed to configure output: {:?}", e),
+                    Err(e) => shell_println!("Failed to configure output: {:?}", e),
                 }
             } else if crate::ac97::is_available() {
-                crate::console_println!("Playing via AC97 (440 Hz, 1 sec)...");
+                shell_println!("Playing via AC97 (440 Hz, 1 sec)...");
                 match crate::ac97::play_test_tone(1000) {
-                    Ok(()) => crate::console_println!("Done."),
-                    Err(e) => crate::console_println!("AC97 error: {:?}", e),
+                    Ok(()) => shell_println!("Done."),
+                    Err(e) => shell_println!("AC97 error: {:?}", e),
                 }
             } else {
                 // Fall back to PC speaker.
-                crate::console_println!("Playing via PC speaker (440 Hz, 1 sec)...");
+                shell_println!("Playing via PC speaker (440 Hz, 1 sec)...");
                 crate::pcspk::beep(440, 1000);
-                crate::console_println!("Done.");
+                shell_println!("Done.");
             }
         }
         "stop" => {
@@ -87904,24 +87892,22 @@ fn cmd_audio(args: &str) {
             }
             let _ = crate::ac97::stop();
             crate::pcspk::off();
-            crate::console_println!("Playback stopped.");
+            shell_println!("Playback stopped.");
         }
         "beep" => {
             // PC speaker beep (always available).
             let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
             let freq: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(440);
             let dur: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
-            crate::console_println!("Beep: {} Hz, {} ms", freq, dur);
+            shell_println!("Beep: {} Hz, {} ms", freq, dur);
             crate::pcspk::beep(freq, dur);
         }
         _ => {
-            crate::console_println!("Usage: audio [status|play|stop|beep]");
-            crate::console_println!("  status       — show audio device info");
-            crate::console_println!(
-                "  play         — play 440 Hz test tone (best available output)"
-            );
-            crate::console_println!("  stop         — stop all playback");
-            crate::console_println!("  beep [f] [d] — PC speaker beep (freq Hz, duration ms)");
+            shell_println!("Usage: audio [status|play|stop|beep]");
+            shell_println!("  status       — show audio device info");
+            shell_println!("  play         — play 440 Hz test tone (best available output)");
+            shell_println!("  stop         — stop all playback");
+            shell_println!("  beep [f] [d] — PC speaker beep (freq Hz, duration ms)");
         }
     }
 }
@@ -87931,20 +87917,20 @@ fn cmd_mixer(args: &str) {
     match sub {
         "status" => {
             let (active, opened, frames, mvol, mmuted) = crate::audio_mixer::status();
-            crate::console_println!("Audio Mixer:");
-            crate::console_println!(
+            shell_println!("Audio Mixer:");
+            shell_println!(
                 "  Master volume: {}%{}",
                 mvol,
                 if mmuted { " (MUTED)" } else { "" }
             );
-            crate::console_println!("  Active streams: {}/{}", active, 8);
-            crate::console_println!("  Total opened:   {}", opened);
-            crate::console_println!("  Frames mixed:   {}", frames);
+            shell_println!("  Active streams: {}/{}", active, 8);
+            shell_println!("  Total opened:   {}", opened);
+            shell_println!("  Frames mixed:   {}", frames);
 
             let streams = crate::audio_mixer::list_streams();
             if !streams.is_empty() {
-                crate::console_println!();
-                crate::console_println!(
+                shell_println!();
+                shell_println!(
                     "  {:>3}  {:>5}  {:>5}  {:>8}",
                     "ID",
                     "VOL",
@@ -87952,7 +87938,7 @@ fn cmd_mixer(args: &str) {
                     "BUFFERED"
                 );
                 for (id, vol, muted, buf) in &streams {
-                    crate::console_println!(
+                    shell_println!(
                         "  {:>3}  {:>4}%  {:>5}  {:>7}B",
                         id,
                         vol,
@@ -87965,51 +87951,51 @@ fn cmd_mixer(args: &str) {
         "vol" | "volume" => {
             let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
             if parts.len() < 2 {
-                crate::console_println!("Master volume: {}%", crate::audio_mixer::master_volume());
+                shell_println!("Master volume: {}%", crate::audio_mixer::master_volume());
                 return;
             }
             if let Ok(vol) = parts[1].parse::<u8>() {
                 crate::audio_mixer::set_master_volume(vol);
-                crate::console_println!("Master volume set to {}%", vol.min(100));
+                shell_println!("Master volume set to {}%", vol.min(100));
             } else {
-                crate::console_println!("Usage: mixer vol <0-100>");
+                shell_println!("Usage: mixer vol <0-100>");
             }
         }
         "mute" => {
             crate::audio_mixer::set_master_mute(true);
-            crate::console_println!("Master muted.");
+            shell_println!("Master muted.");
         }
         "unmute" => {
             crate::audio_mixer::set_master_mute(false);
-            crate::console_println!("Master unmuted.");
+            shell_println!("Master unmuted.");
         }
         _ => {
-            crate::console_println!("Usage: mixer [status|vol|mute|unmute]");
-            crate::console_println!("  status        — show mixer state and streams");
-            crate::console_println!("  vol [0-100]   — set/show master volume");
-            crate::console_println!("  mute/unmute   — toggle master mute");
+            shell_println!("Usage: mixer [status|vol|mute|unmute]");
+            shell_println!("  status        — show mixer state and streams");
+            shell_println!("  vol [0-100]   — set/show master volume");
+            shell_println!("  mute/unmute   — toggle master mute");
         }
     }
 }
 
 fn cmd_soundhist() {
     let (events, bytes, active) = crate::audio_history::stats();
-    crate::console_println!("Sound History:");
-    crate::console_println!(
+    shell_println!("Sound History:");
+    shell_println!(
         "  Total events: {} | Total bytes: {} | Active: {}",
         events,
         bytes,
         active
     );
-    crate::console_println!();
+    shell_println!();
 
     let history = crate::audio_history::recent(16);
     if history.is_empty() {
-        crate::console_println!("  No sound events recorded.");
+        shell_println!("  No sound events recorded.");
         return;
     }
 
-    crate::console_println!(
+    shell_println!(
         "  {:20} {:>8} {:>10} {:>4} {:>7}",
         "NAME",
         "DURATION",
@@ -88017,7 +88003,7 @@ fn cmd_soundhist() {
         "VOL",
         "STATUS"
     );
-    crate::console_println!("  {}", "-".repeat(55));
+    shell_println!("  {}", "-".repeat(55));
     for (name, dur, bytes, vol, playing) in &history {
         let status = if *playing { "PLAYING" } else { "done" };
         let dur_str = if *dur > 0 {
@@ -88025,7 +88011,7 @@ fn cmd_soundhist() {
         } else {
             alloc::string::String::from("<1ms")
         };
-        crate::console_println!(
+        shell_println!(
             "  {:20} {:>8} {:>10} {:>3}% {:>7}",
             name,
             dur_str,
@@ -88042,20 +88028,20 @@ fn cmd_desktop() {
 
 fn cmd_gfx(args: &str) {
     if !crate::fb::is_initialized() {
-        crate::console_println!("Framebuffer graphics: not initialized");
+        shell_println!("Framebuffer graphics: not initialized");
         return;
     }
     let (w, h) = crate::fb::dimensions();
     let sub = args.split_whitespace().next().unwrap_or("status");
     match sub {
         "status" | "info" => {
-            crate::console_println!("Framebuffer graphics:");
-            crate::console_println!("  Resolution:  {}x{}", w, h);
+            shell_println!("Framebuffer graphics:");
+            shell_println!("  Resolution:  {}x{}", w, h);
             let (cx, cy) = crate::fb::cursor_pos();
-            crate::console_println!("  Cursor pos:  ({}, {})", cx, cy);
+            shell_println!("  Cursor pos:  ({}, {})", cx, cy);
         }
         "demo" => {
-            crate::console_println!("Drawing graphics demo...");
+            shell_println!("Drawing graphics demo...");
             // Draw some shapes without covering the console text area.
             // Use the bottom-right quadrant of the screen.
             let base_x = (w / 2) as i32;
@@ -88098,10 +88084,10 @@ fn cmd_gfx(args: &str) {
                 crate::fb::rgb(0, 255, 255),
             );
 
-            crate::console_println!("  Drew shapes in bottom-right quadrant.");
+            shell_println!("  Drew shapes in bottom-right quadrant.");
         }
         "cursor" => {
-            crate::console_println!("Showing mouse cursor. Move the mouse!");
+            shell_println!("Showing mouse cursor. Move the mouse!");
             crate::fb::show_cursor();
             // Process mouse events for a short period to demonstrate cursor movement.
             for _ in 0..500u32 {
@@ -88111,16 +88097,16 @@ fn cmd_gfx(args: &str) {
                 crate::sched::yield_now();
             }
             crate::fb::hide_cursor();
-            crate::console_println!("  Cursor hidden.");
+            shell_println!("  Cursor hidden.");
         }
         "clear" => {
             crate::fb::clear_screen(crate::fb::rgb(0, 0, 0));
             // Re-draw the console text.
             crate::console::clear();
-            crate::console_println!("Screen cleared.");
+            shell_println!("Screen cleared.");
         }
         _ => {
-            crate::console_println!("Usage: gfx [status|demo|cursor|clear]");
+            shell_println!("Usage: gfx [status|demo|cursor|clear]");
         }
     }
 }
@@ -88131,30 +88117,30 @@ fn cmd_gpu(args: &str) {
         "status" | "info" => {
             if crate::virtio::gpu::is_available() {
                 let (w, h) = crate::virtio::gpu::dimensions();
-                crate::console_println!("Virtio-GPU:");
-                crate::console_println!("  Status:     active");
-                crate::console_println!("  Resolution: {}x{}", w, h);
-                crate::console_println!("  Format:     B8G8R8A8 (32-bit)");
+                shell_println!("Virtio-GPU:");
+                shell_println!("  Status:     active");
+                shell_println!("  Resolution: {}x{}", w, h);
+                shell_println!("  Format:     B8G8R8A8 (32-bit)");
                 if let Some(addr) = crate::virtio::gpu::first_frame_addr() {
                     // Reported as a frame *count* plus the first frame, not as
                     // "FB addr": the scanout is a list of unrelated 16 KiB
                     // frames, and printing a single base address is what
                     // invited the flat-buffer arithmetic behind
                     // B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE.
-                    crate::console_println!(
+                    shell_println!(
                         "  FB frames:  {} (first at {:#x})",
                         crate::virtio::gpu::scanout_frame_count(),
                         addr
                     );
                 }
             } else {
-                crate::console_println!("Virtio-GPU: not present");
-                crate::console_println!("  Add `-device virtio-gpu-pci` to QEMU to enable");
+                shell_println!("Virtio-GPU: not present");
+                shell_println!("  Add `-device virtio-gpu-pci` to QEMU to enable");
             }
         }
         "fill" => {
             if !crate::virtio::gpu::is_available() {
-                crate::console_println!("virtio-gpu not available");
+                shell_println!("virtio-gpu not available");
                 return;
             }
             // Parse optional color argument (default: blue).
@@ -88172,26 +88158,26 @@ fn cmd_gpu(args: &str) {
                 }
             };
             match crate::virtio::gpu::fill(color) {
-                Ok(()) => crate::console_println!("Filled display with color {:#010x}", color),
-                Err(e) => crate::console_println!("Fill failed: {:?}", e),
+                Ok(()) => shell_println!("Filled display with color {:#010x}", color),
+                Err(e) => shell_println!("Fill failed: {:?}", e),
             }
         }
         "flush" => {
             if !crate::virtio::gpu::is_available() {
-                crate::console_println!("virtio-gpu not available");
+                shell_println!("virtio-gpu not available");
                 return;
             }
             match crate::virtio::gpu::flush_full() {
-                Ok(()) => crate::console_println!("Display flushed"),
-                Err(e) => crate::console_println!("Flush failed: {:?}", e),
+                Ok(()) => shell_println!("Display flushed"),
+                Err(e) => shell_println!("Flush failed: {:?}", e),
             }
         }
         "test" => {
             if !crate::virtio::gpu::is_available() {
-                crate::console_println!("virtio-gpu not available");
+                shell_println!("virtio-gpu not available");
                 return;
             }
-            crate::console_println!("Drawing test pattern...");
+            shell_println!("Drawing test pattern...");
             // Draw colored bars across the display.
             let (w, h) = crate::virtio::gpu::dimensions();
             let bar_height = h / 8;
@@ -88215,18 +88201,16 @@ fn cmd_gpu(args: &str) {
                 }
             }
             match crate::virtio::gpu::flush_full() {
-                Ok(()) => crate::console_println!("Test pattern displayed (8 color bars)"),
-                Err(e) => crate::console_println!("Flush failed: {:?}", e),
+                Ok(()) => shell_println!("Test pattern displayed (8 color bars)"),
+                Err(e) => shell_println!("Flush failed: {:?}", e),
             }
         }
         _ => {
-            crate::console_println!("Usage: gpu [status|fill [color]|flush|test]");
-            crate::console_println!("  status  - Show virtio-gpu device info");
-            crate::console_println!(
-                "  fill    - Fill display with color (red/green/blue/0xAARRGGBB)"
-            );
-            crate::console_println!("  flush   - Force display refresh");
-            crate::console_println!("  test    - Draw color bar test pattern");
+            shell_println!("Usage: gpu [status|fill [color]|flush|test]");
+            shell_println!("  status  - Show virtio-gpu device info");
+            shell_println!("  fill    - Fill display with color (red/green/blue/0xAARRGGBB)");
+            shell_println!("  flush   - Force display refresh");
+            shell_println!("  test    - Draw color bar test pattern");
         }
     }
 }
@@ -88236,34 +88220,34 @@ fn cmd_usb(args: &str) {
     match sub {
         "status" | "info" => {
             if !crate::xhci::is_available() {
-                crate::console_println!("USB (xHCI): not available");
-                crate::console_println!("  Add `-device qemu-xhci` to QEMU to enable");
+                shell_println!("USB (xHCI): not available");
+                shell_println!("  Add `-device qemu-xhci` to QEMU to enable");
                 return;
             }
-            crate::console_println!("USB (xHCI): active");
+            shell_println!("USB (xHCI): active");
             let ports = crate::xhci::port_status();
             let connected = ports.iter().filter(|p| p.connected).count();
-            crate::console_println!("  Ports: {} total, {} connected", ports.len(), connected);
+            shell_println!("  Ports: {} total, {} connected", ports.len(), connected);
             let devs = crate::xhci::devices();
-            crate::console_println!("  Devices: {} enumerated", devs.len());
+            shell_println!("  Devices: {} enumerated", devs.len());
             let hid = crate::xhci::hid_interfaces();
             if !hid.is_empty() {
-                crate::console_println!("  HID: {} interface(s)", hid.len());
+                shell_println!("  HID: {} interface(s)", hid.len());
                 if crate::xhci::has_keyboard() {
-                    crate::console_println!("    - USB Keyboard (boot protocol)");
+                    shell_println!("    - USB Keyboard (boot protocol)");
                 }
                 if crate::xhci::has_mouse() {
-                    crate::console_println!("    - USB Mouse (boot protocol)");
+                    shell_println!("    - USB Mouse (boot protocol)");
                 }
             }
         }
         "ports" => {
             let ports = crate::xhci::port_status();
             if ports.is_empty() {
-                crate::console_println!("No USB ports detected");
+                shell_println!("No USB ports detected");
                 return;
             }
-            crate::console_println!("USB Ports:");
+            shell_println!("USB Ports:");
             for p in &ports {
                 let status = if p.connected {
                     if p.enabled {
@@ -88281,16 +88265,16 @@ fn cmd_usb(args: &str) {
                     4 => "Super (5G)",
                     _ => "-",
                 };
-                crate::console_println!("  Port {:2}: {} [{}]", p.number, status, spd);
+                shell_println!("  Port {:2}: {} [{}]", p.number, status, spd);
             }
         }
         "devices" | "devs" => {
             let devs = crate::xhci::devices();
             if devs.is_empty() {
-                crate::console_println!("No USB devices enumerated");
+                shell_println!("No USB devices enumerated");
                 return;
             }
-            crate::console_println!("USB Devices:");
+            shell_println!("USB Devices:");
             for d in &devs {
                 let spd = match d.speed {
                     1 => "FS",
@@ -88299,7 +88283,7 @@ fn cmd_usb(args: &str) {
                     4 => "SS",
                     _ => "??",
                 };
-                crate::console_println!(
+                shell_println!(
                     "  Slot {:2}: {:04X}:{:04X} class={:02X}/{:02X} port={} [{}]",
                     d.slot_id,
                     d.vendor_id,
@@ -88314,10 +88298,10 @@ fn cmd_usb(args: &str) {
         "hid" => {
             let hid = crate::xhci::hid_interfaces();
             if hid.is_empty() {
-                crate::console_println!("No HID interfaces configured");
+                shell_println!("No HID interfaces configured");
                 return;
             }
-            crate::console_println!("USB HID Interfaces:");
+            shell_println!("USB HID Interfaces:");
             for h in &hid {
                 let proto = match h.protocol {
                     1 => "Keyboard",
@@ -88325,7 +88309,7 @@ fn cmd_usb(args: &str) {
                     _ => "Unknown",
                 };
                 let subclass = if h.subclass == 1 { "boot" } else { "report" };
-                crate::console_println!(
+                shell_println!(
                     "  Slot {}: {} ({} protocol), EP{} IN, {} bytes, interval={}",
                     h.slot_id,
                     proto,
@@ -88337,40 +88321,40 @@ fn cmd_usb(args: &str) {
             }
         }
         "rescan" => {
-            crate::console_println!("Rescanning USB ports...");
+            shell_println!("Rescanning USB ports...");
             crate::xhci::rescan();
             let devs = crate::xhci::devices();
             let hid = crate::xhci::hid_interfaces();
-            crate::console_println!(
+            shell_println!(
                 "Found {} device(s), {} HID interface(s)",
                 devs.len(),
                 hid.len()
             );
         }
         _ => {
-            crate::console_println!("Usage: usb [status|ports|devices|hid|rescan]");
-            crate::console_println!("  status  - Show USB controller status");
-            crate::console_println!("  ports   - List USB ports and connection status");
-            crate::console_println!("  devices - List enumerated USB devices");
-            crate::console_println!("  hid     - Show HID interface details");
-            crate::console_println!("  rescan  - Re-enumerate devices");
+            shell_println!("Usage: usb [status|ports|devices|hid|rescan]");
+            shell_println!("  status  - Show USB controller status");
+            shell_println!("  ports   - List USB ports and connection status");
+            shell_println!("  devices - List enumerated USB devices");
+            shell_println!("  hid     - Show HID interface details");
+            shell_println!("  rescan  - Re-enumerate devices");
         }
     }
 }
 
 fn cmd_dhcp() {
-    crate::console_println!("Running DHCP discovery...");
+    shell_println!("Running DHCP discovery...");
     match crate::net::dhcp::discover() {
         Ok(ip) => {
-            crate::console_println!("DHCP successful: {}", ip);
+            shell_println!("DHCP successful: {}", ip);
             // Show full config.
             let info = crate::net::interface::info();
-            crate::console_println!("  Subnet mask: {}", info.subnet_mask);
-            crate::console_println!("  Gateway:     {}", info.gateway);
-            crate::console_println!("  DNS server:  {}", info.dns);
+            shell_println!("  Subnet mask: {}", info.subnet_mask);
+            shell_println!("  Gateway:     {}", info.gateway);
+            shell_println!("  DNS server:  {}", info.dns);
         }
         Err(e) => {
-            crate::console_println!("DHCP failed: {:?}", e);
+            shell_println!("DHCP failed: {:?}", e);
         }
     }
 }
@@ -88440,8 +88424,8 @@ fn cmd_dhcpv6(args: &str) {
 
 fn cmd_ping(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: ping <ip-address>");
-        crate::console_println!("  e.g., ping 10.0.2.2");
+        shell_println!("Usage: ping <ip-address>");
+        shell_println!("  e.g., ping 10.0.2.2");
         return;
     }
 
@@ -88452,11 +88436,11 @@ fn cmd_ping(args: &str) {
         // Try DNS resolution.
         match crate::net::dns::resolve(args) {
             Ok(ip) => {
-                crate::console_println!("PING {} ({})", args, ip);
+                shell_println!("PING {} ({})", args, ip);
                 ip
             }
             Err(e) => {
-                crate::console_println!("Cannot resolve {}: {:?}", args, e);
+                shell_println!("Cannot resolve {}: {:?}", args, e);
                 return;
             }
         }
@@ -88471,13 +88455,13 @@ fn cmd_ping(args: &str) {
                 sent = sent.saturating_add(1);
                 if crate::net::icmp::wait_reply(seq, 2000) {
                     received = received.saturating_add(1);
-                    crate::console_println!("Reply from {}: seq={}", ip, seq);
+                    shell_println!("Reply from {}: seq={}", ip, seq);
                 } else {
-                    crate::console_println!("Request timed out: seq={}", seq);
+                    shell_println!("Request timed out: seq={}", seq);
                 }
             }
             Err(e) => {
-                crate::console_println!("ping: send failed: {:?}", e);
+                shell_println!("ping: send failed: {:?}", e);
             }
         }
 
@@ -88489,7 +88473,7 @@ fn cmd_ping(args: &str) {
         }
     }
 
-    crate::console_println!(
+    shell_println!(
         "--- {} ping statistics: {} sent, {} received ---",
         ip,
         sent,
@@ -88503,7 +88487,7 @@ fn cmd_ping(args: &str) {
 /// Triggers SLAAC: if a router responds with a Router Advertisement
 /// containing a prefix, the system auto-configures a global IPv6 address.
 fn cmd_router_solicitation() {
-    crate::console_println!("Sending Router Solicitation (ff02::2)...");
+    shell_println!("Sending Router Solicitation (ff02::2)...");
     match crate::net::icmpv6::send_router_solicitation() {
         Ok(()) => {
             // Poll for a bit to collect the RA response.
@@ -88515,48 +88499,48 @@ fn cmd_router_solicitation() {
             }
 
             if crate::net::icmpv6::ra_received() {
-                crate::console_println!("Router Advertisement received.");
+                shell_println!("Router Advertisement received.");
                 // Show configured addresses.
                 let (addrs, count) = crate::net::icmpv6::slaac_addresses();
                 if count > 0 {
                     for i in 0..count {
                         if let Some((addr, plen)) = addrs.get(i) {
-                            crate::console_println!("  Global: {}/{}", addr, plen);
+                            shell_println!("  Global: {}/{}", addr, plen);
                         }
                     }
                 } else {
-                    crate::console_println!("  No prefixes with SLAAC flag.");
+                    shell_println!("  No prefixes with SLAAC flag.");
                 }
                 if let Some(rdnss) = crate::net::icmpv6::slaac_rdnss() {
-                    crate::console_println!("  DNS:    {}", rdnss);
+                    shell_println!("  DNS:    {}", rdnss);
                 }
             } else {
-                crate::console_println!("No Router Advertisement received (timeout).");
+                shell_println!("No Router Advertisement received (timeout).");
             }
         }
         Err(e) => {
-            crate::console_println!("Failed to send RS: {:?}", e);
+            shell_println!("Failed to send RS: {:?}", e);
         }
     }
 }
 
 fn cmd_ping6(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: ping6 <ipv6-address>");
-        crate::console_println!("  e.g., ping6 fe80::1");
-        crate::console_println!("  e.g., ping6 ff02::1  (all nodes link-local)");
+        shell_println!("Usage: ping6 <ipv6-address>");
+        shell_println!("  e.g., ping6 fe80::1");
+        shell_println!("  e.g., ping6 ff02::1  (all nodes link-local)");
         return;
     }
 
     let dst = match crate::net::ipv6::Ipv6Addr::parse(args) {
         Some(addr) => addr,
         None => {
-            crate::console_println!("Invalid IPv6 address: {}", args);
+            shell_println!("Invalid IPv6 address: {}", args);
             return;
         }
     };
 
-    crate::console_println!("PING6 {} ...", dst);
+    shell_println!("PING6 {} ...", dst);
 
     let mut sent = 0u32;
     let mut received = 0u32;
@@ -88572,28 +88556,18 @@ fn cmd_ping6(args: &str) {
                         if rtt_us >= 1000 {
                             #[allow(clippy::arithmetic_side_effects)]
                             let rtt_ms = rtt_us / 1000;
-                            crate::console_println!(
-                                "Reply from {}: seq={} rtt={} ms",
-                                dst,
-                                seq,
-                                rtt_ms
-                            );
+                            shell_println!("Reply from {}: seq={} rtt={} ms", dst, seq, rtt_ms);
                         } else {
-                            crate::console_println!(
-                                "Reply from {}: seq={} rtt={} us",
-                                dst,
-                                seq,
-                                rtt_us
-                            );
+                            shell_println!("Reply from {}: seq={} rtt={} us", dst, seq, rtt_us);
                         }
                     }
                     None => {
-                        crate::console_println!("Request timed out: seq={}", seq);
+                        shell_println!("Request timed out: seq={}", seq);
                     }
                 }
             }
             Err(e) => {
-                crate::console_println!("ping6: send failed: {:?}", e);
+                shell_println!("ping6: send failed: {:?}", e);
             }
         }
 
@@ -88605,7 +88579,7 @@ fn cmd_ping6(args: &str) {
         }
     }
 
-    crate::console_println!(
+    shell_println!(
         "--- {} ping6 statistics: {} sent, {} received ---",
         dst,
         sent,
@@ -88625,20 +88599,20 @@ fn cmd_udp6(args: &str) {
     match sub {
         "send" | "s" => {
             if parts.len() < 4 {
-                crate::console_println!("Usage: udp6 send <ipv6-addr> <port> <message...>");
+                shell_println!("Usage: udp6 send <ipv6-addr> <port> <message...>");
                 return;
             }
             let dst = match crate::net::ipv6::Ipv6Addr::parse(parts[1]) {
                 Some(addr) => addr,
                 None => {
-                    crate::console_println!("Invalid IPv6 address: {}", parts[1]);
+                    shell_println!("Invalid IPv6 address: {}", parts[1]);
                     return;
                 }
             };
             let port: u16 = match parts[2].parse() {
                 Ok(p) => p,
                 Err(_) => {
-                    crate::console_println!("Invalid port: {}", parts[2]);
+                    shell_println!("Invalid port: {}", parts[2]);
                     return;
                 }
             };
@@ -88646,17 +88620,17 @@ fn cmd_udp6(args: &str) {
             let msg: alloc::string::String = parts[3..].join(" ");
             let src_port: u16 = 49200; // Use a fixed ephemeral port for simplicity.
 
-            crate::console_println!("Sending {} bytes to [{}]:{} ...", msg.len(), dst, port);
+            shell_println!("Sending {} bytes to [{}]:{} ...", msg.len(), dst, port);
             match crate::net::udp::send_v6(src_port, dst, port, msg.as_bytes()) {
-                Ok(()) => crate::console_println!("Sent."),
-                Err(e) => crate::console_println!("Send failed: {:?}", e),
+                Ok(()) => shell_println!("Sent."),
+                Err(e) => shell_println!("Send failed: {:?}", e),
             }
         }
         "listen" | "l" => {
             let port: u16 = match parts.get(1).unwrap_or(&"0").parse() {
                 Ok(p) if p > 0 => p,
                 _ => {
-                    crate::console_println!("Usage: udp6 listen <port> [timeout_ms]");
+                    shell_println!("Usage: udp6 listen <port> [timeout_ms]");
                     return;
                 }
             };
@@ -88665,12 +88639,12 @@ fn cmd_udp6(args: &str) {
             let handle = match crate::net::udp::bind(crate::netns::ROOT_NS, port) {
                 Ok(h) => h,
                 Err(e) => {
-                    crate::console_println!("Bind port {} failed: {:?}", port, e);
+                    shell_println!("Bind port {} failed: {:?}", port, e);
                     return;
                 }
             };
 
-            crate::console_println!("Listening on UDP6 port {} for {}ms ...", port, timeout_ms);
+            shell_println!("Listening on UDP6 port {} for {}ms ...", port, timeout_ms);
 
             let start = crate::hrtimer::now_ns();
             #[allow(clippy::arithmetic_side_effects)]
@@ -88683,7 +88657,7 @@ fn cmd_udp6(args: &str) {
                 // Check for IPv6 datagrams.
                 while let Some(dgram) = crate::net::udp::recv_v6(handle) {
                     count = count.saturating_add(1);
-                    crate::console_println!(
+                    shell_println!(
                         "[{}]:{} → {} bytes",
                         dgram.src_ip,
                         dgram.src_port,
@@ -88691,7 +88665,7 @@ fn cmd_udp6(args: &str) {
                     );
                     // Try to display as text if it looks like UTF-8.
                     if let Ok(text) = core::str::from_utf8(&dgram.data) {
-                        crate::console_println!("  \"{}\"", text);
+                        shell_println!("  \"{}\"", text);
                     } else {
                         // Show first 32 bytes as hex.
                         let show = dgram.data.len().min(32);
@@ -88700,7 +88674,7 @@ fn cmd_udp6(args: &str) {
                             .map(|b| alloc::format!("{:02x}", b))
                             .collect::<alloc::vec::Vec<_>>()
                             .join(" ");
-                        crate::console_println!("  [{}]", hex);
+                        shell_println!("  [{}]", hex);
                     }
                 }
 
@@ -88717,16 +88691,16 @@ fn cmd_udp6(args: &str) {
             }
 
             crate::net::udp::close(handle);
-            crate::console_println!("Received {} IPv6 datagrams.", count);
+            shell_println!("Received {} IPv6 datagrams.", count);
         }
         _ => {
-            crate::console_println!("Usage:");
-            crate::console_println!("  udp6 send <ipv6-addr> <port> <message>");
-            crate::console_println!("  udp6 listen <port> [timeout_ms]");
-            crate::console_println!();
-            crate::console_println!("Examples:");
-            crate::console_println!("  udp6 send fe80::1 5000 Hello world");
-            crate::console_println!("  udp6 listen 5000 10000");
+            shell_println!("Usage:");
+            shell_println!("  udp6 send <ipv6-addr> <port> <message>");
+            shell_println!("  udp6 listen <port> [timeout_ms]");
+            shell_println!();
+            shell_println!("Examples:");
+            shell_println!("  udp6 send fe80::1 5000 Hello world");
+            shell_println!("  udp6 listen 5000 10000");
         }
     }
 }
@@ -88759,16 +88733,16 @@ fn cmd_firewall(args: &str) {
                 let (allowed, denied) = firewall::stats();
                 let ct = firewall::conntrack_count();
 
-                crate::console_println!("=== Firewall (IPv4) ===");
-                crate::console_println!(
+                shell_println!("=== Firewall (IPv4) ===");
+                shell_println!(
                     "  Status:   {}",
                     if enabled { "ENABLED" } else { "disabled" }
                 );
-                crate::console_println!("  Policy:   {:?}", policy);
-                crate::console_println!("  Rules:    {}", nrules);
-                crate::console_println!("  Conntrack: {} entries", ct);
-                crate::console_println!("  Allowed:  {}", allowed);
-                crate::console_println!("  Denied:   {}", denied);
+                shell_println!("  Policy:   {:?}", policy);
+                shell_println!("  Rules:    {}", nrules);
+                shell_println!("  Conntrack: {} entries", ct);
+                shell_println!("  Allowed:  {}", allowed);
+                shell_println!("  Denied:   {}", denied);
 
                 let enabled6 = firewall::is_enabled6();
                 let policy6 = firewall::default_policy6();
@@ -88776,16 +88750,16 @@ fn cmd_firewall(args: &str) {
                 let (allowed6, denied6) = firewall::stats6();
                 let ct6 = firewall::conntrack6_count();
 
-                crate::console_println!("=== Firewall (IPv6) ===");
-                crate::console_println!(
+                shell_println!("=== Firewall (IPv6) ===");
+                shell_println!(
                     "  Status:   {}",
                     if enabled6 { "ENABLED" } else { "disabled" }
                 );
-                crate::console_println!("  Policy:   {:?}", policy6);
-                crate::console_println!("  Rules:    {}", nrules6);
-                crate::console_println!("  Conntrack: {} entries", ct6);
-                crate::console_println!("  Allowed:  {}", allowed6);
-                crate::console_println!("  Denied:   {}", denied6);
+                shell_println!("  Policy:   {:?}", policy6);
+                shell_println!("  Rules:    {}", nrules6);
+                shell_println!("  Conntrack: {} entries", ct6);
+                shell_println!("  Allowed:  {}", allowed6);
+                shell_println!("  Denied:   {}", denied6);
             }
             case();
         }
@@ -88796,12 +88770,12 @@ fn cmd_firewall(args: &str) {
         "policy" => match parts.get(1).copied() {
             Some("accept") => firewall::set_default_policy(firewall::DefaultPolicy::Accept),
             Some("drop") => firewall::set_default_policy(firewall::DefaultPolicy::Drop),
-            _ => crate::console_println!("Usage: firewall policy accept|drop"),
+            _ => shell_println!("Usage: firewall policy accept|drop"),
         },
         "policy6" => match parts.get(1).copied() {
             Some("accept") => firewall::set_default_policy6(firewall::DefaultPolicy::Accept),
             Some("drop") => firewall::set_default_policy6(firewall::DefaultPolicy::Drop),
-            _ => crate::console_println!("Usage: firewall policy6 accept|drop"),
+            _ => shell_println!("Usage: firewall policy6 accept|drop"),
         },
         "allow" | "deny" => {
             #[inline(never)]
@@ -88818,7 +88792,7 @@ fn cmd_firewall(args: &str) {
                     Some("out") => firewall::Direction::Out,
                     Some("both") => firewall::Direction::Both,
                     _ => {
-                        crate::console_println!(
+                        shell_println!(
                             "Usage: firewall {} in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]",
                             cmd
                         );
@@ -88832,7 +88806,7 @@ fn cmd_firewall(args: &str) {
                     Some("icmp") => firewall::Protocol::Icmp,
                     Some("any") | Some("all") => firewall::Protocol::Any,
                     _ => {
-                        crate::console_println!(
+                        shell_println!(
                             "Usage: firewall {} in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]",
                             cmd
                         );
@@ -88897,8 +88871,8 @@ fn cmd_firewall(args: &str) {
                 };
 
                 match firewall::add_rule(rule) {
-                    Ok(idx) => crate::console_println!("Rule {} added", idx),
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Ok(idx) => shell_println!("Rule {} added", idx),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
             case(&parts, cmd);
@@ -88920,7 +88894,7 @@ fn cmd_firewall(args: &str) {
                     Some("out") => firewall::Direction::Out,
                     Some("both") => firewall::Direction::Both,
                     _ => {
-                        crate::console_println!(
+                        shell_println!(
                             "Usage: fw {} in|out|both tcp|udp|icmp|any [port N] [ip ADDR[/N]] [prio N]",
                             cmd
                         );
@@ -88934,7 +88908,7 @@ fn cmd_firewall(args: &str) {
                     Some("icmp") | Some("icmpv6") => firewall::Protocol::Icmp,
                     Some("any") | Some("all") => firewall::Protocol::Any,
                     _ => {
-                        crate::console_println!(
+                        shell_println!(
                             "Usage: fw {} in|out|both tcp|udp|icmp|any [port N] [ip ADDR[/N]] [prio N]",
                             cmd
                         );
@@ -88997,8 +88971,8 @@ fn cmd_firewall(args: &str) {
                 };
 
                 match firewall::add_rule6(rule) {
-                    Ok(idx) => crate::console_println!("IPv6 rule {} added", idx),
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Ok(idx) => shell_println!("IPv6 rule {} added", idx),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
             case(&parts, cmd);
@@ -89009,14 +88983,14 @@ fn cmd_firewall(args: &str) {
                 if let Some(idx_str) = parts.get(1) {
                     if let Ok(idx) = idx_str.parse::<usize>() {
                         match firewall::remove_rule(idx) {
-                            Ok(()) => crate::console_println!("Rule {} removed", idx),
-                            Err(e) => crate::console_println!("Error: {:?}", e),
+                            Ok(()) => shell_println!("Rule {} removed", idx),
+                            Err(e) => shell_println!("Error: {:?}", e),
                         }
                     } else {
-                        crate::console_println!("Usage: firewall remove <index>");
+                        shell_println!("Usage: firewall remove <index>");
                     }
                 } else {
-                    crate::console_println!("Usage: firewall remove <index>");
+                    shell_println!("Usage: firewall remove <index>");
                 }
             }
             case(&parts);
@@ -89027,14 +89001,14 @@ fn cmd_firewall(args: &str) {
                 if let Some(idx_str) = parts.get(1) {
                     if let Ok(idx) = idx_str.parse::<usize>() {
                         match firewall::remove_rule6(idx) {
-                            Ok(()) => crate::console_println!("IPv6 rule {} removed", idx),
-                            Err(e) => crate::console_println!("Error: {:?}", e),
+                            Ok(()) => shell_println!("IPv6 rule {} removed", idx),
+                            Err(e) => shell_println!("Error: {:?}", e),
                         }
                     } else {
-                        crate::console_println!("Usage: firewall remove6 <index>");
+                        shell_println!("Usage: firewall remove6 <index>");
                     }
                 } else {
-                    crate::console_println!("Usage: firewall remove6 <index>");
+                    shell_println!("Usage: firewall remove6 <index>");
                 }
             }
             case(&parts);
@@ -89043,7 +89017,7 @@ fn cmd_firewall(args: &str) {
             #[inline(never)]
             fn case() {
                 firewall::clear_rules();
-                crate::console_println!("All IPv4 rules cleared");
+                shell_println!("All IPv4 rules cleared");
             }
             case();
         }
@@ -89051,7 +89025,7 @@ fn cmd_firewall(args: &str) {
             #[inline(never)]
             fn case() {
                 firewall::clear_rules6();
-                crate::console_println!("All IPv6 rules cleared");
+                shell_println!("All IPv6 rules cleared");
             }
             case();
         }
@@ -89059,9 +89033,9 @@ fn cmd_firewall(args: &str) {
             #[inline(never)]
             fn case() {
                 let (allowed, denied) = firewall::stats();
-                crate::console_println!("IPv4 — Allowed: {}  Denied: {}", allowed, denied);
+                shell_println!("IPv4 — Allowed: {}  Denied: {}", allowed, denied);
                 let (allowed6, denied6) = firewall::stats6();
-                crate::console_println!("IPv6 — Allowed: {}  Denied: {}", allowed6, denied6);
+                shell_println!("IPv6 — Allowed: {}  Denied: {}", allowed6, denied6);
             }
             case();
         }
@@ -89070,10 +89044,10 @@ fn cmd_firewall(args: &str) {
             fn case() {
                 let (rule_stats, count) = firewall::rule_stats();
                 if count == 0 {
-                    crate::console_println!("No IPv4 rules configured");
+                    shell_println!("No IPv4 rules configured");
                 } else {
-                    crate::console_println!("=== IPv4 Firewall Rules ({}) ===", count);
-                    crate::console_println!(
+                    shell_println!("=== IPv4 Firewall Rules ({}) ===", count);
+                    shell_println!(
                         "{:<4} {:<6} {:<5} {:<6} {:<20} {:<6} {:<6} {}",
                         "Idx",
                         "Action",
@@ -89092,7 +89066,7 @@ fn cmd_firewall(args: &str) {
                         } else {
                             alloc::format!("{}", rs.dst_port)
                         };
-                        crate::console_println!(
+                        shell_println!(
                             "{:<4} {:<6} {:<5} {:<6} {:<20} {:<6} {:<6} {}",
                             rs.index,
                             rs.action,
@@ -89113,10 +89087,10 @@ fn cmd_firewall(args: &str) {
             fn case() {
                 let (rule_stats, count) = firewall::rule6_stats();
                 if count == 0 {
-                    crate::console_println!("No IPv6 rules configured");
+                    shell_println!("No IPv6 rules configured");
                 } else {
-                    crate::console_println!("=== IPv6 Firewall Rules ({}) ===", count);
-                    crate::console_println!(
+                    shell_println!("=== IPv6 Firewall Rules ({}) ===", count);
+                    shell_println!(
                         "{:<4} {:<6} {:<5} {:<8} {:<42} {:<6} {:<6} {}",
                         "Idx",
                         "Action",
@@ -89146,7 +89120,7 @@ fn cmd_firewall(args: &str) {
                                 firewall::Protocol::Icmp => "icmpv6",
                             }
                         };
-                        crate::console_println!(
+                        shell_println!(
                             "{:<4} {:<6} {:<5} {:<8} {:<42} {:<6} {:<6} {}",
                             rs.index,
                             rs.action,
@@ -89167,7 +89141,7 @@ fn cmd_firewall(args: &str) {
             fn case() {
                 let count = firewall::conntrack_count();
                 let count6 = firewall::conntrack6_count();
-                crate::console_println!(
+                shell_println!(
                     "Connection tracking: {} IPv4, {} IPv6 active entries",
                     count,
                     count6
@@ -89182,17 +89156,17 @@ fn cmd_firewall(args: &str) {
                 firewall::clear_conntrack();
                 firewall::reset_stats6();
                 firewall::clear_conntrack6();
-                crate::console_println!("Stats and conntrack reset (IPv4 + IPv6)");
+                shell_println!("Stats and conntrack reset (IPv4 + IPv6)");
             }
             case();
         }
         _ => {
             #[inline(never)]
             fn case() {
-                crate::console_println!(
+                shell_println!(
                     "Usage: fw [on|off|on6|off6|policy|policy6|allow|deny|allow6|deny6|"
                 );
-                crate::console_println!(
+                shell_println!(
                     "          remove|remove6|clear|clear6|rules|rules6|stats|conntrack|reset]"
                 );
             }
@@ -89217,8 +89191,8 @@ fn cmd_cap_groups(args: &str) {
     match cmd {
         "" | "list" | "ls" => {
             let all = groups::list();
-            crate::console_println!("=== Capability Groups ({}) ===", all.len());
-            crate::console_println!(
+            shell_println!("=== Capability Groups ({}) ===", all.len());
+            shell_println!(
                 "{:<5} {:<15} {:<6} {:<8} {}",
                 "ID",
                 "Name",
@@ -89228,42 +89202,35 @@ fn cmd_cap_groups(args: &str) {
             );
             for (id, name, caps, members, builtin) in &all {
                 let kind = if *builtin { "built-in" } else { "custom" };
-                crate::console_println!(
-                    "{:<5} {:<15} {:<6} {:<8} {}",
-                    id,
-                    name,
-                    caps,
-                    members,
-                    kind
-                );
+                shell_println!("{:<5} {:<15} {:<6} {:<8} {}", id, name, caps, members, kind);
             }
         }
         "create" | "add" => {
             if let Some(name) = parts.get(1) {
                 match groups::create(name) {
-                    Ok(id) => crate::console_println!("Group '{}' created (id={})", name, id),
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Ok(id) => shell_println!("Group '{}' created (id={})", name, id),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             } else {
-                crate::console_println!("Usage: capgroups create <name>");
+                shell_println!("Usage: capgroups create <name>");
             }
         }
         "remove" | "rm" | "del" => {
             if let Some(name) = parts.get(1) {
                 if let Some(id) = groups::find_by_name(name) {
                     match groups::remove(id) {
-                        Ok(()) => crate::console_println!("Group '{}' removed", name),
-                        Err(e) => crate::console_println!("Error: {:?}", e),
+                        Ok(()) => shell_println!("Group '{}' removed", name),
+                        Err(e) => shell_println!("Error: {:?}", e),
                     }
                 } else {
-                    crate::console_println!("Group '{}' not found", name);
+                    shell_println!("Group '{}' not found", name);
                 }
             } else {
-                crate::console_println!("Usage: capgroups remove <name>");
+                shell_println!("Usage: capgroups remove <name>");
             }
         }
         _ => {
-            crate::console_println!("Usage: capgroups [list|create|remove]");
+            shell_println!("Usage: capgroups [list|create|remove]");
         }
     }
 }
@@ -89291,10 +89258,10 @@ fn cmd_cap_tags(args: &str) {
         "" | "list" | "ls" => {
             let all = file_tags::list_all();
             if all.is_empty() {
-                crate::console_println!("No file capability tags set.");
+                shell_println!("No file capability tags set.");
                 return;
             }
-            crate::console_println!("=== File Capability Tags ({}) ===", all.len());
+            shell_println!("=== File Capability Tags ({}) ===", all.len());
             for (path, group_ids) in &all {
                 let names: alloc::vec::Vec<alloc::string::String> = group_ids
                     .iter()
@@ -89308,7 +89275,7 @@ fn cmd_cap_tags(args: &str) {
                             .unwrap_or_else(|| alloc::format!("id={}", id))
                     })
                     .collect();
-                crate::console_println!("  {} → [{}]", path.display(), names.join(", "));
+                shell_println!("  {} → [{}]", path.display(), names.join(", "));
             }
         }
         "show" => {
@@ -89325,25 +89292,22 @@ fn cmd_cap_tags(args: &str) {
                         .unwrap_or_else(|| alloc::format!("id={}", id))
                 };
 
-                crate::console_println!("Path: {}", path);
+                shell_println!("Path: {}", path);
                 if direct.is_empty() {
-                    crate::console_println!("  Direct tags: (none)");
+                    shell_println!("  Direct tags: (none)");
                 } else {
                     let names: alloc::vec::Vec<_> = direct.iter().map(|&id| name_for(id)).collect();
-                    crate::console_println!("  Direct tags: [{}]", names.join(", "));
+                    shell_println!("  Direct tags: [{}]", names.join(", "));
                 }
                 if effective.is_empty() {
-                    crate::console_println!("  Effective tags (incl. inherited): (none)");
+                    shell_println!("  Effective tags (incl. inherited): (none)");
                 } else {
                     let names: alloc::vec::Vec<_> =
                         effective.iter().map(|&id| name_for(id)).collect();
-                    crate::console_println!(
-                        "  Effective tags (incl. inherited): [{}]",
-                        names.join(", ")
-                    );
+                    shell_println!("  Effective tags (incl. inherited): [{}]", names.join(", "));
                 }
             } else {
-                crate::console_println!("Usage: captags show <path>");
+                shell_println!("Usage: captags show <path>");
             }
         }
         "add" | "tag" => {
@@ -89353,15 +89317,15 @@ fn cmd_cap_tags(args: &str) {
                 if let Some(group_id) = groups::find_by_name(group_name) {
                     match file_tags::tag_path(path, group_id) {
                         Ok(()) => {
-                            crate::console_println!("Tagged '{}' with group '{}'", path, group_name)
+                            shell_println!("Tagged '{}' with group '{}'", path, group_name)
                         }
-                        Err(e) => crate::console_println!("Error: {:?}", e),
+                        Err(e) => shell_println!("Error: {:?}", e),
                     }
                 } else {
-                    crate::console_println!("Group '{}' not found", group_name);
+                    shell_println!("Group '{}' not found", group_name);
                 }
             } else {
-                crate::console_println!("Usage: captags add <path> <group_name>");
+                shell_println!("Usage: captags add <path> <group_name>");
             }
         }
         "remove" | "rm" | "untag" => {
@@ -89371,25 +89335,25 @@ fn cmd_cap_tags(args: &str) {
                 if let Some(group_id) = groups::find_by_name(group_name) {
                     match file_tags::untag_path(path, group_id) {
                         Ok(()) => {
-                            crate::console_println!("Removed '{}' tag from '{}'", group_name, path)
+                            shell_println!("Removed '{}' tag from '{}'", group_name, path)
                         }
-                        Err(e) => crate::console_println!("Error: {:?}", e),
+                        Err(e) => shell_println!("Error: {:?}", e),
                     }
                 } else {
-                    crate::console_println!("Group '{}' not found", group_name);
+                    shell_println!("Group '{}' not found", group_name);
                 }
             } else {
-                crate::console_println!("Usage: captags remove <path> <group_name>");
+                shell_println!("Usage: captags remove <path> <group_name>");
             }
         }
         "clear" => {
             if let Some(path) = parts.get(1) {
                 match file_tags::clear_tags(path) {
-                    Ok(()) => crate::console_println!("All tags cleared from '{}'", path),
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Ok(()) => shell_println!("All tags cleared from '{}'", path),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             } else {
-                crate::console_println!("Usage: captags clear <path>");
+                shell_println!("Usage: captags clear <path>");
             }
         }
         "check" => {
@@ -89409,12 +89373,12 @@ fn cmd_cap_tags(args: &str) {
             if parts.len() >= 4 {
                 let path = parts[1];
                 let Ok(uid) = parts[2].parse::<u32>() else {
-                    crate::console_println!("captags: bad uid '{}'", parts[2]);
+                    shell_println!("captags: bad uid '{}'", parts[2]);
                     set_exit(1);
                     return;
                 };
                 let Ok(gid) = parts[3].parse::<u32>() else {
-                    crate::console_println!("captags: bad gid '{}'", parts[3]);
+                    shell_println!("captags: bad gid '{}'", parts[3]);
                     set_exit(1);
                     return;
                 };
@@ -89429,7 +89393,7 @@ fn cmd_cap_tags(args: &str) {
                     "x" | "exec" | "execute" => crate::fs::vfs::PathAccess::Execute,
                     "m" | "meta" | "metadata" => crate::fs::vfs::PathAccess::Metadata,
                     other => {
-                        crate::console_println!(
+                        shell_println!(
                             "captags: unknown access class '{}' (want r, w, x or m)",
                             other
                         );
@@ -89439,7 +89403,7 @@ fn cmd_cap_tags(args: &str) {
                 };
                 let resolved = resolve_path(path);
                 match crate::fs::vfs::path_access_verdict(&resolved, uid, gid, &[], want) {
-                    Ok(()) => crate::console_println!(
+                    Ok(()) => shell_println!(
                         "ACCESS ALLOWED ({}) for uid={} gid={} on '{}'",
                         want_arg,
                         uid,
@@ -89447,7 +89411,7 @@ fn cmd_cap_tags(args: &str) {
                         resolved.display()
                     ),
                     Err(e) => {
-                        crate::console_println!(
+                        shell_println!(
                             "ACCESS DENIED ({}) for uid={} gid={} on '{}': {}",
                             want_arg,
                             uid,
@@ -89459,12 +89423,12 @@ fn cmd_cap_tags(args: &str) {
                     }
                 }
             } else {
-                crate::console_println!("Usage: captags check <path> <uid> <gid> [r|w|x|m]");
+                shell_println!("Usage: captags check <path> <uid> <gid> [r|w|x|m]");
                 set_exit(1);
             }
         }
         _ => {
-            crate::console_println!("Usage: captags [list|show|add|remove|clear|check]");
+            shell_println!("Usage: captags [list|show|add|remove|clear|check]");
         }
     }
 }
@@ -89486,11 +89450,11 @@ fn cmd_socket_activation(args: &str) {
         "" | "list" | "ls" => {
             let all = service::list_socket_activations();
             if all.is_empty() {
-                crate::console_println!("No socket activations configured.");
+                shell_println!("No socket activations configured.");
                 return;
             }
-            crate::console_println!("=== Socket Activations ({}) ===", all.len());
-            crate::console_println!(
+            shell_println!("=== Socket Activations ({}) ===", all.len());
+            shell_println!(
                 "{:<25} {:<25} {:<10} {:<6} {}",
                 "Service",
                 "Spawn Path",
@@ -89505,7 +89469,7 @@ fn cmd_socket_activation(args: &str) {
                     service::ActivationStatus::Running => "running",
                     service::ActivationStatus::Failed => "FAILED",
                 };
-                crate::console_println!(
+                shell_println!(
                     "{:<25} {:<25} {:<10} {:<6} {}",
                     name,
                     path,
@@ -89521,36 +89485,36 @@ fn cmd_socket_activation(args: &str) {
                 let path = parts[2];
                 match service::register_socket_activation(name.as_bytes(), path) {
                     Ok(()) => {
-                        crate::console_println!("Socket activation registered: {} → {}", name, path)
+                        shell_println!("Socket activation registered: {} → {}", name, path)
                     }
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             } else {
-                crate::console_println!("Usage: sockact add <service_name> <spawn_path>");
+                shell_println!("Usage: sockact add <service_name> <spawn_path>");
             }
         }
         "remove" | "rm" | "del" => {
             if let Some(name) = parts.get(1) {
                 match service::unregister_socket_activation(name.as_bytes()) {
-                    Ok(()) => crate::console_println!("Socket activation removed: {}", name),
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Ok(()) => shell_println!("Socket activation removed: {}", name),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             } else {
-                crate::console_println!("Usage: sockact remove <service_name>");
+                shell_println!("Usage: sockact remove <service_name>");
             }
         }
         "reset" => {
             if let Some(name) = parts.get(1) {
                 match service::reset_activation(name.as_bytes()) {
-                    Ok(()) => crate::console_println!("Activation reset: {}", name),
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Ok(()) => shell_println!("Activation reset: {}", name),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             } else {
-                crate::console_println!("Usage: sockact reset <service_name>");
+                shell_println!("Usage: sockact reset <service_name>");
             }
         }
         _ => {
-            crate::console_println!("Usage: sockact [list|add|remove|reset]");
+            shell_println!("Usage: sockact [list|add|remove|reset]");
         }
     }
 }
@@ -89573,11 +89537,11 @@ fn cmd_service_limits(args: &str) {
         "" | "list" | "ls" => {
             let all = service_limits::list_all();
             if all.is_empty() {
-                crate::console_println!("No service limits configured.");
+                shell_println!("No service limits configured.");
                 return;
             }
-            crate::console_println!("=== Service Resource Limits ({}) ===", all.len());
-            crate::console_println!(
+            shell_println!("=== Service Resource Limits ({}) ===", all.len());
+            shell_println!(
                 "{:<25} {:<12} {:<8} {:<10} {}",
                 "Service",
                 "RSS",
@@ -89606,26 +89570,26 @@ fn cmd_service_limits(args: &str) {
                 } else {
                     alloc::format!("{}", limits.max_handles)
                 };
-                crate::console_println!("{:<25} {:<12} {:<8} {:<10} {}", name, rss, cpu, thr, hdl);
+                shell_println!("{:<25} {:<12} {:<8} {:<10} {}", name, rss, cpu, thr, hdl);
             }
         }
         "show" => {
             if let Some(name) = parts.get(1) {
                 match service_limits::get_service_limits(name) {
                     Some(limits) => {
-                        crate::console_println!("Service: {}", name);
-                        crate::console_println!("  {}", limits);
+                        shell_println!("Service: {}", name);
+                        shell_println!("  {}", limits);
                     }
-                    None => crate::console_println!("No limits configured for '{}'", name),
+                    None => shell_println!("No limits configured for '{}'", name),
                 }
             } else {
-                crate::console_println!("Usage: slimit show <service_name>");
+                shell_println!("Usage: slimit show <service_name>");
             }
         }
         "set" => {
             // slimit set NAME rss=N cpu=N thr=N hdl=N
             if parts.len() < 3 {
-                crate::console_println!("Usage: slimit set <name> rss=N cpu=N thr=N hdl=N");
+                shell_println!("Usage: slimit set <name> rss=N cpu=N thr=N hdl=N");
                 return;
             }
             let name = parts[1];
@@ -89641,17 +89605,14 @@ fn cmd_service_limits(args: &str) {
                 } else if let Some(val) = param.strip_prefix("hdl=") {
                     limits.max_handles = val.parse().unwrap_or(0);
                 } else {
-                    crate::console_println!(
-                        "Unknown parameter: {} (use rss=, cpu=, thr=, hdl=)",
-                        param
-                    );
+                    shell_println!("Unknown parameter: {} (use rss=, cpu=, thr=, hdl=)", param);
                     return;
                 }
             }
 
             match service_limits::set_service_limits(name, limits) {
-                Ok(()) => crate::console_println!("Limits set for '{}': {}", name, limits),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Ok(()) => shell_println!("Limits set for '{}': {}", name, limits),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "profile" => {
@@ -89663,7 +89624,7 @@ fn cmd_service_limits(args: &str) {
                     "system" | "sys" | "s" => service_limits::ServiceProfile::SystemService,
                     "sandbox" | "sand" | "x" => service_limits::ServiceProfile::Sandboxed,
                     _ => {
-                        crate::console_println!(
+                        shell_println!(
                             "Unknown profile: {} (daemon|network|system|sandbox)",
                             parts[2]
                         );
@@ -89672,28 +89633,26 @@ fn cmd_service_limits(args: &str) {
                 };
                 match service_limits::apply_profile(name, profile) {
                     Ok(()) => {
-                        crate::console_println!("Profile {:?} applied to '{}'", profile, name)
+                        shell_println!("Profile {:?} applied to '{}'", profile, name)
                     }
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             } else {
-                crate::console_println!(
-                    "Usage: slimit profile <name> <daemon|network|system|sandbox>"
-                );
+                shell_println!("Usage: slimit profile <name> <daemon|network|system|sandbox>");
             }
         }
         "remove" | "rm" | "del" => {
             if let Some(name) = parts.get(1) {
                 match service_limits::remove_service_limits(name) {
-                    Ok(()) => crate::console_println!("Limits removed for '{}'", name),
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Ok(()) => shell_println!("Limits removed for '{}'", name),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             } else {
-                crate::console_println!("Usage: slimit remove <service_name>");
+                shell_println!("Usage: slimit remove <service_name>");
             }
         }
         _ => {
-            crate::console_println!("Usage: slimit [list|show|set|profile|remove]");
+            shell_println!("Usage: slimit [list|show|set|profile|remove]");
         }
     }
 }
@@ -89731,37 +89690,37 @@ fn parse_url(url: &str) -> Option<(&str, u16, &str)> {
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_wget(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: wget <url>");
-        crate::console_println!("  e.g., wget http://example.com/");
-        crate::console_println!("  e.g., wget https://secure.example.com/");
+        shell_println!("Usage: wget <url>");
+        shell_println!("  e.g., wget http://example.com/");
+        shell_println!("  e.g., wget https://secure.example.com/");
         return;
     }
 
     // HTTPS URLs: use the HTTP module (has TLS 1.3 support).
     if args.starts_with("https://") {
-        crate::console_println!("Fetching (HTTPS) {}...", args);
+        shell_println!("Fetching (HTTPS) {}...", args);
         match crate::net::http::get(args) {
             Ok(resp) => {
-                crate::console_println!("--- Response (HTTP {}) ---", resp.status_code);
+                shell_println!("--- Response (HTTP {}) ---", resp.status_code);
                 let text = resp.body_text();
                 if text.is_empty() {
-                    crate::console_println!("(empty body, {} bytes raw)", resp.body.len());
+                    shell_println!("(empty body, {} bytes raw)", resp.body.len());
                 } else {
-                    crate::console_print!("{}", text);
+                    shell_print!("{}", text);
                 }
-                crate::console_println!("\n--- End ({} bytes) ---", resp.body.len());
+                shell_println!("\n--- End ({} bytes) ---", resp.body.len());
             }
-            Err(e) => crate::console_println!("HTTPS request failed: {:?}", e),
+            Err(e) => shell_println!("HTTPS request failed: {:?}", e),
         }
         return;
     }
 
     let Some((host, port, path)) = parse_url(args) else {
-        crate::console_println!("Invalid URL: {}", args);
+        shell_println!("Invalid URL: {}", args);
         return;
     };
 
-    crate::console_println!("Resolving {}...", host);
+    shell_println!("Resolving {}...", host);
 
     // Resolve hostname to IP.
     let ip = if let Some(ip) = parse_ipv4(host) {
@@ -89770,19 +89729,19 @@ fn cmd_wget(args: &str) {
         match crate::net::dns::resolve(host) {
             Ok(ip) => ip,
             Err(e) => {
-                crate::console_println!("DNS resolution failed: {:?}", e);
+                shell_println!("DNS resolution failed: {:?}", e);
                 return;
             }
         }
     };
 
-    crate::console_println!("Connecting to {}:{}...", ip, port);
+    shell_println!("Connecting to {}:{}...", ip, port);
 
     // Open TCP connection.
     let conn = match crate::net::tcp::connect(crate::netns::ROOT_NS, ip.into(), port) {
         Ok(c) => c,
         Err(e) => {
-            crate::console_println!("Connection failed: {:?}", e);
+            shell_println!("Connection failed: {:?}", e);
             return;
         }
     };
@@ -89794,16 +89753,16 @@ fn cmd_wget(args: &str) {
         host
     );
 
-    crate::console_println!("Sending HTTP request...");
+    shell_println!("Sending HTTP request...");
 
     if let Err(e) = crate::net::tcp::send(conn, request.as_bytes()) {
-        crate::console_println!("Send failed: {:?}", e);
+        shell_println!("Send failed: {:?}", e);
         let _ = crate::net::tcp::close(conn);
         return;
     }
 
     // Read response.
-    crate::console_println!("--- Response ---");
+    shell_println!("--- Response ---");
 
     let mut total = 0usize;
     while let Ok(data) = crate::net::tcp::read_blocking(conn, 3000, 4096) {
@@ -89818,20 +89777,20 @@ fn cmd_wget(args: &str) {
         total = total.saturating_add(data.len());
         // Print as text.
         match core::str::from_utf8(&data) {
-            Ok(text) => crate::console_print!("{}", text),
-            Err(_) => crate::console_print!("(binary: {} bytes)", data.len()),
+            Ok(text) => shell_print!("{}", text),
+            Err(_) => shell_print!("(binary: {} bytes)", data.len()),
         }
     }
 
-    crate::console_println!("\n--- End ({} bytes received) ---", total);
+    shell_println!("\n--- End ({} bytes received) ---", total);
     let _ = crate::net::tcp::close(conn);
 }
 
 fn cmd_dns(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: dns <domain-name>");
-        crate::console_println!("       dns -6 <domain-name>   (AAAA / IPv6)");
-        crate::console_println!("  e.g., dns example.com");
+        shell_println!("Usage: dns <domain-name>");
+        shell_println!("       dns -6 <domain-name>   (AAAA / IPv6)");
+        shell_println!("  e.g., dns example.com");
         return;
     }
 
@@ -89839,35 +89798,35 @@ fn cmd_dns(args: &str) {
     let (query_ipv6, name) = if args.starts_with("-6 ") || args.starts_with("-6\t") {
         (true, args[3..].trim())
     } else if args == "-6" {
-        crate::console_println!("Usage: dns -6 <domain-name>");
+        shell_println!("Usage: dns -6 <domain-name>");
         return;
     } else {
         (false, args.trim())
     };
 
     if name.is_empty() {
-        crate::console_println!("Usage: dns <domain-name>");
+        shell_println!("Usage: dns <domain-name>");
         return;
     }
 
     if query_ipv6 {
-        crate::console_println!("Resolving {} (AAAA)...", name);
+        shell_println!("Resolving {} (AAAA)...", name);
         match crate::net::dns::resolve6(name) {
             Ok(ip) => {
-                crate::console_println!("{} -> {}", name, ip);
+                shell_println!("{} -> {}", name, ip);
             }
             Err(e) => {
-                crate::console_println!("AAAA resolution failed: {:?}", e);
+                shell_println!("AAAA resolution failed: {:?}", e);
             }
         }
     } else {
-        crate::console_println!("Resolving {}...", name);
+        shell_println!("Resolving {}...", name);
         match crate::net::dns::resolve(name) {
             Ok(ip) => {
-                crate::console_println!("{} -> {}", name, ip);
+                shell_println!("{} -> {}", name, ip);
             }
             Err(e) => {
-                crate::console_println!("DNS resolution failed: {:?}", e);
+                shell_println!("DNS resolution failed: {:?}", e);
             }
         }
     }
@@ -89895,26 +89854,26 @@ fn parse_ipv4_octets(s: &str) -> Option<[u8; 4]> {
 }
 
 fn cmd_irq() {
-    crate::console_println!("IRQ interrupt counts:");
+    shell_println!("IRQ interrupt counts:");
     let mut any = false;
     for i in 0..24u32 {
         let count = crate::ioapic::irq_consume(i);
         if count > 0 {
-            crate::console_println!("  IRQ {:2}: {} interrupts", i, count);
+            shell_println!("  IRQ {:2}: {} interrupts", i, count);
             any = true;
         }
     }
     // Also show the total pending (peek without consume) for reference.
     if !any {
-        crate::console_println!("  (no IRQ activity recorded)");
+        shell_println!("  (no IRQ activity recorded)");
     }
 }
 
 fn cmd_reboot() {
     let caps = crate::power::capabilities();
-    crate::console_println!("Rebooting...");
+    shell_println!("Rebooting...");
     if caps.acpi_reboot {
-        crate::console_println!("  Using ACPI reset register.");
+        shell_println!("  Using ACPI reset register.");
     }
     crate::power::reboot();
 }
@@ -89923,21 +89882,21 @@ fn cmd_reboot() {
 fn cmd_iommu() {
     use crate::iommu;
 
-    crate::console_println!("=== IOMMU Status ===");
-    crate::console_println!("{}", iommu::status_summary());
+    shell_println!("=== IOMMU Status ===");
+    shell_println!("{}", iommu::status_summary());
 
     if !iommu::is_available() {
-        crate::console_println!();
-        crate::console_println!("TIP: Enable Intel VT-d or AMD-Vi in BIOS/UEFI");
+        shell_println!();
+        shell_println!("TIP: Enable Intel VT-d or AMD-Vi in BIOS/UEFI");
         return;
     }
 
     let units = iommu::unit_count();
-    crate::console_println!();
-    crate::console_println!("Hardware units:");
+    shell_println!();
+    shell_println!("Hardware units:");
     for i in 0..units as usize {
         if let Some(unit) = iommu::get_unit(i) {
-            crate::console_println!(
+            shell_println!(
                 "  Unit {}: base={:#x} seg={} include_all={}",
                 i,
                 unit.register_base,
@@ -89948,16 +89907,16 @@ fn cmd_iommu() {
     }
 
     // DMA remapping status.
-    crate::console_println!();
+    shell_println!();
     let remap = crate::iommu_remap::stats();
-    crate::console_println!("DMA Remapping:");
-    crate::console_println!(
+    shell_println!("DMA Remapping:");
+    shell_println!(
         "  status:          {}",
         if remap.active { "enabled" } else { "disabled" }
     );
-    crate::console_println!("  active domains:  {}", remap.active_domains);
-    crate::console_println!("  mapped pages:    {}", remap.total_mapped_pages);
-    crate::console_println!("  DMA faults:      {}", remap.total_faults);
+    shell_println!("  active domains:  {}", remap.active_domains);
+    shell_println!("  mapped pages:    {}", remap.total_mapped_pages);
+    shell_println!("  DMA faults:      {}", remap.total_faults);
 }
 
 /// `cgroup` — manage resource control groups.
@@ -89979,8 +89938,8 @@ fn cmd_cgroup(args: &str) {
     match cmd {
         "" | "list" | "ls" => {
             let count = cgroup::active_count();
-            crate::console_println!("=== Resource Control Groups ({} active) ===", count);
-            crate::console_println!(
+            shell_println!("=== Resource Control Groups ({} active) ===", count);
+            shell_println!(
                 "{:<5} {:<7} {:<7} {:<8} {:<12} {:<12} {:<12}",
                 "ID",
                 "Parent",
@@ -90007,7 +89966,7 @@ fn cmd_cgroup(args: &str) {
                     } else {
                         alloc::format!("{}", s.parent)
                     };
-                    crate::console_println!(
+                    shell_println!(
                         "{:<5} {:<7} {:<7} {:<8} {:<12} {:<12} {:<12}",
                         id,
                         parent,
@@ -90023,109 +89982,105 @@ fn cmd_cgroup(args: &str) {
         "create" => {
             let parent: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             match cgroup::create(parent) {
-                Ok(id) => crate::console_println!("Created cgroup {} (parent: {})", id, parent),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Ok(id) => shell_println!("Created cgroup {} (parent: {})", id, parent),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "delete" | "del" | "rm" => {
             let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: cgroup delete <id>");
+                shell_println!("Usage: cgroup delete <id>");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid cgroup ID");
+                shell_println!("Invalid cgroup ID");
                 return;
             };
             match cgroup::delete(id) {
-                Ok(()) => crate::console_println!("Deleted cgroup {}", id),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Ok(()) => shell_println!("Deleted cgroup {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "cpu" => {
             let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: cgroup cpu <id> <percent>");
+                shell_println!("Usage: cgroup cpu <id> <percent>");
                 return;
             };
             let Some(pct_str) = parts.get(2) else {
-                crate::console_println!("Usage: cgroup cpu <id> <percent>");
+                shell_println!("Usage: cgroup cpu <id> <percent>");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid cgroup ID");
+                shell_println!("Invalid cgroup ID");
                 return;
             };
             let Ok(pct) = pct_str.parse::<u64>() else {
-                crate::console_println!("Invalid percentage");
+                shell_println!("Invalid percentage");
                 return;
             };
             let limit = cgroup::CpuLimit::from_percent(pct);
             match cgroup::set_cpu_limit(id, limit) {
                 Ok(()) => {
                     if pct == 0 {
-                        crate::console_println!("Cgroup {}: CPU limit removed (unlimited)", id);
+                        shell_println!("Cgroup {}: CPU limit removed (unlimited)", id);
                     } else {
-                        crate::console_println!("Cgroup {}: CPU limit set to {}%", id, pct);
+                        shell_println!("Cgroup {}: CPU limit set to {}%", id, pct);
                     }
                 }
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "mem" | "memory" => {
             let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: cgroup mem <id> <frames>");
+                shell_println!("Usage: cgroup mem <id> <frames>");
                 return;
             };
             let Some(frames_str) = parts.get(2) else {
-                crate::console_println!("Usage: cgroup mem <id> <frames>");
+                shell_println!("Usage: cgroup mem <id> <frames>");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid cgroup ID");
+                shell_println!("Invalid cgroup ID");
                 return;
             };
             let Ok(frames) = frames_str.parse::<u64>() else {
-                crate::console_println!("Invalid frame count");
+                shell_println!("Invalid frame count");
                 return;
             };
             let limit = cgroup::MemLimit::frames(frames);
             match cgroup::set_mem_limit(id, limit) {
                 Ok(()) => {
                     if frames == 0 {
-                        crate::console_println!("Cgroup {}: memory limit removed (unlimited)", id);
+                        shell_println!("Cgroup {}: memory limit removed (unlimited)", id);
                     } else {
-                        crate::console_println!(
-                            "Cgroup {}: memory limit set to {} frames",
-                            id,
-                            frames
-                        );
+                        shell_println!("Cgroup {}: memory limit set to {} frames", id, frames);
                     }
                 }
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "stats" | "info" => {
             let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: cgroup stats <id>");
+                shell_println!("Usage: cgroup stats <id>");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid cgroup ID");
+                shell_println!("Invalid cgroup ID");
                 return;
             };
             let Some(s) = cgroup::stats(id) else {
-                crate::console_println!("Cgroup {} not found", id);
+                shell_println!("Cgroup {} not found", id);
                 return;
             };
-            crate::console_println!("=== Cgroup {} ===", id);
+            shell_println!("=== Cgroup {} ===", id);
             let parent = if s.parent == u32::MAX {
                 "none (root)".to_string()
             } else {
                 alloc::format!("{}", s.parent)
             };
-            crate::console_println!("  Parent:           {}", parent);
-            crate::console_println!("  Tasks:            {}", s.nr_tasks);
-            crate::console_println!("  Children:         {}", s.nr_children);
-            crate::console_println!(
+            shell_println!("  Parent:           {}", parent);
+            shell_println!("  Tasks:            {}", s.nr_tasks);
+            shell_println!("  Children:         {}", s.nr_children);
+            shell_println!(
                 "  CPU quota:        {}",
                 if s.cpu_quota == 0 {
                     "unlimited".to_string()
@@ -90133,9 +90088,9 @@ fn cmd_cgroup(args: &str) {
                     alloc::format!("{} ticks / {} period", s.cpu_quota, s.cpu_period)
                 }
             );
-            crate::console_println!("  CPU used:         {} ticks (this period)", s.cpu_used);
-            crate::console_println!("  CPU throttles:    {}", s.cpu_throttle_count);
-            crate::console_println!(
+            shell_println!("  CPU used:         {} ticks (this period)", s.cpu_used);
+            shell_println!("  CPU throttles:    {}", s.cpu_throttle_count);
+            shell_println!(
                 "  Memory limit:     {}",
                 if s.mem_limit == 0 {
                     "unlimited".to_string()
@@ -90143,9 +90098,9 @@ fn cmd_cgroup(args: &str) {
                     alloc::format!("{} frames", s.mem_limit)
                 }
             );
-            crate::console_println!("  Memory usage:     {} frames", s.mem_usage);
-            crate::console_println!("  Memory peak:      {} frames", s.mem_peak);
-            crate::console_println!(
+            shell_println!("  Memory usage:     {} frames", s.mem_usage);
+            shell_println!("  Memory peak:      {} frames", s.mem_peak);
+            shell_println!(
                 "  I/O ops limit:    {}",
                 if s.io_ops_limit == 0 {
                     "unlimited".to_string()
@@ -90153,7 +90108,7 @@ fn cmd_cgroup(args: &str) {
                     alloc::format!("{} ops/period", s.io_ops_limit)
                 }
             );
-            crate::console_println!(
+            shell_println!(
                 "  I/O bytes limit:  {}",
                 if s.io_bytes_limit == 0 {
                     "unlimited".to_string()
@@ -90161,13 +90116,13 @@ fn cmd_cgroup(args: &str) {
                     alloc::format!("{} frames/period", s.io_bytes_limit)
                 }
             );
-            crate::console_println!("  I/O ops used:     {} (this period)", s.io_ops_used);
-            crate::console_println!(
+            shell_println!("  I/O ops used:     {} (this period)", s.io_ops_used);
+            shell_println!(
                 "  I/O bytes used:   {} frames (this period)",
                 s.io_bytes_used
             );
-            crate::console_println!("  I/O throttles:    {}", s.io_throttle_count);
-            crate::console_println!("  Eff. CPU quota:   {}", {
+            shell_println!("  I/O throttles:    {}", s.io_throttle_count);
+            shell_println!("  Eff. CPU quota:   {}", {
                 let eff = cgroup::effective_cpu_quota(id);
                 if eff == 0 {
                     "unlimited".to_string()
@@ -90175,7 +90130,7 @@ fn cmd_cgroup(args: &str) {
                     alloc::format!("{} ticks", eff)
                 }
             });
-            crate::console_println!("  Eff. mem limit:   {}", {
+            shell_println!("  Eff. mem limit:   {}", {
                 let eff = cgroup::effective_mem_limit(id);
                 if eff == 0 {
                     "unlimited".to_string()
@@ -90183,7 +90138,7 @@ fn cmd_cgroup(args: &str) {
                     alloc::format!("{} frames", eff)
                 }
             });
-            crate::console_println!("  Eff. I/O ops:     {}", {
+            shell_println!("  Eff. I/O ops:     {}", {
                 let eff = cgroup::effective_io_ops_limit(id);
                 if eff == 0 {
                     "unlimited".to_string()
@@ -90191,7 +90146,7 @@ fn cmd_cgroup(args: &str) {
                     alloc::format!("{} ops", eff)
                 }
             });
-            crate::console_println!("  Eff. I/O bytes:   {}", {
+            shell_println!("  Eff. I/O bytes:   {}", {
                 let eff = cgroup::effective_io_bytes_limit(id);
                 if eff == 0 {
                     "unlimited".to_string()
@@ -90202,19 +90157,19 @@ fn cmd_cgroup(args: &str) {
         }
         "io" => {
             let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: cgroup io <id> <ops_max> [bytes_max]");
+                shell_println!("Usage: cgroup io <id> <ops_max> [bytes_max]");
                 return;
             };
             let Some(ops_str) = parts.get(2) else {
-                crate::console_println!("Usage: cgroup io <id> <ops_max> [bytes_max]");
+                shell_println!("Usage: cgroup io <id> <ops_max> [bytes_max]");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid cgroup ID");
+                shell_println!("Invalid cgroup ID");
                 return;
             };
             let Ok(ops) = ops_str.parse::<u64>() else {
-                crate::console_println!("Invalid ops count");
+                shell_println!("Invalid ops count");
                 return;
             };
             let bytes = parts
@@ -90234,33 +90189,29 @@ fn cmd_cgroup(args: &str) {
                     } else {
                         alloc::format!("{} frames/period", bytes)
                     };
-                    crate::console_println!(
+                    shell_println!(
                         "Cgroup {}: I/O limit set — ops: {}, bytes: {}",
                         id,
                         ops_str,
                         bytes_str
                     );
                 }
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "test" => {
             cgroup::self_test();
         }
         _ => {
-            crate::console_println!("Usage: cgroup [list|create|delete|cpu|mem|io|stats|test]");
-            crate::console_println!("  cgroup              — list active cgroups");
-            crate::console_println!(
-                "  cgroup create [P]   — create under parent P (default: root)"
-            );
-            crate::console_println!("  cgroup delete ID    — delete empty cgroup");
-            crate::console_println!("  cgroup cpu ID PCT   — set CPU limit (0=unlimited)");
-            crate::console_println!(
-                "  cgroup mem ID N     — set memory limit in frames (0=unlimited)"
-            );
-            crate::console_println!("  cgroup io ID OPS [BYTES] — set I/O limit (0=unlimited)");
-            crate::console_println!("  cgroup stats ID     — detailed stats");
-            crate::console_println!("  cgroup test         — run self-test");
+            shell_println!("Usage: cgroup [list|create|delete|cpu|mem|io|stats|test]");
+            shell_println!("  cgroup              — list active cgroups");
+            shell_println!("  cgroup create [P]   — create under parent P (default: root)");
+            shell_println!("  cgroup delete ID    — delete empty cgroup");
+            shell_println!("  cgroup cpu ID PCT   — set CPU limit (0=unlimited)");
+            shell_println!("  cgroup mem ID N     — set memory limit in frames (0=unlimited)");
+            shell_println!("  cgroup io ID OPS [BYTES] — set I/O limit (0=unlimited)");
+            shell_println!("  cgroup stats ID     — detailed stats");
+            shell_println!("  cgroup test         — run self-test");
         }
     }
 }
@@ -90287,8 +90238,8 @@ fn cmd_pidns(args: &str) {
     match cmd {
         "" | "list" | "ls" => {
             let count = pidns::active_count();
-            crate::console_println!("=== PID Namespaces ({} active) ===", count);
-            crate::console_println!(
+            shell_println!("=== PID Namespaces ({} active) ===", count);
+            shell_println!(
                 "{:<5} {:<7} {:<7} {:<10} {:<5}",
                 "ID",
                 "Parent",
@@ -90304,7 +90255,7 @@ fn cmd_pidns(args: &str) {
                         alloc::format!("{}", s.parent)
                     };
                     let init = if s.has_init { "yes" } else { "no" };
-                    crate::console_println!(
+                    shell_println!(
                         "{:<5} {:<7} {:<7} {:<10} {:<5}",
                         id,
                         parent,
@@ -90319,57 +90270,57 @@ fn cmd_pidns(args: &str) {
             let parent: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             match pidns::create(parent) {
                 Ok(id) => {
-                    crate::console_println!("Created PID namespace {} (parent: {})", id, parent)
+                    shell_println!("Created PID namespace {} (parent: {})", id, parent)
                 }
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "delete" | "del" | "rm" => {
             let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: pidns delete <id>");
+                shell_println!("Usage: pidns delete <id>");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid namespace ID");
+                shell_println!("Invalid namespace ID");
                 return;
             };
             match pidns::delete(id) {
-                Ok(()) => crate::console_println!("Deleted PID namespace {}", id),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Ok(()) => shell_println!("Deleted PID namespace {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "stats" | "info" => {
             let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: pidns stats <id>");
+                shell_println!("Usage: pidns stats <id>");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid namespace ID");
+                shell_println!("Invalid namespace ID");
                 return;
             };
             let Some(s) = pidns::stats(id) else {
-                crate::console_println!("PID namespace {} not found", id);
+                shell_println!("PID namespace {} not found", id);
                 return;
             };
-            crate::console_println!("=== PID Namespace {} ===", id);
+            shell_println!("=== PID Namespace {} ===", id);
             let parent = if s.parent == u32::MAX {
                 "none (root)".to_string()
             } else {
                 alloc::format!("{}", s.parent)
             };
-            crate::console_println!("  Parent:     {}", parent);
-            crate::console_println!("  Processes:  {}", s.nr_procs);
-            crate::console_println!("  Children:   {}", s.nr_children);
-            crate::console_println!("  Has init:   {}", if s.has_init { "yes" } else { "no" });
+            shell_println!("  Parent:     {}", parent);
+            shell_println!("  Processes:  {}", s.nr_procs);
+            shell_println!("  Children:   {}", s.nr_children);
+            shell_println!("  Has init:   {}", if s.has_init { "yes" } else { "no" });
             if let Some(init) = pidns::init_pid(id) {
-                crate::console_println!("  Init PID:   {} (global)", init);
+                shell_println!("  Init PID:   {} (global)", init);
             }
             // Show PID mappings.
             let pids = pidns::list_pids(id);
             if !pids.is_empty() {
-                crate::console_println!("  PID mappings:");
+                shell_println!("  PID mappings:");
                 for (local, global) in &pids {
-                    crate::console_println!("    local {} → global {}", local, global);
+                    shell_println!("    local {} → global {}", local, global);
                 }
             }
         }
@@ -90377,12 +90328,12 @@ fn cmd_pidns(args: &str) {
             pidns::self_test();
         }
         _ => {
-            crate::console_println!("Usage: pidns [list|create|delete|stats|test]");
-            crate::console_println!("  pidns              — list active PID namespaces");
-            crate::console_println!("  pidns create [P]   — create under parent P (default: root)");
-            crate::console_println!("  pidns delete ID    — delete empty namespace");
-            crate::console_println!("  pidns stats ID     — detailed stats with PID mappings");
-            crate::console_println!("  pidns test         — run self-test");
+            shell_println!("Usage: pidns [list|create|delete|stats|test]");
+            shell_println!("  pidns              — list active PID namespaces");
+            shell_println!("  pidns create [P]   — create under parent P (default: root)");
+            shell_println!("  pidns delete ID    — delete empty namespace");
+            shell_println!("  pidns stats ID     — detailed stats with PID mappings");
+            shell_println!("  pidns test         — run self-test");
         }
     }
 }
@@ -90396,8 +90347,8 @@ fn cmd_userns(args: &str) {
     match cmd {
         "" | "list" | "ls" => {
             let count = userns::active_count();
-            crate::console_println!("=== User Namespaces ({} active) ===", count);
-            crate::console_println!(
+            shell_println!("=== User Namespaces ({} active) ===", count);
+            shell_println!(
                 "{:<5} {:<7} {:<8} {:<5} {:<5} {:<5} {:<5}",
                 "ID",
                 "Parent",
@@ -90414,7 +90365,7 @@ fn cmd_userns(args: &str) {
                     } else {
                         alloc::format!("{}", s.parent)
                     };
-                    crate::console_println!(
+                    shell_println!(
                         "{:<5} {:<7} {:<8} {:<5} {:<5} {:<5} {:<5}",
                         id,
                         parent,
@@ -90431,33 +90382,33 @@ fn cmd_userns(args: &str) {
             let parent: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             let owner: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             match userns::create(parent, owner) {
-                Ok(id) => crate::console_println!(
+                Ok(id) => shell_println!(
                     "Created user namespace {} (parent: {}, owner UID: {})",
                     id,
                     parent,
                     owner
                 ),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "delete" | "del" | "rm" => {
             let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: userns delete <id>");
+                shell_println!("Usage: userns delete <id>");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid namespace ID");
+                shell_println!("Invalid namespace ID");
                 return;
             };
             match userns::delete(id) {
-                Ok(()) => crate::console_println!("Deleted user namespace {}", id),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Ok(()) => shell_println!("Deleted user namespace {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "uidmap" => {
             // userns uidmap <ns> <inner_start> <outer_start> <count>
             if parts.len() < 5 {
-                crate::console_println!("Usage: userns uidmap <ns> <inner> <outer> <count>");
+                shell_println!("Usage: userns uidmap <ns> <inner> <outer> <count>");
                 return;
             }
             let ns = parts[1].parse::<u32>().unwrap_or(u32::MAX);
@@ -90465,7 +90416,7 @@ fn cmd_userns(args: &str) {
             let outer = parts[3].parse::<u32>().unwrap_or(0);
             let count = parts[4].parse::<u32>().unwrap_or(0);
             match userns::add_uid_mapping(ns, inner, outer, count) {
-                Ok(()) => crate::console_println!(
+                Ok(()) => shell_println!(
                     "Added UID mapping: ns {} inner {}..{} → outer {}..{}",
                     ns,
                     inner,
@@ -90473,13 +90424,13 @@ fn cmd_userns(args: &str) {
                     outer,
                     outer.saturating_add(count).saturating_sub(1)
                 ),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "gidmap" => {
             // userns gidmap <ns> <inner_start> <outer_start> <count>
             if parts.len() < 5 {
-                crate::console_println!("Usage: userns gidmap <ns> <inner> <outer> <count>");
+                shell_println!("Usage: userns gidmap <ns> <inner> <outer> <count>");
                 return;
             }
             let ns = parts[1].parse::<u32>().unwrap_or(u32::MAX);
@@ -90487,7 +90438,7 @@ fn cmd_userns(args: &str) {
             let outer = parts[3].parse::<u32>().unwrap_or(0);
             let count = parts[4].parse::<u32>().unwrap_or(0);
             match userns::add_gid_mapping(ns, inner, outer, count) {
-                Ok(()) => crate::console_println!(
+                Ok(()) => shell_println!(
                     "Added GID mapping: ns {} inner {}..{} → outer {}..{}",
                     ns,
                     inner,
@@ -90495,40 +90446,40 @@ fn cmd_userns(args: &str) {
                     outer,
                     outer.saturating_add(count).saturating_sub(1)
                 ),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "stats" | "info" => {
             let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: userns stats <id>");
+                shell_println!("Usage: userns stats <id>");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid namespace ID");
+                shell_println!("Invalid namespace ID");
                 return;
             };
             let Some(s) = userns::stats(id) else {
-                crate::console_println!("User namespace {} not found", id);
+                shell_println!("User namespace {} not found", id);
                 return;
             };
-            crate::console_println!("=== User Namespace {} ===", id);
+            shell_println!("=== User Namespace {} ===", id);
             let parent = if s.parent == u32::MAX {
                 "none (root)".to_string()
             } else {
                 alloc::format!("{}", s.parent)
             };
-            crate::console_println!("  Parent:      {}", parent);
-            crate::console_println!("  Owner UID:   {}", s.owner_uid);
-            crate::console_println!("  Processes:   {}", s.nr_procs);
-            crate::console_println!("  Children:    {}", s.nr_children);
-            crate::console_println!("  UID ranges:  {}", s.uid_map_count);
-            crate::console_println!("  GID ranges:  {}", s.gid_map_count);
+            shell_println!("  Parent:      {}", parent);
+            shell_println!("  Owner UID:   {}", s.owner_uid);
+            shell_println!("  Processes:   {}", s.nr_procs);
+            shell_println!("  Children:    {}", s.nr_children);
+            shell_println!("  UID ranges:  {}", s.uid_map_count);
+            shell_println!("  GID ranges:  {}", s.gid_map_count);
             // Show UID mappings.
             let uid_maps = userns::uid_mappings(id);
             if !uid_maps.is_empty() {
-                crate::console_println!("  UID mappings:");
+                shell_println!("  UID mappings:");
                 for m in &uid_maps {
-                    crate::console_println!(
+                    shell_println!(
                         "    inner {}..{} → outer {}..{}",
                         m.inner_start,
                         m.inner_start.saturating_add(m.count).saturating_sub(1),
@@ -90540,9 +90491,9 @@ fn cmd_userns(args: &str) {
             // Show GID mappings.
             let gid_maps = userns::gid_mappings(id);
             if !gid_maps.is_empty() {
-                crate::console_println!("  GID mappings:");
+                shell_println!("  GID mappings:");
                 for m in &gid_maps {
-                    crate::console_println!(
+                    shell_println!(
                         "    inner {}..{} → outer {}..{}",
                         m.inner_start,
                         m.inner_start.saturating_add(m.count).saturating_sub(1),
@@ -90552,7 +90503,7 @@ fn cmd_userns(args: &str) {
                 }
             }
             // Show UID translation example.
-            crate::console_println!(
+            shell_println!(
                 "  Translation example (inner 0 → host): {}",
                 userns::uid_to_host(id, 0)
             );
@@ -90561,22 +90512,16 @@ fn cmd_userns(args: &str) {
             userns::self_test();
         }
         _ => {
-            crate::console_println!("Usage: userns [list|create|delete|uidmap|gidmap|stats|test]");
-            crate::console_println!(
-                "  userns                         — list active user namespaces"
-            );
-            crate::console_println!(
+            shell_println!("Usage: userns [list|create|delete|uidmap|gidmap|stats|test]");
+            shell_println!("  userns                         — list active user namespaces");
+            shell_println!(
                 "  userns create [P] [owner]      — create under parent P with owner UID"
             );
-            crate::console_println!("  userns delete ID               — delete empty namespace");
-            crate::console_println!(
-                "  userns uidmap NS I O C         — map inner I..I+C to outer O..O+C"
-            );
-            crate::console_println!("  userns gidmap NS I O C         — same for GID");
-            crate::console_println!(
-                "  userns stats ID                — detailed stats with mappings"
-            );
-            crate::console_println!("  userns test                    — run self-test");
+            shell_println!("  userns delete ID               — delete empty namespace");
+            shell_println!("  userns uidmap NS I O C         — map inner I..I+C to outer O..O+C");
+            shell_println!("  userns gidmap NS I O C         — same for GID");
+            shell_println!("  userns stats ID                — detailed stats with mappings");
+            shell_println!("  userns test                    — run self-test");
         }
     }
 }
@@ -90590,8 +90535,8 @@ fn cmd_netns(args: &str) {
     match cmd {
         "" | "list" | "ls" => {
             let count = netns::active_count();
-            crate::console_println!("=== Network Namespaces ({} active) ===", count);
-            crate::console_println!(
+            shell_println!("=== Network Namespaces ({} active) ===", count);
+            shell_println!(
                 "{:<5} {:<5} {:<16} {:<16} {:<16} {:<6} {:<5}",
                 "ID",
                 "Up",
@@ -90604,7 +90549,7 @@ fn cmd_netns(args: &str) {
             for id in 0..netns::MAX_NAMESPACES as u32 {
                 if let Some(s) = netns::stats(id) {
                     let up = if s.iface_up { "yes" } else { "no" };
-                    crate::console_println!(
+                    shell_println!(
                         "{:<5} {:<5} {:<16} {:<16} {:<16} {:<6} {:<5}",
                         id,
                         up,
@@ -90618,28 +90563,28 @@ fn cmd_netns(args: &str) {
             }
         }
         "create" => match netns::create() {
-            Ok(id) => crate::console_println!("Created network namespace {}", id),
-            Err(e) => crate::console_println!("Error: {:?}", e),
+            Ok(id) => shell_println!("Created network namespace {}", id),
+            Err(e) => shell_println!("Error: {:?}", e),
         },
         "delete" | "del" | "rm" => {
             let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: netns delete <id>");
+                shell_println!("Usage: netns delete <id>");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid namespace ID");
+                shell_println!("Invalid namespace ID");
                 return;
             };
             match netns::delete(id) {
-                Ok(()) => crate::console_println!("Deleted network namespace {}", id),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Ok(()) => shell_println!("Deleted network namespace {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "ifconfig" | "config" => {
             // netns ifconfig <ns> <ip> <mask> <gw> <dns>
             if parts.len() < 6 {
-                crate::console_println!("Usage: netns ifconfig <ns> <ip> <mask> <gw> <dns>");
-                crate::console_println!(
+                shell_println!("Usage: netns ifconfig <ns> <ip> <mask> <gw> <dns>");
+                shell_println!(
                     "  Example: netns ifconfig 1 10.0.0.2 255.255.255.0 10.0.0.1 8.8.8.8"
                 );
                 return;
@@ -90658,23 +90603,23 @@ fn cmd_netns(args: &str) {
                 ))
             };
             let Some(ip) = parse_ip(parts[2]) else {
-                crate::console_println!("Invalid IP address: {}", parts[2]);
+                shell_println!("Invalid IP address: {}", parts[2]);
                 return;
             };
             let Some(mask) = parse_ip(parts[3]) else {
-                crate::console_println!("Invalid subnet mask: {}", parts[3]);
+                shell_println!("Invalid subnet mask: {}", parts[3]);
                 return;
             };
             let Some(gw) = parse_ip(parts[4]) else {
-                crate::console_println!("Invalid gateway: {}", parts[4]);
+                shell_println!("Invalid gateway: {}", parts[4]);
                 return;
             };
             let Some(dns) = parse_ip(parts[5]) else {
-                crate::console_println!("Invalid DNS: {}", parts[5]);
+                shell_println!("Invalid DNS: {}", parts[5]);
                 return;
             };
             match netns::configure_interface(ns, ip, mask, gw, dns) {
-                Ok(()) => crate::console_println!(
+                Ok(()) => shell_println!(
                     "Configured ns {}: IP {} mask {} gw {} dns {}",
                     ns,
                     ip,
@@ -90682,7 +90627,7 @@ fn cmd_netns(args: &str) {
                     gw,
                     dns
                 ),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "route" => {
@@ -90690,11 +90635,11 @@ fn cmd_netns(args: &str) {
             // netns route <ns> add <dest> <mask> <gw> [metric]
             // netns route <ns> del <dest> <mask>
             let Some(ns_str) = parts.get(1) else {
-                crate::console_println!("Usage: netns route <ns> [add|del ...]");
+                shell_println!("Usage: netns route <ns> [add|del ...]");
                 return;
             };
             let Ok(ns) = ns_str.parse::<u32>() else {
-                crate::console_println!("Invalid namespace ID");
+                shell_println!("Invalid namespace ID");
                 return;
             };
             let sub = parts.get(2).copied().unwrap_or("");
@@ -90714,10 +90659,10 @@ fn cmd_netns(args: &str) {
                 "" | "show" => {
                     let rt = netns::routes(ns);
                     if rt.is_empty() {
-                        crate::console_println!("No routes in namespace {}", ns);
+                        shell_println!("No routes in namespace {}", ns);
                     } else {
-                        crate::console_println!("=== Routes (ns {}) ===", ns);
-                        crate::console_println!(
+                        shell_println!("=== Routes (ns {}) ===", ns);
+                        shell_println!(
                             "{:<18} {:<18} {:<18} {:<7}",
                             "Destination",
                             "Mask",
@@ -90725,7 +90670,7 @@ fn cmd_netns(args: &str) {
                             "Metric"
                         );
                         for r in &rt {
-                            crate::console_println!(
+                            shell_println!(
                                 "{:<18} {:<18} {:<18} {:<7}",
                                 alloc::format!("{}", r.destination),
                                 alloc::format!("{}", r.mask),
@@ -90737,85 +90682,83 @@ fn cmd_netns(args: &str) {
                 }
                 "add" => {
                     if parts.len() < 6 {
-                        crate::console_println!(
-                            "Usage: netns route <ns> add <dest> <mask> <gw> [metric]"
-                        );
+                        shell_println!("Usage: netns route <ns> add <dest> <mask> <gw> [metric]");
                         return;
                     }
                     let Some(dest) = parse_ip(parts[3]) else {
-                        crate::console_println!("Invalid destination");
+                        shell_println!("Invalid destination");
                         return;
                     };
                     let Some(mask) = parse_ip(parts[4]) else {
-                        crate::console_println!("Invalid mask");
+                        shell_println!("Invalid mask");
                         return;
                     };
                     let Some(gw) = parse_ip(parts[5]) else {
-                        crate::console_println!("Invalid gateway");
+                        shell_println!("Invalid gateway");
                         return;
                     };
                     let metric = parts.get(6).and_then(|s| s.parse().ok()).unwrap_or(100);
                     match netns::add_route(ns, dest, mask, gw, metric) {
-                        Ok(()) => crate::console_println!(
+                        Ok(()) => shell_println!(
                             "Added route: {} mask {} via {} metric {}",
                             dest,
                             mask,
                             gw,
                             metric
                         ),
-                        Err(e) => crate::console_println!("Error: {:?}", e),
+                        Err(e) => shell_println!("Error: {:?}", e),
                     }
                 }
                 "del" | "delete" => {
                     if parts.len() < 5 {
-                        crate::console_println!("Usage: netns route <ns> del <dest> <mask>");
+                        shell_println!("Usage: netns route <ns> del <dest> <mask>");
                         return;
                     }
                     let Some(dest) = parse_ip(parts[3]) else {
-                        crate::console_println!("Invalid destination");
+                        shell_println!("Invalid destination");
                         return;
                     };
                     let Some(mask) = parse_ip(parts[4]) else {
-                        crate::console_println!("Invalid mask");
+                        shell_println!("Invalid mask");
                         return;
                     };
                     match netns::remove_route(ns, dest, mask) {
-                        Ok(()) => crate::console_println!("Removed route: {} mask {}", dest, mask),
-                        Err(e) => crate::console_println!("Error: {:?}", e),
+                        Ok(()) => shell_println!("Removed route: {} mask {}", dest, mask),
+                        Err(e) => shell_println!("Error: {:?}", e),
                     }
                 }
                 _ => {
-                    crate::console_println!("Usage: netns route <ns> [show|add|del]");
+                    shell_println!("Usage: netns route <ns> [show|add|del]");
                 }
             }
         }
         "stats" | "info" => {
             let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: netns stats <id>");
+                shell_println!("Usage: netns stats <id>");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid namespace ID");
+                shell_println!("Invalid namespace ID");
                 return;
             };
             let Some(s) = netns::stats(id) else {
-                crate::console_println!("Network namespace {} not found", id);
+                shell_println!("Network namespace {} not found", id);
                 return;
             };
-            crate::console_println!("=== Network Namespace {} ===", id);
-            crate::console_println!("  Interface:  {}", if s.iface_up { "up" } else { "down" });
-            crate::console_println!("  IP:         {}", s.ip);
-            crate::console_println!("  Subnet:     {}", s.subnet_mask);
-            crate::console_println!("  Gateway:    {}", s.gateway);
-            crate::console_println!("  DNS:        {}", s.dns);
-            crate::console_println!("  Routes:     {}", s.route_count);
-            crate::console_println!("  Processes:  {}", s.nr_procs);
+            shell_println!("=== Network Namespace {} ===", id);
+            shell_println!("  Interface:  {}", if s.iface_up { "up" } else { "down" });
+            shell_println!("  IP:         {}", s.ip);
+            shell_println!("  Subnet:     {}", s.subnet_mask);
+            shell_println!("  Gateway:    {}", s.gateway);
+            shell_println!("  DNS:        {}", s.dns);
+            shell_println!("  Routes:     {}", s.route_count);
+            shell_println!("  Processes:  {}", s.nr_procs);
             // Show routing table.
             let rt = netns::routes(id);
             if !rt.is_empty() {
-                crate::console_println!("  Routing table:");
+                shell_println!("  Routing table:");
                 for r in &rt {
-                    crate::console_println!(
+                    shell_println!(
                         "    {} mask {} via {} metric {}",
                         r.destination,
                         r.mask,
@@ -90827,46 +90770,38 @@ fn cmd_netns(args: &str) {
         }
         "up" | "down" => {
             let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: netns up|down <id>");
+                shell_println!("Usage: netns up|down <id>");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid namespace ID");
+                shell_println!("Invalid namespace ID");
                 return;
             };
             let up = cmd == "up";
             match netns::set_interface_up(id, up) {
-                Ok(()) => crate::console_println!(
+                Ok(()) => shell_println!(
                     "Namespace {} interface {}",
                     id,
                     if up { "up" } else { "down" }
                 ),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "test" => {
             netns::self_test();
         }
         _ => {
-            crate::console_println!(
-                "Usage: netns [list|create|delete|ifconfig|route|stats|up|down|test]"
-            );
-            crate::console_println!(
-                "  netns                              — list active network namespaces"
-            );
-            crate::console_println!(
-                "  netns create                       — create a new namespace"
-            );
-            crate::console_println!(
-                "  netns delete ID                    — delete empty namespace"
-            );
-            crate::console_println!("  netns ifconfig NS IP MASK GW DNS   — configure interface");
-            crate::console_println!("  netns route NS                     — show routing table");
-            crate::console_println!("  netns route NS add D M GW [metric] — add route");
-            crate::console_println!("  netns route NS del D M             — remove route");
-            crate::console_println!("  netns stats ID                     — detailed stats");
-            crate::console_println!("  netns up|down ID                   — set interface up/down");
-            crate::console_println!("  netns test                         — run self-test");
+            shell_println!("Usage: netns [list|create|delete|ifconfig|route|stats|up|down|test]");
+            shell_println!("  netns                              — list active network namespaces");
+            shell_println!("  netns create                       — create a new namespace");
+            shell_println!("  netns delete ID                    — delete empty namespace");
+            shell_println!("  netns ifconfig NS IP MASK GW DNS   — configure interface");
+            shell_println!("  netns route NS                     — show routing table");
+            shell_println!("  netns route NS add D M GW [metric] — add route");
+            shell_println!("  netns route NS del D M             — remove route");
+            shell_println!("  netns stats ID                     — detailed stats");
+            shell_println!("  netns up|down ID                   — set interface up/down");
+            shell_println!("  netns test                         — run self-test");
         }
     }
 }
@@ -90906,14 +90841,14 @@ fn container_exec_rootfs(rest: &[&str]) {
                     idx = idx.saturating_add(2);
                 }
                 Some(dir) => {
-                    crate::console_println!(
+                    shell_println!(
                         "[run-in] Ignoring workdir '{}': must be an absolute path",
                         dir
                     );
                     idx = idx.saturating_add(2);
                 }
                 None => {
-                    crate::console_println!("[run-in] -w requires a directory argument");
+                    shell_println!("[run-in] -w requires a directory argument");
                     return;
                 }
             },
@@ -90921,11 +90856,11 @@ fn container_exec_rootfs(rest: &[&str]) {
         }
     }
     let Some(id_str) = rest.get(idx) else {
-        crate::console_println!("Usage: container run-in [-d] [-w DIR] <id> <command> [args...]");
+        shell_println!("Usage: container run-in [-d] [-w DIR] <id> <command> [args...]");
         return;
     };
     let Ok(id) = id_str.parse::<u32>() else {
-        crate::console_println!("Invalid container ID");
+        shell_println!("Invalid container ID");
         return;
     };
 
@@ -90934,7 +90869,7 @@ fn container_exec_rootfs(rest: &[&str]) {
     let cmd_tokens = rest.get(idx.saturating_add(1)..).unwrap_or(&[]);
     let argv: alloc::vec::Vec<&[u8]> = cmd_tokens.iter().map(|s| s.as_bytes()).collect();
     let Some(&guest_cmd) = argv.first() else {
-        crate::console_println!("Usage: container run-in [-d] [-w DIR] <id> <command> [args...]");
+        shell_println!("Usage: container run-in [-d] [-w DIR] <id> <command> [args...]");
         return;
     };
 
@@ -90942,20 +90877,18 @@ fn container_exec_rootfs(rest: &[&str]) {
     match container::exec_path_env(id, guest_cmd, &argv, &[], cwd) {
         Ok(spawned) => {
             if detached {
-                crate::console_println!("[run-in] container {} pid {} (detached)", id, spawned.pid);
+                shell_println!("[run-in] container {} pid {} (detached)", id, spawned.pid);
             } else {
                 match container::wait_process(spawned.pid) {
-                    Ok(code) => crate::console_println!(
+                    Ok(code) => shell_println!(
                         "[run-in] container {} pid {} exited with status {}",
                         id,
                         spawned.pid,
                         code
                     ),
-                    Err(e) => crate::console_println!(
-                        "[run-in] wait failed for pid {}: {:?}",
-                        spawned.pid,
-                        e
-                    ),
+                    Err(e) => {
+                        shell_println!("[run-in] wait failed for pid {}: {:?}", spawned.pid, e)
+                    }
                 }
                 // Unregister the finished process from container bookkeeping
                 // (drops the pid entry + decrements namespace refcounts; the
@@ -90963,7 +90896,7 @@ fn container_exec_rootfs(rest: &[&str]) {
                 let _ = container::remove_process_task(id, spawned.pid, spawned.task_id);
             }
         }
-        Err(e) => crate::console_println!("[run-in] failed: {:?}", e),
+        Err(e) => shell_println!("[run-in] failed: {:?}", e),
     }
 }
 
@@ -91028,7 +90961,7 @@ fn cmd_container(args: &str) {
                                     limit = Some(n);
                                     all_states = true;
                                 }
-                                None => crate::console_println!(
+                                None => shell_println!(
                                     "[container] Ignoring -n: expected a count (e.g. -n 5)"
                                 ),
                             }
@@ -91044,14 +90977,14 @@ fn cmd_container(args: &str) {
                                         None if !lbl.is_empty() => {
                                             label_filters.push((lbl, None));
                                         }
-                                        _ => crate::console_println!(
+                                        _ => shell_println!(
                                             "[container] Ignoring filter '{}': expected label=KEY[=VALUE]",
                                             spec
                                         ),
                                     }
                                 } else if let Some(nm) = spec.strip_prefix("name=") {
                                     if nm.is_empty() {
-                                        crate::console_println!(
+                                        shell_println!(
                                             "[container] Ignoring filter '{}': empty name",
                                             spec
                                         );
@@ -91061,13 +90994,13 @@ fn cmd_container(args: &str) {
                                 } else if let Some(st) = spec.strip_prefix("status=") {
                                     match container::parse_state(st) {
                                         Some(state) => status_filters.push(state),
-                                        None => crate::console_println!(
+                                        None => shell_println!(
                                             "[container] Ignoring filter '{}': status must be created|running|stopped|failed",
                                             spec
                                         ),
                                     }
                                 } else {
-                                    crate::console_println!(
+                                    shell_println!(
                                         "[container] Unsupported filter '{}' (supported: label=, name=, status=)",
                                         spec
                                     );
@@ -91085,7 +91018,7 @@ fn cmd_container(args: &str) {
                 if all.is_empty() {
                     // Quiet mode stays silent so `rm $(ls -q)` degrades to a no-op.
                     if !quiet {
-                        crate::console_println!("No containers.");
+                        shell_println!("No containers.");
                     }
                     return;
                 }
@@ -91145,9 +91078,9 @@ fn cmd_container(args: &str) {
                             && label_filters.is_empty()
                             && name_filters.is_empty()
                         {
-                            crate::console_println!("No running containers (use -a to show all).");
+                            shell_println!("No running containers (use -a to show all).");
                         } else {
-                            crate::console_println!("No containers match the filter.");
+                            shell_println!("No containers match the filter.");
                         }
                     }
                     return;
@@ -91155,12 +91088,12 @@ fn cmd_container(args: &str) {
                 // Quiet mode: just the IDs, one per line (Docker `ps -q`).
                 if quiet {
                     for (id, _name, _state) in &shown {
-                        crate::console_println!("{}", id);
+                        shell_println!("{}", id);
                     }
                     return;
                 }
-                crate::console_println!("=== Containers ({}) ===", shown.len());
-                crate::console_println!("{:<5} {:<20} {:<26}", "ID", "Name", "Status");
+                shell_println!("=== Containers ({}) ===", shown.len());
+                shell_println!("{:<5} {:<20} {:<26}", "ID", "Name", "Status");
                 for (id, name, state) in &shown {
                     // Docker `ps -a` style status: a stopped container shows its
                     // recorded init exit code ("exited (N)"); other states show the
@@ -91194,7 +91127,7 @@ fn cmd_container(args: &str) {
                     } else {
                         alloc::format!("{}", state)
                     };
-                    crate::console_println!("{:<5} {:<20} {:<26}", id, name, status);
+                    shell_println!("{:<5} {:<20} {:<26}", id, name, status);
                 }
             }
             case(&parts);
@@ -91249,7 +91182,7 @@ fn cmd_container(args: &str) {
                         // `--restart`).
                         match container::parse_restart_policy(val) {
                             Some(policy) => cfg.restart_policy = policy,
-                            None => crate::console_println!(
+                            None => shell_println!(
                                 "[container] Ignoring restart='{}' (want no|always|unless-stopped|on-failure[:N])",
                                 val
                             ),
@@ -91275,8 +91208,8 @@ fn cmd_container(args: &str) {
                 }
 
                 match container::create(&cfg) {
-                    Ok(id) => crate::console_println!("Created container '{}' (id={})", name, id),
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Ok(id) => shell_println!("Created container '{}' (id={})", name, id),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
             case(&parts);
@@ -91296,12 +91229,12 @@ fn cmd_container(args: &str) {
                     .filter(|&t| t != "-f" && t != "--force")
                     .collect();
                 if ids.is_empty() {
-                    crate::console_println!("Usage: container delete [-f|--force] <id> [id...]");
+                    shell_println!("Usage: container delete [-f|--force] <id> [id...]");
                     return;
                 }
                 for id_str in ids {
                     let Ok(id) = id_str.parse::<u32>() else {
-                        crate::console_println!("Invalid container ID '{}'", id_str);
+                        shell_println!("Invalid container ID '{}'", id_str);
                         continue;
                     };
                     let result = if force {
@@ -91310,8 +91243,8 @@ fn cmd_container(args: &str) {
                         container::delete(id)
                     };
                     match result {
-                        Ok(()) => crate::console_println!("Deleted container {}", id),
-                        Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                        Ok(()) => shell_println!("Deleted container {}", id),
+                        Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
                     }
                 }
             }
@@ -91323,17 +91256,17 @@ fn cmd_container(args: &str) {
                 // Docker `start` accepts multiple targets: each is processed
                 // independently and failures don't abort the rest.
                 if parts.len() < 2 {
-                    crate::console_println!("Usage: container start <id> [id...]");
+                    shell_println!("Usage: container start <id> [id...]");
                     return;
                 }
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
-                        crate::console_println!("Invalid container ID '{}'", id_str);
+                        shell_println!("Invalid container ID '{}'", id_str);
                         continue;
                     };
                     match container::start(id) {
-                        Ok(()) => crate::console_println!("Container {} started", id),
-                        Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                        Ok(()) => shell_println!("Container {} started", id),
+                        Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
                     }
                 }
             }
@@ -91343,17 +91276,17 @@ fn cmd_container(args: &str) {
             #[inline(never)]
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
-                    crate::console_println!("Usage: container stop <id> [id...]");
+                    shell_println!("Usage: container stop <id> [id...]");
                     return;
                 }
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
-                        crate::console_println!("Invalid container ID '{}'", id_str);
+                        shell_println!("Invalid container ID '{}'", id_str);
                         continue;
                     };
                     match container::stop(id) {
-                        Ok(()) => crate::console_println!("Container {} stopped", id),
-                        Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                        Ok(()) => shell_println!("Container {} stopped", id),
+                        Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
                     }
                 }
             }
@@ -91374,15 +91307,15 @@ fn cmd_container(args: &str) {
                     }
                 }
                 let Some(id_str) = id_str else {
-                    crate::console_println!("Usage: container info [--json] <id>");
+                    shell_println!("Usage: container info [--json] <id>");
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID");
+                    shell_println!("Invalid container ID");
                     return;
                 };
                 let Some(ci) = container::info(id) else {
-                    crate::console_println!("Container {} not found", id);
+                    shell_println!("Container {} not found", id);
                     return;
                 };
                 if want_json {
@@ -91451,7 +91384,7 @@ fn cmd_container(args: &str) {
                         ));
                     }
                     networks_json.push(']');
-                    crate::console_println!(
+                    shell_println!(
                         "{{\"id\":{},\"name\":\"{}\",\"state\":\"{}\",\"paused\":{},\"health\":{},\"exit_code\":{},\"restart_policy\":\"{}\",\"restart_count\":{},\"auto_remove\":{},\"init_pid\":{},\"processes\":{},\"rootfs\":\"{}\",\"hostname\":\"{}\",\"pid_ns\":{},\"user_ns\":{},\"net_ns\":{},\"cgroup\":{},\"created_seq\":{},\"networks\":{},\"labels\":{}}}",
                         id,
                         esc(&ci.name),
@@ -91476,74 +91409,74 @@ fn cmd_container(args: &str) {
                     );
                     return;
                 }
-                crate::console_println!("=== Container {} ===", id);
-                crate::console_println!("  Name:       {}", ci.name);
+                shell_println!("=== Container {} ===", id);
+                shell_println!("  Name:       {}", ci.name);
                 // A frozen running container shows "running (paused)" (Docker
                 // reports paused as a sub-state of running).
                 if ci.frozen {
-                    crate::console_println!("  State:      {} (paused)", ci.state);
+                    shell_println!("  State:      {} (paused)", ci.state);
                 } else {
-                    crate::console_println!("  State:      {}", ci.state);
+                    shell_println!("  State:      {}", ci.state);
                 }
                 // Health (Docker `HEALTHCHECK`): shown only when a healthcheck is
                 // configured; the failure streak is appended while unhealthy.
                 if ci.has_healthcheck {
                     if ci.health_status == container::HealthStatus::Unhealthy {
-                        crate::console_println!(
+                        shell_println!(
                             "  Health:     {} (failing streak: {})",
                             ci.health_status,
                             ci.health_fail_streak
                         );
                     } else {
-                        crate::console_println!("  Health:     {}", ci.health_status);
+                        shell_println!("  Health:     {}", ci.health_status);
                     }
                 }
                 // Docker's "Exited (N)": show the init process's recorded exit
                 // code once the container has stopped.
                 if let Some(code) = ci.exit_code {
-                    crate::console_println!("  Exit code:  {}", code);
+                    shell_println!("  Exit code:  {}", code);
                 }
                 // Restart policy (Docker `--restart`); show the auto-restart count
                 // only when a policy other than `no` is in effect.
                 if ci.restart_policy == container::RestartPolicy::No {
-                    crate::console_println!("  Restart:    {}", ci.restart_policy);
+                    shell_println!("  Restart:    {}", ci.restart_policy);
                 } else {
-                    crate::console_println!(
+                    shell_println!(
                         "  Restart:    {} (restarts: {})",
                         ci.restart_policy,
                         ci.restart_count
                     );
                 }
                 if ci.auto_remove {
-                    crate::console_println!("  AutoRemove: yes (--rm)");
+                    shell_println!("  AutoRemove: yes (--rm)");
                 }
-                crate::console_println!("  Processes:  {}", ci.nr_procs);
+                shell_println!("  Processes:  {}", ci.nr_procs);
                 match ci.init_pid {
-                    Some(pid) => crate::console_println!("  Init PID:   {}", pid),
-                    None => crate::console_println!("  Init PID:   (not run)"),
+                    Some(pid) => shell_println!("  Init PID:   {}", pid),
+                    None => shell_println!("  Init PID:   (not run)"),
                 }
                 if ci.root_path.is_empty() {
-                    crate::console_println!("  Rootfs:     (host root)");
+                    shell_println!("  Rootfs:     (host root)");
                 } else {
-                    crate::console_println!("  Rootfs:     {}", ci.root_path.display());
+                    shell_println!("  Rootfs:     {}", ci.root_path.display());
                 }
-                crate::console_println!("  PID NS:     {}", ci.pid_ns);
-                crate::console_println!("  User NS:    {}", ci.user_ns);
-                crate::console_println!("  Net NS:     {}", ci.net_ns);
-                crate::console_println!("  Cgroup:     {}", ci.cgroup_id);
+                shell_println!("  PID NS:     {}", ci.pid_ns);
+                shell_println!("  User NS:    {}", ci.user_ns);
+                shell_println!("  Net NS:     {}", ci.net_ns);
+                shell_println!("  Cgroup:     {}", ci.cgroup_id);
                 // Show sub-resource details.
                 if let Some(s) = crate::userns::stats(ci.user_ns) {
-                    crate::console_println!("  UID maps:   {}", s.uid_map_count);
-                    crate::console_println!("  GID maps:   {}", s.gid_map_count);
+                    shell_println!("  UID maps:   {}", s.uid_map_count);
+                    shell_println!("  GID maps:   {}", s.gid_map_count);
                 }
                 if let Some(pair_id) = ci.veth_pair {
-                    crate::console_println!("  Veth pair:  {} (host A <-> container B)", pair_id);
+                    shell_println!("  Veth pair:  {} (host A <-> container B)", pair_id);
                 }
                 // User-defined-network memberships (Docker multi-network, §60).
                 if !ci.memberships.is_empty() {
-                    crate::console_println!("  Networks:");
+                    shell_println!("  Networks:");
                     for m in &ci.memberships {
-                        crate::console_println!(
+                        shell_println!(
                             "    {} -> ip {} (veth {})",
                             m.network_name,
                             fmt_ipv4(m.ip),
@@ -91553,25 +91486,25 @@ fn cmd_container(args: &str) {
                 }
                 if let Some(s) = crate::netns::stats(ci.net_ns) {
                     if s.iface_up {
-                        crate::console_println!("  Net IP:     {}", s.ip);
+                        shell_println!("  Net IP:     {}", s.ip);
                     } else {
-                        crate::console_println!("  Net IP:     (not configured)");
+                        shell_println!("  Net IP:     (not configured)");
                     }
-                    crate::console_println!("  Routes:     {}", s.route_count);
+                    shell_println!("  Routes:     {}", s.route_count);
                 }
                 if let Some(s) = crate::cgroup::stats(ci.cgroup_id) {
                     if s.cpu_quota > 0 {
-                        crate::console_println!("  CPU quota:  {} ticks/period", s.cpu_quota);
+                        shell_println!("  CPU quota:  {} ticks/period", s.cpu_quota);
                     }
                     if s.mem_limit > 0 {
-                        crate::console_println!("  Mem limit:  {} frames", s.mem_limit);
+                        shell_println!("  Mem limit:  {} frames", s.mem_limit);
                     }
                 }
                 if !ci.hostname.is_empty() {
-                    crate::console_println!("  Hostname:   {}", ci.hostname);
+                    shell_println!("  Hostname:   {}", ci.hostname);
                 }
                 for (k, v) in &ci.labels {
-                    crate::console_println!("  Label:      {}={}", k, v);
+                    shell_println!("  Label:      {}={}", k, v);
                 }
             }
             case(&parts);
@@ -91583,23 +91516,23 @@ fn cmd_container(args: &str) {
                 // container (Docker `top`), with each process's live state and
                 // name resolved from the process table.
                 let Some(id_str) = parts.get(1) else {
-                    crate::console_println!("Usage: container top <id>");
+                    shell_println!("Usage: container top <id>");
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID");
+                    shell_println!("Invalid container ID");
                     return;
                 };
                 let Some(pids) = container::pids(id) else {
-                    crate::console_println!("Container {} not found", id);
+                    shell_println!("Container {} not found", id);
                     return;
                 };
                 if pids.is_empty() {
-                    crate::console_println!("Container {} has no running processes.", id);
+                    shell_println!("Container {} has no running processes.", id);
                     return;
                 }
-                crate::console_println!("=== Container {} processes ({}) ===", id, pids.len());
-                crate::console_println!("{:<8} {:<10} {}", "PID", "State", "Name");
+                shell_println!("=== Container {} processes ({}) ===", id, pids.len());
+                shell_println!("{:<8} {:<10} {}", "PID", "State", "Name");
                 for pid in pids {
                     // The process may exit between the snapshot and the lookup;
                     // show "(gone)" rather than dropping the row so the count
@@ -91610,7 +91543,7 @@ fn cmd_container(args: &str) {
                     };
                     let name = crate::proc::pcb::name(pid)
                         .unwrap_or_else(|| alloc::string::String::from("(gone)"));
-                    crate::console_println!("{:<8} {:<10} {}", pid, state, name);
+                    shell_println!("{:<8} {:<10} {}", pid, state, name);
                 }
             }
             case(&parts);
@@ -91632,10 +91565,10 @@ fn cmd_container(args: &str) {
                         .filter(|(_, _, st)| *st == container::ContainerState::Running)
                         .collect();
                     if running.is_empty() {
-                        crate::console_println!("(no running containers)");
+                        shell_println!("(no running containers)");
                         return;
                     }
-                    crate::console_println!(
+                    shell_println!(
                         "{:>4}  {:<20} {:>8} {:>10} {:>6}",
                         "ID",
                         "NAME",
@@ -91656,7 +91589,7 @@ fn cmd_container(args: &str) {
                                 } else {
                                     &rname
                                 };
-                                crate::console_println!(
+                                shell_println!(
                                     "{:>4}  {:<20} {:>8} {:>10} {:>6}",
                                     rid,
                                     name_disp,
@@ -91665,7 +91598,7 @@ fn cmd_container(args: &str) {
                                     cg.nr_tasks
                                 );
                             }
-                            None => crate::console_println!(
+                            None => shell_println!(
                                 "{:>4}  {:<20} {:>8} {:>10} {:>6}",
                                 rid,
                                 rname,
@@ -91678,15 +91611,15 @@ fn cmd_container(args: &str) {
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID");
+                    shell_println!("Invalid container ID");
                     return;
                 };
                 let Some(ci) = container::info(id) else {
-                    crate::console_println!("Container {} not found", id);
+                    shell_println!("Container {} not found", id);
                     return;
                 };
                 let Some(cg) = crate::cgroup::stats(ci.cgroup_id) else {
-                    crate::console_println!(
+                    shell_println!(
                         "Container {} has no cgroup stats (cgroup {} inactive)",
                         id,
                         ci.cgroup_id
@@ -91695,25 +91628,25 @@ fn cmd_container(args: &str) {
                 };
                 // 16 KiB per frame: MiB = frames / 64 (1024 KiB / 16 KiB).
                 let frames_to_mib = |frames: u64| frames / 64;
-                crate::console_println!("=== Container {} stats ({}) ===", id, ci.name);
-                crate::console_println!("  Tasks:      {}", cg.nr_tasks);
+                shell_println!("=== Container {} stats ({}) ===", id, ci.name);
+                shell_println!("  Tasks:      {}", cg.nr_tasks);
                 // CPU.
                 if cg.cpu_quota > 0 {
-                    crate::console_println!(
+                    shell_println!(
                         "  CPU:        {} / {} ticks this period (throttled {}x)",
                         cg.cpu_used,
                         cg.cpu_quota,
                         cg.cpu_throttle_count
                     );
                 } else {
-                    crate::console_println!(
+                    shell_println!(
                         "  CPU:        {} ticks this period (unlimited)",
                         cg.cpu_used
                     );
                 }
                 // Memory.
                 if cg.mem_limit > 0 {
-                    crate::console_println!(
+                    shell_println!(
                         "  Memory:     {} / {} frames ({} / {} MiB), peak {} frames",
                         cg.mem_usage,
                         cg.mem_limit,
@@ -91722,7 +91655,7 @@ fn cmd_container(args: &str) {
                         cg.mem_peak
                     );
                 } else {
-                    crate::console_println!(
+                    shell_println!(
                         "  Memory:     {} frames ({} MiB) of unlimited, peak {} frames",
                         cg.mem_usage,
                         frames_to_mib(cg.mem_usage),
@@ -91732,7 +91665,7 @@ fn cmd_container(args: &str) {
                 // I/O (bytes stored as frame counts).
                 let io_limited = cg.io_ops_limit > 0 || cg.io_bytes_limit > 0;
                 if io_limited {
-                    crate::console_println!(
+                    shell_println!(
                         "  I/O:        {} ops, {} frames ({} MiB) this period (throttled {}x)",
                         cg.io_ops_used,
                         cg.io_bytes_used,
@@ -91740,7 +91673,7 @@ fn cmd_container(args: &str) {
                         cg.io_throttle_count
                     );
                 } else {
-                    crate::console_println!(
+                    shell_println!(
                         "  I/O:        {} ops, {} frames ({} MiB) this period (unlimited)",
                         cg.io_ops_used,
                         cg.io_bytes_used,
@@ -91761,13 +91694,13 @@ fn cmd_container(args: &str) {
                 // `--memory 0`) sets the corresponding limit to unlimited. At least
                 // one field is required.
                 let Some(id_str) = parts.get(1) else {
-                    crate::console_println!(
+                    shell_println!(
                         "Usage: container update <id> [--cpus N] [--memory SIZE] [--restart POLICY]"
                     );
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID");
+                    shell_println!("Invalid container ID");
                     return;
                 };
                 let mut cpu_percent: Option<u64> = None;
@@ -91784,7 +91717,7 @@ fn cmd_container(args: &str) {
                         match container::parse_restart_policy(val) {
                             Some(p) => restart = Some(p),
                             None => {
-                                crate::console_println!(
+                                shell_println!(
                                     "Invalid restart policy '{}' (want no|always|unless-stopped|on-failure[:N])",
                                     val
                                 );
@@ -91796,13 +91729,13 @@ fn cmd_container(args: &str) {
                     }
                     if arg == "--restart" {
                         let Some(&val) = parts.get(i + 1) else {
-                            crate::console_println!("--restart requires a value");
+                            shell_println!("--restart requires a value");
                             return;
                         };
                         match container::parse_restart_policy(val) {
                             Some(p) => restart = Some(p),
                             None => {
-                                crate::console_println!(
+                                shell_println!(
                                     "Invalid restart policy '{}' (want no|always|unless-stopped|on-failure[:N])",
                                     val
                                 );
@@ -91815,7 +91748,7 @@ fn cmd_container(args: &str) {
                     match arg {
                         "--cpus" => {
                             let Some(&val) = parts.get(i + 1) else {
-                                crate::console_println!("--cpus requires a value");
+                                shell_println!("--cpus requires a value");
                                 return;
                             };
                             // "0" explicitly means unlimited; parse_cpus_to_percent
@@ -91826,7 +91759,7 @@ fn cmd_container(args: &str) {
                                 match parse_cpus_to_percent(val) {
                                     Some(p) => cpu_percent = Some(p),
                                     None => {
-                                        crate::console_println!("Invalid --cpus value: {}", val);
+                                        shell_println!("Invalid --cpus value: {}", val);
                                         return;
                                     }
                                 }
@@ -91835,7 +91768,7 @@ fn cmd_container(args: &str) {
                         }
                         "--memory" | "-m" => {
                             let Some(&val) = parts.get(i + 1) else {
-                                crate::console_println!("--memory requires a value");
+                                shell_println!("--memory requires a value");
                                 return;
                             };
                             if val == "0" {
@@ -91844,7 +91777,7 @@ fn cmd_container(args: &str) {
                                 match parse_mem_size_to_frames(val) {
                                     Some(f) => mem_frames = Some(f),
                                     None => {
-                                        crate::console_println!("Invalid --memory value: {}", val);
+                                        shell_println!("Invalid --memory value: {}", val);
                                         return;
                                     }
                                 }
@@ -91852,13 +91785,13 @@ fn cmd_container(args: &str) {
                             i += 2;
                         }
                         other => {
-                            crate::console_println!("Unknown option: {}", other);
+                            shell_println!("Unknown option: {}", other);
                             return;
                         }
                     }
                 }
                 if cpu_percent.is_none() && mem_frames.is_none() && restart.is_none() {
-                    crate::console_println!(
+                    shell_println!(
                         "Usage: container update <id> [--cpus N] [--memory SIZE] [--restart POLICY] (at least one)"
                     );
                     return;
@@ -91868,10 +91801,10 @@ fn cmd_container(args: &str) {
                 if let Some(policy) = restart {
                     match container::set_restart_policy(id, policy) {
                         Ok(()) => {
-                            crate::console_println!("Container {} restart policy: {}", id, policy)
+                            shell_println!("Container {} restart policy: {}", id, policy)
                         }
                         Err(e) => {
-                            crate::console_println!("Error: {:?}", e);
+                            shell_println!("Error: {:?}", e);
                             return;
                         }
                     }
@@ -91881,16 +91814,16 @@ fn cmd_container(args: &str) {
                         Ok(()) => {
                             if let Some(p) = cpu_percent {
                                 if p == 0 {
-                                    crate::console_println!("Container {} CPU: unlimited", id);
+                                    shell_println!("Container {} CPU: unlimited", id);
                                 } else {
-                                    crate::console_println!("Container {} CPU: {}%", id, p);
+                                    shell_println!("Container {} CPU: {}%", id, p);
                                 }
                             }
                             if let Some(f) = mem_frames {
                                 if f == 0 {
-                                    crate::console_println!("Container {} memory: unlimited", id);
+                                    shell_println!("Container {} memory: unlimited", id);
                                 } else {
-                                    crate::console_println!(
+                                    shell_println!(
                                         "Container {} memory: {} frames ({} MiB)",
                                         id,
                                         f,
@@ -91899,7 +91832,7 @@ fn cmd_container(args: &str) {
                                 }
                             }
                         }
-                        Err(e) => crate::console_println!("Error: {:?}", e),
+                        Err(e) => shell_println!("Error: {:?}", e),
                     }
                 }
             }
@@ -91910,20 +91843,20 @@ fn cmd_container(args: &str) {
             fn case(parts: &[&str]) {
                 // container rename <id> <new-name>  (Docker `rename`)
                 let Some(id_str) = parts.get(1) else {
-                    crate::console_println!("Usage: container rename <id> <new-name>");
+                    shell_println!("Usage: container rename <id> <new-name>");
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID");
+                    shell_println!("Invalid container ID");
                     return;
                 };
                 let Some(&new_name) = parts.get(2) else {
-                    crate::console_println!("Usage: container rename <id> <new-name>");
+                    shell_println!("Usage: container rename <id> <new-name>");
                     return;
                 };
                 match container::rename(id, new_name) {
-                    Ok(()) => crate::console_println!("Container {} renamed to '{}'", id, new_name),
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Ok(()) => shell_println!("Container {} renamed to '{}'", id, new_name),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
             case(&parts);
@@ -91935,25 +91868,22 @@ fn cmd_container(args: &str) {
                 // container by killing all its processes; the init's exit
                 // auto-stops the container with exit code 137.
                 if parts.len() < 2 {
-                    crate::console_println!("Usage: container kill <id> [id...]");
+                    shell_println!("Usage: container kill <id> [id...]");
                     return;
                 }
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
-                        crate::console_println!("Invalid container ID '{}'", id_str);
+                        shell_println!("Invalid container ID '{}'", id_str);
                         continue;
                     };
                     match container::kill(id) {
                         Ok(0) => {
-                            crate::console_println!(
-                                "Container {}: no running processes to kill",
-                                id
-                            )
+                            shell_println!("Container {}: no running processes to kill", id)
                         }
                         Ok(n) => {
-                            crate::console_println!("Container {}: killed {} process(es)", id, n)
+                            shell_println!("Container {}: killed {} process(es)", id, n)
                         }
-                        Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                        Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
                     }
                 }
             }
@@ -91966,19 +91896,19 @@ fn cmd_container(args: &str) {
                 // published port mappings (`-p host:container[/proto]`) in the
                 // form `CONTAINER/PROTO -> HOST`, matching Docker's output.
                 let Some(id_str) = parts.get(1) else {
-                    crate::console_println!("Usage: container port <id>");
+                    shell_println!("Usage: container port <id>");
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID");
+                    shell_println!("Invalid container ID");
                     return;
                 };
                 let Some(ports) = container::published_ports(id) else {
-                    crate::console_println!("Container {} not found", id);
+                    shell_println!("Container {} not found", id);
                     return;
                 };
                 if ports.is_empty() {
-                    crate::console_println!("Container {} publishes no ports.", id);
+                    shell_println!("Container {} publishes no ports.", id);
                     return;
                 }
                 for (proto, host_port, container_port) in ports {
@@ -91987,7 +91917,7 @@ fn cmd_container(args: &str) {
                         crate::net::nat::NatProto::Udp => "udp",
                     };
                     // Docker renders forwards as `80/tcp -> 0.0.0.0:8080`.
-                    crate::console_println!("{}/{} -> 0.0.0.0:{}", container_port, p, host_port);
+                    shell_println!("{}/{} -> 0.0.0.0:{}", container_port, p, host_port);
                 }
             }
             case(&parts);
@@ -92001,22 +91931,22 @@ fn cmd_container(args: &str) {
                 // the shell task on the container's init process and is woken by the
                 // scheduler when it exits — no CPU-burning poll loop.
                 let Some(id_str) = parts.get(1) else {
-                    crate::console_println!("Usage: container wait <id>");
+                    shell_println!("Usage: container wait <id>");
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID");
+                    shell_println!("Invalid container ID");
                     return;
                 };
                 match container::wait(id) {
                     Ok(container::WaitOutcome::Exited(code)) => {
-                        crate::console_println!("{}", code);
+                        shell_println!("{}", code);
                     }
                     Ok(container::WaitOutcome::Removed) => {
-                        crate::console_println!("Container {} removed while waiting", id);
+                        shell_println!("Container {} removed while waiting", id);
                     }
                     Err(_) => {
-                        crate::console_println!("Container {} not found", id);
+                        shell_println!("Container {} not found", id);
                     }
                 }
             }
@@ -92029,30 +91959,27 @@ fn cmd_container(args: &str) {
                 // the container relative to its image — A (added), C (changed),
                 // D (deleted) — by inspecting the overlay's writable upper layer.
                 let Some(id_str) = parts.get(1) else {
-                    crate::console_println!("Usage: container diff <id>");
+                    shell_println!("Usage: container diff <id>");
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID");
+                    shell_println!("Invalid container ID");
                     return;
                 };
                 match container::diff(id) {
                     Ok(changes) => {
                         if changes.is_empty() {
-                            crate::console_println!("(no changes)");
+                            shell_println!("(no changes)");
                         } else {
                             for c in &changes {
-                                crate::console_println!("{} {}", c.kind.prefix(), c.path.display());
+                                shell_println!("{} {}", c.kind.prefix(), c.path.display());
                             }
                         }
                     }
                     Err(crate::error::KernelError::InvalidArgument) => {
-                        crate::console_println!(
-                            "Container {} has no overlay rootfs (nothing to diff)",
-                            id
-                        );
+                        shell_println!("Container {} has no overlay rootfs (nothing to diff)", id);
                     }
-                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                    Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
                 }
             }
             case(&parts);
@@ -92063,21 +91990,19 @@ fn cmd_container(args: &str) {
                 // container pause <id> [id...]  (Docker `pause`): freeze the
                 // container, suspending all of its threads until `unpause`.
                 if parts.len() < 2 {
-                    crate::console_println!("Usage: container pause <id> [id...]");
+                    shell_println!("Usage: container pause <id> [id...]");
                     return;
                 }
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
-                        crate::console_println!("Invalid container ID '{}'", id_str);
+                        shell_println!("Invalid container ID '{}'", id_str);
                         continue;
                     };
                     match container::pause(id) {
-                        Ok(n) => crate::console_println!(
-                            "Container {} paused ({} thread(s) suspended)",
-                            id,
-                            n
-                        ),
-                        Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                        Ok(n) => {
+                            shell_println!("Container {} paused ({} thread(s) suspended)", id, n)
+                        }
+                        Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
                     }
                 }
             }
@@ -92089,21 +92014,19 @@ fn cmd_container(args: &str) {
                 // container unpause <id> [id...]  (Docker `unpause`): thaw a frozen
                 // container, resuming all of its threads.
                 if parts.len() < 2 {
-                    crate::console_println!("Usage: container unpause <id> [id...]");
+                    shell_println!("Usage: container unpause <id> [id...]");
                     return;
                 }
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
-                        crate::console_println!("Invalid container ID '{}'", id_str);
+                        shell_println!("Invalid container ID '{}'", id_str);
                         continue;
                     };
                     match container::unpause(id) {
-                        Ok(n) => crate::console_println!(
-                            "Container {} unpaused ({} thread(s) resumed)",
-                            id,
-                            n
-                        ),
-                        Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                        Ok(n) => {
+                            shell_println!("Container {} unpaused ({} thread(s) resumed)", id, n)
+                        }
+                        Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
                     }
                 }
             }
@@ -92120,20 +92043,20 @@ fn cmd_container(args: &str) {
                 // against the rootfs, and `..` cannot escape it.  Must be set
                 // while the container is still in the Created state.
                 let Some(id_str) = parts.get(1) else {
-                    crate::console_println!("Usage: container rootfs <id> <host-path>");
+                    shell_println!("Usage: container rootfs <id> <host-path>");
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID");
+                    shell_println!("Invalid container ID");
                     return;
                 };
                 let Some(&path) = parts.get(2) else {
-                    crate::console_println!("Usage: container rootfs <id> <host-path>");
+                    shell_println!("Usage: container rootfs <id> <host-path>");
                     return;
                 };
                 match container::set_root_path(id, path) {
-                    Ok(()) => crate::console_println!("Container {} rootfs set to '{}'", id, path),
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Ok(()) => shell_println!("Container {} rootfs set to '{}'", id, path),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
             case(&parts);
@@ -92155,15 +92078,15 @@ fn cmd_container(args: &str) {
                 // resolve against the container rootfs.  Give an absolute host
                 // path to the binary you want as the container's init process.
                 let Some(id_str) = parts.get(1) else {
-                    crate::console_println!("Usage: container run <id> <elf-path> [args...]");
+                    shell_println!("Usage: container run <id> <elf-path> [args...]");
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID");
+                    shell_println!("Invalid container ID");
                     return;
                 };
                 let Some(&path) = parts.get(2) else {
-                    crate::console_println!("Usage: container run <id> <elf-path> [args...]");
+                    shell_println!("Usage: container run <id> <elf-path> [args...]");
                     return;
                 };
 
@@ -92174,14 +92097,14 @@ fn cmd_container(args: &str) {
                 let extra_args: alloc::vec::Vec<&str> = parts.iter().skip(3).copied().collect();
                 match container::run_path(id, path, &extra_args) {
                     Ok(pid) => {
-                        crate::console_println!(
+                        shell_println!(
                             "Container {} running: init pid={} (ELF: {})",
                             id,
                             pid,
                             path
                         );
                     }
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
             case(&parts);
@@ -92192,19 +92115,19 @@ fn cmd_container(args: &str) {
                 // container restart <id> [id...]  (Docker `restart`): re-launch each
                 // container's recorded init command (from the last `run`).
                 if parts.len() < 2 {
-                    crate::console_println!("Usage: container restart <id> [id...]");
+                    shell_println!("Usage: container restart <id> [id...]");
                     return;
                 }
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
-                        crate::console_println!("Invalid container ID '{}'", id_str);
+                        shell_println!("Invalid container ID '{}'", id_str);
                         continue;
                     };
                     match container::restart(id) {
                         Ok(pid) => {
-                            crate::console_println!("Container {} restarted: init pid={}", id, pid)
+                            shell_println!("Container {} restarted: init pid={}", id, pid)
                         }
-                        Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                        Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
                     }
                 }
             }
@@ -92218,9 +92141,7 @@ fn cmd_container(args: &str) {
                 // is a container reference of the form `ID:/path`; the other is a
                 // plain host VFS path.
                 let (Some(&src), Some(&dst)) = (parts.get(1), parts.get(2)) else {
-                    crate::console_println!(
-                        "Usage: container cp <src> <dest>  (one side is ID:/path)"
-                    );
+                    shell_println!("Usage: container cp <src> <dest>  (one side is ID:/path)");
                     return;
                 };
                 // Parse "ID:/path" into (id, path); a plain host path yields None.
@@ -92238,25 +92159,25 @@ fn cmd_container(args: &str) {
                             Ok(EntryType::Directory) => {
                                 match container::copy_dir_from_container(id, &cpath) {
                                     Ok(archive) => match container::untar_tree(dst, &archive) {
-                                        Ok(()) => crate::console_println!(
+                                        Ok(()) => shell_println!(
                                             "Copied directory {}:{} -> {} ({} bytes archived)",
                                             id,
                                             cpath,
                                             dst,
                                             archive.len()
                                         ),
-                                        Err(e) => crate::console_println!(
+                                        Err(e) => shell_println!(
                                             "Failed to extract into '{}': {:?}",
                                             dst,
                                             e
                                         ),
                                     },
-                                    Err(e) => crate::console_println!("Error: {:?}", e),
+                                    Err(e) => shell_println!("Error: {:?}", e),
                                 }
                             }
                             Ok(_) => match container::copy_from_container(id, &cpath) {
                                 Ok(data) => match Vfs::write_file(dst, &data) {
-                                    Ok(()) => crate::console_println!(
+                                    Ok(()) => shell_println!(
                                         "Copied {} bytes from container {}:{} to {}",
                                         data.len(),
                                         id,
@@ -92264,16 +92185,12 @@ fn cmd_container(args: &str) {
                                         dst
                                     ),
                                     Err(e) => {
-                                        crate::console_println!(
-                                            "Failed to write '{}': {:?}",
-                                            dst,
-                                            e
-                                        )
+                                        shell_println!("Failed to write '{}': {:?}", dst, e)
                                     }
                                 },
-                                Err(e) => crate::console_println!("Error: {:?}", e),
+                                Err(e) => shell_println!("Error: {:?}", e),
                             },
-                            Err(e) => crate::console_println!("Error: {:?}", e),
+                            Err(e) => shell_println!("Error: {:?}", e),
                         }
                     }
                     (None, Some((id, cpath))) => {
@@ -92285,50 +92202,44 @@ fn cmd_container(args: &str) {
                                     Ok(archive) => {
                                         match container::copy_dir_to_container(id, &cpath, &archive)
                                         {
-                                            Ok(()) => crate::console_println!(
+                                            Ok(()) => shell_println!(
                                                 "Copied directory {} -> {}:{} ({} bytes archived)",
                                                 src,
                                                 id,
                                                 cpath,
                                                 archive.len()
                                             ),
-                                            Err(e) => crate::console_println!("Error: {:?}", e),
+                                            Err(e) => shell_println!("Error: {:?}", e),
                                         }
                                     }
                                     Err(e) => {
-                                        crate::console_println!(
-                                            "Failed to archive '{}': {:?}",
-                                            src,
-                                            e
-                                        )
+                                        shell_println!("Failed to archive '{}': {:?}", src, e)
                                     }
                                 }
                             }
                             Ok(_) => match Vfs::read_file(src) {
                                 Ok(data) => match container::copy_to_container(id, &cpath, &data) {
-                                    Ok(()) => crate::console_println!(
+                                    Ok(()) => shell_println!(
                                         "Copied {} bytes from {} to container {}:{}",
                                         data.len(),
                                         src,
                                         id,
                                         cpath
                                     ),
-                                    Err(e) => crate::console_println!("Error: {:?}", e),
+                                    Err(e) => shell_println!("Error: {:?}", e),
                                 },
                                 Err(e) => {
-                                    crate::console_println!("Failed to read '{}': {:?}", src, e)
+                                    shell_println!("Failed to read '{}': {:?}", src, e)
                                 }
                             },
-                            Err(e) => crate::console_println!("Failed to stat '{}': {:?}", src, e),
+                            Err(e) => shell_println!("Failed to stat '{}': {:?}", src, e),
                         }
                     }
                     (Some(_), Some(_)) => {
-                        crate::console_println!("cp between two containers is not supported");
+                        shell_println!("cp between two containers is not supported");
                     }
                     (None, None) => {
-                        crate::console_println!(
-                            "One of <src>/<dest> must be a container ref (ID:/path)"
-                        );
+                        shell_println!("One of <src>/<dest> must be a container ref (ID:/path)");
                     }
                 }
             }
@@ -92356,14 +92267,14 @@ fn cmd_container(args: &str) {
                 }
 
                 let Some(id_str) = parts.get(1) else {
-                    crate::console_println!("Usage: container exec <id> <kshell-command...>");
-                    crate::console_println!(
+                    shell_println!("Usage: container exec <id> <kshell-command...>");
+                    shell_println!(
                         "       container exec --rootfs [-d] [-w DIR] <id> <path> [args...]  (real rootfs exec)"
                     );
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID");
+                    shell_println!("Invalid container ID");
                     return;
                 };
                 // The command tail is everything in the raw arg string after the id
@@ -92372,25 +92283,21 @@ fn cmd_container(args: &str) {
                 let after_id = args.get(cmd_offset..).unwrap_or("").trim_start();
                 let after_id = after_id.strip_prefix(id_str).unwrap_or("").trim_start();
                 if after_id.is_empty() {
-                    crate::console_println!("Usage: container exec <id> <kshell-command...>");
+                    shell_println!("Usage: container exec <id> <kshell-command...>");
                     return;
                 }
 
                 // Look up the container's network namespace and verify it is running.
                 let Some((_, _, net_ns)) = container::namespace_ids(id) else {
-                    crate::console_println!("Container {} not found", id);
+                    shell_println!("Container {} not found", id);
                     return;
                 };
                 let Some(ci) = container::info(id) else {
-                    crate::console_println!("Container {} not found", id);
+                    shell_println!("Container {} not found", id);
                     return;
                 };
                 if !matches!(ci.state, container::ContainerState::Running) {
-                    crate::console_println!(
-                        "Container {} is not running (state: {:?})",
-                        id,
-                        ci.state
-                    );
+                    shell_println!("Container {} is not running (state: {:?})", id, ci.state);
                     return;
                 }
 
@@ -92400,13 +92307,13 @@ fn cmd_container(args: &str) {
                 let task_id = crate::sched::current_task_id();
                 let orig_ns = crate::sched::current_task_net_ns();
                 if let Err(e) = crate::sched::set_task_net_ns(task_id, net_ns) {
-                    crate::console_println!("Failed to enter namespace: {:?}", e);
+                    shell_println!("Failed to enter namespace: {:?}", e);
                     return;
                 }
-                crate::console_println!("[exec] Entering container {} (net_ns={})", id, net_ns);
+                shell_println!("[exec] Entering container {} (net_ns={})", id, net_ns);
                 execute(after_id);
                 let _ = crate::sched::set_task_net_ns(task_id, orig_ns);
-                crate::console_println!("[exec] Exited container {} namespace", id);
+                shell_println!("[exec] Exited container {} namespace", id);
             }
             case(&parts, args);
         }
@@ -92431,7 +92338,7 @@ fn cmd_container(args: &str) {
                 // containers (Stopped/Failed).  Created and running containers are
                 // preserved.
                 let removed = container::prune();
-                crate::console_println!("Removed {} stopped container(s)", removed);
+                shell_println!("Removed {} stopped container(s)", removed);
             }
             case();
         }
@@ -92464,19 +92371,15 @@ fn cmd_container(args: &str) {
                             .iter()
                             .filter(|n| !n.allocations.is_empty())
                             .count();
-                        crate::console_println!("TYPE            TOTAL     ACTIVE    SIZE");
-                        crate::console_println!(
-                            "Containers      {:<9} {:<9} -",
-                            total_ct,
-                            running_ct
-                        );
-                        crate::console_println!(
+                        shell_println!("TYPE            TOTAL     ACTIVE    SIZE");
+                        shell_println!("Containers      {:<9} {:<9} -", total_ct, running_ct);
+                        shell_println!(
                             "Volumes         {:<9} {:<9} {}",
                             vols.len(),
                             "-",
                             format_size_human(vol_bytes)
                         );
-                        crate::console_println!("Networks        {:<9} {:<9} -", nets, active_nets);
+                        shell_println!("Networks        {:<9} {:<9} -", nets, active_nets);
                     }
                     Some("prune") => {
                         // Docker `system prune`: reclaim stopped containers and
@@ -92486,21 +92389,21 @@ fn cmd_container(args: &str) {
                         // (Docker likewise leaves volumes alone without --volumes.)
                         let ct_removed = container::prune();
                         let net_removed = crate::cnetwork::prune();
-                        crate::console_println!(
+                        shell_println!(
                             "Removed {} stopped container(s), {} unused network(s)",
                             ct_removed,
                             net_removed
                         );
-                        crate::console_println!(
+                        shell_println!(
                             "Volumes left intact (usage is untracked; remove explicitly with `container volume remove`)"
                         );
                     }
                     _ => {
-                        crate::console_println!("Usage: container system <df|prune>");
-                        crate::console_println!(
+                        shell_println!("Usage: container system <df|prune>");
+                        shell_println!(
                             "  container system df     — disk usage by containers/volumes/networks"
                         );
-                        crate::console_println!(
+                        shell_println!(
                             "  container system prune  — remove stopped containers + unused networks"
                         );
                     }
@@ -92514,26 +92417,26 @@ fn cmd_container(args: &str) {
                 // container export <id> <host-tar-path>  (Docker `export`): pack the
                 // container's rootfs into a tar archive written to the host VFS.
                 let (Some(id_str), Some(&out_path)) = (parts.get(1), parts.get(2)) else {
-                    crate::console_println!("Usage: container export <id> <host-tar-path>");
+                    shell_println!("Usage: container export <id> <host-tar-path>");
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID");
+                    shell_println!("Invalid container ID");
                     return;
                 };
                 match container::export_rootfs(id) {
                     Ok(archive) => match crate::fs::vfs::Vfs::write_file(out_path, &archive) {
-                        Ok(()) => crate::console_println!(
+                        Ok(()) => shell_println!(
                             "Exported container {} rootfs: {} bytes -> {}",
                             id,
                             archive.len(),
                             out_path
                         ),
                         Err(e) => {
-                            crate::console_println!("Failed to write '{}': {:?}", out_path, e)
+                            shell_println!("Failed to write '{}': {:?}", out_path, e)
                         }
                     },
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
             case(&parts);
@@ -92547,23 +92450,21 @@ fn cmd_container(args: &str) {
                 let (Some(&tar_path), Some(&name), Some(&dest_dir)) =
                     (parts.get(1), parts.get(2), parts.get(3))
                 else {
-                    crate::console_println!(
-                        "Usage: container import <host-tar-path> <name> <rootfs-dir>"
-                    );
+                    shell_println!("Usage: container import <host-tar-path> <name> <rootfs-dir>");
                     return;
                 };
                 match crate::fs::vfs::Vfs::read_file(tar_path) {
                     Ok(archive) => match container::import_rootfs(name, &archive, dest_dir) {
-                        Ok(id) => crate::console_println!(
+                        Ok(id) => shell_println!(
                             "Imported {} ({} bytes) -> container {} (rootfs {})",
                             tar_path,
                             archive.len(),
                             id,
                             dest_dir
                         ),
-                        Err(e) => crate::console_println!("Error: {:?}", e),
+                        Err(e) => shell_println!("Error: {:?}", e),
                     },
-                    Err(e) => crate::console_println!("Failed to read '{}': {:?}", tar_path, e),
+                    Err(e) => shell_println!("Failed to read '{}': {:?}", tar_path, e),
                 }
             }
             case(&parts);
@@ -92577,23 +92478,21 @@ fn cmd_container(args: &str) {
                 let (Some(id_str), Some(&new_name), Some(&dest_dir)) =
                     (parts.get(1), parts.get(2), parts.get(3))
                 else {
-                    crate::console_println!(
-                        "Usage: container commit <src-id> <new-name> <rootfs-dir>"
-                    );
+                    shell_println!("Usage: container commit <src-id> <new-name> <rootfs-dir>");
                     return;
                 };
                 let Ok(src) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID");
+                    shell_println!("Invalid container ID");
                     return;
                 };
                 match container::commit(src, new_name, dest_dir) {
-                    Ok(id) => crate::console_println!(
+                    Ok(id) => shell_println!(
                         "Committed container {} -> container {} (rootfs {})",
                         src,
                         id,
                         dest_dir
                     ),
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
             case(&parts);
@@ -92620,15 +92519,12 @@ fn cmd_container(args: &str) {
                                     li = li.saturating_add(2);
                                 }
                                 Err(_) => {
-                                    crate::console_println!(
-                                        "container logs: invalid --tail value '{}'",
-                                        n
-                                    );
+                                    shell_println!("container logs: invalid --tail value '{}'", n);
                                     return;
                                 }
                             },
                             None => {
-                                crate::console_println!("container logs: --tail needs a value");
+                                shell_println!("container logs: --tail needs a value");
                                 return;
                             }
                         },
@@ -92640,11 +92536,11 @@ fn cmd_container(args: &str) {
                     }
                 }
                 let Some(id_str) = id_str else {
-                    crate::console_println!("Usage: container logs [--tail N] ID");
+                    shell_println!("Usage: container logs [--tail N] ID");
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID");
+                    shell_println!("Invalid container ID");
                     return;
                 };
                 match container::logs(id) {
@@ -92669,14 +92565,14 @@ fn cmd_container(args: &str) {
                             };
                             if !out.is_empty() {
                                 crate::console::write_str(&out);
-                                crate::console_println!();
+                                shell_println!();
                             }
                         }
                         // Non-UTF-8 capture: don't force bytes through the text
                         // console — report the size (matches `cat`'s convention).
-                        Err(_) => crate::console_println!("(binary log, {} bytes)", data.len()),
+                        Err(_) => shell_println!("(binary log, {} bytes)", data.len()),
                     },
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
             case(&parts);
@@ -92703,9 +92599,7 @@ fn cmd_container(args: &str) {
                                     ei = ei.saturating_add(2);
                                 }
                                 None => {
-                                    crate::console_println!(
-                                        "container events: -n needs a numeric value"
-                                    );
+                                    shell_println!("container events: -n needs a numeric value");
                                     return;
                                 }
                             }
@@ -92720,9 +92614,7 @@ fn cmd_container(args: &str) {
                                     ei = ei.saturating_add(2);
                                 }
                                 None => {
-                                    crate::console_println!(
-                                        "container events: --id needs a container ID"
-                                    );
+                                    shell_println!("container events: --id needs a container ID");
                                     return;
                                 }
                             }
@@ -92733,10 +92625,7 @@ fn cmd_container(args: &str) {
                             match tok.parse::<u32>() {
                                 Ok(v) => filter_id = Some(v),
                                 Err(_) => {
-                                    crate::console_println!(
-                                        "container events: unknown argument '{}'",
-                                        tok
-                                    );
+                                    shell_println!("container events: unknown argument '{}'", tok);
                                     return;
                                 }
                             }
@@ -92747,7 +92636,7 @@ fn cmd_container(args: &str) {
                 }
                 let events = container::events_snapshot(0, limit, filter_id);
                 if events.is_empty() {
-                    crate::console_println!("(no container events recorded)");
+                    shell_println!("(no container events recorded)");
                 } else {
                     for e in &events {
                         // Monotonic timestamp shown as seconds.milliseconds since boot
@@ -92757,7 +92646,7 @@ fn cmd_container(args: &str) {
                         let ms = (e.time_ns % 1_000_000_000) / 1_000_000;
                         let action = e.kind.action();
                         match e.exit_code {
-                            Some(code) => crate::console_println!(
+                            Some(code) => shell_println!(
                                 "{:>6}.{:03}s  container {:<8} id={} name={} (exit {})",
                                 secs,
                                 ms,
@@ -92766,7 +92655,7 @@ fn cmd_container(args: &str) {
                                 e.name,
                                 code
                             ),
-                            None => crate::console_println!(
+                            None => shell_println!(
                                 "{:>6}.{:03}s  container {:<8} id={} name={}",
                                 secs,
                                 ms,
@@ -92791,60 +92680,58 @@ fn cmd_container(args: &str) {
                     "ls" | "list" => {
                         let names = crate::volume::list();
                         if names.is_empty() {
-                            crate::console_println!("(no volumes)");
+                            shell_println!("(no volumes)");
                         } else {
-                            crate::console_println!("{:<24} {}", "NAME", "MOUNTPOINT");
+                            shell_println!("{:<24} {}", "NAME", "MOUNTPOINT");
                             for name in &names {
                                 let mount = crate::volume::path_of(name).unwrap_or_default();
-                                crate::console_println!("{:<24} {}", name, mount.display());
+                                shell_println!("{:<24} {}", name, mount.display());
                             }
                         }
                     }
                     "create" => {
                         let Some(name) = parts.get(2) else {
-                            crate::console_println!("Usage: container volume create NAME");
+                            shell_println!("Usage: container volume create NAME");
                             return;
                         };
                         match crate::volume::create(name) {
-                            Ok(path) => crate::console_println!("{} ({})", name, path.display()),
-                            Err(e) => crate::console_println!("Error: {:?}", e),
+                            Ok(path) => shell_println!("{} ({})", name, path.display()),
+                            Err(e) => shell_println!("Error: {:?}", e),
                         }
                     }
                     "rm" | "remove" | "delete" => {
                         if parts.len() < 3 {
-                            crate::console_println!("Usage: container volume rm NAME [NAME...]");
+                            shell_println!("Usage: container volume rm NAME [NAME...]");
                             return;
                         }
                         for name in parts.iter().skip(2) {
                             match crate::volume::remove(name) {
-                                Ok(()) => crate::console_println!("{}", name),
-                                Err(e) => crate::console_println!("{}: {:?}", name, e),
+                                Ok(()) => shell_println!("{}", name),
+                                Err(e) => shell_println!("{}: {:?}", name, e),
                             }
                         }
                     }
                     "inspect" => {
                         let Some(name) = parts.get(2) else {
-                            crate::console_println!("Usage: container volume inspect NAME");
+                            shell_println!("Usage: container volume inspect NAME");
                             return;
                         };
                         match crate::volume::path_of(name) {
                             Some(path) => {
-                                crate::console_println!("Name:       {}", name);
-                                crate::console_println!("Driver:     local");
-                                crate::console_println!("Mountpoint: {}", path.display());
+                                shell_println!("Name:       {}", name);
+                                shell_println!("Driver:     local");
+                                shell_println!("Mountpoint: {}", path.display());
                             }
-                            None => crate::console_println!("Volume '{}' not found", name),
+                            None => shell_println!("Volume '{}' not found", name),
                         }
                     }
                     "prune" => {
                         let n = crate::volume::prune();
-                        crate::console_println!("Removed {} volume(s)", n);
+                        shell_println!("Removed {} volume(s)", n);
                     }
                     other => {
-                        crate::console_println!("Unknown volume action '{}'", other);
-                        crate::console_println!(
-                            "Usage: container volume <create|ls|rm|inspect|prune> ..."
-                        );
+                        shell_println!("Unknown volume action '{}'", other);
+                        shell_println!("Usage: container volume <create|ls|rm|inspect|prune> ...");
                     }
                 }
             }
@@ -92867,110 +92754,102 @@ fn cmd_container(args: &str) {
         _ => {
             #[inline(never)]
             fn case() {
-                crate::console_println!(
+                shell_println!(
                     "Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|system|exec|cp|export|import|commit|logs|events|volume|network|info|top|stats|update|rename|port|wait|test]"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container [list] [-a] [-q] [-n N|-l] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (-a: all, -q: IDs, -n/-l: last N/latest)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container create NAME [cpu=%] [mem=] [uid=] [net=] [restart=POLICY] [rm] — create container"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container delete [-f] ID [ID...]         — delete container(s) (-f force-removes a running one)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container rootfs ID <host-path>          — set filesystem root (chroot)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container run ID <elf-path> [args...]    — launch init process in container"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container restart ID [ID...]             — re-launch the recorded init command"
                 );
-                crate::console_println!(
-                    "  container start ID [ID...]               — mark as running"
-                );
-                crate::console_println!(
-                    "  container stop ID [ID...]                — mark as stopped"
-                );
-                crate::console_println!(
+                shell_println!("  container start ID [ID...]               — mark as running");
+                shell_println!("  container stop ID [ID...]                — mark as stopped");
+                shell_println!(
                     "  container kill ID [ID...]                — force-kill all container processes"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container pause ID [ID...]               — freeze (suspend all threads)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container unpause ID [ID...]             — thaw (resume all threads)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container prune                          — remove all stopped containers"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container system <df|prune>              — disk usage summary / reclaim stopped containers+unused networks"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container exec ID <kshell-command>       — netns-debug facade: run a kshell builtin in the container's network namespace"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container run-in [-d] ID <path> [args]   — run a real process from the container rootfs (docker exec; foreground waits + prints exit status; -d detaches)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container exec --rootfs [-d] ID <path> [args]  — alias for run-in"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container cp <src> <dest>                — copy file/dir host<->rootfs (one side ID:/path)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container export ID <host-tar-path>      — pack rootfs into a tar archive"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container import <tar> <name> <rootfs-dir> — create container from a tar archive"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container commit ID <name> <rootfs-dir>  — snapshot rootfs into a new container"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container logs [--tail N] ID             — print captured init stdout/stderr (--tail: last N lines)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container events [-n N] [--id ID]        — recent lifecycle events (create/start/die/stop/kill/pause/restart/destroy)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container volume <create|ls|rm|inspect|prune> NAME — manage named volumes (mount with -v NAME:/path)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container network <create|ls|rm|inspect|prune> NAME [--subnet CIDR] [--gateway IP] — manage user-defined networks (IPAM)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container info [--json] ID               — detailed inspection (--json: machine-readable)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container top ID                         — list processes running in container"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container stats [ID]                     — cgroup resource usage (no ID: table of all running)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container update ID [--cpus N] [--memory SIZE] [--restart POLICY] — change live limits/restart policy"
                 );
-                crate::console_println!(
-                    "  container rename ID <new-name>           — rename a container"
-                );
-                crate::console_println!(
+                shell_println!("  container rename ID <new-name>           — rename a container");
+                shell_println!(
                     "  container port ID                        — list published port mappings"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container wait ID                        — block until container stops, print exit code"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  container diff ID                        — list rootfs changes vs image (A/C/D)"
                 );
-                crate::console_println!(
-                    "  container test                           — run self-test"
-                );
-                crate::console_println!();
-                crate::console_println!("Aliases: ct");
+                shell_println!("  container test                           — run self-test");
+                shell_println!();
+                shell_println!("Aliases: ct");
             }
             case();
         }
@@ -93007,9 +92886,9 @@ fn cmd_container_network(parts: &[&str]) {
         "ls" | "list" => {
             let nets = crate::cnetwork::list();
             if nets.is_empty() {
-                crate::console_println!("(no networks)");
+                shell_println!("(no networks)");
             } else {
-                crate::console_println!(
+                shell_println!(
                     "{:<20} {:<20} {:<16} {}",
                     "NAME",
                     "SUBNET",
@@ -93018,7 +92897,7 @@ fn cmd_container_network(parts: &[&str]) {
                 );
                 for n in &nets {
                     let subnet = alloc::format!("{}/{}", fmt_ipv4(n.network_addr), n.prefix_len);
-                    crate::console_println!(
+                    shell_println!(
                         "{:<20} {:<20} {:<16} {}",
                         n.name,
                         subnet,
@@ -93030,7 +92909,7 @@ fn cmd_container_network(parts: &[&str]) {
         }
         "create" => {
             let Some(&name) = parts.get(2) else {
-                crate::console_println!(
+                shell_println!(
                     "Usage: container network create NAME [--subnet CIDR] [--gateway IP]"
                 );
                 return;
@@ -93046,15 +92925,12 @@ fn cmd_container_network(parts: &[&str]) {
                             Some(cidr) => match crate::cnetwork::parse_cidr(cidr) {
                                 Ok(v) => subnet = Some(v),
                                 Err(_) => {
-                                    crate::console_println!(
-                                        "Invalid --subnet '{}' (want A.B.C.D/N)",
-                                        cidr
-                                    );
+                                    shell_println!("Invalid --subnet '{}' (want A.B.C.D/N)", cidr);
                                     return;
                                 }
                             },
                             None => {
-                                crate::console_println!("--subnet requires a CIDR argument");
+                                shell_println!("--subnet requires a CIDR argument");
                                 return;
                             }
                         }
@@ -93065,22 +92941,19 @@ fn cmd_container_network(parts: &[&str]) {
                             Some(ip) => match crate::cnetwork::parse_ipv4(ip) {
                                 Ok(v) => gateway = Some(v),
                                 Err(_) => {
-                                    crate::console_println!(
-                                        "Invalid --gateway '{}' (want A.B.C.D)",
-                                        ip
-                                    );
+                                    shell_println!("Invalid --gateway '{}' (want A.B.C.D)", ip);
                                     return;
                                 }
                             },
                             None => {
-                                crate::console_println!("--gateway requires an IP argument");
+                                shell_println!("--gateway requires an IP argument");
                                 return;
                             }
                         }
                         j = j.saturating_add(2);
                     }
                     Some(other) => {
-                        crate::console_println!("Unknown network create flag '{}'", other);
+                        shell_println!("Unknown network create flag '{}'", other);
                         return;
                     }
                     None => break,
@@ -93089,92 +92962,83 @@ fn cmd_container_network(parts: &[&str]) {
             let result = match subnet {
                 Some((net, pfx)) => crate::cnetwork::create_with_subnet(name, net, pfx, gateway),
                 None if gateway.is_some() => {
-                    crate::console_println!("--gateway requires --subnet");
+                    shell_println!("--gateway requires --subnet");
                     return;
                 }
                 None => crate::cnetwork::create(name),
             };
             match result {
                 Ok(()) => match crate::cnetwork::inspect(name) {
-                    Some(n) => crate::console_println!(
-                        "{} ({}/{})",
-                        name,
-                        fmt_ipv4(n.network_addr),
-                        n.prefix_len
-                    ),
-                    None => crate::console_println!("{}", name),
+                    Some(n) => {
+                        shell_println!("{} ({}/{})", name, fmt_ipv4(n.network_addr), n.prefix_len)
+                    }
+                    None => shell_println!("{}", name),
                 },
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "rm" | "remove" | "delete" => {
             if parts.len() < 3 {
-                crate::console_println!("Usage: container network rm NAME [NAME...]");
+                shell_println!("Usage: container network rm NAME [NAME...]");
                 return;
             }
             for name in parts.iter().skip(2) {
                 match crate::cnetwork::remove(name) {
-                    Ok(()) => crate::console_println!("{}", name),
-                    Err(e) => crate::console_println!("{}: {:?}", name, e),
+                    Ok(()) => shell_println!("{}", name),
+                    Err(e) => shell_println!("{}: {:?}", name, e),
                 }
             }
         }
         "inspect" => {
             let Some(&name) = parts.get(2) else {
-                crate::console_println!("Usage: container network inspect NAME");
+                shell_println!("Usage: container network inspect NAME");
                 return;
             };
             match crate::cnetwork::inspect(name) {
                 Some(n) => {
-                    crate::console_println!("Name:       {}", name);
-                    crate::console_println!("Driver:     local");
-                    crate::console_println!(
-                        "Subnet:     {}/{}",
-                        fmt_ipv4(n.network_addr),
-                        n.prefix_len
-                    );
-                    crate::console_println!("Gateway:    {}", fmt_ipv4(n.gateway));
+                    shell_println!("Name:       {}", name);
+                    shell_println!("Driver:     local");
+                    shell_println!("Subnet:     {}/{}", fmt_ipv4(n.network_addr), n.prefix_len);
+                    shell_println!("Gateway:    {}", fmt_ipv4(n.gateway));
                     if n.allocations.is_empty() {
-                        crate::console_println!("Containers: (none)");
+                        shell_println!("Containers: (none)");
                     } else {
-                        crate::console_println!("Containers:");
+                        shell_println!("Containers:");
                         for (ip, owner) in &n.allocations {
                             match owner {
-                                Some(id) => crate::console_println!(
-                                    "  {} -> container {}",
-                                    fmt_ipv4(*ip),
-                                    id
-                                ),
+                                Some(id) => {
+                                    shell_println!("  {} -> container {}", fmt_ipv4(*ip), id)
+                                }
                                 None => {
-                                    crate::console_println!("  {} -> (reserved)", fmt_ipv4(*ip))
+                                    shell_println!("  {} -> (reserved)", fmt_ipv4(*ip))
                                 }
                             }
                         }
                     }
                     if !n.dns_names.is_empty() {
-                        crate::console_println!("DNS names:");
+                        shell_println!("DNS names:");
                         for (nm, ip) in &n.dns_names {
-                            crate::console_println!("  {} -> {}", nm, fmt_ipv4(*ip));
+                            shell_println!("  {} -> {}", nm, fmt_ipv4(*ip));
                         }
                     }
                 }
-                None => crate::console_println!("Network '{}' not found", name),
+                None => shell_println!("Network '{}' not found", name),
             }
         }
         "prune" => {
             let n = crate::cnetwork::prune();
-            crate::console_println!("Removed {} network(s)", n);
+            shell_println!("Removed {} network(s)", n);
         }
         "resolve" | "lookup" => {
             // container network resolve NET NAME — Docker embedded-DNS query.
             let (Some(&net), Some(&query)) = (parts.get(2), parts.get(3)) else {
-                crate::console_println!("Usage: container network resolve NET NAME");
+                shell_println!("Usage: container network resolve NET NAME");
                 return;
             };
             match crate::cnetwork::resolve(net, query) {
-                Some(ip) => crate::console_println!("{} -> {}", query, fmt_ipv4(ip)),
+                Some(ip) => shell_println!("{} -> {}", query, fmt_ipv4(ip)),
                 None => {
-                    crate::console_println!("{}: name does not resolve on network '{}'", query, net)
+                    shell_println!("{}: name does not resolve on network '{}'", query, net)
                 }
             }
         }
@@ -93182,11 +93046,11 @@ fn cmd_container_network(parts: &[&str]) {
             // container network connect NET CONTAINER — join a running/created
             // container to an additional user-defined network (Docker parity, §60).
             let (Some(&net), Some(&ctref)) = (parts.get(2), parts.get(3)) else {
-                crate::console_println!("Usage: container network connect NET CONTAINER");
+                shell_println!("Usage: container network connect NET CONTAINER");
                 return;
             };
             let Some(ct_id) = resolve_container_ref(ctref) else {
-                crate::console_println!("Container '{}' not found", ctref);
+                shell_println!("Container '{}' not found", ctref);
                 return;
             };
             // Embedded-DNS names for the new network: the container's name plus
@@ -93204,7 +93068,7 @@ fn cmd_container_network(parts: &[&str]) {
             match crate::cnetwork::connect_container(net, ct_id, &names) {
                 Ok(lease) => {
                     let peers = crate::cnetwork::inspect(net).map_or(0, |i| i.allocations.len());
-                    crate::console_println!(
+                    shell_println!(
                         "{} connected to '{}' (ip {}, {} member{})",
                         ctref,
                         net,
@@ -93213,33 +93077,33 @@ fn cmd_container_network(parts: &[&str]) {
                         if peers == 1 { "" } else { "s" }
                     );
                 }
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "disconnect" => {
             // container network disconnect NET CONTAINER — leave a network (§60).
             let (Some(&net), Some(&ctref)) = (parts.get(2), parts.get(3)) else {
-                crate::console_println!("Usage: container network disconnect NET CONTAINER");
+                shell_println!("Usage: container network disconnect NET CONTAINER");
                 return;
             };
             let Some(ct_id) = resolve_container_ref(ctref) else {
-                crate::console_println!("Container '{}' not found", ctref);
+                shell_println!("Container '{}' not found", ctref);
                 return;
             };
             match crate::cnetwork::disconnect_container(net, ct_id) {
-                Ok(()) => crate::console_println!("{} disconnected from '{}'", ctref, net),
-                Err(crate::error::KernelError::InvalidArgument) => crate::console_println!(
+                Ok(()) => shell_println!("{} disconnected from '{}'", ctref, net),
+                Err(crate::error::KernelError::InvalidArgument) => shell_println!(
                     "Cannot disconnect '{}' from its primary network '{}' (created with --network); \
                      delete the container to release it",
                     ctref,
                     net
                 ),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         other => {
-            crate::console_println!("Unknown network action '{}'", other);
-            crate::console_println!(
+            shell_println!("Unknown network action '{}'", other);
+            shell_println!(
                 "Usage: container network <create|ls|rm|inspect|prune|resolve|connect|disconnect> NAME [--subnet CIDR] [--gateway IP]"
             );
         }
@@ -93468,11 +93332,11 @@ fn cmd_docker(args: &str) {
         "commit" => {
             let mut it = rest.split_whitespace();
             let (Some(id_str), Some(reference)) = (it.next(), it.next()) else {
-                crate::console_println!("Usage: docker commit <container-id> <name:tag>");
+                shell_println!("Usage: docker commit <container-id> <name:tag>");
                 return;
             };
             let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
+                shell_println!("Invalid container ID");
                 return;
             };
             let tmp = "/tmp/oci-commit-tmp";
@@ -93481,18 +93345,18 @@ fn cmd_docker(args: &str) {
             match crate::container::commit_image(id, tmp) {
                 Ok(digest) => {
                     match crate::oci::store_tag_from_dir(tmp, reference) {
-                        Ok(_) => crate::console_println!(
+                        Ok(_) => shell_println!(
                             "Committed container {} as {} ({})",
                             id,
                             reference,
                             digest
                         ),
-                        Err(e) => crate::console_println!("commit tag failed: {:?}", e),
+                        Err(e) => shell_println!("commit tag failed: {:?}", e),
                     }
                     // Blobs are now copied into the store; drop the staging dir.
                     let _ = crate::fs::vfs::Vfs::remove_recursive(tmp);
                 }
-                Err(e) => crate::console_println!("commit failed: {:?}", e),
+                Err(e) => shell_println!("commit failed: {:?}", e),
             }
         }
         // Named image store (`/var/lib/images`): `docker images` lists tagged
@@ -93547,95 +93411,79 @@ fn cmd_docker(args: &str) {
             cmd_oci(&delegated);
         }
         "version" => {
-            crate::console_println!(
-                "SlateOS docker-compat shim — front-end for `oci` and `container`"
-            );
+            shell_println!("SlateOS docker-compat shim — front-end for `oci` and `container`");
         }
         _ => {
-            crate::console_println!(
+            shell_println!(
                 "Usage: docker <build|history|run|create|ps|start|stop|restart|kill|pause|unpause|rm|inspect|exec|logs|events|stats|top|port|wait|diff|rename|update|prune|cp|commit|export|import|save|load|system|images|tag|rmi|version> ..."
             );
-            crate::console_println!(
+            shell_println!(
                 "  docker build <dockerfile> <context-dir> <dest-dir> [--build-arg K=V ...] [--target STAGE]   — build an OCI image from a Dockerfile (RUN deferred, see Q17)"
             );
-            crate::console_println!(
+            shell_println!(
                 "  docker run <image-dir> [--name N] [--net IP] [-v h:g] [-p h:c[/proto]] [-e K=V] [--env-file F] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--restart POLICY] [--rm] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]"
             );
-            crate::console_println!(
-                "  docker create <image-dir> [flags...]   — create without starting"
-            );
-            crate::console_println!(
+            shell_println!("  docker create <image-dir> [flags...]   — create without starting");
+            shell_println!(
                 "  docker ps [-a] [-q] [-n N|-l]          — list containers (running; -a: all)"
             );
-            crate::console_println!("  docker start|stop|restart|kill <id>    — lifecycle control");
-            crate::console_println!(
-                "  docker pause|unpause <id>              — freeze / thaw all threads"
-            );
-            crate::console_println!(
-                "  docker rm [-f] <id>                    — remove container(s)"
-            );
-            crate::console_println!(
+            shell_println!("  docker start|stop|restart|kill <id>    — lifecycle control");
+            shell_println!("  docker pause|unpause <id>              — freeze / thaw all threads");
+            shell_println!("  docker rm [-f] <id>                    — remove container(s)");
+            shell_println!(
                 "  docker inspect [--json] <id>           — detailed container info (--json)"
             );
-            crate::console_println!(
+            shell_println!(
                 "  docker exec <id> <command...>          — run a command in the container NS"
             );
-            crate::console_println!(
+            shell_println!(
                 "  docker logs [--tail N] <id>            — captured init stdout/stderr"
             );
-            crate::console_println!(
-                "  docker events [-n N] [--id <id>]       — recent lifecycle events"
-            );
-            crate::console_println!(
+            shell_println!("  docker events [-n N] [--id <id>]       — recent lifecycle events");
+            shell_println!(
                 "  docker stats|top <id>                  — live resource usage / process list"
             );
-            crate::console_println!(
+            shell_println!(
                 "  docker port|wait <id>                  — published ports / block until exit"
             );
-            crate::console_println!(
+            shell_println!(
                 "  docker diff <id>                       — rootfs changes vs image (A/C/D)"
             );
-            crate::console_println!(
-                "  docker rename <id> <name>              — rename a container"
-            );
-            crate::console_println!(
-                "  docker update <id> [--cpus N] [--memory SIZE] [--restart POLICY]"
-            );
-            crate::console_println!(
+            shell_println!("  docker rename <id> <name>              — rename a container");
+            shell_println!("  docker update <id> [--cpus N] [--memory SIZE] [--restart POLICY]");
+            shell_println!(
                 "  docker prune                           — remove all stopped containers"
             );
-            crate::console_println!(
+            shell_println!(
                 "  docker cp <src> <dest>                 — copy between host and rootfs"
             );
-            crate::console_println!(
+            shell_println!(
                 "  docker commit|export|import ...        — snapshot / pack / load a rootfs"
             );
-            crate::console_println!(
+            shell_println!(
                 "  docker save <image-dir|name:tag> <out-tar>  — bundle an OCI image into a tar"
             );
-            crate::console_println!(
+            shell_println!(
                 "  docker load <in-tar> [dest-dir]        — restore a saved image tar (imports into the store by ref.name)"
             );
-            crate::console_println!(
+            shell_println!(
                 "  docker system df|prune                 — disk usage / reclaim stopped containers+networks"
             );
-            crate::console_println!(
+            shell_println!(
                 "  docker images                          — list tagged images in the named store"
             );
-            crate::console_println!(
+            shell_println!(
                 "  docker tag <dir|ref> <ref>             — import an image dir or re-tag an existing ref"
             );
-            crate::console_println!(
+            shell_println!(
                 "  docker rmi <ref>                       — remove a tag from the named store (GCs blobs)"
             );
-            crate::console_println!(
+            shell_println!(
                 "  docker history <image-dir>             — show image build history (created-by + size)"
             );
-            crate::console_println!();
-            crate::console_println!(
-                "Native equivalents: `oci` (images) and `container`/`ct` (lifecycle)."
-            );
-            crate::console_println!("Alias: dk");
+            shell_println!();
+            shell_println!("Native equivalents: `oci` (images) and `container`/`ct` (lifecycle).");
+            shell_println!("Alias: dk");
         }
     }
 }
@@ -93791,7 +93639,7 @@ impl<'a> OciRunFlags<'a> {
                     if let Some(&spec) = parts.get(i.saturating_add(1)) {
                         match parse_mem_size_to_frames(spec) {
                             Some(frames) => mem_frames = Some(frames),
-                            None => crate::console_println!(
+                            None => shell_println!(
                                 "[oci] Ignoring memory '{}': expected SIZE[k|m|g] (e.g. 512m)",
                                 spec
                             ),
@@ -93805,7 +93653,7 @@ impl<'a> OciRunFlags<'a> {
                     if let Some(&spec) = parts.get(i.saturating_add(1)) {
                         match parse_cpus_to_percent(spec) {
                             Some(pct) => cpu_percent = Some(pct),
-                            None => crate::console_println!(
+                            None => shell_println!(
                                 "[oci] Ignoring cpus '{}': expected a positive number (e.g. 1.5)",
                                 spec
                             ),
@@ -93823,15 +93671,12 @@ impl<'a> OciRunFlags<'a> {
                         // reject it rather than silently pass an empty var.
                         if let Some((key, _)) = spec.split_once('=') {
                             if key.is_empty() {
-                                crate::console_println!("[oci] Ignoring env '{}': empty key", spec);
+                                shell_println!("[oci] Ignoring env '{}': empty key", spec);
                             } else {
                                 extra_env.push(spec);
                             }
                         } else {
-                            crate::console_println!(
-                                "[oci] Ignoring env '{}': expected KEY=value",
-                                spec
-                            );
+                            shell_println!("[oci] Ignoring env '{}': expected KEY=value", spec);
                         }
                         i = i.saturating_add(2);
                     } else {
@@ -93847,7 +93692,7 @@ impl<'a> OciRunFlags<'a> {
                                 // lines but keep the valid entries.
                                 let parsed = oci::parse_env_file(&bytes);
                                 for n in &parsed.rejected_lines {
-                                    crate::console_println!(
+                                    shell_println!(
                                         "[oci] Ignoring env-file '{}' line {}: expected KEY=value",
                                         path,
                                         n
@@ -93855,11 +93700,9 @@ impl<'a> OciRunFlags<'a> {
                                 }
                                 env_file_entries.extend(parsed.entries);
                             }
-                            Err(e) => crate::console_println!(
-                                "[oci] Could not read env-file '{}': {:?}",
-                                path,
-                                e
-                            ),
+                            Err(e) => {
+                                shell_println!("[oci] Could not read env-file '{}': {:?}", path, e)
+                            }
                         }
                         i = i.saturating_add(2);
                     } else {
@@ -93874,7 +93717,7 @@ impl<'a> OciRunFlags<'a> {
                             Some((p, "tcp")) => (p, crate::net::nat::NatProto::Tcp),
                             Some((p, "udp")) => (p, crate::net::nat::NatProto::Udp),
                             Some((_, other)) => {
-                                crate::console_println!(
+                                shell_println!(
                                     "[oci] Ignoring port '{}': unknown protocol '{}' (use tcp/udp)",
                                     spec,
                                     other
@@ -93889,12 +93732,12 @@ impl<'a> OciRunFlags<'a> {
                                 (Ok(hp), Ok(cp)) if hp != 0 && cp != 0 => {
                                     ports.push((proto, hp, cp));
                                 }
-                                _ => crate::console_println!(
+                                _ => shell_println!(
                                     "[oci] Ignoring port '{}': expected host:container with nonzero ports",
                                     spec
                                 ),
                             },
-                            None => crate::console_println!(
+                            None => shell_println!(
                                 "[oci] Ignoring port '{}': expected host:container",
                                 spec
                             ),
@@ -93925,7 +93768,7 @@ impl<'a> OciRunFlags<'a> {
                             None | Some("rw") => Some(false),
                             Some("ro") => Some(true),
                             Some(other) => {
-                                crate::console_println!(
+                                shell_println!(
                                     "[oci] Ignoring volume '{}': unknown mode '{}' (expected ro or rw)",
                                     spec,
                                     other
@@ -93935,7 +93778,7 @@ impl<'a> OciRunFlags<'a> {
                         };
                         if let Some(ro) = read_only {
                             if !guest.starts_with('/') {
-                                crate::console_println!(
+                                shell_println!(
                                     "[oci] Ignoring volume '{}': guest path must be absolute (source:/guest[:ro|:rw])",
                                     spec
                                 );
@@ -93943,7 +93786,7 @@ impl<'a> OciRunFlags<'a> {
                                 // Host bind mount: use the absolute host path.
                                 volumes.push((PathBuf::from(source), PathBuf::from(guest), ro));
                             } else if source.is_empty() {
-                                crate::console_println!(
+                                shell_println!(
                                     "[oci] Ignoring volume '{}': empty source (want /host:/guest or name:/guest)",
                                     spec
                                 );
@@ -93955,7 +93798,7 @@ impl<'a> OciRunFlags<'a> {
                                         volumes.push((backing, PathBuf::from(guest), ro));
                                     }
                                     Err(e) => {
-                                        crate::console_println!(
+                                        shell_println!(
                                             "[oci] Ignoring volume '{}': cannot create named volume '{}': {:?}",
                                             spec,
                                             source,
@@ -93981,14 +93824,14 @@ impl<'a> OciRunFlags<'a> {
                         // options — the honest failure mode until quota
                         // enforcement lands.
                         if let Some((path, opts)) = spec.split_once(':') {
-                            crate::console_println!(
+                            shell_println!(
                                 "[oci] Ignoring tmpfs '{}': mount options ('{}') not yet supported (want --tmpfs /guest)",
                                 spec,
                                 opts
                             );
                             let _ = path;
                         } else if !spec.starts_with('/') || spec == "/" {
-                            crate::console_println!(
+                            shell_println!(
                                 "[oci] Ignoring tmpfs '{}': guest path must be absolute and not '/'",
                                 spec
                             );
@@ -94014,7 +93857,7 @@ impl<'a> OciRunFlags<'a> {
                     if let Some(&spec) = parts.get(i.saturating_add(1)) {
                         match crate::container::parse_restart_policy(spec) {
                             Some(p) => restart_policy = Some(p),
-                            None => crate::console_println!(
+                            None => shell_println!(
                                 "[oci] Ignoring restart '{}': want no|always|unless-stopped|on-failure[:N]",
                                 spec
                             ),
@@ -94031,7 +93874,7 @@ impl<'a> OciRunFlags<'a> {
                         if spec.starts_with('/') {
                             workdir = Some(spec);
                         } else {
-                            crate::console_println!(
+                            shell_println!(
                                 "[oci] Ignoring workdir '{}': must be an absolute path",
                                 spec
                             );
@@ -94119,7 +93962,7 @@ impl<'a> OciRunFlags<'a> {
                             None => (spec, ""),
                         };
                         if key.is_empty() {
-                            crate::console_println!("[oci] Ignoring label '{}': empty key", spec);
+                            shell_println!("[oci] Ignoring label '{}': empty key", spec);
                         } else {
                             labels.push((key, value));
                         }
@@ -94138,7 +93981,7 @@ impl<'a> OciRunFlags<'a> {
                                 // (rather than corrupt) any non-UTF-8 line.
                                 let parsed = oci::parse_env_file(&bytes);
                                 for n in &parsed.rejected_lines {
-                                    crate::console_println!(
+                                    shell_println!(
                                         "[oci] Ignoring label-file '{}' line {}: expected KEY=VALUE",
                                         path,
                                         n
@@ -94157,14 +94000,14 @@ impl<'a> OciRunFlags<'a> {
                                             alloc::string::String::from(k),
                                             alloc::string::String::from(v),
                                         )),
-                                        _ => crate::console_println!(
+                                        _ => shell_println!(
                                             "[oci] Ignoring label-file '{}': non-UTF-8 label entry",
                                             path
                                         ),
                                     }
                                 }
                             }
-                            Err(e) => crate::console_println!(
+                            Err(e) => shell_println!(
                                 "[oci] Could not read label-file '{}': {:?}",
                                 path,
                                 e
@@ -94266,19 +94109,19 @@ fn oci_run_prepare_rootfs(
     if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_base) {
         // May already exist — ignore AlreadyExists.
         if !matches!(e, crate::error::KernelError::AlreadyExists) {
-            crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_base, e);
+            shell_println!("[oci] Failed to create {}: {:?}", rootfs_base, e);
             return None;
         }
     }
     if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_lower) {
         if !matches!(e, crate::error::KernelError::AlreadyExists) {
-            crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_lower, e);
+            shell_println!("[oci] Failed to create {}: {:?}", rootfs_lower, e);
             return None;
         }
     }
     if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_upper) {
         if !matches!(e, crate::error::KernelError::AlreadyExists) {
-            crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_upper, e);
+            shell_println!("[oci] Failed to create {}: {:?}", rootfs_upper, e);
             return None;
         }
     }
@@ -94286,7 +94129,7 @@ fn oci_run_prepare_rootfs(
     // Extract each layer into the lower directory (merged — last layer wins).
     let mut total_files: u64 = 0;
     for (idx, layer) in image.manifest.layers.iter().enumerate() {
-        crate::console_println!(
+        shell_println!(
             "[oci] Extracting layer {}/{} ({} bytes)...",
             idx.saturating_add(1),
             image.manifest.layers.len(),
@@ -94295,14 +94138,14 @@ fn oci_run_prepare_rootfs(
         match crate::oci::extract_layer(blob_dir, layer, &rootfs_lower) {
             Ok(count) => {
                 total_files = total_files.saturating_add(count);
-                crate::console_println!(
+                shell_println!(
                     "[oci]   Layer {}: {} files extracted",
                     idx.saturating_add(1),
                     count
                 );
             }
             Err(e) => {
-                crate::console_println!(
+                shell_println!(
                     "[oci] Failed to extract layer {}: {:?}",
                     idx.saturating_add(1),
                     e
@@ -94311,7 +94154,7 @@ fn oci_run_prepare_rootfs(
             }
         }
     }
-    crate::console_println!(
+    shell_println!(
         "[oci] Rootfs: {} total files in {}",
         total_files,
         rootfs_lower
@@ -94326,7 +94169,7 @@ fn oci_run_prepare_rootfs(
     let overlay_name = alloc::format!("oci-{}", image_name);
     let overlay_id = match crate::fs::overlay::create(&overlay_name, &rootfs_lower, &rootfs_upper) {
         Ok(ov_id) => {
-            crate::console_println!(
+            shell_println!(
                 "[oci] Overlay created (id={}): lower={}, upper={}",
                 ov_id,
                 rootfs_lower,
@@ -94335,7 +94178,7 @@ fn oci_run_prepare_rootfs(
             Some(ov_id)
         }
         Err(e) => {
-            crate::console_println!(
+            shell_println!(
                 "[oci] Overlay creation failed: {:?} (continuing without overlay)",
                 e
             );
@@ -94409,21 +94252,21 @@ fn oci_run_report_created(
     image_name: &str,
     cfg: &crate::container::ContainerConfig,
 ) {
-    crate::console_println!();
-    crate::console_println!("=== Container Created ===");
-    crate::console_println!("  Container ID: {}", ct_id);
-    crate::console_println!("  Name:         {}", image_name);
+    shell_println!();
+    shell_println!("=== Container Created ===");
+    shell_println!("  Container ID: {}", ct_id);
+    shell_println!("  Name:         {}", image_name);
     if !cfg.hostname.is_empty() {
-        crate::console_println!("  Hostname:     {}", cfg.hostname);
+        shell_println!("  Hostname:     {}", cfg.hostname);
     }
     if cfg.restart_policy != crate::container::RestartPolicy::No {
-        crate::console_println!("  Restart:      {}", cfg.restart_policy);
+        shell_println!("  Restart:      {}", cfg.restart_policy);
     }
     if cfg.auto_remove {
-        crate::console_println!("  AutoRemove:   yes (--rm)");
+        shell_println!("  AutoRemove:   yes (--rm)");
     }
     for (k, v) in &cfg.labels {
-        crate::console_println!("  Label:        {}={}", k, v);
+        shell_println!("  Label:        {}={}", k, v);
     }
 }
 
@@ -94443,8 +94286,8 @@ fn oci_run_bind_network(
     net_aliases: &[&str],
 ) {
     match crate::cnetwork::set_allocation_owner(nn, ip, ct_id) {
-        Ok(()) => crate::console_println!("  Network:      {} (ip {})", nn, fmt_ipv4(ip)),
-        Err(e) => crate::console_println!(
+        Ok(()) => shell_println!("  Network:      {} (ip {})", nn, fmt_ipv4(ip)),
+        Err(e) => shell_println!(
             "[oci] Warning: could not bind network '{}' owner: {:?}",
             nn,
             e
@@ -94469,7 +94312,7 @@ fn oci_run_bind_network(
         }
         if !names.is_empty() {
             if let Err(e) = crate::cnetwork::register_dns_names(nn, ct_id, &names) {
-                crate::console_println!(
+                shell_println!(
                     "[oci] Warning: could not register DNS names on '{}': {:?}",
                     nn,
                     e
@@ -94489,7 +94332,7 @@ fn oci_run_bind_network(
             match crate::cnetwork::attach_container_veth(nn, ct_id, vp) {
                 Ok(()) => {
                     let peers = crate::cnetwork::inspect(nn).map_or(0, |i| i.allocations.len());
-                    crate::console_println!(
+                    shell_println!(
                         "  L2 bridge:    {} ({} member{})",
                         nn,
                         peers,
@@ -94509,14 +94352,14 @@ fn oci_run_bind_network(
                         );
                     }
                 }
-                Err(e) => crate::console_println!(
+                Err(e) => shell_println!(
                     "[oci] Warning: could not attach to network '{}' bridge: {:?}",
                     nn,
                     e
                 ),
             }
         }
-        None => crate::console_println!(
+        None => shell_println!(
             "[oci] Warning: network '{}' has no veth to bridge (no host link)",
             nn
         ),
@@ -94551,13 +94394,10 @@ fn oci_run_mount_jail(
                     Ok(()) => {
                         jail_root = merged_mount.clone();
                         mounted_overlay = true;
-                        crate::console_println!(
-                            "[oci] Overlay mounted at {} (copy-on-write)",
-                            merged_mount
-                        );
+                        shell_println!("[oci] Overlay mounted at {} (copy-on-write)", merged_mount);
                     }
                     Err(e) => {
-                        crate::console_println!(
+                        shell_println!(
                             "[oci] Could not mount overlay at {}: {:?} (using read-only lower)",
                             merged_mount,
                             e
@@ -94566,7 +94406,7 @@ fn oci_run_mount_jail(
                 }
             }
             Err(e) => {
-                crate::console_println!(
+                shell_println!(
                     "[oci] Could not open overlay adapter: {:?} (using read-only lower)",
                     e
                 );
@@ -94602,16 +94442,16 @@ fn oci_run_apply_created_state(
     // then resolves `/bin/sh`, `/lib/...`, etc. against the
     // container's filesystem instead of the host.
     if let Err(e) = crate::container::set_root_path(ct_id, jail_root) {
-        crate::console_println!("[oci] Warning: could not set rootfs jail: {:?}", e);
+        shell_println!("[oci] Warning: could not set rootfs jail: {:?}", e);
     }
     // Apply Docker `--read-only`: mark the container rootfs
     // read-only (Created state). Writable `:rw` volumes below
     // still punch writable holes through it.
     if f.read_only_root {
         match crate::container::set_read_only_root(ct_id, true) {
-            Ok(()) => crate::console_println!("  Root FS:      read-only"),
+            Ok(()) => shell_println!("  Root FS:      read-only"),
             Err(e) => {
-                crate::console_println!("[oci] Warning: could not set read-only root: {:?}", e);
+                shell_println!("[oci] Warning: could not set read-only root: {:?}", e);
             }
         }
     }
@@ -94619,7 +94459,7 @@ fn oci_run_apply_created_state(
     // `container delete` unmounts the adapter on teardown.
     if let Some(merged_mount) = merged_mount {
         if let Err(e) = crate::container::set_rootfs_mount(ct_id, merged_mount) {
-            crate::console_println!("[oci] Warning: could not record rootfs mount: {:?}", e);
+            shell_println!("[oci] Warning: could not record rootfs mount: {:?}", e);
         }
     }
     // Record the overlay id (independent of whether the adapter
@@ -94628,7 +94468,7 @@ fn oci_run_apply_created_state(
     // read-only lower dir.
     if let Some(ov_id) = overlay_id {
         if let Err(e) = crate::container::set_overlay_id(ct_id, Some(ov_id)) {
-            crate::console_println!("[oci] Warning: could not record overlay id: {:?}", e);
+            shell_println!("[oci] Warning: could not record overlay id: {:?}", e);
         }
     }
 
@@ -94638,13 +94478,13 @@ fn oci_run_apply_created_state(
     // the rootfs (e.g. `-v /srv/data:/data`).
     for (host, guest, read_only) in &f.volumes {
         match crate::container::add_volume_mount(ct_id, host, guest, *read_only) {
-            Ok(()) => crate::console_println!(
+            Ok(()) => shell_println!(
                 "  Volume:       {} -> {}{}",
                 host.display(),
                 guest.display(),
                 if *read_only { " (ro)" } else { "" }
             ),
-            Err(e) => crate::console_println!(
+            Err(e) => shell_println!(
                 "[oci] Warning: could not add volume {}:{}: {:?}",
                 host.display(),
                 guest.display(),
@@ -94660,10 +94500,10 @@ fn oci_run_apply_created_state(
     for guest in &f.tmpfs {
         match crate::container::add_tmpfs_mount(ct_id, guest) {
             Ok(()) => {
-                crate::console_println!("  Tmpfs:        {} (in-memory)", guest);
+                shell_println!("  Tmpfs:        {} (in-memory)", guest);
             }
             Err(e) => {
-                crate::console_println!("[oci] Warning: could not add tmpfs {}: {:?}", guest, e);
+                shell_println!("[oci] Warning: could not add tmpfs {}: {:?}", guest, e);
             }
         }
     }
@@ -94675,8 +94515,8 @@ fn oci_run_apply_created_state(
     // (set via `--net`), which add_port_publish enforces.
     for &(proto, hp, cp) in &f.ports {
         match crate::container::add_port_publish(ct_id, proto, hp, cp) {
-            Ok(()) => crate::console_println!("  Publish:      {:?} :{} -> :{}", proto, hp, cp),
-            Err(e) => crate::console_println!(
+            Ok(()) => shell_println!("  Publish:      {:?} :{} -> :{}", proto, hp, cp),
+            Err(e) => shell_println!(
                 "[oci] Warning: could not publish {:?} :{} -> :{}: {:?} (need --net IP)",
                 proto,
                 hp,
@@ -94773,7 +94613,7 @@ fn oci_run_effective_uid_gid(flag: Option<&str>, image_user: &str) -> Option<(u3
             (Ok(uid), None) => Some((uid, 0)),
             (Ok(uid), Some(Ok(gid))) => Some((uid, gid)),
             _ => {
-                crate::console_println!("[oci] Ignoring user '{}': expected numeric uid[:gid]", s);
+                shell_println!("[oci] Ignoring user '{}': expected numeric uid[:gid]", s);
                 None
             }
         }
@@ -94831,25 +94671,25 @@ fn oci_run_launch_init(
                 .exe_path(exe_guest.as_bytes());
             if let Some(wd) = effective_workdir.as_deref() {
                 opts = opts.cwd(wd.as_bytes());
-                crate::console_println!("  WorkDir:      {}", wd);
+                shell_println!("  WorkDir:      {}", wd);
             }
             if let Some((uid, gid)) = effective_uid_gid {
                 opts = opts.uid_gid(uid, gid);
-                crate::console_println!("  User:         {}:{}", uid, gid);
+                shell_println!("  User:         {}:{}", uid, gid);
             }
             match crate::container::run(ct_id, &elf, &opts) {
                 Ok(pid) => {
-                    crate::console_println!("  Init PID:     {} ({})", pid, exe_guest);
+                    shell_println!("  Init PID:     {} ({})", pid, exe_guest);
                     true
                 }
                 Err(e) => {
-                    crate::console_println!("[oci] Failed to launch init process: {:?}", e);
+                    shell_println!("[oci] Failed to launch init process: {:?}", e);
                     false
                 }
             }
         }
         Err(e) => {
-            crate::console_println!(
+            shell_println!(
                 "[oci] Could not read entrypoint '{}' (host {}): {:?}",
                 exe_guest,
                 exe_host,
@@ -94878,7 +94718,7 @@ fn oci_run(parts: &[&str]) {
     // directory, creates a container with the image's configuration,
     // and reports the container ID for subsequent exec/stop/delete.
     let Some(dir) = parts.get(1) else {
-        crate::console_println!(
+        shell_println!(
             "Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [--network-alias NAME ...] [-v src:/guest[:ro|:rw] ...] [--tmpfs /guest ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [--restart POLICY] [--rm] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]"
         );
         return;
@@ -94892,11 +94732,11 @@ fn oci_run(parts: &[&str]) {
     // Step 1: Load OCI image metadata. `dir` may be an on-disk OCI
     // layout directory or a named-store reference (`name:tag`);
     // `blob_dir` is where the layer blobs actually live.
-    crate::console_println!("[oci] Loading image from {}...", dir);
+    shell_println!("[oci] Loading image from {}...", dir);
     let (blob_dir, image) = match crate::oci::resolve_image_source(dir) {
         Ok(pair) => pair,
         Err(e) => {
-            crate::console_println!("[oci] Failed to load image: {:?}", e);
+            shell_println!("[oci] Failed to load image: {:?}", e);
             return;
         }
     };
@@ -94906,7 +94746,7 @@ fn oci_run(parts: &[&str]) {
         dir.rsplit('/').next().unwrap_or("oci-container")
     });
 
-    crate::console_println!(
+    shell_println!(
         "[oci] Image: {} ({}), {} layers",
         image.config.architecture,
         image.config.os,
@@ -94933,7 +94773,7 @@ fn oci_run(parts: &[&str]) {
     let mut network_lease: Option<(&str, [u8; 4])> = None;
     if let Some(nn) = f.net_name {
         if net_ip.is_some() {
-            crate::console_println!(
+            shell_println!(
                 "[oci] --network {} ignored: explicit --net IP already given",
                 nn
             );
@@ -94946,11 +94786,7 @@ fn oci_run(parts: &[&str]) {
                     network_lease = Some((nn, lease.ip));
                 }
                 Err(e) => {
-                    crate::console_println!(
-                        "[oci] Cannot allocate IP from network '{}': {:?}",
-                        nn,
-                        e
-                    );
+                    shell_println!("[oci] Cannot allocate IP from network '{}': {:?}", nn, e);
                     return;
                 }
             }
@@ -94967,7 +94803,7 @@ fn oci_run(parts: &[&str]) {
             if let Some((nn, ip)) = network_lease {
                 let _ = crate::cnetwork::release(nn, ip);
             }
-            crate::console_println!("[oci] Container creation failed: {:?}", e);
+            shell_println!("[oci] Container creation failed: {:?}", e);
             return;
         }
     };
@@ -94982,7 +94818,7 @@ fn oci_run(parts: &[&str]) {
     }
 
     let (jail_root, merged_mount) = oci_run_mount_jail(image_name, &rootfs_lower, overlay_id);
-    crate::console_println!("  Rootfs:       {}", jail_root);
+    shell_println!("  Rootfs:       {}", jail_root);
 
     // Compute the effective command (what the init process
     // actually runs), applying Docker's ENTRYPOINT/CMD override
@@ -94997,22 +94833,22 @@ fn oci_run(parts: &[&str]) {
     // Show the effective runtime config.
     if !command.is_empty() {
         let cmd_str: alloc::string::String = command.join(" ");
-        crate::console_println!("  Command:      {}", cmd_str);
+        shell_println!("  Command:      {}", cmd_str);
     }
     if !image.config.working_dir.is_empty() {
-        crate::console_println!("  WorkingDir:   {}", image.config.working_dir);
+        shell_println!("  WorkingDir:   {}", image.config.working_dir);
     }
     if !image.config.env.is_empty() {
-        crate::console_println!("  Environment:");
+        shell_println!("  Environment:");
         for e in &image.config.env {
-            crate::console_println!("    {}", e);
+            shell_println!("    {}", e);
         }
     }
 
     if let Some(ns) = crate::container::namespace_ids(ct_id) {
-        crate::console_println!("  PID NS:       {}", ns.0);
-        crate::console_println!("  User NS:      {}", ns.1);
-        crate::console_println!("  Net NS:       {}", ns.2);
+        shell_println!("  PID NS:       {}", ns.0);
+        shell_println!("  User NS:      {}", ns.1);
+        shell_println!("  Net NS:       {}", ns.2);
     }
 
     oci_run_apply_created_state(ct_id, &jail_root, merged_mount.as_deref(), overlay_id, &f);
@@ -95020,17 +94856,15 @@ fn oci_run(parts: &[&str]) {
     // Launch the image's entrypoint/cmd as the container's init process, jailed
     // to the rootfs.
     let launched = if command.is_empty() {
-        crate::console_println!(
-            "[oci] Image declares no entrypoint/cmd; not launching an init process."
-        );
+        shell_println!("[oci] Image declares no entrypoint/cmd; not launching an init process.");
         false
     } else {
         oci_run_launch_init(ct_id, &jail_root, &command, &image, &f)
     };
 
-    crate::console_println!();
+    shell_println!();
     if launched {
-        crate::console_println!(
+        shell_println!(
             "Container {} is running. Use 'container info {}' to inspect.",
             ct_id,
             ct_id
@@ -95039,12 +94873,12 @@ fn oci_run(parts: &[&str]) {
         // No init process launched — fall back to the manual
         // model so the user can still exec into the container.
         let _ = crate::container::start(ct_id);
-        crate::console_println!(
+        shell_println!(
             "Use 'container exec {}' to run commands in this container.",
             ct_id
         );
     }
-    crate::console_println!(
+    shell_println!(
         "Use 'container stop {}' then 'container delete {}' to clean up.",
         ct_id,
         ct_id
@@ -95069,66 +94903,66 @@ fn cmd_oci(args: &str) {
             #[inline(never)]
             fn case(parts: &[&str]) {
                 let Some(dir) = parts.get(1) else {
-                    crate::console_println!("Usage: oci inspect <image-dir>");
+                    shell_println!("Usage: oci inspect <image-dir>");
                     return;
                 };
                 match oci::resolve_image_source(dir) {
                     Ok((_, image)) => {
-                        crate::console_println!("=== OCI Image: {} ===", dir);
-                        crate::console_println!("  Architecture: {}", image.config.architecture);
-                        crate::console_println!("  OS:           {}", image.config.os);
-                        crate::console_println!("  Layers:       {}", image.manifest.layers.len());
+                        shell_println!("=== OCI Image: {} ===", dir);
+                        shell_println!("  Architecture: {}", image.config.architecture);
+                        shell_println!("  OS:           {}", image.config.os);
+                        shell_println!("  Layers:       {}", image.manifest.layers.len());
 
                         if !image.config.entrypoint.is_empty() {
                             let ep: alloc::string::String = image.config.entrypoint.join(" ");
-                            crate::console_println!("  Entrypoint:   {}", ep);
+                            shell_println!("  Entrypoint:   {}", ep);
                         }
                         if !image.config.cmd.is_empty() {
                             let cmd_str: alloc::string::String = image.config.cmd.join(" ");
-                            crate::console_println!("  Cmd:          {}", cmd_str);
+                            shell_println!("  Cmd:          {}", cmd_str);
                         }
                         if !image.config.working_dir.is_empty() {
-                            crate::console_println!("  WorkingDir:   {}", image.config.working_dir);
+                            shell_println!("  WorkingDir:   {}", image.config.working_dir);
                         }
                         if !image.config.user.is_empty() {
-                            crate::console_println!("  User:         {}", image.config.user);
+                            shell_println!("  User:         {}", image.config.user);
                         }
                         if !image.config.env.is_empty() {
-                            crate::console_println!("  Environment:");
+                            shell_println!("  Environment:");
                             for e in &image.config.env {
-                                crate::console_println!("    {}", e);
+                                shell_println!("    {}", e);
                             }
                         }
                         if !image.config.exposed_ports.is_empty() {
                             let ports: alloc::string::String =
                                 image.config.exposed_ports.join(", ");
-                            crate::console_println!("  Ports:        {}", ports);
+                            shell_println!("  Ports:        {}", ports);
                         }
                         if !image.config.volumes.is_empty() {
                             let vols: alloc::string::String = image.config.volumes.join(", ");
-                            crate::console_println!("  Volumes:      {}", vols);
+                            shell_println!("  Volumes:      {}", vols);
                         }
                         if !image.config.stop_signal.is_empty() {
-                            crate::console_println!("  StopSignal:   {}", image.config.stop_signal);
+                            shell_println!("  StopSignal:   {}", image.config.stop_signal);
                         }
                         if !image.config.shell.is_empty() {
                             let sh: alloc::string::String = image.config.shell.join(" ");
-                            crate::console_println!("  Shell:        {}", sh);
+                            shell_println!("  Shell:        {}", sh);
                         }
                         if !image.config.onbuild.is_empty() {
-                            crate::console_println!("  OnBuild:");
+                            shell_println!("  OnBuild:");
                             for t in &image.config.onbuild {
-                                crate::console_println!("    {}", t);
+                                shell_println!("    {}", t);
                             }
                         }
                         if !image.config.labels.is_empty() {
-                            crate::console_println!("  Labels:");
+                            shell_println!("  Labels:");
                             for (k, v) in &image.config.labels {
-                                crate::console_println!("    {}={}", k, v);
+                                shell_println!("    {}={}", k, v);
                             }
                         }
                     }
-                    Err(e) => crate::console_println!("Error loading image: {:?}", e),
+                    Err(e) => shell_println!("Error loading image: {:?}", e),
                 }
             }
             case(&parts);
@@ -95137,14 +94971,14 @@ fn cmd_oci(args: &str) {
             #[inline(never)]
             fn case(parts: &[&str]) {
                 let Some(dir) = parts.get(1) else {
-                    crate::console_println!("Usage: oci layers <image-dir>");
+                    shell_println!("Usage: oci layers <image-dir>");
                     return;
                 };
                 match oci::resolve_image_source(dir) {
                     Ok((_, image)) => {
-                        crate::console_println!("=== Layers ({}) ===", image.manifest.layers.len());
+                        shell_println!("=== Layers ({}) ===", image.manifest.layers.len());
                         for (i, layer) in image.manifest.layers.iter().enumerate() {
-                            crate::console_println!(
+                            shell_println!(
                                 "  [{}] {} ({} bytes, {})",
                                 i,
                                 layer.digest,
@@ -95152,13 +94986,13 @@ fn cmd_oci(args: &str) {
                                 layer.media_type
                             );
                         }
-                        crate::console_println!(
+                        shell_println!(
                             "Config: {} ({} bytes)",
                             image.manifest.config.digest,
                             image.manifest.config.size
                         );
                     }
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
             case(&parts);
@@ -95167,23 +95001,20 @@ fn cmd_oci(args: &str) {
             #[inline(never)]
             fn case(parts: &[&str]) {
                 let Some(dir) = parts.get(1) else {
-                    crate::console_println!("Usage: oci history <image-dir>");
+                    shell_println!("Usage: oci history <image-dir>");
                     return;
                 };
                 match oci::resolve_image_source(dir) {
                     Ok((_, image)) => {
                         if image.config.history.is_empty() {
-                            crate::console_println!(
+                            shell_println!(
                                 "No build history recorded in image config ({} layers)",
                                 image.manifest.layers.len()
                             );
                             return;
                         }
-                        crate::console_println!(
-                            "=== History ({} steps) ===",
-                            image.config.history.len()
-                        );
-                        crate::console_println!("  {:>12}  CREATED BY", "SIZE");
+                        shell_println!("=== History ({} steps) ===", image.config.history.len());
+                        shell_println!("  {:>12}  CREATED BY", "SIZE");
                         // Non-empty steps consume layers in order; empty steps are
                         // metadata-only (0 bytes), matching `docker history`.
                         let mut layer_idx = 0usize;
@@ -95195,10 +95026,10 @@ fn cmd_oci(args: &str) {
                                 layer_idx = layer_idx.saturating_add(1);
                                 s
                             };
-                            crate::console_println!("  {:>12}  {}", size, h.created_by);
+                            shell_println!("  {:>12}  {}", size, h.created_by);
                         }
                     }
-                    Err(e) => crate::console_println!("Error: {:?}", e),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
             case(&parts);
@@ -95217,7 +95048,7 @@ fn cmd_oci(args: &str) {
                 // a *container's* flattened rootfs), `save` preserves the image's
                 // layered on-disk layout verbatim.
                 let (Some(&src), Some(&out_path)) = (parts.get(1), parts.get(2)) else {
-                    crate::console_println!("Usage: oci save <image-dir|name:tag> <out-tar>");
+                    shell_println!("Usage: oci save <image-dir|name:tag> <out-tar>");
                     return;
                 };
                 let is_layout = crate::fs::vfs::Vfs::metadata(alloc::format!(
@@ -95236,7 +95067,7 @@ fn cmd_oci(args: &str) {
                     match oci::store_export_ref(src, &tmp) {
                         Ok(()) => (tmp, true),
                         Err(e) => {
-                            crate::console_println!(
+                            shell_println!(
                                 "Not an image dir or store reference '{}': {:?}",
                                 src,
                                 e
@@ -95253,7 +95084,7 @@ fn cmd_oci(args: &str) {
                         match crate::container::tar_tree(&pack_dir) {
                             Ok(archive) => {
                                 match crate::fs::vfs::Vfs::write_file(out_path, &archive) {
-                                    Ok(()) => crate::console_println!(
+                                    Ok(()) => shell_println!(
                                         "Saved image {} ({} layers): {} bytes -> {}",
                                         src,
                                         layers,
@@ -95261,21 +95092,17 @@ fn cmd_oci(args: &str) {
                                         out_path
                                     ),
                                     Err(e) => {
-                                        crate::console_println!(
-                                            "Failed to write '{}': {:?}",
-                                            out_path,
-                                            e
-                                        )
+                                        shell_println!("Failed to write '{}': {:?}", out_path, e)
                                     }
                                 }
                             }
                             Err(e) => {
-                                crate::console_println!("Failed to pack image '{}': {:?}", src, e)
+                                shell_println!("Failed to pack image '{}': {:?}", src, e)
                             }
                         }
                     }
                     Err(e) => {
-                        crate::console_println!("Not a valid OCI image at '{}': {:?}", pack_dir, e)
+                        shell_println!("Not a valid OCI image at '{}': {:?}", pack_dir, e)
                     }
                 }
                 if temp {
@@ -95295,13 +95122,13 @@ fn cmd_oci(args: &str) {
                 // named store so the image is usable by `name:tag` — matching Docker,
                 // where `load` repopulates the local image store.
                 let Some(&tar_path) = parts.get(1) else {
-                    crate::console_println!("Usage: oci load <in-tar> [dest-dir]");
+                    shell_println!("Usage: oci load <in-tar> [dest-dir]");
                     return;
                 };
                 let archive = match crate::fs::vfs::Vfs::read_file(tar_path) {
                     Ok(a) => a,
                     Err(e) => {
-                        crate::console_println!("Failed to read '{}': {:?}", tar_path, e);
+                        shell_println!("Failed to read '{}': {:?}", tar_path, e);
                         return;
                     }
                 };
@@ -95319,14 +95146,14 @@ fn cmd_oci(args: &str) {
                             let layers = image.manifest.layers.len();
                             // Import ref.name-annotated tags into the store.
                             match oci::store_import_dir(&extract_dir) {
-                                Ok(tags) if !tags.is_empty() => crate::console_println!(
+                                Ok(tags) if !tags.is_empty() => shell_println!(
                                     "Loaded {} ({} bytes, {} layers) -> store tags: {}",
                                     tar_path,
                                     archive.len(),
                                     layers,
                                     tags.join(", ")
                                 ),
-                                Ok(_) => crate::console_println!(
+                                Ok(_) => shell_println!(
                                     "Loaded {} ({} bytes, {} layers){}",
                                     tar_path,
                                     archive.len(),
@@ -95337,20 +95164,20 @@ fn cmd_oci(args: &str) {
                                         ""
                                     }
                                 ),
-                                Err(e) => crate::console_println!(
+                                Err(e) => shell_println!(
                                     "Loaded {} but store import failed: {:?}",
                                     tar_path,
                                     e
                                 ),
                             }
                         }
-                        Err(e) => crate::console_println!(
+                        Err(e) => shell_println!(
                             "Extracted {} but it is not a valid OCI image: {:?}",
                             tar_path,
                             e
                         ),
                     },
-                    Err(e) => crate::console_println!("Failed to extract '{}': {:?}", tar_path, e),
+                    Err(e) => shell_println!("Failed to extract '{}': {:?}", tar_path, e),
                 }
                 if temp {
                     let _ = crate::fs::vfs::Vfs::remove_recursive(&extract_dir);
@@ -95381,7 +95208,7 @@ fn cmd_oci(args: &str) {
                             tag = Some(t);
                             i = i.saturating_add(2);
                         } else {
-                            crate::console_println!("[oci] -t/--tag needs a name:tag");
+                            shell_println!("[oci] -t/--tag needs a name:tag");
                             i = i.saturating_add(1);
                         }
                     } else if let Some(t) = tok.strip_prefix("--tag=") {
@@ -95396,10 +95223,7 @@ fn cmd_oci(args: &str) {
                                 None => (kv, ""),
                             };
                             if k.is_empty() {
-                                crate::console_println!(
-                                    "[oci] Ignoring --build-arg '{}': empty key",
-                                    kv
-                                );
+                                shell_println!("[oci] Ignoring --build-arg '{}': empty key", kv);
                             } else {
                                 build_args.push((
                                     alloc::string::String::from(k),
@@ -95408,7 +95232,7 @@ fn cmd_oci(args: &str) {
                             }
                             i = i.saturating_add(2);
                         } else {
-                            crate::console_println!("[oci] --build-arg needs KEY=VALUE");
+                            shell_println!("[oci] --build-arg needs KEY=VALUE");
                             i = i.saturating_add(1);
                         }
                     } else if tok == "--target" {
@@ -95416,7 +95240,7 @@ fn cmd_oci(args: &str) {
                             target = Some(t);
                             i = i.saturating_add(2);
                         } else {
-                            crate::console_println!("[oci] --target needs a stage name or index");
+                            shell_println!("[oci] --target needs a stage name or index");
                             i = i.saturating_add(1);
                         }
                     } else if let Some(t) = tok.strip_prefix("--target=") {
@@ -95430,7 +95254,7 @@ fn cmd_oci(args: &str) {
                 let (Some(&dockerfile), Some(&ctx), Some(&dest)) =
                     (positional.first(), positional.get(1), positional.get(2))
                 else {
-                    crate::console_println!(
+                    shell_println!(
                         "Usage: oci build <dockerfile> <context-dir> <dest-image-dir> [-t name:tag] [--build-arg KEY=VALUE ...] [--target STAGE]"
                     );
                     return;
@@ -95439,7 +95263,7 @@ fn cmd_oci(args: &str) {
                     Ok(df) => {
                         match oci::build_image_targeted(&df, ctx, dest, &build_args, target) {
                             Ok(desc) => {
-                                crate::console_println!(
+                                shell_println!(
                                     "Built image -> {} (manifest {}, {} bytes)",
                                     dest,
                                     desc.digest,
@@ -95449,8 +95273,8 @@ fn cmd_oci(args: &str) {
                                 // named store so it can be referenced by name.
                                 if let Some(reference) = tag {
                                     match oci::store_tag_from_dir(dest, reference) {
-                                        Ok(_) => crate::console_println!("Tagged -> {}", reference),
-                                        Err(e) => crate::console_println!(
+                                        Ok(_) => shell_println!("Tagged -> {}", reference),
+                                        Err(e) => shell_println!(
                                             "build succeeded but tag '{}' failed: {:?}",
                                             reference,
                                             e
@@ -95458,15 +95282,11 @@ fn cmd_oci(args: &str) {
                                     }
                                 }
                             }
-                            Err(e) => crate::console_println!("build failed: {}", e.describe()),
+                            Err(e) => shell_println!("build failed: {}", e.describe()),
                         }
                     }
                     Err(e) => {
-                        crate::console_println!(
-                            "Failed to read Dockerfile '{}': {:?}",
-                            dockerfile,
-                            e
-                        );
+                        shell_println!("Failed to read Dockerfile '{}': {:?}", dockerfile, e);
                     }
                 }
             }
@@ -95480,7 +95300,7 @@ fn cmd_oci(args: &str) {
                 //   oci tag <image-dir> <name:tag>   — import a built dir + tag it
                 //   oci tag <src-ref>   <name:tag>    — add a second tag (both in store)
                 let (Some(&a), Some(&b)) = (parts.get(1), parts.get(2)) else {
-                    crate::console_println!("Usage: oci tag <image-dir|src-ref> <name:tag>");
+                    shell_println!("Usage: oci tag <image-dir|src-ref> <name:tag>");
                     return;
                 };
                 // A source that looks like a path (has a `/` or exists as a dir) is
@@ -95490,13 +95310,13 @@ fn cmd_oci(args: &str) {
                     .unwrap_or(false);
                 if is_dir {
                     match oci::store_tag_from_dir(a, b) {
-                        Ok(digest) => crate::console_println!("Tagged {} -> {} ({})", a, b, digest),
-                        Err(e) => crate::console_println!("tag failed: {:?}", e),
+                        Ok(digest) => shell_println!("Tagged {} -> {} ({})", a, b, digest),
+                        Err(e) => shell_println!("tag failed: {:?}", e),
                     }
                 } else {
                     match oci::store_add_tag(a, b) {
-                        Ok(()) => crate::console_println!("Tagged {} -> {}", a, b),
-                        Err(e) => crate::console_println!("tag failed: {:?}", e),
+                        Ok(()) => shell_println!("Tagged {} -> {}", a, b),
+                        Err(e) => shell_println!("tag failed: {:?}", e),
                     }
                 }
             }
@@ -95507,15 +95327,10 @@ fn cmd_oci(args: &str) {
             fn case() {
                 match oci::store_list() {
                     Ok(imgs) if imgs.is_empty() => {
-                        crate::console_println!("No images in store ({}).", oci::STORE_DIR);
+                        shell_println!("No images in store ({}).", oci::STORE_DIR);
                     }
                     Ok(imgs) => {
-                        crate::console_println!(
-                            "{:<28} {:<20} {:>10}",
-                            "REPOSITORY:TAG",
-                            "DIGEST",
-                            "SIZE"
-                        );
+                        shell_println!("{:<28} {:<20} {:>10}", "REPOSITORY:TAG", "DIGEST", "SIZE");
                         for im in imgs {
                             // Show the short (12-hex) digest, Docker-style.
                             let short = im
@@ -95523,15 +95338,10 @@ fn cmd_oci(args: &str) {
                                 .split_once(':')
                                 .map(|(_, hex)| hex.get(..12).unwrap_or(hex))
                                 .unwrap_or(&im.digest);
-                            crate::console_println!(
-                                "{:<28} {:<20} {:>10}",
-                                im.reference,
-                                short,
-                                im.size
-                            );
+                            shell_println!("{:<28} {:<20} {:>10}", im.reference, short, im.size);
                         }
                     }
-                    Err(e) => crate::console_println!("images failed: {:?}", e),
+                    Err(e) => shell_println!("images failed: {:?}", e),
                 }
             }
             case();
@@ -95540,12 +95350,12 @@ fn cmd_oci(args: &str) {
             #[inline(never)]
             fn case(parts: &[&str]) {
                 let Some(&reference) = parts.get(1) else {
-                    crate::console_println!("Usage: oci rmi <name:tag>");
+                    shell_println!("Usage: oci rmi <name:tag>");
                     return;
                 };
                 match oci::store_remove(reference) {
-                    Ok(()) => crate::console_println!("Untagged: {}", reference),
-                    Err(e) => crate::console_println!("rmi failed: {:?}", e),
+                    Ok(()) => shell_println!("Untagged: {}", reference),
+                    Err(e) => shell_println!("rmi failed: {:?}", e),
                 }
             }
             case(&parts);
@@ -95560,18 +95370,16 @@ fn cmd_oci(args: &str) {
                 // as a standalone OCI layout at <dest-dir>; an optional trailing
                 // `name:tag` also tags it into the image store.
                 let (Some(id_str), Some(&dest_dir)) = (parts.get(1), parts.get(2)) else {
-                    crate::console_println!(
-                        "Usage: oci commit <container-id> <dest-dir> [name:tag]"
-                    );
+                    shell_println!("Usage: oci commit <container-id> <dest-dir> [name:tag]");
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID");
+                    shell_println!("Invalid container ID");
                     return;
                 };
                 match crate::container::commit_image(id, dest_dir) {
                     Ok(digest) => {
-                        crate::console_println!(
+                        shell_println!(
                             "Committed container {} -> image {} ({})",
                             id,
                             dest_dir,
@@ -95579,55 +95387,52 @@ fn cmd_oci(args: &str) {
                         );
                         if let Some(&reference) = parts.get(3) {
                             match oci::store_tag_from_dir(dest_dir, reference) {
-                                Ok(d) => crate::console_println!(
-                                    "Tagged {} -> {} ({})",
-                                    dest_dir,
-                                    reference,
-                                    d
-                                ),
-                                Err(e) => crate::console_println!("commit tag failed: {:?}", e),
+                                Ok(d) => {
+                                    shell_println!("Tagged {} -> {} ({})", dest_dir, reference, d)
+                                }
+                                Err(e) => shell_println!("commit tag failed: {:?}", e),
                             }
                         }
                     }
-                    Err(e) => crate::console_println!("commit failed: {:?}", e),
+                    Err(e) => shell_println!("commit failed: {:?}", e),
                 }
             }
             case(&parts);
         }
         "test" => match oci::self_test() {
-            Ok(()) => crate::console_println!("OCI self-test passed."),
-            Err(e) => crate::console_println!("OCI self-test failed: {:?}", e),
+            Ok(()) => shell_println!("OCI self-test passed."),
+            Err(e) => shell_println!("OCI self-test failed: {:?}", e),
         },
         _ => {
             #[inline(never)]
             fn case() {
-                crate::console_println!(
+                shell_println!(
                     "Usage: oci [inspect|layers|history|run|build|commit|tag|images|rmi|save|load|test]"
                 );
-                crate::console_println!("  oci inspect <dir>  — show image metadata and config");
-                crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-                crate::console_println!(
+                shell_println!("  oci inspect <dir>  — show image metadata and config");
+                shell_println!("  oci layers <dir>   — list layer digests and sizes");
+                shell_println!(
                     "  oci history <dir>  — show build history (per-step created-by + size)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  oci build <dockerfile> <context-dir> <dest-dir> [--build-arg K=V ...] [--target STAGE] — build an OCI image from a Dockerfile (Docker build; RUN deferred, see Q17)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  oci save <dir> <out-tar>   — bundle an image directory into a tar (Docker save)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  oci load <in-tar> <dest-dir> — restore a saved image tar into a directory (Docker load)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  oci commit <container-id> <dest-dir> [name:tag] — author a new image from a container's changes (Docker commit)"
                 );
-                crate::console_println!(
+                shell_println!(
                     "  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [--network-alias NAME ...] [-v src:/guest[:ro|:rw] ...] [--tmpfs /guest ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]"
                 );
-                crate::console_println!(
+                shell_println!(
                     "                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user, --entrypoint/trailing COMMAND override the image entrypoint/cmd)"
                 );
-                crate::console_println!("  oci test           — run parser self-tests");
+                shell_println!("  oci test           — run parser self-tests");
             }
             case();
         }
@@ -95643,15 +95448,15 @@ fn cmd_scfilter(args: &str) {
     match cmd {
         "" | "list" | "ls" => {
             let count = scfilter::active_count();
-            crate::console_println!("Active syscall filters: {}", count);
+            shell_println!("Active syscall filters: {}", count);
         }
         "install" => {
             let Some(pid_str) = parts.get(1) else {
-                crate::console_println!("Usage: scfilter install <pid> [deny-all]");
+                shell_println!("Usage: scfilter install <pid> [deny-all]");
                 return;
             };
             let Ok(pid) = pid_str.parse::<u64>() else {
-                crate::console_println!("Invalid PID");
+                shell_println!("Invalid PID");
                 return;
             };
             let mode = parts.get(2).copied().unwrap_or("allow-all");
@@ -95661,74 +95466,74 @@ fn cmd_scfilter(args: &str) {
                 scfilter::install(pid)
             };
             match result {
-                Ok(()) => crate::console_println!("Installed {} filter for PID {}", mode, pid),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Ok(()) => shell_println!("Installed {} filter for PID {}", mode, pid),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "remove" | "rm" => {
             let Some(pid_str) = parts.get(1) else {
-                crate::console_println!("Usage: scfilter remove <pid>");
+                shell_println!("Usage: scfilter remove <pid>");
                 return;
             };
             let Ok(pid) = pid_str.parse::<u64>() else {
-                crate::console_println!("Invalid PID");
+                shell_println!("Invalid PID");
                 return;
             };
             scfilter::remove(pid);
-            crate::console_println!("Removed filter for PID {}", pid);
+            shell_println!("Removed filter for PID {}", pid);
         }
         "deny" => {
             // scfilter deny <pid> <syscall_nr>
             if parts.len() < 3 {
-                crate::console_println!("Usage: scfilter deny <pid> <syscall_nr>");
+                shell_println!("Usage: scfilter deny <pid> <syscall_nr>");
                 return;
             }
             let Ok(pid) = parts[1].parse::<u64>() else {
-                crate::console_println!("Invalid PID");
+                shell_println!("Invalid PID");
                 return;
             };
             let Ok(nr) = parts[2].parse::<u64>() else {
-                crate::console_println!("Invalid syscall number");
+                shell_println!("Invalid syscall number");
                 return;
             };
             match scfilter::deny(pid, nr) {
-                Ok(()) => crate::console_println!("Denied syscall {} for PID {}", nr, pid),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Ok(()) => shell_println!("Denied syscall {} for PID {}", nr, pid),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "allow" => {
             if parts.len() < 3 {
-                crate::console_println!("Usage: scfilter allow <pid> <syscall_nr>");
+                shell_println!("Usage: scfilter allow <pid> <syscall_nr>");
                 return;
             }
             let Ok(pid) = parts[1].parse::<u64>() else {
-                crate::console_println!("Invalid PID");
+                shell_println!("Invalid PID");
                 return;
             };
             let Ok(nr) = parts[2].parse::<u64>() else {
-                crate::console_println!("Invalid syscall number");
+                shell_println!("Invalid syscall number");
                 return;
             };
             match scfilter::allow(pid, nr) {
-                Ok(()) => crate::console_println!("Allowed syscall {} for PID {}", nr, pid),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                Ok(()) => shell_println!("Allowed syscall {} for PID {}", nr, pid),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "check" => {
             if parts.len() < 3 {
-                crate::console_println!("Usage: scfilter check <pid> <syscall_nr>");
+                shell_println!("Usage: scfilter check <pid> <syscall_nr>");
                 return;
             }
             let Ok(pid) = parts[1].parse::<u64>() else {
-                crate::console_println!("Invalid PID");
+                shell_println!("Invalid PID");
                 return;
             };
             let Ok(nr) = parts[2].parse::<u64>() else {
-                crate::console_println!("Invalid syscall number");
+                shell_println!("Invalid syscall number");
                 return;
             };
             let allowed = scfilter::check(pid, nr);
-            crate::console_println!(
+            shell_println!(
                 "Syscall {} for PID {}: {}",
                 nr,
                 pid,
@@ -95737,46 +95542,42 @@ fn cmd_scfilter(args: &str) {
         }
         "info" => {
             let Some(pid_str) = parts.get(1) else {
-                crate::console_println!("Usage: scfilter info <pid>");
+                shell_println!("Usage: scfilter info <pid>");
                 return;
             };
             let Ok(pid) = pid_str.parse::<u64>() else {
-                crate::console_println!("Invalid PID");
+                shell_println!("Invalid PID");
                 return;
             };
             if !scfilter::has_filter(pid) {
-                crate::console_println!("No filter installed for PID {}", pid);
+                shell_println!("No filter installed for PID {}", pid);
                 return;
             }
             let allowed = scfilter::allowed_count(pid).unwrap_or(0);
             let denied = scfilter::deny_count(pid);
-            crate::console_println!("=== Syscall Filter for PID {} ===", pid);
-            crate::console_println!(
+            shell_println!("=== Syscall Filter for PID {} ===", pid);
+            shell_println!(
                 "  Allowed syscalls: {}/{}",
                 allowed,
                 scfilter::MAX_SYSCALL_NR
             );
-            crate::console_println!("  Denied attempts:  {}", denied);
+            shell_println!("  Denied attempts:  {}", denied);
         }
         "test" => {
             scfilter::self_test();
         }
         _ => {
-            crate::console_println!(
-                "Usage: scfilter [list|install|remove|deny|allow|check|info|test]"
-            );
-            crate::console_println!(
-                "  scfilter                           — show active filter count"
-            );
-            crate::console_println!("  scfilter install PID [deny-all]    — install filter");
-            crate::console_println!("  scfilter remove PID                — remove filter");
-            crate::console_println!("  scfilter deny PID NR               — deny syscall NR");
-            crate::console_println!("  scfilter allow PID NR              — allow syscall NR");
-            crate::console_println!("  scfilter check PID NR              — test if allowed");
-            crate::console_println!("  scfilter info PID                  — show filter stats");
-            crate::console_println!("  scfilter test                      — run self-test");
-            crate::console_println!();
-            crate::console_println!("Aliases: seccomp");
+            shell_println!("Usage: scfilter [list|install|remove|deny|allow|check|info|test]");
+            shell_println!("  scfilter                           — show active filter count");
+            shell_println!("  scfilter install PID [deny-all]    — install filter");
+            shell_println!("  scfilter remove PID                — remove filter");
+            shell_println!("  scfilter deny PID NR               — deny syscall NR");
+            shell_println!("  scfilter allow PID NR              — allow syscall NR");
+            shell_println!("  scfilter check PID NR              — test if allowed");
+            shell_println!("  scfilter info PID                  — show filter stats");
+            shell_println!("  scfilter test                      — run self-test");
+            shell_println!();
+            shell_println!("Aliases: seccomp");
         }
     }
 }
@@ -95795,13 +95596,13 @@ fn cmd_cap_request(args: &str) {
         "" | "list" | "pending" => {
             let pending = request::list_pending();
             if pending.is_empty() {
-                crate::console_println!("No pending capability requests.");
-                crate::console_println!("Handler active: {}", request::handler_active());
+                shell_println!("No pending capability requests.");
+                shell_println!("Handler active: {}", request::handler_active());
                 return;
             }
-            crate::console_println!("=== Pending Capability Requests ({}) ===", pending.len());
+            shell_println!("=== Pending Capability Requests ({}) ===", pending.len());
             for req in &pending {
-                crate::console_println!(
+                shell_println!(
                     "  #{}: pid={} ({}) wants {:?}/{:?}",
                     req.id,
                     req.pid,
@@ -95809,16 +95610,16 @@ fn cmd_cap_request(args: &str) {
                     req.resource_type,
                     req.rights
                 );
-                crate::console_println!("       Reason: {}", req.reason);
+                shell_println!("       Reason: {}", req.reason);
             }
         }
         "all" => {
             let all = request::list_all();
             if all.is_empty() {
-                crate::console_println!("No capability requests on record.");
+                shell_println!("No capability requests on record.");
                 return;
             }
-            crate::console_println!("=== All Capability Requests ({}) ===", all.len());
+            shell_println!("=== All Capability Requests ({}) ===", all.len());
             for req in &all {
                 let status_str = match req.status {
                     request::RequestStatus::Pending => "PENDING",
@@ -95827,7 +95628,7 @@ fn cmd_cap_request(args: &str) {
                     request::RequestStatus::TimedOut => "TIMEOUT",
                     request::RequestStatus::Cancelled => "CANCEL",
                 };
-                crate::console_println!(
+                shell_println!(
                     "  #{}: [{}] pid={} ({}) {:?}/{:?} -- {}",
                     req.id,
                     status_str,
@@ -95844,13 +95645,13 @@ fn cmd_cap_request(args: &str) {
             let id: u64 = match id_str.parse() {
                 Ok(v) => v,
                 Err(_) => {
-                    crate::console_println!("Usage: capreq approve <request-id>");
+                    shell_println!("Usage: capreq approve <request-id>");
                     return;
                 }
             };
             match request::approve(id) {
                 Ok(req) => {
-                    crate::console_println!(
+                    shell_println!(
                         "Approved #{}: pid={} gets {:?}/{:?}",
                         id,
                         req.pid,
@@ -95859,7 +95660,7 @@ fn cmd_cap_request(args: &str) {
                     );
                 }
                 Err(e) => {
-                    crate::console_println!("Failed to approve #{}: {:?}", id, e);
+                    shell_println!("Failed to approve #{}: {:?}", id, e);
                 }
             }
         }
@@ -95868,16 +95669,16 @@ fn cmd_cap_request(args: &str) {
             let id: u64 = match id_str.parse() {
                 Ok(v) => v,
                 Err(_) => {
-                    crate::console_println!("Usage: capreq deny <request-id>");
+                    shell_println!("Usage: capreq deny <request-id>");
                     return;
                 }
             };
             match request::deny(id) {
                 Ok(()) => {
-                    crate::console_println!("Denied #{}", id);
+                    shell_println!("Denied #{}", id);
                 }
                 Err(e) => {
-                    crate::console_println!("Failed to deny #{}: {:?}", id, e);
+                    shell_println!("Failed to deny #{}: {:?}", id, e);
                 }
             }
         }
@@ -95886,14 +95687,14 @@ fn cmd_cap_request(args: &str) {
             match action {
                 "on" | "register" => {
                     request::register_handler();
-                    crate::console_println!("Policy handler registered (requests will pend)");
+                    shell_println!("Policy handler registered (requests will pend)");
                 }
                 "off" | "unregister" => {
                     request::unregister_handler();
-                    crate::console_println!("Policy handler unregistered (auto-deny mode)");
+                    shell_println!("Policy handler unregistered (auto-deny mode)");
                 }
                 _ => {
-                    crate::console_println!(
+                    shell_println!(
                         "Handler: {} ({})",
                         if request::handler_active() {
                             "active"
@@ -95913,7 +95714,7 @@ fn cmd_cap_request(args: &str) {
             // Submit a test request for demonstration.
             if !request::handler_active() {
                 request::register_handler();
-                crate::console_println!("(registered handler for test)");
+                shell_println!("(registered handler for test)");
             }
             match request::request_capability(
                 1,
@@ -95923,18 +95724,16 @@ fn cmd_cap_request(args: &str) {
                 "Test request from kshell",
             ) {
                 Ok(id) => {
-                    crate::console_println!("Submitted test request #{}", id);
-                    crate::console_println!("Use 'capreq approve {}' or 'capreq deny {}'", id, id);
+                    shell_println!("Submitted test request #{}", id);
+                    shell_println!("Use 'capreq approve {}' or 'capreq deny {}'", id, id);
                 }
                 Err(e) => {
-                    crate::console_println!("Failed to submit test request: {:?}", e);
+                    shell_println!("Failed to submit test request: {:?}", e);
                 }
             }
         }
         _ => {
-            crate::console_println!(
-                "Usage: capreq [list|all|approve ID|deny ID|handler on/off|test]"
-            );
+            shell_println!("Usage: capreq [list|all|approve ID|deny ID|handler on/off|test]");
         }
     }
 }
@@ -95996,14 +95795,14 @@ fn cmd_uname(args: &str) {
                         'm' => show_m = true,
                         'o' => show_o = true,
                         _ => {
-                            crate::console_println!("uname: invalid option -- '{}'", ch);
+                            shell_println!("uname: invalid option -- '{}'", ch);
                             set_exit(1);
                             return;
                         }
                     }
                 }
             } else {
-                crate::console_println!("uname: extra operand '{}'", token);
+                shell_println!("uname: extra operand '{}'", token);
                 set_exit(1);
                 return;
             }
@@ -96051,7 +95850,7 @@ fn cmd_sort(args: &str) {
     };
 
     if path.is_empty() {
-        crate::console_println!("Usage: sort [-r] <file>");
+        shell_println!("Usage: sort [-r] <file>");
         return;
     }
 
@@ -96064,7 +95863,7 @@ fn cmd_sort(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("sort: cannot read '{}': {:?}", path.display(), e);
+            shell_println!("sort: cannot read '{}': {:?}", path.display(), e);
             return;
         }
     };
@@ -96095,7 +95894,7 @@ fn cmd_uniq(args: &str) {
     };
 
     if path.is_empty() {
-        crate::console_println!("Usage: uniq [-c] <file>");
+        shell_println!("Usage: uniq [-c] <file>");
         return;
     }
 
@@ -96105,7 +95904,7 @@ fn cmd_uniq(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("uniq: cannot read '{}': {:?}", path.display(), e);
+            shell_println!("uniq: cannot read '{}': {:?}", path.display(), e);
             return;
         }
     };
@@ -96227,7 +96026,7 @@ fn cmd_grep_input(args: &str, input: &str) {
     let pattern = match positional.first() {
         Some(p) => *p,
         None => {
-            crate::console_println!("grep: no pattern specified");
+            shell_println!("grep: no pattern specified");
             return;
         }
     };
@@ -96277,7 +96076,7 @@ fn cmd_grep_input(args: &str, input: &str) {
     if flags.count_only {
         shell_println!("{}", match_count);
     } else if match_count == 0 {
-        crate::console_println!("grep: no matches for '{}'", pattern);
+        shell_println!("grep: no matches for '{}'", pattern);
     }
     // "Found nothing" is grep's documented exit 1, and it is the status the
     // rest of the shell is most often asked about: `cmd | grep pat && ...`
@@ -96393,7 +96192,7 @@ fn cmd_source(args: &str) {
     const MAX_DEPTH: u8 = 8;
 
     if args.is_empty() {
-        crate::console_println!("Usage: source <script-file>");
+        shell_println!("Usage: source <script-file>");
         return;
     }
 
@@ -96402,7 +96201,7 @@ fn cmd_source(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("source: {}: {:?}", path.display(), e);
+            shell_println!("source: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -96410,7 +96209,7 @@ fn cmd_source(args: &str) {
     let text = match core::str::from_utf8(&data) {
         Ok(s) => s,
         Err(_) => {
-            crate::console_println!("source: {}: not a text file", path.display());
+            shell_println!("source: {}: not a text file", path.display());
             return;
         }
     };
@@ -96419,7 +96218,7 @@ fn cmd_source(args: &str) {
     {
         let mut depth = SOURCE_DEPTH.lock();
         if *depth >= MAX_DEPTH {
-            crate::console_println!("source: maximum nesting depth ({}) exceeded", MAX_DEPTH);
+            shell_println!("source: maximum nesting depth ({}) exceeded", MAX_DEPTH);
             return;
         }
         *depth = depth.saturating_add(1);
@@ -96444,7 +96243,7 @@ fn cmd_source(args: &str) {
 
         // `set -e` (errexit): abort script on non-zero exit status.
         if OPT_ERREXIT.load(core::sync::atomic::Ordering::Relaxed) && last_exit() != 0 {
-            crate::console_println!(
+            shell_println!(
                 "{}:{}: command failed (exit {}), aborting (set -e)",
                 path.display(),
                 line_num.saturating_add(1),
@@ -96472,7 +96271,7 @@ fn cmd_seq(args: &str) {
             let n = match parts[0].parse::<i64>() {
                 Ok(v) => v,
                 Err(_) => {
-                    crate::console_println!("Usage: seq N [M]");
+                    shell_println!("Usage: seq N [M]");
                     return;
                 }
             };
@@ -96484,7 +96283,7 @@ fn cmd_seq(args: &str) {
             (a, b)
         }
         _ => {
-            crate::console_println!("Usage: seq N [M]");
+            shell_println!("Usage: seq N [M]");
             return;
         }
     };
@@ -96507,7 +96306,7 @@ fn cmd_seq(args: &str) {
 /// Number lines of a file (like Unix `nl`).
 fn cmd_nl(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: nl <file>");
+        shell_println!("Usage: nl <file>");
         return;
     }
 
@@ -96516,7 +96315,7 @@ fn cmd_nl(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("nl: {}: {:?}", path.display(), e);
+            shell_println!("nl: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -96549,7 +96348,7 @@ fn cmd_nl_input(args: &str, input: &[u8]) {
 /// Reverse the order of lines in a file (like Unix `tac`).
 fn cmd_rev(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: rev <file>");
+        shell_println!("Usage: rev <file>");
         return;
     }
 
@@ -96558,7 +96357,7 @@ fn cmd_rev(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("rev: {}: {:?}", path.display(), e);
+            shell_println!("rev: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -96606,12 +96405,12 @@ fn cmd_cut(args: &str) {
                 cut_process(text, delim, &fields, chars_range);
             }
             Err(e) => {
-                crate::console_println!("cut: {}: {:?}", path, e);
+                shell_println!("cut: {}: {:?}", path, e);
                 set_exit(1);
             }
         }
     } else {
-        crate::console_println!("Usage: cut -d DELIM -f FIELDS [file]  or  cut -c RANGE [file]");
+        shell_println!("Usage: cut -d DELIM -f FIELDS [file]  or  cut -c RANGE [file]");
         set_exit(1);
     }
 }
@@ -96727,7 +96526,7 @@ fn cmd_tr(args: &str) {
     if set1_or_flag == "-d" {
         // Delete mode: tr -d SET1 FILE
         if set2_or_file.is_empty() {
-            crate::console_println!("Usage: tr -d CHARS [file]  or pipe: cmd | tr -d CHARS");
+            shell_println!("Usage: tr -d CHARS [file]  or pipe: cmd | tr -d CHARS");
             set_exit(1);
             return;
         }
@@ -96739,16 +96538,16 @@ fn cmd_tr(args: &str) {
                     tr_delete(text, set2_or_file);
                 }
                 Err(e) => {
-                    crate::console_println!("tr: {}: {:?}", file, e);
+                    shell_println!("tr: {}: {:?}", file, e);
                     set_exit(1);
                 }
             }
         } else {
-            crate::console_println!("Usage: tr -d CHARS [file]");
+            shell_println!("Usage: tr -d CHARS [file]");
             set_exit(1);
         }
     } else if set1_or_flag.is_empty() || set2_or_file.is_empty() {
-        crate::console_println!("Usage: tr SET1 SET2 [file]  or  tr -d CHARS [file]");
+        shell_println!("Usage: tr SET1 SET2 [file]  or  tr -d CHARS [file]");
         set_exit(1);
     } else if !file.is_empty() {
         let resolved = resolve_path(file);
@@ -96758,12 +96557,12 @@ fn cmd_tr(args: &str) {
                 tr_translate(text, set1_or_flag, set2_or_file);
             }
             Err(e) => {
-                crate::console_println!("tr: {}: {:?}", file, e);
+                shell_println!("tr: {}: {:?}", file, e);
                 set_exit(1);
             }
         }
     } else {
-        crate::console_println!("Usage: tr SET1 SET2 [file]  or pipe: cmd | tr SET1 SET2");
+        shell_println!("Usage: tr SET1 SET2 [file]  or pipe: cmd | tr SET1 SET2");
         set_exit(1);
     }
 }
@@ -96778,7 +96577,7 @@ fn cmd_tr_input(args: &str, input: &str) {
     } else if !set2.is_empty() {
         tr_translate(input, set1_or_flag, set2);
     } else {
-        crate::console_println!("Usage: cmd | tr SET1 SET2  or  cmd | tr -d CHARS");
+        shell_println!("Usage: cmd | tr SET1 SET2  or  cmd | tr -d CHARS");
     }
 }
 
@@ -96874,7 +96673,7 @@ fn cmd_yes(args: &str) {
 /// `tac [FILE]` — print lines in reverse order (opposite of cat).
 fn cmd_tac(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: tac <file>");
+        shell_println!("Usage: tac <file>");
         return;
     }
 
@@ -96888,7 +96687,7 @@ fn cmd_tac(args: &str) {
             tac_process(&data);
         }
         Err(e) => {
-            crate::console_println!("tac: {}: {:?}", args, e);
+            shell_println!("tac: {}: {:?}", args, e);
             set_exit(1);
         }
     }
@@ -96922,12 +96721,12 @@ fn cmd_fold(args: &str) {
                 fold_process(text, width);
             }
             Err(e) => {
-                crate::console_println!("fold: {}: {:?}", path, e);
+                shell_println!("fold: {}: {:?}", path, e);
                 set_exit(1);
             }
         }
     } else {
-        crate::console_println!("Usage: fold [-w WIDTH] <file>");
+        shell_println!("Usage: fold [-w WIDTH] <file>");
         set_exit(1);
     }
 }
@@ -96982,7 +96781,7 @@ fn fold_process(text: &str, width: usize) {
 fn cmd_paste(args: &str) {
     let files: Vec<&str> = args.split_whitespace().collect();
     if files.is_empty() {
-        crate::console_println!("Usage: paste FILE1 [FILE2 ...]");
+        shell_println!("Usage: paste FILE1 [FILE2 ...]");
         set_exit(1);
         return;
     }
@@ -96994,7 +96793,7 @@ fn cmd_paste(args: &str) {
         match crate::fs::Vfs::read_file(&path) {
             Ok(data) => columns.push(paste_column(&data)),
             Err(e) => {
-                crate::console_println!("paste: {}: {:?}", file, e);
+                shell_println!("paste: {}: {:?}", file, e);
                 set_exit(1);
                 return;
             }
@@ -97015,7 +96814,7 @@ fn cmd_paste_input(args: &str, input: &[u8]) {
         match crate::fs::Vfs::read_file(&path) {
             Ok(data) => columns.push(paste_column(&data)),
             Err(e) => {
-                crate::console_println!("paste: {}: {:?}", file, e);
+                shell_println!("paste: {}: {:?}", file, e);
                 set_exit(1);
                 return;
             }
@@ -97060,8 +96859,8 @@ fn paste_output(columns: &[Vec<Vec<u8>>]) {
 /// COMMAND.  By default, all input words are appended to a single invocation.
 /// With `-n N`, limits to N arguments per invocation.
 fn cmd_xargs(_args: &str) {
-    crate::console_println!("Usage: cmd | xargs COMMAND [args]");
-    crate::console_println!("xargs requires piped input.");
+    shell_println!("Usage: cmd | xargs COMMAND [args]");
+    shell_println!("xargs requires piped input.");
     set_exit(1);
 }
 
@@ -97106,7 +96905,7 @@ fn cmd_sleep(args: &str) {
     let ms = match args.parse::<u64>() {
         Ok(n) if n > 0 => n,
         _ => {
-            crate::console_println!("Usage: sleep <milliseconds>");
+            shell_println!("Usage: sleep <milliseconds>");
             return;
         }
     };
@@ -97114,7 +96913,7 @@ fn cmd_sleep(args: &str) {
     // Cap at 10 seconds to prevent accidental infinite waits.
     let capped = ms.min(10_000);
     if capped != ms {
-        crate::console_println!("(capped to {} ms)", capped);
+        shell_println!("(capped to {} ms)", capped);
     }
 
     // Busy-wait using the APIC tick counter.
@@ -97288,9 +97087,9 @@ fn eval_test(args: &str) -> bool {
 /// Usage: `expr 1 + 2 * 3` → `7`
 fn cmd_expr(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: expr <expression>");
-        crate::console_println!("  Operators: + - * / % ()");
-        crate::console_println!("  Example: expr 2 + 3 * 4");
+        shell_println!("Usage: expr <expression>");
+        shell_println!("  Operators: + - * / % ()");
+        shell_println!("  Example: expr 2 + 3 * 4");
         set_exit(1);
         return;
     }
@@ -97770,7 +97569,7 @@ fn cmd_mapfile(args: &str) {
     };
 
     if file_path.is_empty() {
-        crate::console_println!("mapfile: no file specified (pipe input or provide a file path)");
+        shell_println!("mapfile: no file specified (pipe input or provide a file path)");
         set_exit(1);
         return;
     }
@@ -97783,7 +97582,7 @@ fn cmd_mapfile(args: &str) {
             set_exit(0);
         }
         Err(e) => {
-            crate::console_println!("mapfile: {}: {:?}", file_path, e);
+            shell_println!("mapfile: {}: {:?}", file_path, e);
             set_exit(1);
         }
     }
@@ -97861,7 +97660,7 @@ fn cmd_tee_input(args: &str, input: &[u8]) {
     shell_write_bytes(input);
     // Also write to file.
     if let Err(e) = crate::fs::Vfs::write_file(&resolved, input) {
-        crate::console_println!("tee: write error: {:?}", e);
+        shell_println!("tee: write error: {:?}", e);
         set_exit(1);
     }
 }
@@ -97877,9 +97676,9 @@ fn cmd_readonly(args: &str) {
         let ro = READONLY_VARS.lock();
         for name in ro.iter() {
             if let Some(val) = env_get(name) {
-                crate::console_println!("declare -r {}=\"{}\"", name, val);
+                shell_println!("declare -r {}=\"{}\"", name, val);
             } else {
-                crate::console_println!("declare -r {}", name);
+                shell_println!("declare -r {}", name);
             }
         }
         return;
@@ -97891,7 +97690,7 @@ fn cmd_readonly(args: &str) {
             let name = word.get(..eq_pos).unwrap_or("");
             let value = word.get(eq_pos.saturating_add(1)..).unwrap_or("");
             if name.is_empty() {
-                crate::console_println!("readonly: invalid variable name");
+                shell_println!("readonly: invalid variable name");
                 continue;
             }
             // Set the value (bypass readonly check since we're about to mark it).
@@ -97913,7 +97712,7 @@ fn cmd_readonly(args: &str) {
 /// (like bash).  Supports assignment: `let "x = 5 + 3"`.
 fn cmd_let(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: let EXPRESSION ...");
+        shell_println!("Usage: let EXPRESSION ...");
         set_exit(1);
         return;
     }
@@ -97954,10 +97753,10 @@ fn cmd_trap(args: &str) {
         // List all trap handlers.
         let handlers = TRAP_HANDLERS.lock();
         if handlers.is_empty() {
-            crate::console_println!("No trap handlers set.");
+            shell_println!("No trap handlers set.");
         } else {
             for (sig, cmd) in handlers.iter() {
-                crate::console_println!("trap -- '{}' {}", cmd, sig);
+                shell_println!("trap -- '{}' {}", cmd, sig);
             }
         }
         return;
@@ -97997,7 +97796,7 @@ fn cmd_trap(args: &str) {
     };
 
     if rest.is_empty() {
-        crate::console_println!("Usage: trap 'COMMAND' SIGNAL [SIGNAL...]");
+        shell_println!("Usage: trap 'COMMAND' SIGNAL [SIGNAL...]");
         set_exit(1);
         return;
     }
@@ -98012,7 +97811,7 @@ fn cmd_trap(args: &str) {
                     .insert(sig_upper, String::from(command));
             }
             _ => {
-                crate::console_println!("trap: unsupported signal '{}'", sig);
+                shell_println!("trap: unsupported signal '{}'", sig);
                 set_exit(1);
             }
         }
@@ -98046,7 +97845,7 @@ fn fire_trap(signal: &str) {
 /// with the same name.
 fn cmd_command(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: command CMD [args...]");
+        shell_println!("Usage: command CMD [args...]");
         set_exit(1);
         return;
     }
@@ -98066,7 +97865,7 @@ fn cmd_export(args: &str) {
         let name = args.get(..eq_pos).unwrap_or("").trim();
         let value = args.get(eq_pos.saturating_add(1)..).unwrap_or("").trim();
         if name.is_empty() {
-            crate::console_println!("export: invalid variable name");
+            shell_println!("export: invalid variable name");
             set_exit(1);
             return;
         }
@@ -98077,7 +97876,7 @@ fn cmd_export(args: &str) {
         let name = parts.next().unwrap_or("").trim();
         let value = parts.next().unwrap_or("").trim();
         if name.is_empty() {
-            crate::console_println!("export: invalid variable name");
+            shell_println!("export: invalid variable name");
             set_exit(1);
             return;
         }
@@ -98101,9 +97900,9 @@ fn cmd_set(args: &str) {
         // Show current options and variables.
         let errexit = OPT_ERREXIT.load(core::sync::atomic::Ordering::Relaxed);
         let xtrace = OPT_XTRACE.load(core::sync::atomic::Ordering::Relaxed);
-        crate::console_println!("Shell options:");
-        crate::console_println!("  errexit (-e): {}", if errexit { "on" } else { "off" });
-        crate::console_println!("  xtrace  (-x): {}", if xtrace { "on" } else { "off" });
+        shell_println!("Shell options:");
+        shell_println!("  errexit (-e): {}", if errexit { "on" } else { "off" });
+        shell_println!("  xtrace  (-x): {}", if xtrace { "on" } else { "off" });
         return;
     }
 
@@ -98150,7 +97949,7 @@ fn cmd_set(args: &str) {
 /// behaves identically to `export`.
 fn cmd_local(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: local VAR[=VALUE]");
+        shell_println!("Usage: local VAR[=VALUE]");
         return;
     }
 
@@ -98167,7 +97966,7 @@ fn cmd_local(args: &str) {
     };
 
     if name.is_empty() {
-        crate::console_println!("local: invalid variable name");
+        shell_println!("local: invalid variable name");
         return;
     }
 
@@ -98195,7 +97994,7 @@ fn cmd_local(args: &str) {
 /// Usage: `unset NAME [NAME ...]`
 fn cmd_unset(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: unset [-f] NAME [NAME ...]");
+        shell_println!("Usage: unset [-f] NAME [NAME ...]");
         set_exit(1);
         return;
     }
@@ -98212,7 +98011,7 @@ fn cmd_unset(args: &str) {
         let names = args.get(3..).unwrap_or("").trim();
         for name in names.split_whitespace() {
             if FUNCTIONS.lock().remove(name).is_none() {
-                crate::console_println!("unset: function '{}': not defined", name);
+                shell_println!("unset: function '{}': not defined", name);
                 set_exit(1);
             }
         }
@@ -98235,7 +98034,7 @@ fn cmd_unset(args: &str) {
         }
         // Try removing as array first, then as scalar.
         if !array_remove(name) && !env_remove(name) {
-            crate::console_println!("unset: '{}': not set", name);
+            shell_println!("unset: '{}': not set", name);
             set_exit(1);
         }
     }
@@ -98252,33 +98051,33 @@ fn cmd_unset(args: &str) {
 /// Usage: `type name [name ...]`
 fn cmd_type(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: type <name> [<name> ...]");
+        shell_println!("Usage: type <name> [<name> ...]");
         return;
     }
 
     for name in args.split_whitespace() {
         // Check aliases first.
         if let Some(val) = alias_get(name) {
-            crate::console_println!("{} is aliased to '{}'", name, val);
+            shell_println!("{} is aliased to '{}'", name, val);
             continue;
         }
 
         // Check user-defined functions.
         if FUNCTIONS.lock().contains_key(name) {
-            crate::console_println!("{} is a function", name);
+            shell_println!("{} is a function", name);
             continue;
         }
 
         // Check array variables.
         if is_array(name) {
             let len = array_len(name).unwrap_or(0);
-            crate::console_println!("{} is an array ({} elements)", name, len);
+            shell_println!("{} is an array ({} elements)", name, len);
             continue;
         }
 
         // Check builtins (simplified — we check the dispatch table names).
         if is_builtin(name) {
-            crate::console_println!("{} is a shell builtin", name);
+            shell_println!("{} is a shell builtin", name);
             continue;
         }
 
@@ -98300,11 +98099,11 @@ fn cmd_type(args: &str) {
                 | "in"
                 | "select"
         ) {
-            crate::console_println!("{} is a shell keyword", name);
+            shell_println!("{} is a shell keyword", name);
             continue;
         }
 
-        crate::console_println!("{}: not found", name);
+        shell_println!("{}: not found", name);
         set_exit(1);
     }
 }
@@ -98378,10 +98177,10 @@ fn cmd_declare(args: &str) {
     if args.is_empty() {
         // List function names only.
         if funcs.is_empty() {
-            crate::console_println!("No functions defined.");
+            shell_println!("No functions defined.");
         } else {
             for name in funcs.keys() {
-                crate::console_println!("{}", name);
+                shell_println!("{}", name);
             }
         }
         return;
@@ -98390,14 +98189,14 @@ fn cmd_declare(args: &str) {
     if args == "-f" {
         // List all functions with bodies.
         if funcs.is_empty() {
-            crate::console_println!("No functions defined.");
+            shell_println!("No functions defined.");
         } else {
             for (name, body) in funcs.iter() {
-                crate::console_println!("{}() {{", name);
+                shell_println!("{}() {{", name);
                 for line in body {
-                    crate::console_println!("    {}", line);
+                    shell_println!("    {}", line);
                 }
-                crate::console_println!("}}");
+                shell_println!("}}");
             }
         }
         return;
@@ -98406,13 +98205,13 @@ fn cmd_declare(args: &str) {
     if let Some(name) = args.strip_prefix("-f ") {
         let name = name.trim();
         if let Some(body) = funcs.get(name) {
-            crate::console_println!("{}() {{", name);
+            shell_println!("{}() {{", name);
             for line in body {
-                crate::console_println!("    {}", line);
+                shell_println!("    {}", line);
             }
-            crate::console_println!("}}");
+            shell_println!("}}");
         } else {
-            crate::console_println!("declare: function '{}' not found", name);
+            shell_println!("declare: function '{}' not found", name);
             set_exit(1);
         }
         return;
@@ -98422,7 +98221,7 @@ fn cmd_declare(args: &str) {
         // List all arrays with contents.
         let arrays = ARRAY_VARS.lock();
         if arrays.is_empty() {
-            crate::console_println!("No arrays defined.");
+            shell_println!("No arrays defined.");
         } else {
             for (name, values) in arrays.iter() {
                 let mut display = String::from("(");
@@ -98440,7 +98239,7 @@ fn cmd_declare(args: &str) {
                     }
                 }
                 display.push(')');
-                crate::console_println!("{}={}", name, display);
+                shell_println!("{}={}", name, display);
             }
         }
         return;
@@ -98451,16 +98250,16 @@ fn cmd_declare(args: &str) {
         let arrays = ARRAY_VARS.lock();
         if let Some(values) = arrays.get(name) {
             for (i, v) in values.iter().enumerate() {
-                crate::console_println!("{}[{}]={}", name, i, v);
+                shell_println!("{}[{}]={}", name, i, v);
             }
         } else {
-            crate::console_println!("declare: array '{}' not found", name);
+            shell_println!("declare: array '{}' not found", name);
             set_exit(1);
         }
         return;
     }
 
-    crate::console_println!("Usage: declare [-f [NAME]] [-a [NAME]]");
+    shell_println!("Usage: declare [-f [NAME]] [-a [NAME]]");
 }
 
 /// Define or list shell aliases.
@@ -98473,10 +98272,10 @@ fn cmd_alias(args: &str) {
     if args.is_empty() {
         let aliases = ALIASES.lock();
         if aliases.is_empty() {
-            crate::console_println!("(no aliases defined)");
+            shell_println!("(no aliases defined)");
         } else {
             for (k, v) in aliases.iter() {
-                crate::console_println!("alias {}='{}'", k, v);
+                shell_println!("alias {}='{}'", k, v);
             }
         }
         return;
@@ -98490,7 +98289,7 @@ fn cmd_alias(args: &str) {
         let value = value.trim();
         let value = strip_quotes(value);
         if name.is_empty() {
-            crate::console_println!("alias: invalid alias name");
+            shell_println!("alias: invalid alias name");
             set_exit(1);
             return;
         }
@@ -98501,18 +98300,18 @@ fn cmd_alias(args: &str) {
         let name = parts.next().unwrap_or("").trim();
         let value = parts.next().unwrap_or("").trim();
         if name.is_empty() {
-            crate::console_println!("alias: invalid alias name");
+            shell_println!("alias: invalid alias name");
             set_exit(1);
             return;
         }
         if value.is_empty() {
             // Show this single alias.
             if let Some(v) = alias_get(name) {
-                crate::console_println!("alias {}='{}'", name, v);
+                shell_println!("alias {}='{}'", name, v);
             } else {
                 // A query for a name that does not exist: the question was
                 // asked and could not be answered, which is bash's exit 1 too.
-                crate::console_println!("alias: '{}': not found", name);
+                shell_println!("alias: '{}': not found", name);
                 set_exit(1);
             }
         } else {
@@ -98526,7 +98325,7 @@ fn cmd_alias(args: &str) {
 /// Usage: `unalias NAME [NAME ...]` or `unalias -a` (remove all).
 fn cmd_unalias(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: unalias [-a] NAME [NAME ...]");
+        shell_println!("Usage: unalias [-a] NAME [NAME ...]");
         set_exit(1);
         return;
     }
@@ -98539,7 +98338,7 @@ fn cmd_unalias(args: &str) {
         // status is not reset by a later name that does succeed, so a batch
         // reports its worst outcome rather than its last one.
         if !alias_remove(name) {
-            crate::console_println!("unalias: '{}': not found", name);
+            shell_println!("unalias: '{}': not found", name);
             set_exit(1);
         }
     }
@@ -98578,16 +98377,16 @@ fn cmd_tee(args: &str) {
     let text = parts.next().unwrap_or("").trim();
 
     if path.is_empty() || text.is_empty() {
-        crate::console_println!("Usage: tee <file> <text>");
+        shell_println!("Usage: tee <file> <text>");
         return;
     }
 
     // Display the text.
-    crate::console_println!("{}", text);
+    shell_println!("{}", text);
 
     // Write to the file.
     if let Err(e) = crate::fs::Vfs::write_file(path, text.as_bytes()) {
-        crate::console_println!("tee: write error: {:?}", e);
+        shell_println!("tee: write error: {:?}", e);
     }
 }
 
@@ -98603,7 +98402,7 @@ fn cmd_truncate(args: &str) {
     let path = parts.next().unwrap_or("").trim();
 
     if size_str.is_empty() || path.is_empty() {
-        crate::console_println!("Usage: truncate <size>[K|M|G] <file>");
+        shell_println!("Usage: truncate <size>[K|M|G] <file>");
         return;
     }
 
@@ -98627,7 +98426,7 @@ fn cmd_truncate(args: &str) {
     let size = match num_str.parse::<u64>() {
         Ok(n) => n.saturating_mul(multiplier),
         Err(_) => {
-            crate::console_println!("truncate: invalid size '{}'", size_str);
+            shell_println!("truncate: invalid size '{}'", size_str);
             return;
         }
     };
@@ -98637,16 +98436,16 @@ fn cmd_truncate(args: &str) {
         Ok(handle) => {
             match crate::fs::handle::ftruncate(handle, size) {
                 Ok(()) => {
-                    crate::console_println!("Truncated '{}' to {} bytes", path, size);
+                    shell_println!("Truncated '{}' to {} bytes", path, size);
                 }
                 Err(e) => {
-                    crate::console_println!("truncate: error: {:?}", e);
+                    shell_println!("truncate: error: {:?}", e);
                 }
             }
             let _ = crate::fs::handle::close(handle);
         }
         Err(e) => {
-            crate::console_println!("truncate: cannot open '{}': {:?}", path, e);
+            shell_println!("truncate: cannot open '{}': {:?}", path, e);
         }
     }
 }
@@ -98655,7 +98454,7 @@ fn cmd_truncate(args: &str) {
 fn cmd_sha256(args: &str) {
     let path = args.trim();
     if path.is_empty() {
-        crate::console_println!("Usage: sha256 <file>");
+        shell_println!("Usage: sha256 <file>");
         return;
     }
 
@@ -98666,10 +98465,10 @@ fn cmd_sha256(args: &str) {
             for byte in &hash {
                 hex.push_str(&alloc::format!("{:02x}", byte));
             }
-            crate::console_println!("{} {}", hex, path);
+            shell_println!("{} {}", hex, path);
         }
         Err(e) => {
-            crate::console_println!("sha256: cannot hash '{}': {:?}", path, e);
+            shell_println!("sha256: cannot hash '{}': {:?}", path, e);
         }
     }
 }
@@ -98682,16 +98481,16 @@ fn cmd_sha256(args: &str) {
 fn cmd_readlink(args: &str) {
     let path = args.trim();
     if path.is_empty() {
-        crate::console_println!("Usage: readlink <symlink>");
+        shell_println!("Usage: readlink <symlink>");
         return;
     }
 
     match crate::fs::Vfs::readlink(path) {
         Ok(target) => {
-            crate::console_println!("{}", target.display());
+            shell_println!("{}", target.display());
         }
         Err(e) => {
-            crate::console_println!("readlink: '{}': {:?}", path, e);
+            shell_println!("readlink: '{}': {:?}", path, e);
         }
     }
 }
@@ -98703,16 +98502,16 @@ fn cmd_symlink(args: &str) {
     let link_path = parts.next().unwrap_or("").trim();
 
     if target.is_empty() || link_path.is_empty() {
-        crate::console_println!("Usage: symlink <target> <link_path>");
+        shell_println!("Usage: symlink <target> <link_path>");
         return;
     }
 
     match crate::fs::Vfs::symlink(link_path, target) {
         Ok(()) => {
-            crate::console_println!("{} -> {}", link_path, target);
+            shell_println!("{} -> {}", link_path, target);
         }
         Err(e) => {
-            crate::console_println!("symlink: cannot create '{}': {:?}", link_path, e);
+            shell_println!("symlink: cannot create '{}': {:?}", link_path, e);
         }
     }
 }
@@ -98724,9 +98523,7 @@ fn cmd_xattr(args: &str) {
     let rest = parts.next().unwrap_or("").trim();
 
     if file.is_empty() {
-        crate::console_println!(
-            "Usage: xattr <file> [list | get <key> | set <key> <value> | rm <key>]"
-        );
+        shell_println!("Usage: xattr <file> [list | get <key> | set <key> <value> | rm <key>]");
         return;
     }
 
@@ -98735,15 +98532,15 @@ fn cmd_xattr(args: &str) {
         match crate::fs::Vfs::list_xattrs(file) {
             Ok(keys) => {
                 if keys.is_empty() {
-                    crate::console_println!("(no extended attributes)");
+                    shell_println!("(no extended attributes)");
                 } else {
                     for key in &keys {
-                        crate::console_println!("  {}", key);
+                        shell_println!("  {}", key);
                     }
                 }
             }
             Err(e) => {
-                crate::console_println!("xattr: list '{}': {:?}", file, e);
+                shell_println!("xattr: list '{}': {:?}", file, e);
             }
         }
         return;
@@ -98756,14 +98553,14 @@ fn cmd_xattr(args: &str) {
     match subcmd {
         "get" => {
             if key.is_empty() {
-                crate::console_println!("Usage: xattr <file> get <key>");
+                shell_println!("Usage: xattr <file> get <key>");
                 return;
             }
             match crate::fs::Vfs::get_xattr(file, key) {
                 Ok(val) => {
                     // Try to display as UTF-8, fall back to hex.
                     if let Ok(s) = core::str::from_utf8(&val) {
-                        crate::console_println!("{}", s);
+                        shell_println!("{}", s);
                     } else {
                         let mut hex =
                             alloc::string::String::with_capacity(val.len().saturating_mul(3));
@@ -98773,45 +98570,45 @@ fn cmd_xattr(args: &str) {
                             }
                             hex.push_str(&alloc::format!("{:02x}", byte));
                         }
-                        crate::console_println!("{}", hex);
+                        shell_println!("{}", hex);
                     }
                 }
                 Err(e) => {
-                    crate::console_println!("xattr: get '{}' from '{}': {:?}", key, file, e);
+                    shell_println!("xattr: get '{}' from '{}': {:?}", key, file, e);
                 }
             }
         }
         "set" => {
             let value = sub_parts.next().unwrap_or("").trim();
             if key.is_empty() {
-                crate::console_println!("Usage: xattr <file> set <key> <value>");
+                shell_println!("Usage: xattr <file> set <key> <value>");
                 return;
             }
             match crate::fs::Vfs::set_xattr(file, key, value.as_bytes()) {
                 Ok(()) => {
-                    crate::console_println!("Set {}={} on {}", key, value, file);
+                    shell_println!("Set {}={} on {}", key, value, file);
                 }
                 Err(e) => {
-                    crate::console_println!("xattr: set '{}' on '{}': {:?}", key, file, e);
+                    shell_println!("xattr: set '{}' on '{}': {:?}", key, file, e);
                 }
             }
         }
         "rm" | "remove" | "del" => {
             if key.is_empty() {
-                crate::console_println!("Usage: xattr <file> rm <key>");
+                shell_println!("Usage: xattr <file> rm <key>");
                 return;
             }
             match crate::fs::Vfs::remove_xattr(file, key) {
                 Ok(()) => {
-                    crate::console_println!("Removed '{}' from {}", key, file);
+                    shell_println!("Removed '{}' from {}", key, file);
                 }
                 Err(e) => {
-                    crate::console_println!("xattr: rm '{}' from '{}': {:?}", key, file, e);
+                    shell_println!("xattr: rm '{}' from '{}': {:?}", key, file, e);
                 }
             }
         }
         _ => {
-            crate::console_println!(
+            shell_println!(
                 "xattr: unknown subcommand '{}'. Use list/get/set/rm.",
                 subcmd
             );
@@ -98849,17 +98646,17 @@ fn cmd_journal(args: &str) {
     if parts.first() == Some(&"--stats") || parts.first() == Some(&"-s") {
         let (count, seq) = crate::fs::journal::stats();
         let cursor = crate::fs::journal::cursor();
-        crate::console_println!("Journal statistics:");
-        crate::console_println!("  Entries in buffer: {}", count);
-        crate::console_println!("  Current sequence:  {}", seq);
-        crate::console_println!("  Cursor position:   {}", cursor);
+        shell_println!("Journal statistics:");
+        shell_println!("  Entries in buffer: {}", count);
+        shell_println!("  Current sequence:  {}", seq);
+        shell_println!("  Cursor position:   {}", cursor);
         return;
     }
 
     if parts.first() == Some(&"--flush") || parts.first() == Some(&"-f") {
         match crate::fs::journal::flush() {
-            Ok(()) => crate::console_println!("Journal flushed to disk."),
-            Err(e) => crate::console_println!("journal: flush failed: {:?}", e),
+            Ok(()) => shell_println!("Journal flushed to disk."),
+            Err(e) => shell_println!("journal: flush failed: {:?}", e),
         }
         return;
     }
@@ -98877,12 +98674,12 @@ fn cmd_journal(args: &str) {
                     if let Some(n) = parse_u64_decimal(count_str) {
                         max_show = n as usize;
                     } else {
-                        crate::console_println!("journal: invalid count: {}", count_str);
+                        shell_println!("journal: invalid count: {}", count_str);
                         return;
                     }
                     i = i.wrapping_add(1);
                 } else {
-                    crate::console_println!("journal: -n requires a number");
+                    shell_println!("journal: -n requires a number");
                     return;
                 }
             }
@@ -98894,17 +98691,17 @@ fn cmd_journal(args: &str) {
                     if let Some(n) = parse_u64_decimal(seq_str) {
                         since_seq = n;
                     } else {
-                        crate::console_println!("journal: invalid sequence: {}", seq_str);
+                        shell_println!("journal: invalid sequence: {}", seq_str);
                         return;
                     }
                     i = i.wrapping_add(1);
                 } else {
-                    crate::console_println!("journal: --since requires a number");
+                    shell_println!("journal: --since requires a number");
                     return;
                 }
             }
             "--help" | "-h" => {
-                crate::console_println!(
+                shell_println!(
                     "Usage: journal [-n N] [--all] [--since SEQ] [--stats] [--flush]\n\
                      \x20 -n N        Show last N entries (default 20)\n\
                      \x20 --all       Show all entries in the ring buffer\n\
@@ -98923,9 +98720,9 @@ fn cmd_journal(args: &str) {
 
     if entries.is_empty() {
         if since_seq > 0 {
-            crate::console_println!("No journal entries since seq {}.", since_seq);
+            shell_println!("No journal entries since seq {}.", since_seq);
         } else {
-            crate::console_println!("Journal is empty.");
+            shell_println!("Journal is empty.");
         }
         return;
     }
@@ -98934,7 +98731,7 @@ fn cmd_journal(args: &str) {
     let display_entries = if show_all || since_seq > 0 {
         &entries[..]
     } else if entries.len() > max_show {
-        crate::console_println!(
+        shell_println!(
             "... ({} older entries omitted, use --all or -n to see more)",
             entries.len().saturating_sub(max_show)
         );
@@ -98961,7 +98758,7 @@ fn cmd_journal(args: &str) {
         if let (crate::fs::journal::JournalEventType::Renamed, Some(old)) =
             (entry.event_type, entry.old_path.as_deref())
         {
-            crate::console_println!(
+            shell_println!(
                 "  #{:<6} {}.{:03}s  {:<6}  {} -> {}",
                 entry.seq,
                 secs,
@@ -98971,7 +98768,7 @@ fn cmd_journal(args: &str) {
                 entry.path.display()
             );
         } else {
-            crate::console_println!(
+            shell_println!(
                 "  #{:<6} {}.{:03}s  {:<6}  {}",
                 entry.seq,
                 secs,
@@ -98982,7 +98779,7 @@ fn cmd_journal(args: &str) {
         }
     }
 
-    crate::console_println!(
+    shell_println!(
         "\n{} entries shown (current sequence: {})",
         display_entries.len(),
         current_seq
@@ -99014,7 +98811,7 @@ fn parse_u64_decimal(s: &str) -> Option<u64> {
 fn cmd_trash(args: &str) {
     let args = args.trim();
     if args.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: trash <file>            Move file to recycle bin\n\
              \x20      trash --list / -l       List trash contents\n\
              \x20      trash --restore <name>  Restore file to original location\n\
@@ -99029,18 +98826,13 @@ fn cmd_trash(args: &str) {
         "--list" | "-l" => match crate::fs::trash::list() {
             Ok(items) => {
                 if items.is_empty() {
-                    crate::console_println!("(recycle bin is empty)");
+                    shell_println!("(recycle bin is empty)");
                 } else {
-                    crate::console_println!(
-                        "{:<20} {:>10}  {}",
-                        "TRASH NAME",
-                        "SIZE",
-                        "ORIGINAL PATH"
-                    );
+                    shell_println!("{:<20} {:>10}  {}", "TRASH NAME", "SIZE", "ORIGINAL PATH");
                     for item in &items {
                         let size_str = format_bytes(item.size);
                         let type_prefix = if item.is_directory { "D " } else { "  " };
-                        crate::console_println!(
+                        shell_println!(
                             "{}{:<18} {:>10}  {}",
                             type_prefix,
                             item.trash_name.display(),
@@ -99051,50 +98843,50 @@ fn cmd_trash(args: &str) {
                                 .display()
                         );
                     }
-                    crate::console_println!("\n{} item(s) in recycle bin", items.len());
+                    shell_println!("\n{} item(s) in recycle bin", items.len());
                 }
             }
-            Err(e) => crate::console_println!("trash: list failed: {:?}", e),
+            Err(e) => shell_println!("trash: list failed: {:?}", e),
         },
         "--empty" => match crate::fs::trash::empty() {
-            Ok(()) => crate::console_println!("Recycle bin emptied."),
-            Err(e) => crate::console_println!("trash: empty failed: {:?}", e),
+            Ok(()) => shell_println!("Recycle bin emptied."),
+            Err(e) => shell_println!("trash: empty failed: {:?}", e),
         },
         "--prune" => match crate::fs::trash::auto_prune() {
-            Ok(0) => crate::console_println!("No pruning needed (disk space OK)."),
-            Ok(n) => crate::console_println!("Auto-pruned {} item(s).", n),
-            Err(e) => crate::console_println!("trash: prune failed: {:?}", e),
+            Ok(0) => shell_println!("No pruning needed (disk space OK)."),
+            Ok(n) => shell_println!("Auto-pruned {} item(s).", n),
+            Err(e) => shell_println!("trash: prune failed: {:?}", e),
         },
         _ if args.starts_with("--restore ") => {
             let name = args.get(10..).unwrap_or("").trim();
             if name.is_empty() {
-                crate::console_println!("Usage: trash --restore <name>");
+                shell_println!("Usage: trash --restore <name>");
                 return;
             }
             match crate::fs::trash::restore(name) {
                 Ok(original) => {
-                    crate::console_println!("Restored '{}' to '{}'", name, original.display());
+                    shell_println!("Restored '{}' to '{}'", name, original.display());
                 }
-                Err(e) => crate::console_println!("trash: restore '{}': {:?}", name, e),
+                Err(e) => shell_println!("trash: restore '{}': {:?}", name, e),
             }
         }
         _ if args.starts_with("--purge ") => {
             let name = args.get(8..).unwrap_or("").trim();
             if name.is_empty() {
-                crate::console_println!("Usage: trash --purge <name>");
+                shell_println!("Usage: trash --purge <name>");
                 return;
             }
             match crate::fs::trash::purge_one(name) {
-                Ok(()) => crate::console_println!("Permanently deleted '{}'", name),
-                Err(e) => crate::console_println!("trash: purge '{}': {:?}", name, e),
+                Ok(()) => shell_println!("Permanently deleted '{}'", name),
+                Err(e) => shell_println!("trash: purge '{}': {:?}", name, e),
             }
         }
         _ => {
             // Default: move file to trash.
             let path = resolve_path(args);
             match crate::fs::trash::trash(&path) {
-                Ok(()) => crate::console_println!("Moved '{}' to recycle bin", path.display()),
-                Err(e) => crate::console_println!("trash: '{}': {:?}", path.display(), e),
+                Ok(()) => shell_println!("Moved '{}' to recycle bin", path.display()),
+                Err(e) => shell_println!("trash: '{}': {:?}", path.display(), e),
             }
         }
     }
@@ -99104,27 +98896,27 @@ fn cmd_trash(args: &str) {
 fn cmd_basename(args: &str) {
     let path = args.trim();
     if path.is_empty() {
-        crate::console_println!("Usage: basename <path>");
+        shell_println!("Usage: basename <path>");
         return;
     }
 
     // Strip trailing slashes.
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
-        crate::console_println!("/");
+        shell_println!("/");
         return;
     }
 
     // Find last '/' and take everything after it.
     if let Some(pos) = trimmed.rfind('/') {
         if let Some(name) = trimmed.get(pos + 1..) {
-            crate::console_println!("{}", name);
+            shell_println!("{}", name);
         } else {
-            crate::console_println!("/");
+            shell_println!("/");
         }
     } else {
         // No slash — the whole thing is the basename.
-        crate::console_println!("{}", trimmed);
+        shell_println!("{}", trimmed);
     }
 }
 
@@ -99132,29 +98924,29 @@ fn cmd_basename(args: &str) {
 fn cmd_dirname(args: &str) {
     let path = args.trim();
     if path.is_empty() {
-        crate::console_println!("Usage: dirname <path>");
+        shell_println!("Usage: dirname <path>");
         return;
     }
 
     // Strip trailing slashes.
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
-        crate::console_println!("/");
+        shell_println!("/");
         return;
     }
 
     // Find last '/' and take everything before it.
     if let Some(pos) = trimmed.rfind('/') {
         if pos == 0 {
-            crate::console_println!("/");
+            shell_println!("/");
         } else if let Some(dir) = trimmed.get(..pos) {
-            crate::console_println!("{}", dir);
+            shell_println!("{}", dir);
         } else {
-            crate::console_println!(".");
+            shell_println!(".");
         }
     } else {
         // No slash — dirname is ".".
-        crate::console_println!(".");
+        shell_println!(".");
     }
 }
 
@@ -99162,16 +98954,16 @@ fn cmd_dirname(args: &str) {
 fn cmd_realpath(args: &str) {
     let path = args.trim();
     if path.is_empty() {
-        crate::console_println!("Usage: realpath <path>");
+        shell_println!("Usage: realpath <path>");
         return;
     }
 
     match crate::fs::Vfs::resolve_path(path) {
         Ok(resolved) => {
-            crate::console_println!("{}", resolved.display());
+            shell_println!("{}", resolved.display());
         }
         Err(e) => {
-            crate::console_println!("realpath: '{}': {:?}", path, e);
+            shell_println!("realpath: '{}': {:?}", path, e);
         }
     }
 }
@@ -99193,13 +98985,13 @@ fn cmd_cd(args: &str) {
     match crate::fs::Vfs::stat(&target) {
         Ok(meta) => {
             if meta.entry_type != crate::fs::EntryType::Directory {
-                crate::console_println!("cd: not a directory: {}", target.display());
+                shell_println!("cd: not a directory: {}", target.display());
                 set_exit(1);
                 return;
             }
         }
         Err(e) => {
-            crate::console_println!("cd: {}: {:?}", target.display(), e);
+            shell_println!("cd: {}: {:?}", target.display(), e);
             set_exit(1);
             return;
         }
@@ -99219,7 +99011,7 @@ fn cmd_id() {
     // The kernel shell runs in the kernel's own context (task 0),
     // which is always uid=0/gid=0 (root).
     if let Some(creds) = crate::proc::pcb::get_credentials(task_id as u64) {
-        crate::console_println!(
+        shell_println!(
             "uid={} gid={} groups=[{}] task={}",
             creds.uid,
             creds.gid,
@@ -99237,7 +99029,7 @@ fn cmd_id() {
         );
     } else {
         // Fallback: kernel context, no PCB.
-        crate::console_println!("uid=0(root) gid=0(root) task={}", task_id);
+        shell_println!("uid=0(root) gid=0(root) task={}", task_id);
     }
 }
 
@@ -99263,10 +99055,10 @@ fn cmd_mktemp(args: &str) {
 
     match crate::fs::Vfs::write_file(&path, &[]) {
         Ok(()) => {
-            crate::console_println!("{}", path);
+            shell_println!("{}", path);
         }
         Err(e) => {
-            crate::console_println!("mktemp: cannot create temp file in '{}': {:?}", dir, e);
+            shell_println!("mktemp: cannot create temp file in '{}': {:?}", dir, e);
         }
     }
 }
@@ -99287,11 +99079,11 @@ fn cmd_sysctl(args: &str) {
         // List all parameters.
         let params = crate::sysctl::list_all();
         if params.is_empty() {
-            crate::console_println!("(no parameters registered)");
+            shell_println!("(no parameters registered)");
             return;
         }
         for p in &params {
-            crate::console_println!(
+            shell_println!(
                 "  {:<30} = {:<8} (default: {}, range: {}..{})",
                 p.name,
                 p.value,
@@ -99311,7 +99103,7 @@ fn cmd_sysctl(args: &str) {
         // Read a single parameter.
         match crate::sysctl::find_by_name(name) {
             Some(info) => {
-                crate::console_println!(
+                shell_println!(
                     "{} = {} (default: {}, range: {}..{})",
                     info.name,
                     info.value,
@@ -99321,7 +99113,7 @@ fn cmd_sysctl(args: &str) {
                 );
             }
             None => {
-                crate::console_println!("sysctl: unknown parameter '{}'", name);
+                shell_println!("sysctl: unknown parameter '{}'", name);
             }
         }
     } else {
@@ -99329,10 +99121,10 @@ fn cmd_sysctl(args: &str) {
         match value_str.parse::<u64>() {
             Ok(value) => match crate::sysctl::set_by_name(name, value) {
                 Some(old) => {
-                    crate::console_println!("{} = {} (was {})", name, value, old);
+                    shell_println!("{} = {} (was {})", name, value, old);
                 }
                 None => {
-                    crate::console_println!(
+                    shell_println!(
                         "sysctl: cannot set '{}' to {} (out of range or unknown)",
                         name,
                         value
@@ -99340,7 +99132,7 @@ fn cmd_sysctl(args: &str) {
                 }
             },
             Err(_) => {
-                crate::console_println!("sysctl: invalid value '{}'", value_str);
+                shell_println!("sysctl: invalid value '{}'", value_str);
             }
         }
     }
@@ -99352,15 +99144,15 @@ fn cmd_hostname(args: &str) {
 
     if name.is_empty() {
         // Show current hostname.
-        crate::console_println!("{}", crate::fs::sysfs::get_hostname());
+        shell_println!("{}", crate::fs::sysfs::get_hostname());
     } else {
         // Set hostname.
         match crate::fs::Vfs::write_file("/sys/kernel/hostname", name.as_bytes()) {
             Ok(()) => {
-                crate::console_println!("{}", name);
+                shell_println!("{}", name);
             }
             Err(e) => {
-                crate::console_println!("hostname: cannot set hostname: {:?}", e);
+                shell_println!("hostname: cannot set hostname: {:?}", e);
             }
         }
     }
@@ -99390,7 +99182,7 @@ fn cmd_dd(args: &str) {
             bs = match parse_size_suffix(val) {
                 Some(n) => n as usize,
                 None => {
-                    crate::console_println!("dd: invalid block size '{}'", val);
+                    shell_println!("dd: invalid block size '{}'", val);
                     return;
                 }
             };
@@ -99398,7 +99190,7 @@ fn cmd_dd(args: &str) {
             count = match val.parse::<u64>() {
                 Ok(n) => Some(n),
                 Err(_) => {
-                    crate::console_println!("dd: invalid count '{}'", val);
+                    shell_println!("dd: invalid count '{}'", val);
                     return;
                 }
             };
@@ -99406,7 +99198,7 @@ fn cmd_dd(args: &str) {
             skip = match val.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => {
-                    crate::console_println!("dd: invalid skip '{}'", val);
+                    shell_println!("dd: invalid skip '{}'", val);
                     return;
                 }
             };
@@ -99414,13 +99206,13 @@ fn cmd_dd(args: &str) {
             seek = match val.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => {
-                    crate::console_println!("dd: invalid seek '{}'", val);
+                    shell_println!("dd: invalid seek '{}'", val);
                     return;
                 }
             };
         } else {
-            crate::console_println!("dd: unknown option '{}'", token);
-            crate::console_println!("Usage: dd if=FILE of=FILE [bs=N] [count=N] [skip=N] [seek=N]");
+            shell_println!("dd: unknown option '{}'", token);
+            shell_println!("Usage: dd if=FILE of=FILE [bs=N] [count=N] [skip=N] [seek=N]");
             return;
         }
     }
@@ -99428,13 +99220,11 @@ fn cmd_dd(args: &str) {
     let input = match input {
         Some(p) => p,
         None => {
-            crate::console_println!("Usage: dd if=FILE of=FILE [bs=N] [count=N] [skip=N] [seek=N]");
-            crate::console_println!("  bs=N     Block size (default 512, supports K/M/G suffix)");
-            crate::console_println!("  count=N  Copy only N input blocks");
-            crate::console_println!("  skip=N   Skip N input blocks before reading");
-            crate::console_println!(
-                "  seek=N   Skip N output blocks before writing (uses write_at)"
-            );
+            shell_println!("Usage: dd if=FILE of=FILE [bs=N] [count=N] [skip=N] [seek=N]");
+            shell_println!("  bs=N     Block size (default 512, supports K/M/G suffix)");
+            shell_println!("  count=N  Copy only N input blocks");
+            shell_println!("  skip=N   Skip N input blocks before reading");
+            shell_println!("  seek=N   Skip N output blocks before writing (uses write_at)");
             set_exit(1);
             return;
         }
@@ -99442,14 +99232,14 @@ fn cmd_dd(args: &str) {
     let output = match output {
         Some(p) => p,
         None => {
-            crate::console_println!("Usage: dd if=FILE of=FILE [bs=N] [count=N] [skip=N] [seek=N]");
+            shell_println!("Usage: dd if=FILE of=FILE [bs=N] [count=N] [skip=N] [seek=N]");
             set_exit(1);
             return;
         }
     };
 
     if bs == 0 || bs > 1024 * 1024 {
-        crate::console_println!("dd: block size must be 1..1M");
+        shell_println!("dd: block size must be 1..1M");
         set_exit(1);
         return;
     }
@@ -99460,7 +99250,7 @@ fn cmd_dd(args: &str) {
     let data = match crate::fs::Vfs::read_file(input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("dd: cannot read '{}': {:?}", input, e);
+            shell_println!("dd: cannot read '{}': {:?}", input, e);
             set_exit(1);
             return;
         }
@@ -99499,8 +99289,8 @@ fn cmd_dd(args: &str) {
             let blocks = to_write.len() / bs;
             let remainder = to_write.len() % bs;
             let partial = if remainder > 0 { 1 } else { 0 };
-            crate::console_println!("{}+{} records in", blocks, partial);
-            crate::console_println!("{}+{} records out", blocks, partial);
+            shell_println!("{}+{} records in", blocks, partial);
+            shell_println!("{}+{} records out", blocks, partial);
 
             // Format throughput.
             let bytes_copied = to_write.len() as u64;
@@ -99508,7 +99298,7 @@ fn cmd_dd(args: &str) {
                 // Speed in KiB/s.
                 let kib_per_sec = bytes_copied.saturating_mul(1_000_000_000) / elapsed_ns / 1024;
                 let ms = elapsed_ns / 1_000_000;
-                crate::console_println!(
+                shell_println!(
                     "{} bytes copied, {}.{:03} s, {} KiB/s",
                     bytes_copied,
                     ms / 1000,
@@ -99516,11 +99306,11 @@ fn cmd_dd(args: &str) {
                     kib_per_sec,
                 );
             } else {
-                crate::console_println!("{} bytes copied", bytes_copied);
+                shell_println!("{} bytes copied", bytes_copied);
             }
         }
         Err(e) => {
-            crate::console_println!("dd: cannot write '{}': {:?}", output, e);
+            shell_println!("dd: cannot write '{}': {:?}", output, e);
             set_exit(1);
         }
     }
@@ -99555,14 +99345,14 @@ fn cmd_free() {
     let swap_used_kib = info.swap_used_bytes / 1024;
     let swap_free_kib = swap_total_kib.saturating_sub(swap_used_kib);
 
-    crate::console_println!("             total       used       free");
-    crate::console_println!(
+    shell_println!("             total       used       free");
+    shell_println!(
         "Mem:    {:>6} MiB  {:>6} MiB  {:>6} MiB",
         total_mb,
         used_mb,
         free_mb
     );
-    crate::console_println!(
+    shell_println!(
         "Swap:   {:>6} KiB  {:>6} KiB  {:>6} KiB",
         swap_total_kib,
         swap_used_kib,
@@ -99570,7 +99360,7 @@ fn cmd_free() {
     );
 
     // Frame counts.
-    crate::console_println!(
+    shell_println!(
         "Frames: {:>6} total  {:>6} free  {:>6} zero-pool",
         info.total_frames,
         info.free_frames,
@@ -99579,7 +99369,7 @@ fn cmd_free() {
 
     // Heap.
     let heap_live = info.heap_slab_allocs.saturating_sub(info.heap_slab_frees);
-    crate::console_println!(
+    shell_println!(
         "Heap:   {:>6} slab allocs  {:>6} live  {:>6} large",
         info.heap_slab_allocs,
         heap_live,
@@ -99593,7 +99383,7 @@ fn cmd_free() {
         crate::mm::pressure::PressureLevel::Medium => "medium",
         crate::mm::pressure::PressureLevel::Critical => "CRITICAL",
     };
-    crate::console_println!(
+    shell_println!(
         "Pressure: {}  Fragmentation: {}%",
         level_str,
         info.fragmentation_pct
@@ -104737,80 +104527,80 @@ fn cmd_vmstat() {
     let pi = crate::mm::pressure::pressure_info();
 
     // --- Memory counters ---
-    crate::console_println!("nr_total_frames        {}", info.total_frames);
-    crate::console_println!("nr_free_frames         {}", info.free_frames);
-    crate::console_println!(
+    shell_println!("nr_total_frames        {}", info.total_frames);
+    shell_println!("nr_free_frames         {}", info.free_frames);
+    shell_println!(
         "nr_used_frames         {}",
         info.total_frames.saturating_sub(info.free_frames)
     );
-    crate::console_println!("nr_zero_pool           {}", info.zero_pool_count);
-    crate::console_println!("fragmentation_pct      {}", info.fragmentation_pct);
+    shell_println!("nr_zero_pool           {}", info.zero_pool_count);
+    shell_println!("fragmentation_pct      {}", info.fragmentation_pct);
 
     // --- Buddy order distribution ---
     for (order, &count) in info.order_counts.iter().enumerate() {
-        crate::console_println!("buddy_order_{:<2}         {}", order, count);
+        shell_println!("buddy_order_{:<2}         {}", order, count);
     }
 
     // --- Per-CPU frame cache ---
-    crate::console_println!("pcpu_cache_hits        {}", info.pcpu_cache_hits);
-    crate::console_println!("pcpu_cache_misses      {}", info.pcpu_cache_misses);
-    crate::console_println!("pcpu_refill_ops        {}", info.pcpu_refill_ops);
-    crate::console_println!("pcpu_drain_ops         {}", info.pcpu_drain_ops);
+    shell_println!("pcpu_cache_hits        {}", info.pcpu_cache_hits);
+    shell_println!("pcpu_cache_misses      {}", info.pcpu_cache_misses);
+    shell_println!("pcpu_refill_ops        {}", info.pcpu_refill_ops);
+    shell_println!("pcpu_drain_ops         {}", info.pcpu_drain_ops);
     let total_allocs = info.pcpu_cache_hits.saturating_add(info.pcpu_cache_misses);
     let hit_pct = if total_allocs > 0 {
         info.pcpu_cache_hits.saturating_mul(100) / total_allocs
     } else {
         0
     };
-    crate::console_println!("pcpu_hit_pct           {}", hit_pct);
+    shell_println!("pcpu_hit_pct           {}", hit_pct);
 
     // --- Zero pool ---
-    crate::console_println!("zero_pool_hits         {}", info.zero_pool_hits);
-    crate::console_println!("zero_pool_misses       {}", info.zero_pool_misses);
+    shell_println!("zero_pool_hits         {}", info.zero_pool_hits);
+    shell_println!("zero_pool_misses       {}", info.zero_pool_misses);
 
     // --- Heap ---
-    crate::console_println!("heap_slab_allocs       {}", info.heap_slab_allocs);
-    crate::console_println!("heap_slab_frees        {}", info.heap_slab_frees);
-    crate::console_println!("heap_large_allocs      {}", info.heap_large_allocs);
-    crate::console_println!("heap_alloc_failures    {}", info.heap_alloc_failures);
+    shell_println!("heap_slab_allocs       {}", info.heap_slab_allocs);
+    shell_println!("heap_slab_frees        {}", info.heap_slab_frees);
+    shell_println!("heap_large_allocs      {}", info.heap_large_allocs);
+    shell_println!("heap_alloc_failures    {}", info.heap_alloc_failures);
 
     // --- Swap ---
-    crate::console_println!("swap_total_bytes       {}", info.swap_total_bytes);
-    crate::console_println!("swap_used_bytes        {}", info.swap_used_bytes);
-    crate::console_println!("swap_devices           {}", info.swap_device_count);
+    shell_println!("swap_total_bytes       {}", info.swap_total_bytes);
+    shell_println!("swap_used_bytes        {}", info.swap_used_bytes);
+    shell_println!("swap_devices           {}", info.swap_device_count);
 
     // --- kswapd ---
-    crate::console_println!(
+    shell_println!(
         "kswapd_running         {}",
         if info.kswapd_running { 1 } else { 0 }
     );
-    crate::console_println!("kswapd_reclaim_cycles  {}", info.kswapd_reclaim_cycles);
-    crate::console_println!("kswapd_reclaimed       {}", info.kswapd_total_reclaimed);
+    shell_println!("kswapd_reclaim_cycles  {}", info.kswapd_reclaim_cycles);
+    shell_println!("kswapd_reclaimed       {}", info.kswapd_total_reclaimed);
 
     // --- OOM ---
-    crate::console_println!("oom_events             {}", info.oom_events);
-    crate::console_println!("oom_kills              {}", info.oom_kills);
+    shell_println!("oom_events             {}", info.oom_events);
+    shell_println!("oom_kills              {}", info.oom_kills);
 
     // --- Pressure ---
-    crate::console_println!("pressure_level         {}", pi.level as u8);
-    crate::console_println!("pressure_shrinkers     {}", pi.active_shrinkers);
-    crate::console_println!("pressure_notifications {}", pi.total_notifications);
-    crate::console_println!("pressure_objects_freed {}", pi.total_freed);
+    shell_println!("pressure_level         {}", pi.level as u8);
+    shell_println!("pressure_shrinkers     {}", pi.active_shrinkers);
+    shell_println!("pressure_notifications {}", pi.total_notifications);
+    shell_println!("pressure_objects_freed {}", pi.total_freed);
 
     // --- Scheduler ---
-    crate::console_println!("sched_ctx_switches     {}", sched.total_ctx_switches);
-    crate::console_println!("sched_work_steals      {}", sched.total_work_steals);
-    crate::console_println!("sched_tasks_spawned    {}", sched.total_tasks_spawned);
-    crate::console_println!("sched_tasks_exited     {}", sched.total_tasks_exited);
-    crate::console_println!("sched_load_avg_x100    {}", sched.load_avg_x100);
-    crate::console_println!("sched_num_cpus         {}", sched.num_cpus);
-    crate::console_println!(
+    shell_println!("sched_ctx_switches     {}", sched.total_ctx_switches);
+    shell_println!("sched_work_steals      {}", sched.total_work_steals);
+    shell_println!("sched_tasks_spawned    {}", sched.total_tasks_spawned);
+    shell_println!("sched_tasks_exited     {}", sched.total_tasks_exited);
+    shell_println!("sched_load_avg_x100    {}", sched.load_avg_x100);
+    shell_println!("sched_num_cpus         {}", sched.num_cpus);
+    shell_println!(
         "sched_starv_boosts     {}",
         crate::sched::starvation_boost_count()
     );
 
     // --- Per-process accounting ---
-    crate::console_println!("tracked_addr_spaces    {}", info.tracked_address_spaces);
+    shell_println!("tracked_addr_spaces    {}", info.tracked_address_spaces);
 }
 
 /// Format a block device as FAT16/FAT32.
@@ -104833,21 +104623,21 @@ fn cmd_mkfs_fat(args: &str) {
     }
 
     if device.is_empty() {
-        crate::console_println!("Usage: mkfs.fat [-L LABEL] DEVICE");
-        crate::console_println!("  Formats DEVICE as FAT (auto-selects FAT16/FAT32).");
-        crate::console_println!("  WARNING: all data on the device will be lost!");
+        shell_println!("Usage: mkfs.fat [-L LABEL] DEVICE");
+        shell_println!("  Formats DEVICE as FAT (auto-selects FAT16/FAT32).");
+        shell_println!("  WARNING: all data on the device will be lost!");
         set_exit(1);
         return;
     }
 
-    crate::console_println!("Formatting '{}' as FAT...", device);
+    shell_println!("Formatting '{}' as FAT...", device);
 
     match crate::fs::fat::mkfs_fat(device, label) {
         Ok(()) => {
-            crate::console_println!("Done. Device '{}' formatted successfully.", device);
+            shell_println!("Done. Device '{}' formatted successfully.", device);
         }
         Err(e) => {
-            crate::console_println!("mkfs.fat: {:?}", e);
+            shell_println!("mkfs.fat: {:?}", e);
             set_exit(1);
         }
     }
@@ -104872,31 +104662,31 @@ fn cmd_fsck_fat(args: &str) {
     }
 
     if device.is_empty() {
-        crate::console_println!("Usage: fsck.fat [-a] DEVICE");
-        crate::console_println!("  Check FAT filesystem consistency.");
-        crate::console_println!("  -a  Automatically repair errors");
-        crate::console_println!("  -n  Check only, do not repair (default)");
+        shell_println!("Usage: fsck.fat [-a] DEVICE");
+        shell_println!("  Check FAT filesystem consistency.");
+        shell_println!("  -a  Automatically repair errors");
+        shell_println!("  -n  Check only, do not repair (default)");
         set_exit(1);
         return;
     }
 
     if repair {
-        crate::console_println!("fsck.fat: checking and repairing '{}'...", device);
+        shell_println!("fsck.fat: checking and repairing '{}'...", device);
     } else {
-        crate::console_println!("fsck.fat: checking '{}'...", device);
+        shell_println!("fsck.fat: checking '{}'...", device);
     }
 
     match crate::fs::fat::fsck_fat(device, repair) {
         Ok(report) => {
             for msg in &report.messages {
-                crate::console_println!("  {}", msg);
+                shell_println!("  {}", msg);
             }
             if report.errors > 0 && !repair {
                 set_exit(1);
             }
         }
         Err(e) => {
-            crate::console_println!("fsck.fat: {:?}", e);
+            shell_println!("fsck.fat: {:?}", e);
             set_exit(1);
         }
     }
@@ -104915,9 +104705,9 @@ fn cmd_fsck_ext4(args: &str) {
         if w == "-v" || w == "--verbose" {
             verbose = true;
         } else if w == "-h" || w == "--help" {
-            crate::console_println!("Usage: fsck.ext4 [-v] DEVICE");
-            crate::console_println!("  Check ext4 filesystem consistency (read-only).");
-            crate::console_println!("  -v  Verbose output (show all phases)");
+            shell_println!("Usage: fsck.ext4 [-v] DEVICE");
+            shell_println!("  Check ext4 filesystem consistency (read-only).");
+            shell_println!("  -v  Verbose output (show all phases)");
             return;
         } else {
             device = w;
@@ -104925,12 +104715,12 @@ fn cmd_fsck_ext4(args: &str) {
     }
 
     if device.is_empty() {
-        crate::console_println!("Usage: fsck.ext4 [-v] DEVICE");
+        shell_println!("Usage: fsck.ext4 [-v] DEVICE");
         set_exit(1);
         return;
     }
 
-    crate::console_println!("fsck.ext4: checking '{}'...", device);
+    shell_println!("fsck.ext4: checking '{}'...", device);
 
     match crate::fs::ext4::fsck::fsck_ext4(device) {
         Ok(report) => {
@@ -104942,11 +104732,11 @@ fn cmd_fsck_ext4(args: &str) {
                     || msg.starts_with("  ") && !msg.starts_with("  All ")
                     || report.errors > 0
                 {
-                    crate::console_println!("{}", msg);
+                    shell_println!("{}", msg);
                 }
             }
             if !verbose && report.errors == 0 {
-                crate::console_println!(
+                shell_println!(
                     "fsck.ext4: clean — {} files, {} dirs, {} symlinks, 0 errors",
                     report.files,
                     report.dirs,
@@ -104958,7 +104748,7 @@ fn cmd_fsck_ext4(args: &str) {
             }
         }
         Err(e) => {
-            crate::console_println!("fsck.ext4: {:?}", e);
+            shell_println!("fsck.ext4: {:?}", e);
             set_exit(1);
         }
     }
@@ -104986,10 +104776,10 @@ fn cmd_label(args: &str) {
                 } else {
                     &info.volume_label
                 };
-                crate::console_println!("{}: {} [{}]", path.display(), label, info.fs_type);
+                shell_println!("{}: {} [{}]", path.display(), label, info.fs_type);
             }
             Err(e) => {
-                crate::console_println!("label: {}: {:?}", path.display(), e);
+                shell_println!("label: {}: {:?}", path.display(), e);
                 set_exit(1);
             }
         }
@@ -104998,10 +104788,10 @@ fn cmd_label(args: &str) {
         let new_label = parts[1];
         match crate::fs::Vfs::set_volume_label(&path, new_label) {
             Ok(()) => {
-                crate::console_println!("Label set to '{}'", new_label);
+                shell_println!("Label set to '{}'", new_label);
             }
             Err(e) => {
-                crate::console_println!("label: {:?}", e);
+                shell_println!("label: {:?}", e);
                 set_exit(1);
             }
         }
@@ -105030,11 +104820,11 @@ fn cmd_flock(args: &str) {
     }
 
     if path_arg.is_empty() {
-        crate::console_println!("Usage: flock [-s|-x|-u|-q] FILE");
-        crate::console_println!("  -s  Acquire shared (read) lock");
-        crate::console_println!("  -x  Acquire exclusive (write) lock");
-        crate::console_println!("  -u  Release lock");
-        crate::console_println!("  -q  Query lock status (default)");
+        shell_println!("Usage: flock [-s|-x|-u|-q] FILE");
+        shell_println!("  -s  Acquire shared (read) lock");
+        shell_println!("  -x  Acquire exclusive (write) lock");
+        shell_println!("  -u  Release lock");
+        shell_println!("  -q  Query lock status (default)");
         set_exit(1);
         return;
     }
@@ -105045,33 +104835,33 @@ fn cmd_flock(args: &str) {
 
     match mode.unwrap_or("query") {
         "shared" => match crate::fs::Vfs::flock(&path, owner, crate::fs::vfs::LockType::Shared) {
-            Ok(()) => crate::console_println!("{}: shared lock acquired", path_arg),
+            Ok(()) => shell_println!("{}: shared lock acquired", path_arg),
             Err(crate::error::KernelError::WouldBlock) => {
-                crate::console_println!("{}: lock denied (would block)", path_arg);
+                shell_println!("{}: lock denied (would block)", path_arg);
                 set_exit(1);
             }
             Err(e) => {
-                crate::console_println!("flock: {:?}", e);
+                shell_println!("flock: {:?}", e);
                 set_exit(1);
             }
         },
         "exclusive" => {
             match crate::fs::Vfs::flock(&path, owner, crate::fs::vfs::LockType::Exclusive) {
-                Ok(()) => crate::console_println!("{}: exclusive lock acquired", path_arg),
+                Ok(()) => shell_println!("{}: exclusive lock acquired", path_arg),
                 Err(crate::error::KernelError::WouldBlock) => {
-                    crate::console_println!("{}: lock denied (would block)", path_arg);
+                    shell_println!("{}: lock denied (would block)", path_arg);
                     set_exit(1);
                 }
                 Err(e) => {
-                    crate::console_println!("flock: {:?}", e);
+                    shell_println!("flock: {:?}", e);
                     set_exit(1);
                 }
             }
         }
         "unlock" => match crate::fs::Vfs::funlock(&path, owner) {
-            Ok(()) => crate::console_println!("{}: lock released", path_arg),
+            Ok(()) => shell_println!("{}: lock released", path_arg),
             Err(e) => {
-                crate::console_println!("flock: {:?}", e);
+                shell_println!("flock: {:?}", e);
                 set_exit(1);
             }
         },
@@ -105083,13 +104873,13 @@ fn cmd_flock(args: &str) {
                         crate::fs::vfs::LockType::Shared => "SHARED",
                         crate::fs::vfs::LockType::Exclusive => "EXCLUSIVE",
                     };
-                    crate::console_println!("{}: {} ({} holder(s))", path_arg, type_str, count);
+                    shell_println!("{}: {} ({} holder(s))", path_arg, type_str, count);
                 }
                 Ok(None) => {
-                    crate::console_println!("{}: unlocked", path_arg);
+                    shell_println!("{}: unlocked", path_arg);
                 }
                 Err(e) => {
-                    crate::console_println!("flock: {:?}", e);
+                    shell_println!("flock: {:?}", e);
                     set_exit(1);
                 }
             }
@@ -105103,14 +104893,14 @@ fn cmd_lsblk() {
     let devices = crate::blkdev::list_devices();
 
     if devices.is_empty() {
-        crate::console_println!("No block devices found.");
+        shell_println!("No block devices found.");
         return;
     }
 
     // Collect mount info for cross-referencing devices to mount points.
     let mounts = crate::fs::Vfs::mounts_full();
 
-    crate::console_println!(
+    shell_println!(
         "{:<8} {:>12} {:>8} {:>6}  {:<8} {:<16} {}",
         "NAME",
         "SECTORS",
@@ -105183,7 +104973,7 @@ fn cmd_lsblk() {
             }
         }
 
-        crate::console_println!(
+        shell_println!(
             "{:<8} {:>12} {:>8} {:>6}  {:<8} {:<16} {}",
             dev.name,
             dev.sector_count,
@@ -105205,25 +104995,25 @@ fn cmd_lsblk() {
 fn cmd_glob(args: &str) {
     let pattern = args.trim();
     if pattern.is_empty() {
-        crate::console_println!("Usage: glob <pattern>");
-        crate::console_println!("  Example: glob /tmp/*.txt");
-        crate::console_println!("  Example: glob /proc/*/status");
+        shell_println!("Usage: glob <pattern>");
+        shell_println!("  Example: glob /tmp/*.txt");
+        shell_println!("  Example: glob /proc/*/status");
         return;
     }
 
     match crate::fs::Vfs::glob(pattern) {
         Ok(matches) => {
             if matches.is_empty() {
-                crate::console_println!("(no matches)");
+                shell_println!("(no matches)");
             } else {
                 for path in &matches {
-                    crate::console_println!("{}", path.display());
+                    shell_println!("{}", path.display());
                 }
-                crate::console_println!("\n{} matches", matches.len());
+                shell_println!("\n{} matches", matches.len());
             }
         }
         Err(e) => {
-            crate::console_println!("glob: error: {:?}", e);
+            shell_println!("glob: error: {:?}", e);
         }
     }
 }
@@ -105256,7 +105046,7 @@ fn cmd_comm(args: &str) {
                     '2' => show2 = false,
                     '3' => show3 = false,
                     _ => {
-                        crate::console_println!("comm: unknown flag '-{}'", ch);
+                        shell_println!("comm: unknown flag '-{}'", ch);
                         set_exit(1);
                         return;
                     }
@@ -105268,7 +105058,7 @@ fn cmd_comm(args: &str) {
     }
 
     if files.len() < 2 {
-        crate::console_println!("Usage: comm [-123] FILE1 FILE2");
+        shell_println!("Usage: comm [-123] FILE1 FILE2");
         set_exit(1);
         return;
     }
@@ -105279,7 +105069,7 @@ fn cmd_comm(args: &str) {
     let data1 = match crate::fs::Vfs::read_file(&path1) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("comm: {}: {:?}", path1.display(), e);
+            shell_println!("comm: {}: {:?}", path1.display(), e);
             set_exit(1);
             return;
         }
@@ -105287,7 +105077,7 @@ fn cmd_comm(args: &str) {
     let data2 = match crate::fs::Vfs::read_file(&path2) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("comm: {}: {:?}", path2.display(), e);
+            shell_println!("comm: {}: {:?}", path2.display(), e);
             set_exit(1);
             return;
         }
@@ -105318,21 +105108,21 @@ fn cmd_comm(args: &str) {
             core::cmp::Ordering::Less => {
                 // Line only in file 1.
                 if show1 {
-                    crate::console_println!("{}", lines1[i]);
+                    shell_println!("{}", lines1[i]);
                 }
                 i += 1;
             }
             core::cmp::Ordering::Greater => {
                 // Line only in file 2.
                 if show2 {
-                    crate::console_println!("{}{}", col2_prefix, lines2[j]);
+                    shell_println!("{}{}", col2_prefix, lines2[j]);
                 }
                 j += 1;
             }
             core::cmp::Ordering::Equal => {
                 // Line in both files.
                 if show3 {
-                    crate::console_println!("{}{}", col3_prefix, lines1[i]);
+                    shell_println!("{}{}", col3_prefix, lines1[i]);
                 }
                 i += 1;
                 j += 1;
@@ -105343,7 +105133,7 @@ fn cmd_comm(args: &str) {
     // Remaining lines from file 1.
     while i < lines1.len() {
         if show1 {
-            crate::console_println!("{}", lines1[i]);
+            shell_println!("{}", lines1[i]);
         }
         i += 1;
     }
@@ -105351,7 +105141,7 @@ fn cmd_comm(args: &str) {
     // Remaining lines from file 2.
     while j < lines2.len() {
         if show2 {
-            crate::console_println!("{}{}", col2_prefix, lines2[j]);
+            shell_println!("{}{}", col2_prefix, lines2[j]);
         }
         j += 1;
     }
@@ -105396,7 +105186,7 @@ fn cmd_od(args: &str) {
     }
 
     if file_path.is_empty() {
-        crate::console_println!("Usage: od [-A o|d|x|n] [-t o1|x1|d1|u1|c] [-N count] <file>");
+        shell_println!("Usage: od [-A o|d|x|n] [-t o1|x1|d1|u1|c] [-N count] <file>");
         set_exit(1);
         return;
     }
@@ -105405,7 +105195,7 @@ fn cmd_od(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("od: {}: {:?}", path.display(), e);
+            shell_println!("od: {}: {:?}", path.display(), e);
             set_exit(1);
             return;
         }
@@ -105451,14 +105241,14 @@ fn cmd_od(args: &str) {
             }
         }
 
-        crate::console_println!("{}", line);
+        shell_println!("{}", line);
     }
 
     // Print final address (marks the end).
     match addr_fmt {
-        'o' => crate::console_println!("{:07o}", data.len()),
-        'd' => crate::console_println!("{:07}", data.len()),
-        'x' => crate::console_println!("{:07x}", data.len()),
+        'o' => shell_println!("{:07o}", data.len()),
+        'd' => shell_println!("{:07}", data.len()),
+        'x' => shell_println!("{:07x}", data.len()),
         _ => {}
     }
 }
@@ -105483,16 +105273,16 @@ fn cmd_tar(args: &str) {
 
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!("Usage: tar [-c|-x|-t][z|J][v]f archive [files...]");
-        crate::console_println!("  -cf       Create archive from files/directories");
-        crate::console_println!("  -czf      Create gzip-compressed archive (.tar.gz)");
-        crate::console_println!("  -cjf      Create bzip2-compressed archive (.tar.bz2)");
-        crate::console_println!("  -cJf      Create xz-compressed archive (.tar.xz)");
-        crate::console_println!("  --zstd    Use zstd compression (.tar.zst)");
-        crate::console_println!("  --lz4     Use lz4 compression (.tar.lz4)");
-        crate::console_println!("  -xf       Extract archive (auto-detects compression)");
-        crate::console_println!("  -tf       List archive contents");
-        crate::console_println!("  -v        Verbose output");
+        shell_println!("Usage: tar [-c|-x|-t][z|J][v]f archive [files...]");
+        shell_println!("  -cf       Create archive from files/directories");
+        shell_println!("  -czf      Create gzip-compressed archive (.tar.gz)");
+        shell_println!("  -cjf      Create bzip2-compressed archive (.tar.bz2)");
+        shell_println!("  -cJf      Create xz-compressed archive (.tar.xz)");
+        shell_println!("  --zstd    Use zstd compression (.tar.zst)");
+        shell_println!("  --lz4     Use lz4 compression (.tar.lz4)");
+        shell_println!("  -xf       Extract archive (auto-detects compression)");
+        shell_println!("  -tf       List archive contents");
+        shell_println!("  -v        Verbose output");
         return;
     }
 
@@ -105511,17 +105301,17 @@ fn cmd_tar(args: &str) {
     // Exactly one mode required.
     let mode_count = u8::from(create) + u8::from(extract) + u8::from(list);
     if mode_count != 1 {
-        crate::console_println!("tar: specify exactly one of -c, -x, -t");
+        shell_println!("tar: specify exactly one of -c, -x, -t");
         return;
     }
 
     if !flags.contains('f') {
-        crate::console_println!("tar: -f flag required (no stdin/stdout tar)");
+        shell_println!("tar: -f flag required (no stdin/stdout tar)");
         return;
     }
 
     if parts.len() < 2 {
-        crate::console_println!("tar: missing archive filename after -f");
+        shell_println!("tar: missing archive filename after -f");
         return;
     }
 
@@ -105530,7 +105320,7 @@ fn cmd_tar(args: &str) {
     if create {
         // tar -cf archive.tar file1 dir1 ...
         if parts.len() < 3 {
-            crate::console_println!("tar: no files specified for archiving");
+            shell_println!("tar: no files specified for archiving");
             return;
         }
 
@@ -105551,7 +105341,7 @@ fn cmd_tar(args: &str) {
                 &mut file_count,
                 verbose,
             ) {
-                crate::console_println!("tar: {}: {:?}", source, e);
+                shell_println!("tar: {}: {:?}", source, e);
                 return;
             }
         }
@@ -105564,7 +105354,7 @@ fn cmd_tar(args: &str) {
         let write_data = if gzip_compress {
             let compressed = crate::fs::compress::gzip(&archive_data);
             if verbose {
-                crate::console_println!(
+                shell_println!(
                     "tar: gzip compressed {} -> {} bytes",
                     archive_data.len(),
                     compressed.len()
@@ -105574,7 +105364,7 @@ fn cmd_tar(args: &str) {
         } else if bz2_compress {
             let compressed = crate::fs::bzip2::bzip2_compress(&archive_data, 1);
             if verbose {
-                crate::console_println!(
+                shell_println!(
                     "tar: bzip2 compressed {} -> {} bytes",
                     archive_data.len(),
                     compressed.len()
@@ -105584,7 +105374,7 @@ fn cmd_tar(args: &str) {
         } else if zstd_compress {
             let compressed = crate::fs::zstd::compress_zstd(&archive_data);
             if verbose {
-                crate::console_println!(
+                shell_println!(
                     "tar: zstd compressed {} -> {} bytes",
                     archive_data.len(),
                     compressed.len()
@@ -105594,7 +105384,7 @@ fn cmd_tar(args: &str) {
         } else if xz_compress {
             match crate::fs::xz::xz_compress(&archive_data) {
                 Ok(compressed) => {
-                    crate::console_println!(
+                    shell_println!(
                         "tar: xz compressed {}B → {}B ({}%)",
                         archive_data.len(),
                         compressed.len(),
@@ -105603,14 +105393,14 @@ fn cmd_tar(args: &str) {
                     compressed
                 }
                 Err(e) => {
-                    crate::console_println!("tar: xz compression failed: {:?}", e);
+                    shell_println!("tar: xz compression failed: {:?}", e);
                     return;
                 }
             }
         } else if lz4_compress {
             let compressed = crate::fs::lz4::compress(&archive_data);
             if verbose {
-                crate::console_println!(
+                shell_println!(
                     "tar: lz4 compressed {} -> {} bytes",
                     archive_data.len(),
                     compressed.len()
@@ -105623,7 +105413,7 @@ fn cmd_tar(args: &str) {
 
         match Vfs::write_file(&archive_path, &write_data) {
             Ok(()) => {
-                crate::console_println!(
+                shell_println!(
                     "tar: created '{}' ({} files, {} bytes)",
                     archive_path.display(),
                     file_count,
@@ -105631,7 +105421,7 @@ fn cmd_tar(args: &str) {
                 );
             }
             Err(e) => {
-                crate::console_println!("tar: write '{}': {:?}", archive_path.display(), e);
+                shell_println!("tar: write '{}': {:?}", archive_path.display(), e);
             }
         }
     } else if extract || list {
@@ -105650,7 +105440,7 @@ fn cmd_tar(args: &str) {
         let raw_data = match Vfs::read_file(&archive_path) {
             Ok(d) => d,
             Err(e) => {
-                crate::console_println!("tar: read '{}': {:?}", archive_path.display(), e);
+                shell_println!("tar: read '{}': {:?}", archive_path.display(), e);
                 return;
             }
         };
@@ -105663,7 +105453,7 @@ fn cmd_tar(args: &str) {
             match crate::fs::compress::gunzip(&raw_data) {
                 Ok(decompressed) => {
                     if verbose {
-                        crate::console_println!(
+                        shell_println!(
                             "tar: decompressed gzip: {} -> {} bytes",
                             raw_data.len(),
                             decompressed.len()
@@ -105672,7 +105462,7 @@ fn cmd_tar(args: &str) {
                     decompressed
                 }
                 Err(e) => {
-                    crate::console_println!("tar: gzip decompress failed: {:?}", e);
+                    shell_println!("tar: gzip decompress failed: {:?}", e);
                     return;
                 }
             }
@@ -105684,7 +105474,7 @@ fn cmd_tar(args: &str) {
             match crate::fs::bzip2::bunzip2(&raw_data) {
                 Ok(decompressed) => {
                     if verbose {
-                        crate::console_println!(
+                        shell_println!(
                             "tar: decompressed bzip2: {} -> {} bytes",
                             raw_data.len(),
                             decompressed.len()
@@ -105693,7 +105483,7 @@ fn cmd_tar(args: &str) {
                     decompressed
                 }
                 Err(e) => {
-                    crate::console_println!("tar: bzip2 decompress failed: {:?}", e);
+                    shell_println!("tar: bzip2 decompress failed: {:?}", e);
                     return;
                 }
             }
@@ -105703,7 +105493,7 @@ fn cmd_tar(args: &str) {
             match crate::fs::xz::unxz(&raw_data) {
                 Ok(decompressed) => {
                     if verbose {
-                        crate::console_println!(
+                        shell_println!(
                             "tar: decompressed xz: {} -> {} bytes",
                             raw_data.len(),
                             decompressed.len()
@@ -105712,7 +105502,7 @@ fn cmd_tar(args: &str) {
                     decompressed
                 }
                 Err(e) => {
-                    crate::console_println!("tar: xz decompress failed: {:?}", e);
+                    shell_println!("tar: xz decompress failed: {:?}", e);
                     return;
                 }
             }
@@ -105726,7 +105516,7 @@ fn cmd_tar(args: &str) {
                 match crate::fs::zstd::unzstd(&raw_data) {
                     Ok(decompressed) => {
                         if verbose {
-                            crate::console_println!(
+                            shell_println!(
                                 "tar: decompressed zstd: {} -> {} bytes",
                                 raw_data.len(),
                                 decompressed.len()
@@ -105735,7 +105525,7 @@ fn cmd_tar(args: &str) {
                         decompressed
                     }
                     Err(e) => {
-                        crate::console_println!("tar: zstd decompress failed: {:?}", e);
+                        shell_println!("tar: zstd decompress failed: {:?}", e);
                         return;
                     }
                 }
@@ -105744,7 +105534,7 @@ fn cmd_tar(args: &str) {
                 match crate::fs::lz4::decompress(&raw_data) {
                     Ok(decompressed) => {
                         if verbose {
-                            crate::console_println!(
+                            shell_println!(
                                 "tar: decompressed lz4: {} -> {} bytes",
                                 raw_data.len(),
                                 decompressed.len()
@@ -105753,7 +105543,7 @@ fn cmd_tar(args: &str) {
                         decompressed
                     }
                     Err(e) => {
-                        crate::console_println!("tar: lz4 decompress failed: {:?}", e);
+                        shell_println!("tar: lz4 decompress failed: {:?}", e);
                         return;
                     }
                 }
@@ -105768,7 +105558,7 @@ fn cmd_tar(args: &str) {
         let entries = match crate::fs::tar::parse(&data) {
             Ok(e) => e,
             Err(e) => {
-                crate::console_println!("tar: parse '{}': {:?}", archive_path.display(), e);
+                shell_println!("tar: parse '{}': {:?}", archive_path.display(), e);
                 return;
             }
         };
@@ -105783,14 +105573,9 @@ fn cmd_tar(args: &str) {
                     _ => '-',
                 };
                 if verbose {
-                    crate::console_println!(
-                        "{} {:>8} {}",
-                        type_ch,
-                        entry.size,
-                        entry.name.display()
-                    );
+                    shell_println!("{} {:>8} {}", type_ch, entry.size, entry.name.display());
                 } else {
-                    crate::console_println!("{}", entry.name.display());
+                    shell_println!("{}", entry.name.display());
                 }
             } else {
                 // Extract mode.  Stripping a leading `/` does nothing about
@@ -105799,10 +105584,7 @@ fn cmd_tar(args: &str) {
                 // land inside `target_dir` or be refused outright (Zip Slip).
                 let Ok(out_path) = crate::fs::pathutil::confine_under(&target_dir, &entry.name)
                 else {
-                    crate::console_println!(
-                        "tar: refusing unsafe member '{}'",
-                        entry.name.display()
-                    );
+                    shell_println!("tar: refusing unsafe member '{}'", entry.name.display());
                     continue;
                 };
 
@@ -105811,15 +105593,11 @@ fn cmd_tar(args: &str) {
                         match Vfs::mkdir(&out_path) {
                             Ok(()) | Err(crate::error::KernelError::AlreadyExists) => {}
                             Err(e) => {
-                                crate::console_println!(
-                                    "tar: mkdir '{}': {:?}",
-                                    out_path.display(),
-                                    e
-                                );
+                                shell_println!("tar: mkdir '{}': {:?}", out_path.display(), e);
                             }
                         }
                         if verbose {
-                            crate::console_println!("x {}", out_path.display());
+                            shell_println!("x {}", out_path.display());
                         }
                     }
                     crate::fs::tar::EntryKind::File => {
@@ -105839,24 +105617,16 @@ fn cmd_tar(args: &str) {
                         match Vfs::write_file(&out_path, file_data) {
                             Ok(()) => {}
                             Err(e) => {
-                                crate::console_println!(
-                                    "tar: write '{}': {:?}",
-                                    out_path.display(),
-                                    e
-                                );
+                                shell_println!("tar: write '{}': {:?}", out_path.display(), e);
                             }
                         }
                         if verbose {
-                            crate::console_println!(
-                                "x {} ({} bytes)",
-                                out_path.display(),
-                                entry.size
-                            );
+                            shell_println!("x {} ({} bytes)", out_path.display(), entry.size);
                         }
                     }
                     crate::fs::tar::EntryKind::Symlink => {
                         if verbose {
-                            crate::console_println!(
+                            shell_println!(
                                 "x {} -> {} (symlink, skipped)",
                                 out_path.display(),
                                 entry.link_target.display()
@@ -105865,7 +105635,7 @@ fn cmd_tar(args: &str) {
                     }
                     crate::fs::tar::EntryKind::Other(t) => {
                         if verbose {
-                            crate::console_println!(
+                            shell_println!(
                                 "x {} (type '{}', skipped)",
                                 out_path.display(),
                                 t as char
@@ -105879,7 +105649,7 @@ fn cmd_tar(args: &str) {
         }
 
         if extract {
-            crate::console_println!(
+            shell_println!(
                 "tar: extracted {} entries from '{}'",
                 file_count,
                 archive_path.display()
@@ -105955,7 +105725,7 @@ fn tar_add_recursive(
             archive.extend_from_slice(&header);
             *count = count.saturating_add(1);
             if verbose {
-                crate::console_println!("a {}", archive_name.display());
+                shell_println!("a {}", archive_name.display());
             }
 
             // Recurse into children.
@@ -105997,7 +105767,7 @@ fn tar_add_recursive(
 
             *count = count.saturating_add(1);
             if verbose {
-                crate::console_println!("a {} ({} bytes)", archive_name.display(), file_size);
+                shell_println!("a {} ({} bytes)", archive_name.display(), file_size);
             }
         }
         EntryType::Symlink => {
@@ -106017,7 +105787,7 @@ fn tar_add_recursive(
             archive.extend_from_slice(&header);
             *count = count.saturating_add(1);
             if verbose {
-                crate::console_println!("a {} -> {}", archive_name.display(), target.display());
+                shell_println!("a {} -> {}", archive_name.display(), target.display());
             }
         }
         _ => {
@@ -106047,7 +105817,7 @@ fn cmd_unzip(args: &str) {
 
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: unzip [-l] archive.zip [-d dir]\n\
              \x20 -l      List archive contents\n\
              \x20 -d DIR  Extract to directory DIR"
@@ -106072,7 +105842,7 @@ fn cmd_unzip(args: &str) {
                     target_dir = resolve_path(dir);
                     skip_next = true;
                 } else {
-                    crate::console_println!("unzip: -d requires a directory argument");
+                    shell_println!("unzip: -d requires a directory argument");
                     return;
                 }
             }
@@ -106087,7 +105857,7 @@ fn cmd_unzip(args: &str) {
     let archive_path = match archive_arg {
         Some(p) => resolve_path(p),
         None => {
-            crate::console_println!("unzip: no archive file specified");
+            shell_println!("unzip: no archive file specified");
             return;
         }
     };
@@ -106095,7 +105865,7 @@ fn cmd_unzip(args: &str) {
     let data = match Vfs::read_file(&archive_path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("unzip: '{}': {:?}", archive_path.display(), e);
+            shell_println!("unzip: '{}': {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -106103,7 +105873,7 @@ fn cmd_unzip(args: &str) {
     let entries = match zip::parse(&data) {
         Ok(e) => e,
         Err(_) => {
-            crate::console_println!(
+            shell_println!(
                 "unzip: '{}': not a valid ZIP archive",
                 archive_path.display()
             );
@@ -106112,13 +105882,13 @@ fn cmd_unzip(args: &str) {
     };
 
     if list_mode {
-        crate::console_println!(
+        shell_println!(
             "  {:>10}  {:>10}  {:>6}  Name",
             "Size",
             "Compressed",
             "Method"
         );
-        crate::console_println!(
+        shell_println!(
             "  {}  {}  {}  {}",
             "-".repeat(10),
             "-".repeat(10),
@@ -106134,7 +105904,7 @@ fn cmd_unzip(args: &str) {
                 8 => "deflat",
                 _ => "???",
             };
-            crate::console_println!(
+            shell_println!(
                 "  {:>10}  {:>10}  {:>6}  {}",
                 entry.uncompressed_size,
                 entry.compressed_size,
@@ -106144,14 +105914,14 @@ fn cmd_unzip(args: &str) {
             total_size = total_size.saturating_add(entry.uncompressed_size);
             total_compressed = total_compressed.saturating_add(entry.compressed_size);
         }
-        crate::console_println!(
+        shell_println!(
             "  {}  {}  {}  {}",
             "-".repeat(10),
             "-".repeat(10),
             "-".repeat(6),
             "-".repeat(30)
         );
-        crate::console_println!(
+        shell_println!(
             "  {:>10}  {:>10}  {:>6}  {} files",
             total_size,
             total_compressed,
@@ -106175,10 +105945,7 @@ fn cmd_unzip(args: &str) {
             // A name that resolves to nothing under the base is an archive
             // artefact, not an attack; only report a real escape.
             if entry.name.components().any(|c| c == Path::new("..")) {
-                crate::console_println!(
-                    "  unzip: refusing unsafe member '{}'",
-                    entry.name.display()
-                );
+                shell_println!("  unzip: refusing unsafe member '{}'", entry.name.display());
                 errors = errors.saturating_add(1);
             }
             continue;
@@ -106189,11 +105956,11 @@ fn cmd_unzip(args: &str) {
             match Vfs::mkdir_all(&out_path) {
                 Ok(()) | Err(crate::error::KernelError::AlreadyExists) => {}
                 Err(e) => {
-                    crate::console_println!("  unzip: mkdir '{}': {:?}", out_path.display(), e);
+                    shell_println!("  unzip: mkdir '{}': {:?}", out_path.display(), e);
                     errors = errors.saturating_add(1);
                 }
             }
-            crate::console_println!("  creating: {}", out_path.display());
+            shell_println!("  creating: {}", out_path.display());
             continue;
         }
 
@@ -106210,7 +105977,7 @@ fn cmd_unzip(args: &str) {
         let file_data = match zip::extract_entry(&data, entry) {
             Ok(d) => d,
             Err(e) => {
-                crate::console_println!("  unzip: '{}': {:?}", entry.name.display(), e);
+                shell_println!("  unzip: '{}': {:?}", entry.name.display(), e);
                 errors = errors.saturating_add(1);
                 continue;
             }
@@ -106219,7 +105986,7 @@ fn cmd_unzip(args: &str) {
         // Write the file.
         match Vfs::write_file(&out_path, &file_data) {
             Ok(()) => {
-                crate::console_println!(
+                shell_println!(
                     "  extracting: {} ({} bytes)",
                     out_path.display(),
                     file_data.len()
@@ -106227,13 +105994,13 @@ fn cmd_unzip(args: &str) {
                 extracted = extracted.saturating_add(1);
             }
             Err(e) => {
-                crate::console_println!("  unzip: write '{}': {:?}", out_path.display(), e);
+                shell_println!("  unzip: write '{}': {:?}", out_path.display(), e);
                 errors = errors.saturating_add(1);
             }
         }
     }
 
-    crate::console_println!(
+    shell_println!(
         "unzip: {} files extracted{} from '{}'",
         extracted,
         if errors > 0 {
@@ -106258,7 +106025,7 @@ fn cmd_unzip(args: &str) {
 fn cmd_cpio(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: cpio -t archive.cpio       List archive contents\n\
              \x20      cpio -i archive.cpio [-d DIR]  Extract archive\n\
              \x20      cpio -o archive.cpio FILE..    Create archive from files"
@@ -106275,7 +106042,7 @@ fn cmd_cpio(args: &str) {
         _ => {
             // If no flag, try to auto-detect: if the arg is an existing file,
             // list it.
-            crate::console_println!(
+            shell_println!(
                 "cpio: unknown mode '{}'. Use -t (list), -i (extract), or -o (create)",
                 mode
             );
@@ -106289,7 +106056,7 @@ fn cmd_cpio_list(args: &[&str]) {
     let archive_path = match args.first() {
         Some(&p) => resolve_path(p),
         None => {
-            crate::console_println!("cpio -t: no archive file specified");
+            shell_println!("cpio -t: no archive file specified");
             return;
         }
     };
@@ -106297,7 +106064,7 @@ fn cmd_cpio_list(args: &[&str]) {
     let data = match Vfs::read_file(&archive_path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("cpio: '{}': {:?}", archive_path.display(), e);
+            shell_println!("cpio: '{}': {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -106305,12 +106072,12 @@ fn cmd_cpio_list(args: &[&str]) {
     let entries = match crate::fs::cpio::uncpio(&data) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!("cpio: '{}': parse failed: {:?}", archive_path.display(), e);
+            shell_println!("cpio: '{}': parse failed: {:?}", archive_path.display(), e);
             return;
         }
     };
 
-    crate::console_println!(
+    shell_println!(
         "  {:>4}  {:>5}:{:<5}  {:>10}  {:>4}  Name",
         "Mode",
         "UID",
@@ -106318,7 +106085,7 @@ fn cmd_cpio_list(args: &[&str]) {
         "Size",
         "Type"
     );
-    crate::console_println!(
+    shell_println!(
         "  {}  {}  {}  {}  {}",
         "-".repeat(4),
         "-".repeat(11),
@@ -106356,7 +106123,7 @@ fn cmd_cpio_list(args: &[&str]) {
             alloc::format!("{}", entry.name.display())
         };
 
-        crate::console_println!(
+        shell_println!(
             "  {:>4o}  {:>5}:{:<5}  {:>10}  {:>4}  {}",
             entry.mode,
             entry.uid,
@@ -106374,7 +106141,7 @@ fn cmd_cpio_list(args: &[&str]) {
         }
     }
 
-    crate::console_println!(
+    shell_println!(
         "  {} file(s), {} dir(s), {} link(s), {} bytes total",
         file_count,
         dir_count,
@@ -106401,7 +106168,7 @@ fn cmd_cpio_extract(args: &[&str]) {
                     target_dir = resolve_path(dir);
                     skip_next = true;
                 } else {
-                    crate::console_println!("cpio -i: -d requires a directory argument");
+                    shell_println!("cpio -i: -d requires a directory argument");
                     return;
                 }
             }
@@ -106416,7 +106183,7 @@ fn cmd_cpio_extract(args: &[&str]) {
     let archive_path = match archive_arg {
         Some(p) => resolve_path(p),
         None => {
-            crate::console_println!("cpio -i: no archive file specified");
+            shell_println!("cpio -i: no archive file specified");
             return;
         }
     };
@@ -106424,7 +106191,7 @@ fn cmd_cpio_extract(args: &[&str]) {
     let data = match Vfs::read_file(&archive_path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("cpio: '{}': {:?}", archive_path.display(), e);
+            shell_println!("cpio: '{}': {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -106432,7 +106199,7 @@ fn cmd_cpio_extract(args: &[&str]) {
     let entries = match crate::fs::cpio::uncpio(&data) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!(
+            shell_println!(
                 "cpio: '{}': extraction failed: {:?}",
                 archive_path.display(),
                 e
@@ -106451,7 +106218,7 @@ fn cmd_cpio_extract(args: &[&str]) {
         // already rejects `..`, but the guard is what makes that guarantee
         // local to the write instead of an assumption about the parser.
         let Ok(dest) = crate::fs::pathutil::confine_under(&target_dir, &entry.name) else {
-            crate::console_println!("cpio: refusing unsafe member '{}'", entry.name.display());
+            shell_println!("cpio: refusing unsafe member '{}'", entry.name.display());
             errors = errors.wrapping_add(1);
             continue;
         };
@@ -106466,7 +106233,7 @@ fn cmd_cpio_extract(args: &[&str]) {
                         extracted = extracted.wrapping_add(1);
                     }
                     Err(e) => {
-                        crate::console_println!("cpio: symlink '{}': {:?}", dest.display(), e);
+                        shell_println!("cpio: symlink '{}': {:?}", dest.display(), e);
                         errors = errors.wrapping_add(1);
                     }
                 }
@@ -106488,7 +106255,7 @@ fn cmd_cpio_extract(args: &[&str]) {
                         extracted = extracted.wrapping_add(1);
                     }
                     Err(e) => {
-                        crate::console_println!("cpio: write '{}': {:?}", dest.display(), e);
+                        shell_println!("cpio: write '{}': {:?}", dest.display(), e);
                         errors = errors.wrapping_add(1);
                     }
                 }
@@ -106499,7 +106266,7 @@ fn cmd_cpio_extract(args: &[&str]) {
         }
     }
 
-    crate::console_println!(
+    shell_println!(
         "cpio: extracted {} item(s) from '{}'{}",
         extracted,
         archive_path.display(),
@@ -106515,7 +106282,7 @@ fn cmd_cpio_create(args: &[&str]) {
     use crate::fs::Vfs;
 
     if args.len() < 2 {
-        crate::console_println!("cpio -o: need archive name and at least one file");
+        shell_println!("cpio -o: need archive name and at least one file");
         return;
     }
 
@@ -106538,7 +106305,7 @@ fn cmd_cpio_create(args: &[&str]) {
                     match Vfs::read_file(&path) {
                         Ok(d) => d,
                         Err(e) => {
-                            crate::console_println!("cpio: read '{}': {:?}", path.display(), e);
+                            shell_println!("cpio: read '{}': {:?}", path.display(), e);
                             continue;
                         }
                     }
@@ -106570,27 +106337,27 @@ fn cmd_cpio_create(args: &[&str]) {
                 });
             }
             Err(e) => {
-                crate::console_println!("cpio: '{}': {:?}", path.display(), e);
+                shell_println!("cpio: '{}': {:?}", path.display(), e);
             }
         }
     }
 
     if entries.is_empty() {
-        crate::console_println!("cpio -o: no valid files to archive");
+        shell_println!("cpio -o: no valid files to archive");
         return;
     }
 
     let archive = match crate::fs::cpio::mkcpio(&entries) {
         Ok(a) => a,
         Err(e) => {
-            crate::console_println!("cpio: create failed: {:?}", e);
+            shell_println!("cpio: create failed: {:?}", e);
             return;
         }
     };
 
     match Vfs::write_file(&archive_path, &archive) {
         Ok(()) => {
-            crate::console_println!(
+            shell_println!(
                 "cpio: created '{}' ({} entries, {} bytes)",
                 archive_path.display(),
                 entries.len(),
@@ -106598,7 +106365,7 @@ fn cmd_cpio_create(args: &[&str]) {
             );
         }
         Err(e) => {
-            crate::console_println!("cpio: write '{}': {:?}", archive_path.display(), e);
+            shell_println!("cpio: write '{}': {:?}", archive_path.display(), e);
         }
     }
 }
@@ -106616,7 +106383,7 @@ fn cmd_cpio_create(args: &[&str]) {
 fn cmd_ar(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: ar t archive.a           List members\n\
              \x20      ar x archive.a [-d DIR]  Extract members\n\
              \x20      ar r archive.a FILE..    Create archive from files"
@@ -106630,7 +106397,7 @@ fn cmd_ar(args: &str) {
         "x" => cmd_ar_extract(&parts[1..]),
         "r" | "c" | "cr" | "rcs" => cmd_ar_create(&parts[1..]),
         _ => {
-            crate::console_println!(
+            shell_println!(
                 "ar: unknown operation '{}'. Use t (list), x (extract), or r (create)",
                 mode
             );
@@ -106644,7 +106411,7 @@ fn cmd_ar_list(args: &[&str]) {
     let archive_path = match args.first() {
         Some(&p) => resolve_path(p),
         None => {
-            crate::console_println!("ar t: no archive file specified");
+            shell_println!("ar t: no archive file specified");
             return;
         }
     };
@@ -106652,7 +106419,7 @@ fn cmd_ar_list(args: &[&str]) {
     let data = match Vfs::read_file(&archive_path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("ar: '{}': {:?}", archive_path.display(), e);
+            shell_println!("ar: '{}': {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -106660,12 +106427,12 @@ fn cmd_ar_list(args: &[&str]) {
     let entries = match crate::fs::ar::unar(&data) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!("ar: '{}': parse failed: {:?}", archive_path.display(), e);
+            shell_println!("ar: '{}': parse failed: {:?}", archive_path.display(), e);
             return;
         }
     };
 
-    crate::console_println!(
+    shell_println!(
         "  {:>8}  {:>5}:{:<5}  {:>10}  {}",
         "Mode",
         "UID",
@@ -106673,7 +106440,7 @@ fn cmd_ar_list(args: &[&str]) {
         "Size",
         "Name"
     );
-    crate::console_println!(
+    shell_println!(
         "  {}  {}  {}  {}",
         "-".repeat(8),
         "-".repeat(11),
@@ -106683,7 +106450,7 @@ fn cmd_ar_list(args: &[&str]) {
 
     let mut total_size: u64 = 0;
     for entry in &entries {
-        crate::console_println!(
+        shell_println!(
             "  {:>8o}  {:>5}:{:<5}  {:>10}  {}",
             entry.mode,
             entry.uid,
@@ -106694,7 +106461,7 @@ fn cmd_ar_list(args: &[&str]) {
         total_size = total_size.wrapping_add(entry.data.len() as u64);
     }
 
-    crate::console_println!("  {} member(s), {} bytes total", entries.len(), total_size);
+    shell_println!("  {} member(s), {} bytes total", entries.len(), total_size);
 }
 
 fn cmd_ar_extract(args: &[&str]) {
@@ -106715,7 +106482,7 @@ fn cmd_ar_extract(args: &[&str]) {
                     target_dir = resolve_path(dir);
                     skip_next = true;
                 } else {
-                    crate::console_println!("ar x: -d requires a directory argument");
+                    shell_println!("ar x: -d requires a directory argument");
                     return;
                 }
             }
@@ -106730,7 +106497,7 @@ fn cmd_ar_extract(args: &[&str]) {
     let archive_path = match archive_arg {
         Some(p) => resolve_path(p),
         None => {
-            crate::console_println!("ar x: no archive file specified");
+            shell_println!("ar x: no archive file specified");
             return;
         }
     };
@@ -106738,7 +106505,7 @@ fn cmd_ar_extract(args: &[&str]) {
     let data = match Vfs::read_file(&archive_path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("ar: '{}': {:?}", archive_path.display(), e);
+            shell_println!("ar: '{}': {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -106746,7 +106513,7 @@ fn cmd_ar_extract(args: &[&str]) {
     let entries = match crate::fs::ar::unar(&data) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!(
+            shell_println!(
                 "ar: '{}': extraction failed: {:?}",
                 archive_path.display(),
                 e
@@ -106763,7 +106530,7 @@ fn cmd_ar_extract(args: &[&str]) {
         // format enforces that, so the write goes through the shared jail guard
         // (Zip Slip) rather than trusting the archive.
         let Ok(dest) = crate::fs::pathutil::confine_under(&target_dir, &entry.name) else {
-            crate::console_println!("ar: refusing unsafe member '{}'", entry.name.display());
+            shell_println!("ar: refusing unsafe member '{}'", entry.name.display());
             errors = errors.wrapping_add(1);
             continue;
         };
@@ -106773,13 +106540,13 @@ fn cmd_ar_extract(args: &[&str]) {
                 extracted = extracted.wrapping_add(1);
             }
             Err(e) => {
-                crate::console_println!("ar: write '{}': {:?}", dest.display(), e);
+                shell_println!("ar: write '{}': {:?}", dest.display(), e);
                 errors = errors.wrapping_add(1);
             }
         }
     }
 
-    crate::console_println!(
+    shell_println!(
         "ar: extracted {} member(s) from '{}'{}",
         extracted,
         archive_path.display(),
@@ -106795,7 +106562,7 @@ fn cmd_ar_create(args: &[&str]) {
     use crate::fs::Vfs;
 
     if args.len() < 2 {
-        crate::console_println!("ar r: need archive name and at least one file");
+        shell_println!("ar r: need archive name and at least one file");
         return;
     }
 
@@ -106818,27 +106585,27 @@ fn cmd_ar_create(args: &[&str]) {
                 });
             }
             Err(e) => {
-                crate::console_println!("ar: read '{}': {:?}", path.display(), e);
+                shell_println!("ar: read '{}': {:?}", path.display(), e);
             }
         }
     }
 
     if entries.is_empty() {
-        crate::console_println!("ar r: no valid files to archive");
+        shell_println!("ar r: no valid files to archive");
         return;
     }
 
     let archive = match crate::fs::ar::mkar(&entries) {
         Ok(a) => a,
         Err(e) => {
-            crate::console_println!("ar: create failed: {:?}", e);
+            shell_println!("ar: create failed: {:?}", e);
             return;
         }
     };
 
     match Vfs::write_file(&archive_path, &archive) {
         Ok(()) => {
-            crate::console_println!(
+            shell_println!(
                 "ar: created '{}' ({} members, {} bytes)",
                 archive_path.display(),
                 entries.len(),
@@ -106846,7 +106613,7 @@ fn cmd_ar_create(args: &[&str]) {
             );
         }
         Err(e) => {
-            crate::console_println!("ar: write '{}': {:?}", archive_path.display(), e);
+            shell_println!("ar: write '{}': {:?}", archive_path.display(), e);
         }
     }
 }
@@ -106869,7 +106636,7 @@ fn cmd_ar_create(args: &[&str]) {
 fn cmd_dpkg(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: dpkg -I pkg.deb          Show package info\n\
              \x20      dpkg -c pkg.deb          List data files\n\
              \x20      dpkg -x pkg.deb [-d DIR] Extract data files"
@@ -106884,7 +106651,7 @@ fn cmd_dpkg(args: &str) {
         "-x" | "--extract" => cmd_dpkg_extract(&parts[1..]),
         _ => {
             // Maybe the first arg is the file and no flag given.
-            crate::console_println!(
+            shell_println!(
                 "dpkg: unknown flag '{}'. Use -I (info), -c (contents), or -x (extract)",
                 mode
             );
@@ -106897,7 +106664,7 @@ fn dpkg_read_deb(path: &Path) -> Option<alloc::vec::Vec<crate::fs::ar::ArEntry>>
     let data = match crate::fs::Vfs::read_file(path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("dpkg: '{}': {:?}", path.display(), e);
+            shell_println!("dpkg: '{}': {:?}", path.display(), e);
             return None;
         }
     };
@@ -106905,7 +106672,7 @@ fn dpkg_read_deb(path: &Path) -> Option<alloc::vec::Vec<crate::fs::ar::ArEntry>>
     match crate::fs::ar::unar(&data) {
         Ok(entries) => Some(entries),
         Err(e) => {
-            crate::console_println!(
+            shell_println!(
                 "dpkg: '{}': not a valid .deb (ar parse error: {:?})",
                 path.display(),
                 e
@@ -106953,7 +106720,7 @@ fn dpkg_decompress_tar(member: &crate::fs::ar::ArEntry) -> Option<alloc::vec::Ve
             match crate::fs::compress::gunzip(data) {
                 Ok(d) => return Some(d),
                 Err(e) => {
-                    crate::console_println!(
+                    shell_println!(
                         "dpkg: gzip decompress of '{}' failed: {:?}",
                         name.display(),
                         e
@@ -106967,7 +106734,7 @@ fn dpkg_decompress_tar(member: &crate::fs::ar::ArEntry) -> Option<alloc::vec::Ve
             match crate::fs::xz::unxz(data) {
                 Ok(d) => return Some(d),
                 Err(e) => {
-                    crate::console_println!(
+                    shell_println!(
                         "dpkg: xz decompress of '{}' failed: {:?}",
                         name.display(),
                         e
@@ -106986,7 +106753,7 @@ fn dpkg_decompress_tar(member: &crate::fs::ar::ArEntry) -> Option<alloc::vec::Ve
                 match crate::fs::zstd::unzstd(data) {
                     Ok(d) => return Some(d),
                     Err(e) => {
-                        crate::console_println!(
+                        shell_println!(
                             "dpkg: zstd decompress of '{}' failed: {:?}",
                             name.display(),
                             e
@@ -107001,7 +106768,7 @@ fn dpkg_decompress_tar(member: &crate::fs::ar::ArEntry) -> Option<alloc::vec::Ve
             match crate::fs::bzip2::bunzip2(data) {
                 Ok(d) => return Some(d),
                 Err(e) => {
-                    crate::console_println!(
+                    shell_println!(
                         "dpkg: bzip2 decompress of '{}' failed: {:?}",
                         name.display(),
                         e
@@ -107020,7 +106787,7 @@ fn cmd_dpkg_info(args: &[&str]) {
     let deb_path = match args.first() {
         Some(&p) => resolve_path(p),
         None => {
-            crate::console_println!("dpkg -I: no .deb file specified");
+            shell_println!("dpkg -I: no .deb file specified");
             return;
         }
     };
@@ -107033,20 +106800,20 @@ fn cmd_dpkg_info(args: &[&str]) {
     // Show debian-binary version.
     if let Some(version_member) = dpkg_find_member(&members, "debian-binary") {
         let version = core::str::from_utf8(&version_member.data).unwrap_or("???");
-        crate::console_println!("  format: {}", version.trim());
+        shell_println!("  format: {}", version.trim());
     }
 
     // Show .deb members.
-    crate::console_println!("  members:");
+    shell_println!("  members:");
     for m in &members {
-        crate::console_println!("    {} ({} bytes)", m.name.display(), m.data.len());
+        shell_println!("    {} ({} bytes)", m.name.display(), m.data.len());
     }
 
     // Decompress and parse the control.tar to show package metadata.
     let control_member = match dpkg_find_member(&members, "control.tar") {
         Some(m) => m,
         None => {
-            crate::console_println!("  (no control.tar found)");
+            shell_println!("  (no control.tar found)");
             return;
         }
     };
@@ -107060,7 +106827,7 @@ fn cmd_dpkg_info(args: &[&str]) {
     let tar_entries = match crate::fs::tar::parse(&tar_data) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!("  (control.tar is not a valid tar: {:?})", e);
+            shell_println!("  (control.tar is not a valid tar: {:?})", e);
             return;
         }
     };
@@ -107074,26 +106841,26 @@ fn cmd_dpkg_info(args: &[&str]) {
         if first != Path::new("control") {
             continue;
         }
-        crate::console_println!("  ---");
+        shell_println!("  ---");
         let Ok(bytes) = crate::fs::tar::entry_data(&tar_data, entry) else {
-            crate::console_println!("  (truncated)");
+            shell_println!("  (truncated)");
             return;
         };
         let content = core::str::from_utf8(bytes).unwrap_or("(binary data)");
         for line in content.lines() {
-            crate::console_println!("  {}", line);
+            shell_println!("  {}", line);
         }
         return;
     }
 
-    crate::console_println!("  (control file not found in control.tar)");
+    shell_println!("  (control file not found in control.tar)");
 }
 
 fn cmd_dpkg_contents(args: &[&str]) {
     let deb_path = match args.first() {
         Some(&p) => resolve_path(p),
         None => {
-            crate::console_println!("dpkg -c: no .deb file specified");
+            shell_println!("dpkg -c: no .deb file specified");
             return;
         }
     };
@@ -107106,7 +106873,7 @@ fn cmd_dpkg_contents(args: &[&str]) {
     let data_member = match dpkg_find_member(&members, "data.tar") {
         Some(m) => m,
         None => {
-            crate::console_println!("  (no data.tar found)");
+            shell_println!("  (no data.tar found)");
             return;
         }
     };
@@ -107119,20 +106886,20 @@ fn cmd_dpkg_contents(args: &[&str]) {
     let entries = match crate::fs::tar::parse(&tar_data) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!("dpkg: data.tar is not a valid tar: {:?}", e);
+            shell_println!("dpkg: data.tar is not a valid tar: {:?}", e);
             return;
         }
     };
-    crate::console_println!("  {:>10}  Name", "Size");
-    crate::console_println!("  {}  {}", "-".repeat(10), "-".repeat(50));
+    shell_println!("  {:>10}  Name", "Size");
+    shell_println!("  {}  {}", "-".repeat(10), "-".repeat(50));
 
     let mut total_size: u64 = 0;
     for entry in &entries {
-        crate::console_println!("  {:>10}  {}", entry.size, entry.name.display());
+        shell_println!("  {:>10}  {}", entry.size, entry.name.display());
         total_size = total_size.wrapping_add(entry.size);
     }
 
-    crate::console_println!("  {} file(s), {} bytes total", entries.len(), total_size);
+    shell_println!("  {} file(s), {} bytes total", entries.len(), total_size);
 }
 
 fn cmd_dpkg_extract(args: &[&str]) {
@@ -107153,7 +106920,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
                     target_dir = resolve_path(dir);
                     skip_next = true;
                 } else {
-                    crate::console_println!("dpkg -x: -d requires a directory argument");
+                    shell_println!("dpkg -x: -d requires a directory argument");
                     return;
                 }
             }
@@ -107168,7 +106935,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
     let deb_path = match deb_arg {
         Some(p) => resolve_path(p),
         None => {
-            crate::console_println!("dpkg -x: no .deb file specified");
+            shell_println!("dpkg -x: no .deb file specified");
             return;
         }
     };
@@ -107181,7 +106948,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
     let data_member = match dpkg_find_member(&members, "data.tar") {
         Some(m) => m,
         None => {
-            crate::console_println!("dpkg: no data.tar found in '{}'", deb_path.display());
+            shell_println!("dpkg: no data.tar found in '{}'", deb_path.display());
             return;
         }
     };
@@ -107194,7 +106961,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
     let entries = match crate::fs::tar::parse(&tar_data) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!("dpkg: data.tar is not a valid tar: {:?}", e);
+            shell_println!("dpkg: data.tar is not a valid tar: {:?}", e);
             return;
         }
     };
@@ -107210,7 +106977,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
             // A name that resolves to nothing under the base is the common
             // `./` archive-root entry, not an attack; only report real escapes.
             if entry.name.components().any(|c| c == Path::new("..")) {
-                crate::console_println!("dpkg: refusing unsafe member '{}'", entry.name.display());
+                shell_println!("dpkg: refusing unsafe member '{}'", entry.name.display());
                 errors = errors.wrapping_add(1);
             }
             continue;
@@ -107232,7 +106999,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
         }
 
         let Ok(data) = crate::fs::tar::entry_data(&tar_data, entry) else {
-            crate::console_println!("dpkg: truncated member '{}'", entry.name.display());
+            shell_println!("dpkg: truncated member '{}'", entry.name.display());
             errors = errors.wrapping_add(1);
             continue;
         };
@@ -107242,13 +107009,13 @@ fn cmd_dpkg_extract(args: &[&str]) {
                 extracted = extracted.wrapping_add(1);
             }
             Err(e) => {
-                crate::console_println!("dpkg: write '{}': {:?}", dest.display(), e);
+                shell_println!("dpkg: write '{}': {:?}", dest.display(), e);
                 errors = errors.wrapping_add(1);
             }
         }
     }
 
-    crate::console_println!(
+    shell_println!(
         "dpkg: extracted {} file(s) from '{}'{}",
         extracted,
         deb_path.display(),
@@ -107276,7 +107043,7 @@ fn cmd_un7z(args: &str) {
 
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: un7z [-l] archive.7z [-d dir]\n\
              \x20 -l      List archive contents\n\
              \x20 -d DIR  Extract to directory DIR"
@@ -107301,7 +107068,7 @@ fn cmd_un7z(args: &str) {
                     target_dir = resolve_path(dir);
                     skip_next = true;
                 } else {
-                    crate::console_println!("un7z: -d requires a directory argument");
+                    shell_println!("un7z: -d requires a directory argument");
                     return;
                 }
             }
@@ -107316,7 +107083,7 @@ fn cmd_un7z(args: &str) {
     let archive_path = match archive_arg {
         Some(p) => resolve_path(p),
         None => {
-            crate::console_println!("un7z: no archive file specified");
+            shell_println!("un7z: no archive file specified");
             return;
         }
     };
@@ -107324,7 +107091,7 @@ fn cmd_un7z(args: &str) {
     let data = match Vfs::read_file(&archive_path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("un7z: '{}': {:?}", archive_path.display(), e);
+            shell_println!("un7z: '{}': {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -107332,7 +107099,7 @@ fn cmd_un7z(args: &str) {
     let entries = match crate::fs::sevenz::un7z(&data) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!(
+            shell_println!(
                 "un7z: '{}': extraction failed: {:?}",
                 archive_path.display(),
                 e
@@ -107342,8 +107109,8 @@ fn cmd_un7z(args: &str) {
     };
 
     if list_mode {
-        crate::console_println!("  {:>10}  {:>4}  Name", "Size", "Type");
-        crate::console_println!(
+        shell_println!("  {:>10}  {:>4}  Name", "Size", "Type");
+        shell_println!(
             "  {}  {}  {}",
             "-".repeat(10),
             "-".repeat(4),
@@ -107355,7 +107122,7 @@ fn cmd_un7z(args: &str) {
         let mut dir_count = 0u64;
         for entry in &entries {
             let type_str = if entry.is_dir { "dir" } else { "file" };
-            crate::console_println!(
+            shell_println!(
                 "  {:>10}  {:>4}  {}",
                 entry.data.len(),
                 type_str,
@@ -107368,7 +107135,7 @@ fn cmd_un7z(args: &str) {
                 file_count = file_count.wrapping_add(1);
             }
         }
-        crate::console_println!(
+        shell_println!(
             "  {} files, {} directories, {} bytes total",
             file_count,
             dir_count,
@@ -107385,7 +107152,7 @@ fn cmd_un7z(args: &str) {
         // Member names are attacker-controlled: route the join through the
         // shared jail guard so `../../etc/passwd` cannot escape (Zip Slip).
         let Ok(dest) = crate::fs::pathutil::confine_under(&target_dir, &entry.name) else {
-            crate::console_println!("un7z: refusing unsafe member '{}'", entry.name.display());
+            shell_println!("un7z: refusing unsafe member '{}'", entry.name.display());
             errors = errors.wrapping_add(1);
             continue;
         };
@@ -107410,13 +107177,13 @@ fn cmd_un7z(args: &str) {
                 extracted = extracted.wrapping_add(1);
             }
             Err(e) => {
-                crate::console_println!("un7z: write '{}': {:?}", dest.display(), e);
+                shell_println!("un7z: write '{}': {:?}", dest.display(), e);
                 errors = errors.wrapping_add(1);
             }
         }
     }
 
-    crate::console_println!(
+    shell_println!(
         "un7z: extracted {} file(s) from '{}'{}",
         extracted,
         archive_path.display(),
@@ -107441,7 +107208,7 @@ fn cmd_unrar(args: &str) {
 
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: unrar [-l] archive.rar [-d dir]\n\
              \x20 -l      List archive contents\n\
              \x20 -d DIR  Extract to directory DIR\n\
@@ -107467,7 +107234,7 @@ fn cmd_unrar(args: &str) {
                     target_dir = resolve_path(dir);
                     skip_next = true;
                 } else {
-                    crate::console_println!("unrar: -d requires a directory argument");
+                    shell_println!("unrar: -d requires a directory argument");
                     return;
                 }
             }
@@ -107482,7 +107249,7 @@ fn cmd_unrar(args: &str) {
     let archive_path = match archive_arg {
         Some(p) => resolve_path(p),
         None => {
-            crate::console_println!("unrar: no archive file specified");
+            shell_println!("unrar: no archive file specified");
             return;
         }
     };
@@ -107490,7 +107257,7 @@ fn cmd_unrar(args: &str) {
     let data = match Vfs::read_file(&archive_path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("unrar: '{}': {:?}", archive_path.display(), e);
+            shell_println!("unrar: '{}': {:?}", archive_path.display(), e);
             return;
         }
     };
@@ -107498,27 +107265,27 @@ fn cmd_unrar(args: &str) {
     let entries = match crate::fs::rar::parse(&data) {
         Ok(e) => e,
         Err(crate::error::KernelError::InvalidArgument) => {
-            crate::console_println!(
+            shell_println!(
                 "unrar: '{}': RAR4 format not supported (only RAR5)",
                 archive_path.display()
             );
             return;
         }
         Err(e) => {
-            crate::console_println!("unrar: '{}': parse failed: {:?}", archive_path.display(), e);
+            shell_println!("unrar: '{}': parse failed: {:?}", archive_path.display(), e);
             return;
         }
     };
 
     if list_mode {
-        crate::console_println!(
+        shell_println!(
             "  {:>10}  {:>10}  {:>4}  {:>5}  Name",
             "Size",
             "Packed",
             "Type",
             "Mode"
         );
-        crate::console_println!(
+        shell_println!(
             "  {}  {}  {}  {}  {}",
             "-".repeat(10),
             "-".repeat(10),
@@ -107533,7 +107300,7 @@ fn cmd_unrar(args: &str) {
         for entry in &entries {
             let type_str = if entry.is_dir { "dir" } else { "file" };
             let mode = if entry.is_stored { "store" } else { "comp" };
-            crate::console_println!(
+            shell_println!(
                 "  {:>10}  {:>10}  {:>4}  {:>5}  {}",
                 entry.unpacked_size,
                 entry.packed_size,
@@ -107548,7 +107315,7 @@ fn cmd_unrar(args: &str) {
                 file_count = file_count.wrapping_add(1);
             }
         }
-        crate::console_println!(
+        shell_println!(
             "  {} files, {} directories, {} bytes total",
             file_count,
             dir_count,
@@ -107566,7 +107333,7 @@ fn cmd_unrar(args: &str) {
         // Member names are attacker-controlled: route the join through the
         // shared jail guard so `../../etc/passwd` cannot escape (Zip Slip).
         let Ok(dest) = crate::fs::pathutil::confine_under(&target_dir, &entry.name) else {
-            crate::console_println!("unrar: refusing unsafe member '{}'", entry.name.display());
+            shell_println!("unrar: refusing unsafe member '{}'", entry.name.display());
             errors = errors.wrapping_add(1);
             continue;
         };
@@ -107577,7 +107344,7 @@ fn cmd_unrar(args: &str) {
         }
 
         if !entry.is_stored {
-            crate::console_println!(
+            shell_println!(
                 "unrar: skip '{}' (compressed, not extractable)",
                 entry.name.display()
             );
@@ -107600,18 +107367,18 @@ fn cmd_unrar(args: &str) {
                     extracted = extracted.wrapping_add(1);
                 }
                 Err(e) => {
-                    crate::console_println!("unrar: write '{}': {:?}", dest.display(), e);
+                    shell_println!("unrar: write '{}': {:?}", dest.display(), e);
                     errors = errors.wrapping_add(1);
                 }
             },
             Err(e) => {
-                crate::console_println!("unrar: extract '{}': {:?}", entry.name.display(), e);
+                shell_println!("unrar: extract '{}': {:?}", entry.name.display(), e);
                 errors = errors.wrapping_add(1);
             }
         }
     }
 
-    crate::console_println!(
+    shell_println!(
         "unrar: extracted {} file(s) from '{}'{}{}",
         extracted,
         archive_path.display(),
@@ -107689,7 +107456,7 @@ fn cmd_zip(args: &str) {
     use crate::fs::zip;
 
     if args.trim().is_empty() || args.trim() == "--help" || args.trim() == "-h" {
-        crate::console_println!(
+        shell_println!(
             "Usage: zip [-0] [-r] archive.zip file1 [file2 ...]\n\
              Create a ZIP archive.\n  \
                -0      Store files uncompressed (method 0)\n  \
@@ -107712,7 +107479,7 @@ fn cmd_zip(args: &str) {
                         '0' => store_only = true,
                         'r' => recursive = true,
                         _ => {
-                            crate::console_println!("zip: unknown option '-{}'", ch);
+                            shell_println!("zip: unknown option '-{}'", ch);
                             return;
                         }
                     }
@@ -107723,7 +107490,7 @@ fn cmd_zip(args: &str) {
     }
 
     if positional.len() < 2 {
-        crate::console_println!("zip: need at least an archive name and one file");
+        shell_println!("zip: need at least an archive name and one file");
         return;
     }
 
@@ -107749,7 +107516,7 @@ fn cmd_zip(args: &str) {
                     input_files.push((marker, PathBuf::new()));
                     zip_collect_files(&abs, &dir_name, &mut input_files, 0);
                 } else {
-                    crate::console_println!("zip: '{}' is a directory (use -r)", token);
+                    shell_println!("zip: '{}' is a directory (use -r)", token);
                 }
             }
             Ok(_) => {
@@ -107757,7 +107524,7 @@ fn cmd_zip(args: &str) {
                 input_files.push((name, abs));
             }
             Err(e) => {
-                crate::console_println!("zip: '{}': {:?}", token, e);
+                shell_println!("zip: '{}': {:?}", token, e);
                 set_exit(1);
                 return;
             }
@@ -107765,7 +107532,7 @@ fn cmd_zip(args: &str) {
     }
 
     if input_files.is_empty() {
-        crate::console_println!("zip: no input files");
+        shell_println!("zip: no input files");
         return;
     }
 
@@ -107788,13 +107555,13 @@ fn cmd_zip(args: &str) {
         let raw_data = match Vfs::read_file(abs_path) {
             Ok(d) => d,
             Err(e) => {
-                crate::console_println!("  zip: read '{}': {:?}", abs_path.display(), e);
+                shell_println!("  zip: read '{}': {:?}", abs_path.display(), e);
                 errors = errors.saturating_add(1);
                 continue;
             }
         };
 
-        crate::console_println!("  adding: {} ({} bytes)", name.display(), raw_data.len());
+        shell_println!("  adding: {} ({} bytes)", name.display(), raw_data.len());
 
         total_in = total_in.wrapping_add(raw_data.len() as u64);
 
@@ -107806,7 +107573,7 @@ fn cmd_zip(args: &str) {
     }
 
     if entries.is_empty() {
-        crate::console_println!("zip: nothing to add");
+        shell_println!("zip: nothing to add");
         return;
     }
 
@@ -107821,7 +107588,7 @@ fn cmd_zip(args: &str) {
             } else {
                 0
             };
-            crate::console_println!(
+            shell_println!(
                 "zip: created '{}' ({} bytes, {} entries, ~{}% compression{})",
                 archive_path.display(),
                 archive.len(),
@@ -107835,7 +107602,7 @@ fn cmd_zip(args: &str) {
             );
         }
         Err(e) => {
-            crate::console_println!("zip: write '{}': {:?}", archive_path.display(), e);
+            shell_println!("zip: write '{}': {:?}", archive_path.display(), e);
             set_exit(1);
         }
     }
@@ -107846,7 +107613,7 @@ fn cmd_zip(args: &str) {
 /// `crc32 FILE [FILE ...]` — compute CRC32C checksum for files.
 fn cmd_crc32(args: &str) {
     if args.trim().is_empty() {
-        crate::console_println!("Usage: crc32 <file> [file ...]");
+        shell_println!("Usage: crc32 <file> [file ...]");
         return;
     }
 
@@ -107855,10 +107622,10 @@ fn cmd_crc32(args: &str) {
         match crate::fs::Vfs::read_file(&path) {
             Ok(data) => {
                 let checksum = crate::crypto::crc32c(&data);
-                crate::console_println!("{:08x} {} {}", checksum, data.len(), path.display());
+                shell_println!("{:08x} {} {}", checksum, data.len(), path.display());
             }
             Err(e) => {
-                crate::console_println!("crc32: '{}': {:?}", path.display(), e);
+                shell_println!("crc32: '{}': {:?}", path.display(), e);
             }
         }
     }
@@ -107964,15 +107731,15 @@ fn base64_decode(input: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
 fn cmd_base64(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!("Usage: base64 [-d] <file>");
-        crate::console_println!("  -d   Decode (input is Base64 text)");
+        shell_println!("Usage: base64 [-d] <file>");
+        shell_println!("  -d   Decode (input is Base64 text)");
         return;
     }
 
     let decode = parts[0] == "-d" || parts[0] == "--decode";
     let file_arg = if decode {
         if parts.len() < 2 {
-            crate::console_println!("base64: missing file argument");
+            shell_println!("base64: missing file argument");
             return;
         }
         parts[1]
@@ -107984,7 +107751,7 @@ fn cmd_base64(args: &str) {
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("base64: '{}': {:?}", path.display(), e);
+            shell_println!("base64: '{}': {:?}", path.display(), e);
             return;
         }
     };
@@ -107996,13 +107763,13 @@ fn cmd_base64(args: &str) {
             Ok(decoded) => {
                 // Print as text if valid UTF-8, otherwise show hex summary.
                 if let Ok(s) = core::str::from_utf8(&decoded) {
-                    crate::console_println!("{}", s);
+                    shell_println!("{}", s);
                 } else {
-                    crate::console_println!("<binary: {} bytes>", decoded.len());
+                    shell_println!("<binary: {} bytes>", decoded.len());
                 }
             }
             Err(e) => {
-                crate::console_println!("base64: decode error: {}", e);
+                shell_println!("base64: decode error: {}", e);
             }
         }
     } else {
@@ -108014,7 +107781,7 @@ fn cmd_base64(args: &str) {
         while offset < bytes.len() {
             let end = (offset + line_width).min(bytes.len());
             if let Ok(line) = core::str::from_utf8(&bytes[offset..end]) {
-                crate::console_println!("{}", line);
+                shell_println!("{}", line);
             }
             offset = end;
         }
@@ -108032,8 +107799,8 @@ fn cmd_base64(args: &str) {
 /// This prevents casual recovery of deleted file content from disk.
 fn cmd_wipe(args: &str) {
     if args.trim().is_empty() {
-        crate::console_println!("Usage: wipe <file> [file ...]");
-        crate::console_println!("  Overwrites file with zeros, then deletes it");
+        shell_println!("Usage: wipe <file> [file ...]");
+        shell_println!("  Overwrites file with zeros, then deletes it");
         return;
     }
 
@@ -108046,7 +107813,7 @@ fn cmd_wipe(args: &str) {
                     // Zero-fill the file.
                     let zeros = alloc::vec![0u8; size];
                     if let Err(e) = crate::fs::Vfs::write_file(&path, &zeros) {
-                        crate::console_println!("wipe: write '{}': {:?}", path.display(), e);
+                        shell_println!("wipe: write '{}': {:?}", path.display(), e);
                         continue;
                     }
                     // Sync to ensure zeros hit disk.
@@ -108055,19 +107822,15 @@ fn cmd_wipe(args: &str) {
                 // Remove the file.
                 match crate::fs::Vfs::remove(&path) {
                     Ok(()) => {
-                        crate::console_println!(
-                            "wiped: {} ({} bytes zeroed)",
-                            path.display(),
-                            size
-                        );
+                        shell_println!("wiped: {} ({} bytes zeroed)", path.display(), size);
                     }
                     Err(e) => {
-                        crate::console_println!("wipe: remove '{}': {:?}", path.display(), e);
+                        shell_println!("wipe: remove '{}': {:?}", path.display(), e);
                     }
                 }
             }
             Err(e) => {
-                crate::console_println!("wipe: '{}': {:?}", path.display(), e);
+                shell_println!("wipe: '{}': {:?}", path.display(), e);
             }
         }
     }
@@ -108083,7 +107846,7 @@ fn cmd_wipe(args: &str) {
 fn cmd_checksum(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!("Usage: checksum [-t sha256|crc32] <file> [file ...]");
+        shell_println!("Usage: checksum [-t sha256|crc32] <file> [file ...]");
         return;
     }
 
@@ -108099,7 +107862,7 @@ fn cmd_checksum(args: &str) {
             Ok(data) => match algo {
                 "crc32" | "crc32c" => {
                     let cksum = crate::crypto::crc32c(&data);
-                    crate::console_println!("CRC32C {:08x}  {}", cksum, path.display());
+                    shell_println!("CRC32C {:08x}  {}", cksum, path.display());
                 }
                 "sha256" => match crate::fs::Vfs::content_hash(&path) {
                     Ok(hash) => {
@@ -108107,14 +107870,14 @@ fn cmd_checksum(args: &str) {
                         for byte in &hash {
                             hex.push_str(&alloc::format!("{:02x}", byte));
                         }
-                        crate::console_println!("SHA256 {}  {}", hex, path.display());
+                        shell_println!("SHA256 {}  {}", hex, path.display());
                     }
                     Err(e) => {
-                        crate::console_println!("checksum: sha256 '{}': {:?}", path.display(), e);
+                        shell_println!("checksum: sha256 '{}': {:?}", path.display(), e);
                     }
                 },
                 _ => {
-                    crate::console_println!(
+                    shell_println!(
                         "checksum: unknown algorithm '{}' (use crc32 or sha256)",
                         algo
                     );
@@ -108122,7 +107885,7 @@ fn cmd_checksum(args: &str) {
                 }
             },
             Err(e) => {
-                crate::console_println!("checksum: '{}': {:?}", path.display(), e);
+                shell_println!("checksum: '{}': {:?}", path.display(), e);
             }
         }
     }
@@ -108142,7 +107905,7 @@ fn cmd_checksum(args: &str) {
 fn cmd_gunzip(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: gunzip [-t|-l] FILE.gz [-o OUTPUT]   Decompress\n\
              \x20      gzip FILE [-o OUTPUT]              Compress\n\
              \x20      gzip -d FILE.gz [-o OUTPUT]        Decompress\n\
@@ -108175,7 +107938,7 @@ fn cmd_gunzip(args: &str) {
                     output_path = Some(out);
                     skip_next = true;
                 } else {
-                    crate::console_println!("gunzip: -o requires an argument");
+                    shell_println!("gunzip: -o requires an argument");
                     return;
                 }
             }
@@ -108190,7 +107953,7 @@ fn cmd_gunzip(args: &str) {
     let input = match input_path {
         Some(p) => resolve_path(p),
         None => {
-            crate::console_println!("gunzip: no input file specified");
+            shell_println!("gunzip: no input file specified");
             return;
         }
     };
@@ -108199,7 +107962,7 @@ fn cmd_gunzip(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("gzip: '{}': {:?}", input.display(), e);
+            shell_println!("gzip: '{}': {:?}", input.display(), e);
             return;
         }
     };
@@ -108222,7 +107985,7 @@ fn cmd_gunzip(args: &str) {
 
         match crate::fs::Vfs::write_file(&out, &compressed) {
             Ok(()) => {
-                crate::console_println!(
+                shell_println!(
                     "gzip: '{}' -> '{}' ({} -> {} bytes, {:.1}%)",
                     input.display(),
                     out.display(),
@@ -108236,7 +107999,7 @@ fn cmd_gunzip(args: &str) {
                 );
             }
             Err(e) => {
-                crate::console_println!("gzip: write '{}': {:?}", out.display(), e);
+                shell_println!("gzip: write '{}': {:?}", out.display(), e);
             }
         }
         return;
@@ -108245,7 +108008,7 @@ fn cmd_gunzip(args: &str) {
     // DECOMPRESS mode from here on.
     let compressed = file_data;
     if !is_gzip {
-        crate::console_println!("gunzip: '{}': not in gzip format", input.display());
+        shell_println!("gunzip: '{}': not in gzip format", input.display());
         return;
     }
 
@@ -108266,7 +108029,7 @@ fn cmd_gunzip(args: &str) {
             } else {
                 alloc::string::String::from("N/A")
             };
-            crate::console_println!(
+            shell_println!(
                 "  compressed: {} bytes  uncompressed: {} bytes  ratio: {}  {}",
                 compressed.len(),
                 uncompressed_size,
@@ -108281,7 +108044,7 @@ fn cmd_gunzip(args: &str) {
     let decompressed = match crate::fs::compress::gunzip(&compressed) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!(
+            shell_println!(
                 "gunzip: '{}': decompression failed: {:?}",
                 input.display(),
                 e
@@ -108291,7 +108054,7 @@ fn cmd_gunzip(args: &str) {
     };
 
     if test_only {
-        crate::console_println!(
+        shell_println!(
             "gunzip: '{}': OK ({} -> {} bytes)",
             input.display(),
             compressed.len(),
@@ -108309,7 +108072,7 @@ fn cmd_gunzip(args: &str) {
 
     match crate::fs::Vfs::write_file(&out, &decompressed) {
         Ok(()) => {
-            crate::console_println!(
+            shell_println!(
                 "gunzip: '{}' -> '{}' ({} -> {} bytes)",
                 input.display(),
                 out.display(),
@@ -108318,7 +108081,7 @@ fn cmd_gunzip(args: &str) {
             );
         }
         Err(e) => {
-            crate::console_println!("gunzip: write '{}': {:?}", out.display(), e);
+            shell_println!("gunzip: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -108330,7 +108093,7 @@ fn cmd_gunzip(args: &str) {
 fn cmd_bunzip2(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: bunzip2 [-t] FILE.bz2 [-o OUTPUT]   Decompress bzip2 file\n\
              \x20      bzcat FILE.bz2                    Decompress to stdout\n\
              \x20 -t   Test integrity only (no output written)\n\
@@ -108356,7 +108119,7 @@ fn cmd_bunzip2(args: &str) {
                     output_path = Some(out);
                     skip_next = true;
                 } else {
-                    crate::console_println!("bunzip2: -o requires an argument");
+                    shell_println!("bunzip2: -o requires an argument");
                     return;
                 }
             }
@@ -108371,7 +108134,7 @@ fn cmd_bunzip2(args: &str) {
     let input = match input_path {
         Some(p) => resolve_path(p),
         None => {
-            crate::console_println!("bunzip2: no input file specified");
+            shell_println!("bunzip2: no input file specified");
             return;
         }
     };
@@ -108380,7 +108143,7 @@ fn cmd_bunzip2(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("bunzip2: '{}': {:?}", input.display(), e);
+            shell_println!("bunzip2: '{}': {:?}", input.display(), e);
             return;
         }
     };
@@ -108391,7 +108154,7 @@ fn cmd_bunzip2(args: &str) {
         || file_data.get(1) != Some(&b'Z')
         || file_data.get(2) != Some(&b'h')
     {
-        crate::console_println!("bunzip2: '{}': not a bzip2 file", input.display());
+        shell_println!("bunzip2: '{}': not a bzip2 file", input.display());
         return;
     }
 
@@ -108399,7 +108162,7 @@ fn cmd_bunzip2(args: &str) {
     let decompressed = match crate::fs::bzip2::bunzip2(&file_data) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!(
+            shell_println!(
                 "bunzip2: '{}': decompression failed: {:?}",
                 input.display(),
                 e
@@ -108409,7 +108172,7 @@ fn cmd_bunzip2(args: &str) {
     };
 
     if test_only {
-        crate::console_println!(
+        shell_println!(
             "bunzip2: '{}': OK ({} -> {} bytes)",
             input.display(),
             file_data.len(),
@@ -108430,7 +108193,7 @@ fn cmd_bunzip2(args: &str) {
 
     match crate::fs::Vfs::write_file(&out, &decompressed) {
         Ok(()) => {
-            crate::console_println!(
+            shell_println!(
                 "bunzip2: '{}' -> '{}' ({} -> {} bytes)",
                 input.display(),
                 out.display(),
@@ -108439,7 +108202,7 @@ fn cmd_bunzip2(args: &str) {
             );
         }
         Err(e) => {
-            crate::console_println!("bunzip2: write '{}': {:?}", out.display(), e);
+            shell_println!("bunzip2: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -108451,7 +108214,7 @@ fn cmd_bunzip2(args: &str) {
 fn cmd_bzip2(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: bzip2 [-N] FILE [-o OUTPUT]   Compress file with bzip2\n\
              \x20 -1..-9  Block size (1=100K .. 9=900K, default 1)\n\
              \x20 -o F    Write output to F instead of FILE.bz2"
@@ -108484,7 +108247,7 @@ fn cmd_bzip2(args: &str) {
                     output_path = Some(out);
                     skip_next = true;
                 } else {
-                    crate::console_println!("bzip2: -o requires an argument");
+                    shell_println!("bzip2: -o requires an argument");
                     return;
                 }
             }
@@ -108499,7 +108262,7 @@ fn cmd_bzip2(args: &str) {
     let input = match input_path {
         Some(p) => resolve_path(p),
         None => {
-            crate::console_println!("bzip2: no input file specified");
+            shell_println!("bzip2: no input file specified");
             return;
         }
     };
@@ -108508,7 +108271,7 @@ fn cmd_bzip2(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("bzip2: '{}': {:?}", input.display(), e);
+            shell_println!("bzip2: '{}': {:?}", input.display(), e);
             return;
         }
     };
@@ -108530,7 +108293,7 @@ fn cmd_bzip2(args: &str) {
             } else {
                 compressed.len().wrapping_mul(100) / file_data.len()
             };
-            crate::console_println!(
+            shell_println!(
                 "bzip2: '{}' -> '{}' ({} -> {} bytes, {}%)",
                 input.display(),
                 out.display(),
@@ -108540,7 +108303,7 @@ fn cmd_bzip2(args: &str) {
             );
         }
         Err(e) => {
-            crate::console_println!("bzip2: write '{}': {:?}", out.display(), e);
+            shell_println!("bzip2: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -108552,7 +108315,7 @@ fn cmd_bzip2(args: &str) {
 fn cmd_xz(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: xz FILE [-o OUTPUT]   Compress file with XZ/LZMA2\n\
              \x20 -o F    Write output to F instead of FILE.xz"
         );
@@ -108574,7 +108337,7 @@ fn cmd_xz(args: &str) {
                     output_path = Some(out);
                     skip_next = true;
                 } else {
-                    crate::console_println!("xz: -o requires an argument");
+                    shell_println!("xz: -o requires an argument");
                     return;
                 }
             }
@@ -108589,7 +108352,7 @@ fn cmd_xz(args: &str) {
     let input = match input_path {
         Some(p) => resolve_path(p),
         None => {
-            crate::console_println!("xz: no input file specified");
+            shell_println!("xz: no input file specified");
             return;
         }
     };
@@ -108597,7 +108360,7 @@ fn cmd_xz(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("xz: '{}': {:?}", input.display(), e);
+            shell_println!("xz: '{}': {:?}", input.display(), e);
             return;
         }
     };
@@ -108605,7 +108368,7 @@ fn cmd_xz(args: &str) {
     let compressed = match crate::fs::xz::xz_compress(&file_data) {
         Ok(c) => c,
         Err(e) => {
-            crate::console_println!("xz: compression failed: {:?}", e);
+            shell_println!("xz: compression failed: {:?}", e);
             return;
         }
     };
@@ -108623,7 +108386,7 @@ fn cmd_xz(args: &str) {
             } else {
                 compressed.len().wrapping_mul(100) / file_data.len()
             };
-            crate::console_println!(
+            shell_println!(
                 "xz: '{}' -> '{}' ({} -> {} bytes, {}%)",
                 input.display(),
                 out.display(),
@@ -108633,7 +108396,7 @@ fn cmd_xz(args: &str) {
             );
         }
         Err(e) => {
-            crate::console_println!("xz: write '{}': {:?}", out.display(), e);
+            shell_println!("xz: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -108645,7 +108408,7 @@ fn cmd_xz(args: &str) {
 fn cmd_unxz(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: unxz [-t] FILE.xz [-o OUTPUT]   Decompress XZ/LZMA2 file\n\
              \x20      xzcat FILE.xz                   Decompress to stdout\n\
              \x20 -t   Test integrity only (no output written)\n\
@@ -108671,7 +108434,7 @@ fn cmd_unxz(args: &str) {
                     output_path = Some(out);
                     skip_next = true;
                 } else {
-                    crate::console_println!("unxz: -o requires an argument");
+                    shell_println!("unxz: -o requires an argument");
                     return;
                 }
             }
@@ -108686,7 +108449,7 @@ fn cmd_unxz(args: &str) {
     let input = match input_path {
         Some(p) => resolve_path(p),
         None => {
-            crate::console_println!("unxz: no input file specified");
+            shell_println!("unxz: no input file specified");
             return;
         }
     };
@@ -108695,14 +108458,14 @@ fn cmd_unxz(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("unxz: '{}': {:?}", input.display(), e);
+            shell_println!("unxz: '{}': {:?}", input.display(), e);
             return;
         }
     };
 
     // Verify XZ magic (FD 37 7A 58 5A 00).
     if file_data.len() < 12 || file_data.get(..6) != Some(&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]) {
-        crate::console_println!("unxz: '{}': not an XZ file", input.display());
+        shell_println!("unxz: '{}': not an XZ file", input.display());
         return;
     }
 
@@ -108710,13 +108473,13 @@ fn cmd_unxz(args: &str) {
     let decompressed = match crate::fs::xz::unxz(&file_data) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("unxz: '{}': decompression failed: {:?}", input.display(), e);
+            shell_println!("unxz: '{}': decompression failed: {:?}", input.display(), e);
             return;
         }
     };
 
     if test_only {
-        crate::console_println!(
+        shell_println!(
             "unxz: '{}': OK ({} -> {} bytes)",
             input.display(),
             file_data.len(),
@@ -108737,7 +108500,7 @@ fn cmd_unxz(args: &str) {
 
     match crate::fs::Vfs::write_file(&out, &decompressed) {
         Ok(()) => {
-            crate::console_println!(
+            shell_println!(
                 "unxz: '{}' -> '{}' ({} -> {} bytes)",
                 input.display(),
                 out.display(),
@@ -108746,7 +108509,7 @@ fn cmd_unxz(args: &str) {
             );
         }
         Err(e) => {
-            crate::console_println!("unxz: write '{}': {:?}", out.display(), e);
+            shell_println!("unxz: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -108759,7 +108522,7 @@ fn cmd_unxz(args: &str) {
 fn cmd_unzstd(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: unzstd [-t] FILE.zst [-o OUTPUT]   Decompress Zstandard file\n\
              \x20      zstdcat FILE.zst                    Decompress to stdout\n\
              \x20 -t   Test integrity only (no output written)\n\
@@ -108785,7 +108548,7 @@ fn cmd_unzstd(args: &str) {
                     output_path = Some(out);
                     skip_next = true;
                 } else {
-                    crate::console_println!("unzstd: -o requires an argument");
+                    shell_println!("unzstd: -o requires an argument");
                     return;
                 }
             }
@@ -108800,7 +108563,7 @@ fn cmd_unzstd(args: &str) {
     let input = match input_path {
         Some(p) => resolve_path(p),
         None => {
-            crate::console_println!("unzstd: no input file specified");
+            shell_println!("unzstd: no input file specified");
             return;
         }
     };
@@ -108809,14 +108572,14 @@ fn cmd_unzstd(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("unzstd: '{}': {:?}", input.display(), e);
+            shell_println!("unzstd: '{}': {:?}", input.display(), e);
             return;
         }
     };
 
     // Verify Zstandard magic (FD 2F B5 28).
     if file_data.len() < 8 {
-        crate::console_println!("unzstd: '{}': file too small", input.display());
+        shell_println!("unzstd: '{}': file too small", input.display());
         return;
     }
     let magic = u32::from(file_data[0])
@@ -108824,7 +108587,7 @@ fn cmd_unzstd(args: &str) {
         | (u32::from(file_data[2]) << 16)
         | (u32::from(file_data[3]) << 24);
     if magic != 0xFD2F_B528 {
-        crate::console_println!("unzstd: '{}': not a Zstandard file", input.display());
+        shell_println!("unzstd: '{}': not a Zstandard file", input.display());
         return;
     }
 
@@ -108832,7 +108595,7 @@ fn cmd_unzstd(args: &str) {
     let decompressed = match crate::fs::zstd::unzstd(&file_data) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!(
+            shell_println!(
                 "unzstd: '{}': decompression failed: {:?}",
                 input.display(),
                 e
@@ -108842,7 +108605,7 @@ fn cmd_unzstd(args: &str) {
     };
 
     if test_only {
-        crate::console_println!(
+        shell_println!(
             "unzstd: '{}': OK ({} -> {} bytes)",
             input.display(),
             file_data.len(),
@@ -108863,7 +108626,7 @@ fn cmd_unzstd(args: &str) {
 
     match crate::fs::Vfs::write_file(&out, &decompressed) {
         Ok(()) => {
-            crate::console_println!(
+            shell_println!(
                 "unzstd: '{}' -> '{}' ({} -> {} bytes)",
                 input.display(),
                 out.display(),
@@ -108872,7 +108635,7 @@ fn cmd_unzstd(args: &str) {
             );
         }
         Err(e) => {
-            crate::console_println!("unzstd: write '{}': {:?}", out.display(), e);
+            shell_println!("unzstd: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -108889,7 +108652,7 @@ fn cmd_unzstd(args: &str) {
 fn cmd_zstd(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: zstd [-s] FILE [-o OUTPUT]   Compress file with Zstandard\n\
              \x20 -s   Store mode (no LZ77, raw/RLE blocks only)\n\
              \x20 -o F Write output to F instead of FILE.zst"
@@ -108914,7 +108677,7 @@ fn cmd_zstd(args: &str) {
                     output_path = Some(out);
                     skip_next = true;
                 } else {
-                    crate::console_println!("zstd: -o requires an argument");
+                    shell_println!("zstd: -o requires an argument");
                     return;
                 }
             }
@@ -108929,7 +108692,7 @@ fn cmd_zstd(args: &str) {
     let input = match input_path {
         Some(p) => resolve_path(p),
         None => {
-            crate::console_println!("zstd: no input file specified");
+            shell_println!("zstd: no input file specified");
             return;
         }
     };
@@ -108938,7 +108701,7 @@ fn cmd_zstd(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("zstd: '{}': {:?}", input.display(), e);
+            shell_println!("zstd: '{}': {:?}", input.display(), e);
             return;
         }
     };
@@ -108964,7 +108727,7 @@ fn cmd_zstd(args: &str) {
             } else {
                 compressed.len() * 100 / file_data.len()
             };
-            crate::console_println!(
+            shell_println!(
                 "zstd: '{}' -> '{}' ({} -> {} bytes, {}%)",
                 input.display(),
                 out.display(),
@@ -108974,7 +108737,7 @@ fn cmd_zstd(args: &str) {
             );
         }
         Err(e) => {
-            crate::console_println!("zstd: write '{}': {:?}", out.display(), e);
+            shell_println!("zstd: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -108991,7 +108754,7 @@ fn cmd_zstd(args: &str) {
 fn cmd_unlz4(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: unlz4 [-t] FILE.lz4 [-o OUTPUT]   Decompress LZ4 file\n\
              \x20      lz4cat FILE.lz4                    Decompress to stdout\n\
              \x20 -t   Test integrity only (no output written)\n\
@@ -109017,7 +108780,7 @@ fn cmd_unlz4(args: &str) {
                     output_path = Some(out);
                     skip_next = true;
                 } else {
-                    crate::console_println!("unlz4: -o requires an argument");
+                    shell_println!("unlz4: -o requires an argument");
                     return;
                 }
             }
@@ -109032,7 +108795,7 @@ fn cmd_unlz4(args: &str) {
     let input = match input_path {
         Some(p) => resolve_path(p),
         None => {
-            crate::console_println!("unlz4: no input file specified");
+            shell_println!("unlz4: no input file specified");
             return;
         }
     };
@@ -109041,14 +108804,14 @@ fn cmd_unlz4(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("unlz4: '{}': {:?}", input.display(), e);
+            shell_println!("unlz4: '{}': {:?}", input.display(), e);
             return;
         }
     };
 
     // Verify LZ4 frame magic (04 22 4D 18).
     if file_data.len() < 7 {
-        crate::console_println!("unlz4: '{}': file too small", input.display());
+        shell_println!("unlz4: '{}': file too small", input.display());
         return;
     }
     let magic = u32::from(file_data[0])
@@ -109056,7 +108819,7 @@ fn cmd_unlz4(args: &str) {
         | (u32::from(file_data[2]) << 16)
         | (u32::from(file_data[3]) << 24);
     if magic != 0x04224D18 {
-        crate::console_println!(
+        shell_println!(
             "unlz4: '{}': not an LZ4 file (magic: {:#010X})",
             input.display(),
             magic
@@ -109068,7 +108831,7 @@ fn cmd_unlz4(args: &str) {
     let decompressed = match crate::fs::lz4::decompress(&file_data) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!(
+            shell_println!(
                 "unlz4: '{}': decompression failed: {:?}",
                 input.display(),
                 e
@@ -109078,7 +108841,7 @@ fn cmd_unlz4(args: &str) {
     };
 
     if test_only {
-        crate::console_println!(
+        shell_println!(
             "unlz4: '{}': OK ({} -> {} bytes)",
             input.display(),
             file_data.len(),
@@ -109096,7 +108859,7 @@ fn cmd_unlz4(args: &str) {
 
     match crate::fs::Vfs::write_file(&out, &decompressed) {
         Ok(()) => {
-            crate::console_println!(
+            shell_println!(
                 "unlz4: '{}' -> '{}' ({} -> {} bytes)",
                 input.display(),
                 out.display(),
@@ -109105,7 +108868,7 @@ fn cmd_unlz4(args: &str) {
             );
         }
         Err(e) => {
-            crate::console_println!("unlz4: write '{}': {:?}", out.display(), e);
+            shell_println!("unlz4: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -109121,7 +108884,7 @@ fn cmd_unlz4(args: &str) {
 fn cmd_lz4(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!(
+        shell_println!(
             "Usage: lz4 FILE [-o OUTPUT]   Compress file with LZ4\n\
              \x20 -o F Write output to F instead of FILE.lz4"
         );
@@ -109143,7 +108906,7 @@ fn cmd_lz4(args: &str) {
                     output_path = Some(out);
                     skip_next = true;
                 } else {
-                    crate::console_println!("lz4: -o requires an argument");
+                    shell_println!("lz4: -o requires an argument");
                     return;
                 }
             }
@@ -109158,7 +108921,7 @@ fn cmd_lz4(args: &str) {
     let input = match input_path {
         Some(p) => resolve_path(p),
         None => {
-            crate::console_println!("lz4: no input file specified");
+            shell_println!("lz4: no input file specified");
             return;
         }
     };
@@ -109167,7 +108930,7 @@ fn cmd_lz4(args: &str) {
     let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("lz4: '{}': {:?}", input.display(), e);
+            shell_println!("lz4: '{}': {:?}", input.display(), e);
             return;
         }
     };
@@ -109189,7 +108952,7 @@ fn cmd_lz4(args: &str) {
             } else {
                 compressed.len().wrapping_mul(100) / file_data.len()
             };
-            crate::console_println!(
+            shell_println!(
                 "lz4: '{}' -> '{}' ({} -> {} bytes, {}%)",
                 input.display(),
                 out.display(),
@@ -109199,7 +108962,7 @@ fn cmd_lz4(args: &str) {
             );
         }
         Err(e) => {
-            crate::console_println!("lz4: write '{}': {:?}", out.display(), e);
+            shell_println!("lz4: write '{}': {:?}", out.display(), e);
         }
     }
 }
@@ -109229,9 +108992,9 @@ fn cmd_lz4(args: &str) {
 fn cmd_sed(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!("Usage: sed [-i] [-n] [-e CMD] 's/old/new/[g]' [file]");
-        crate::console_println!("       sed [-i] [-n] '/pattern/d' [file]");
-        crate::console_println!("       sed [-i] [-n] 'Nd' [file]  (delete line N)");
+        shell_println!("Usage: sed [-i] [-n] [-e CMD] 's/old/new/[g]' [file]");
+        shell_println!("       sed [-i] [-n] '/pattern/d' [file]");
+        shell_println!("       sed [-i] [-n] 'Nd' [file]  (delete line N)");
         return;
     }
 
@@ -109266,7 +109029,7 @@ fn cmd_sed(args: &str) {
     }
 
     if commands.is_empty() {
-        crate::console_println!("sed: no command specified");
+        shell_println!("sed: no command specified");
         return;
     }
 
@@ -109277,13 +109040,13 @@ fn cmd_sed(args: &str) {
         .collect();
 
     if parsed.is_empty() {
-        crate::console_println!("sed: invalid command syntax");
+        shell_println!("sed: invalid command syntax");
         return;
     }
 
     // Process each file (or use empty content if no file given).
     if file_args.is_empty() {
-        crate::console_println!("sed: no input file specified");
+        shell_println!("sed: no input file specified");
         return;
     }
 
@@ -109292,7 +109055,7 @@ fn cmd_sed(args: &str) {
         let data = match crate::fs::Vfs::read_file(&path) {
             Ok(d) => d,
             Err(e) => {
-                crate::console_println!("sed: '{}': {:?}", path.display(), e);
+                shell_println!("sed: '{}': {:?}", path.display(), e);
                 continue;
             }
         };
@@ -109350,7 +109113,7 @@ fn cmd_sed(args: &str) {
             match crate::fs::Vfs::write_file(&path, output.as_bytes()) {
                 Ok(()) => {}
                 Err(e) => {
-                    crate::console_println!("sed: write '{}': {:?}", path.display(), e);
+                    shell_println!("sed: write '{}': {:?}", path.display(), e);
                 }
             }
         } else {
@@ -109358,7 +109121,7 @@ fn cmd_sed(args: &str) {
             if output.ends_with('\n') {
                 output.pop();
             }
-            crate::console_println!("{}", output);
+            shell_println!("{}", output);
         }
     }
 }
@@ -109616,10 +109379,10 @@ fn sed_replace_all(text: &str, pattern: &str, replacement: &str) -> alloc::strin
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 fn cmd_awk(args: &str) {
     if args.trim().is_empty() {
-        crate::console_println!("Usage: awk [-F sep] 'program' [file ...]");
-        crate::console_println!("  Fields: $0 (line), $1..$N, $NF (last)");
-        crate::console_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
-        crate::console_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
+        shell_println!("Usage: awk [-F sep] 'program' [file ...]");
+        shell_println!("  Fields: $0 (line), $1..$N, $NF (last)");
+        shell_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
+        shell_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
         return;
     }
 
@@ -109627,7 +109390,7 @@ fn cmd_awk(args: &str) {
     let (fs_char, program, files) = parse_awk_args(args);
 
     if program.is_empty() {
-        crate::console_println!("awk: no program specified");
+        shell_println!("awk: no program specified");
         return;
     }
 
@@ -109635,7 +109398,7 @@ fn cmd_awk(args: &str) {
 
     // Process files.
     if files.is_empty() {
-        crate::console_println!("awk: no input file specified");
+        shell_println!("awk: no input file specified");
         return;
     }
 
@@ -109653,7 +109416,7 @@ fn cmd_awk(args: &str) {
         let data = match crate::fs::Vfs::read_file(&path) {
             Ok(d) => d,
             Err(e) => {
-                crate::console_println!("awk: '{}': {:?}", path.display(), e);
+                shell_println!("awk: '{}': {:?}", path.display(), e);
                 continue;
             }
         };
@@ -110006,11 +109769,11 @@ fn awk_exec_action(action: &str, line: &str, fields: &[&str], nr: usize, nf: usi
         }
 
         if stmt == "print" || stmt == "print $0" {
-            crate::console_println!("{}", line);
+            shell_println!("{}", line);
         } else if stmt.starts_with("print ") || stmt.starts_with("print\t") {
             let expr = stmt[6..].trim();
             let output = awk_format_print(expr, line, fields, nr, nf);
-            crate::console_println!("{}", output);
+            shell_println!("{}", output);
         } else {
             // Unknown statement — ignore.
         }
@@ -111080,5 +110843,5 @@ fn do_session_switch(target_id: u32) {
     }
 
     let name = termsession::session_name(target_id).unwrap_or_default();
-    crate::console_println!("[Switched to session {} (\"{}\")] ", target_id, name);
+    shell_println!("[Switched to session {} (\"{}\")] ", target_id, name);
 }

@@ -8491,11 +8491,33 @@ fn cmd_history(args: &str) {
             }
         }
         "clear" => {
-            let mut shadow = SHELL_HISTORY.lock();
-            shadow.clear();
-            // Also remove the history file.
-            let _ = crate::fs::vfs::Vfs::remove(HISTORY_FILE);
-            shell_println!("History cleared.");
+            // The guard is scoped to the in-memory clear and dropped before the
+            // VFS call. Holding a module-global across `Vfs::remove` inverts the
+            // kernel's filesystem-lock -> module-state order, which is an AB/BA
+            // against anything that takes SHELL_HISTORY from inside the
+            // filesystem -- and it wedges two CPUs with no serial output rather
+            // than panicking, so it would be found by a hang, not a message.
+            {
+                let mut shadow = SHELL_HISTORY.lock();
+                shadow.clear();
+            }
+            // A missing file is the normal case for a session that never wrote
+            // history, so only a real failure is worth reporting -- but it must
+            // be reported, because "History cleared." would otherwise be a lie
+            // that the next boot exposes by restoring every entry.
+            match crate::fs::vfs::Vfs::remove(HISTORY_FILE) {
+                Ok(()) | Err(crate::error::KernelError::NotFound) => {
+                    shell_println!("History cleared.");
+                }
+                Err(e) => {
+                    crate::console_println!(
+                        "history: cleared in memory, but could not remove {}: {}",
+                        HISTORY_FILE,
+                        e
+                    );
+                    set_exit(1);
+                }
+            }
         }
         "search" => {
             let pattern = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();

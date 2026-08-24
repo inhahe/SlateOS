@@ -10,5 +10,9 @@ textfind = { path = "../../textfind" }
 # itself supplies. `byteread` is those reads stating their own bound.
 byteread = { path = "../../byteread" }
 
+# Test fixtures only: a private temp directory per test, removed on drop.
+[dev-dependencies]
+scratchdir = { path = "../../userspace/scratchdir" }
+
 [lints]
 workspace = true

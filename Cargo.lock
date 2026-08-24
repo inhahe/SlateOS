@@ -3663,6 +3663,7 @@ version = "0.1.0"
 dependencies = [
  "byteread",
  "guitk",
+ "scratchdir",
  "textfind",
 ]
 
@@ -11053,6 +11054,7 @@ version = "0.1.0"
 dependencies = [
  "guitk",
  "safeio",
+ "scratchdir",
 ]
 
 [[package]]

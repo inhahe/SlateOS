@@ -1088,17 +1088,24 @@ mod tests {
     )]
 
     use super::*;
-    use std::time::{Duration, UNIX_EPOCH};
+    use scratchdir::ScratchDir;
+    use std::time::Duration;
 
-    /// A unique scratch directory for one test.
-    fn temp_dir(label: &str) -> PathBuf {
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("explorer_test_{label}_{ts}"));
-        fs::create_dir_all(&dir).expect("create scratch dir");
-        dir
+    /// A private scratch directory for one test, removed when the returned
+    /// guard drops.
+    ///
+    /// The name used to carry the system clock in nanoseconds, which is not
+    /// unique: `cargo test` runs a binary's tests as threads of one process,
+    /// and the clock a thread reads is only refreshed on a timer interrupt, so
+    /// every test that starts within the same tick draws the same tag and they
+    /// share — and corrupt — one directory. `ScratchDir` names itself from the
+    /// process id and a per-process atomic counter, which is unique by
+    /// construction.
+    ///
+    /// Bind the guard to a named local, never to `_`: `_` drops it immediately
+    /// and the directory is gone before the test's first line.
+    fn temp_dir(label: &str) -> ScratchDir {
+        ScratchDir::new(&format!("explorer_test_{label}"))
     }
 
     fn write(path: &Path, content: &str) {
@@ -1125,7 +1132,8 @@ mod tests {
 
     #[test]
     fn pasting_over_an_existing_file_does_not_destroy_it() {
-        let root = temp_dir("paste_conflict");
+        let root_scratch = temp_dir("paste_conflict");
+        let root = root_scratch.dir().to_path_buf();
         let src_dir = root.join("src");
         let dst_dir = root.join("dst");
         fs::create_dir_all(&src_dir).expect("src");
@@ -1153,13 +1161,12 @@ mod tests {
             1,
             "the pasted copy should land beside the original, got {renamed:?}"
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_paste_that_could_not_copy_anything_says_so() {
-        let root = temp_dir("paste_missing");
+        let root_scratch = temp_dir("paste_missing");
+        let root = root_scratch.dir().to_path_buf();
         let dst_dir = root.join("dst");
         fs::create_dir_all(&dst_dir).expect("dst");
 
@@ -1177,13 +1184,12 @@ mod tests {
             state.clipboard.is_some(),
             "a paste that changed nothing should leave the clipboard usable"
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_cut_clears_the_clipboard_but_a_copy_does_not() {
-        let root = temp_dir("paste_clipboard");
+        let root_scratch = temp_dir("paste_clipboard");
+        let root = root_scratch.dir().to_path_buf();
         let src_dir = root.join("src");
         let dst_dir = root.join("dst");
         fs::create_dir_all(&src_dir).expect("src");
@@ -1210,8 +1216,6 @@ mod tests {
             "a cut should have moved the source away"
         );
         assert!(dst_dir.join("b.txt").exists(), "and into the destination");
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     // ------------------------------------------------------------------
@@ -1220,7 +1224,8 @@ mod tests {
 
     #[test]
     fn a_recycled_file_can_be_restored() {
-        let root = temp_dir("delete_restore");
+        let root_scratch = temp_dir("delete_restore");
+        let root = root_scratch.dir().to_path_buf();
         write(&root.join("notes.txt"), "keep me");
 
         let mut state = state_at(&root);
@@ -1240,13 +1245,12 @@ mod tests {
             fs::read_to_string(root.join("notes.txt")).expect("restored"),
             "keep me"
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn two_recycled_files_of_the_same_name_do_not_collide() {
-        let root = temp_dir("delete_collision");
+        let root_scratch = temp_dir("delete_collision");
+        let root = root_scratch.dir().to_path_buf();
         let a = root.join("a");
         let b = root.join("b");
         fs::create_dir_all(&a).expect("a");
@@ -1268,13 +1272,12 @@ mod tests {
             2,
             "deleting a second file of the same name must not destroy the first"
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_delete_that_failed_does_not_report_success() {
-        let root = temp_dir("delete_failure");
+        let root_scratch = temp_dir("delete_failure");
+        let root = root_scratch.dir().to_path_buf();
         write(&root.join("gone.txt"), "x");
 
         let mut state = state_at(&root);
@@ -1289,17 +1292,15 @@ mod tests {
             "a delete that moved nothing must say so, got: {}",
             state.status_message
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn deleting_with_nothing_selected_reports_nothing_selected() {
-        let root = temp_dir("delete_empty");
+        let root_scratch = temp_dir("delete_empty");
+        let root = root_scratch.dir().to_path_buf();
         let mut state = state_at(&root);
         state.delete_selected(false);
         assert_eq!(state.status_message, "Nothing selected");
-        let _ = fs::remove_dir_all(&root);
     }
 
     // ------------------------------------------------------------------
@@ -1308,7 +1309,8 @@ mod tests {
 
     #[test]
     fn an_operation_result_survives_the_directory_reload_that_follows_it() {
-        let root = temp_dir("status_survives");
+        let root_scratch = temp_dir("status_survives");
+        let root = root_scratch.dir().to_path_buf();
         write(&root.join("gone.txt"), "x");
 
         let mut state = state_at(&root);
@@ -1326,13 +1328,12 @@ mod tests {
             state.dir_summary.contains("folder(s)"),
             "and the summary should have been recomputed alongside it"
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn navigating_away_drops_the_previous_directorys_message() {
-        let root = temp_dir("status_navigate");
+        let root_scratch = temp_dir("status_navigate");
+        let root = root_scratch.dir().to_path_buf();
         let sub = root.join("sub");
         fs::create_dir_all(&sub).expect("sub");
         write(&root.join("gone.txt"), "x");
@@ -1348,13 +1349,12 @@ mod tests {
             state.dir_summary,
             "a message about another directory should not follow the user around"
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn an_unreadable_directory_reports_the_error_rather_than_an_empty_listing() {
-        let root = temp_dir("status_unreadable");
+        let root_scratch = temp_dir("status_unreadable");
+        let root = root_scratch.dir().to_path_buf();
         let mut state = state_at(&root);
         // A path that is not a directory at all: `read_dir` fails.
         write(&root.join("plain.txt"), "x");
@@ -1367,8 +1367,6 @@ mod tests {
             "a listing that failed must say so rather than claim zero files, got: {}",
             state.status_bar_text()
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     // ------------------------------------------------------------------
@@ -1377,7 +1375,8 @@ mod tests {
 
     #[test]
     fn the_copied_count_matches_what_was_actually_copied() {
-        let root = temp_dir("copy_count");
+        let root_scratch = temp_dir("copy_count");
+        let root = root_scratch.dir().to_path_buf();
         write(&root.join("a.txt"), "a");
         write(&root.join("b.txt"), "b");
 
@@ -1390,8 +1389,6 @@ mod tests {
         state.selected_indices = vec![0];
         state.copy_selected();
         assert_eq!(state.status_message, "2 item(s) copied to clipboard");
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     // ------------------------------------------------------------------
@@ -1415,7 +1412,8 @@ mod tests {
     /// to match: never silently destroy, make the user delete first.
     #[test]
     fn a_rename_onto_an_existing_file_does_not_destroy_it() {
-        let root = temp_dir("rename_clobber");
+        let root_scratch = temp_dir("rename_clobber");
+        let root = root_scratch.dir().to_path_buf();
         write(&root.join("notes.txt"), "the notes I care about");
         write(&root.join("draft.txt"), "a throwaway draft");
 
@@ -1428,14 +1426,15 @@ mod tests {
             "the notes I care about",
             "the existing file must survive"
         );
-        assert!(root.join("draft.txt").exists(), "the rename must not happen");
+        assert!(
+            root.join("draft.txt").exists(),
+            "the rename must not happen"
+        );
         assert!(
             state.status_message.contains("already exists"),
             "the user must be told why: {}",
             state.status_message
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// `with_file_name` does not constrain the result to the same directory,
@@ -1443,7 +1442,8 @@ mod tests {
     /// user was looking at — and onto whatever was already there.
     #[test]
     fn a_rename_cannot_escape_the_current_directory() {
-        let root = temp_dir("rename_escape");
+        let root_scratch = temp_dir("rename_escape");
+        let root = root_scratch.dir().to_path_buf();
         let inner = root.join("inner");
         fs::create_dir_all(&inner).unwrap();
         write(&inner.join("file.txt"), "inner file");
@@ -1459,14 +1459,13 @@ mod tests {
             "a file outside the directory must not be touched"
         );
         assert!(inner.join("file.txt").exists(), "the file must stay put");
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// The same escape through the folder-creation path.
     #[test]
     fn a_new_folder_cannot_escape_the_current_directory() {
-        let root = temp_dir("mkdir_escape");
+        let root_scratch = temp_dir("mkdir_escape");
+        let root = root_scratch.dir().to_path_buf();
         let inner = root.join("inner");
         fs::create_dir_all(&inner).unwrap();
 
@@ -1477,15 +1476,14 @@ mod tests {
             !root.join("escaped").exists(),
             "a folder must not be created outside the directory being viewed"
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// An empty name, `.` and `..` are not names. Left unchecked they turn a
     /// rename into an operation on the directory itself.
     #[test]
     fn a_rename_rejects_names_that_are_not_names() {
-        let root = temp_dir("rename_badnames");
+        let root_scratch = temp_dir("rename_badnames");
+        let root = root_scratch.dir().to_path_buf();
         write(&root.join("file.txt"), "data");
 
         for bad in ["", ".", "..", "a/b"] {
@@ -1502,8 +1500,6 @@ mod tests {
                 state.status_message
             );
         }
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// Renaming to the name it already has is a no-op the user may well
@@ -1511,7 +1507,8 @@ mod tests {
     /// a collision with itself, and must not delete anything.
     #[test]
     fn a_rename_to_the_same_name_is_harmless() {
-        let root = temp_dir("rename_noop");
+        let root_scratch = temp_dir("rename_noop");
+        let root = root_scratch.dir().to_path_buf();
         write(&root.join("file.txt"), "data");
 
         let mut state = state_at(&root);
@@ -1524,14 +1521,13 @@ mod tests {
             "a no-op rename is not an error: {}",
             state.status_message
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// A genuine rename still has to work.
     #[test]
     fn an_ordinary_rename_still_renames() {
-        let root = temp_dir("rename_ok");
+        let root_scratch = temp_dir("rename_ok");
+        let root = root_scratch.dir().to_path_buf();
         write(&root.join("before.txt"), "data");
 
         let mut state = state_at(&root);
@@ -1540,7 +1536,5 @@ mod tests {
 
         assert!(!root.join("before.txt").exists());
         assert_eq!(fs::read_to_string(root.join("after.txt")).unwrap(), "data");
-
-        let _ = fs::remove_dir_all(&root);
     }
 }

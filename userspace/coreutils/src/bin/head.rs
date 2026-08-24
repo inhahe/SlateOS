@@ -531,11 +531,11 @@ fn parse_count(text: &[u8], unit: Unit) -> Result<u64, getopt::Error> {
 fn write_stopped(out: &mut Stream, ok: bool) -> Option<ExitCode> {
     let complaint = match out.error() {
         None => return None,
-        Some(e) if stdfd::reader_gone(e) => None,
+        Some(e) if stdfd::reader_gone(&e) => None,
         Some(e) => Some(format!(
             "head: error writing {}: {}",
             quoteaf(b"standard output"),
-            strerror(e)
+            strerror(&e)
         )),
     };
     out.abandon();

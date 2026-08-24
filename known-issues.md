@@ -72628,7 +72628,7 @@ cases, because the same utility diverges or not depending on the invocation.
 
 ---
 
-## `B-COREUTILS-DIAG-DOES-NOT-FLUSH-STDOUT-FIRST` — a diagnostic can appear above output that was written before it
+## `B-COREUTILS-DIAG-DOES-NOT-FLUSH-STDOUT-FIRST` — a diagnostic can appear above output that was written before it — ✅ FIXED 2026-08-24 (lane B)
 
 *(lane B, 2026-08-24)*
 
@@ -72672,3 +72672,102 @@ $ /usr/bin/nl f nosuch > log 2>&1   # GNU: the complaint is last
 Verified against our own build, not from recall. Affects every utility that can
 write output and a diagnostic in the same run — `nl`, `cat`, `head`, `wc`,
 `md5sum`, `sort`, and so on.
+
+### How it was fixed
+
+Structurally, as prescribed above: `Inner` — buffer, buffering mode and sticky
+error — was split out of `Stream`, and descriptor 1's copy became the
+process-global `static STDOUT: Mutex<Inner>`. `Stream::stdout()` is now a
+*handle* onto it (`own: None`) rather than an owner; every other descriptor
+still owns its own `Inner`. `Stream::error()` returns `Option<io::Error>`, an
+owned snapshot, since a borrow could not outlive the lock guard.
+
+**Two things the diagnosis above did not anticipate:**
+
+1. **`diag!` was not the only way to reach descriptor 2.** `tsort` reports its
+   loop through a `Stream::stderr()` handed around as `&mut dyn Write`, not
+   through `diag!` — so a flush installed only in `diag_to` left
+   `tsort cycle >log 2>&1` still printing the loop report above the vertices it
+   had already ordered. `nohup`, `env` and `nice` build their messages the same
+   way. The rule was therefore attached to the **descriptor** rather than to the
+   call: `Inner::put` and `Inner::drain` both begin with `before_diagnostic(fd)`,
+   which flushes descriptor 1 whenever `fd == 2`. This is wider than glibc, which
+   flushes only inside `error()` — see `design-decisions.md` §378.
+
+2. **`cat` passed the whole time, and that was misleading.** It flushes
+   explicitly after each operand for reasons predating this bug, so it was the
+   one utility that looked correct while the shared machinery was still broken.
+   A harness that had only covered `cat` would have reported green.
+
+### Where it is enforced
+
+`scripts/interleave-diff.sh` — a new cross-utility harness, and deliberately
+cross-utility: the per-utility harnesses capture standard output and standard
+error into *separate* files, which is the one arrangement in which an ordering
+bug cannot be seen. It runs each case twice per side, `>out 2>err` to establish
+that the content agrees at all (if it does not, the case is `n/a` — content is
+the per-utility harnesses' business) and then `>log 2>&1`, compared byte for
+byte. 21 cases over 13 utilities; no accepted divergences.
+
+It was checked for discrimination, not just for green: with the flush disabled
+it reports **5 passed / 16 differed**, with it restored **21 / 0**.
+
+As bins convert onto `Stream` they must be added to its `DIFF_BINS`. Everything
+still on `std::io::Stdout` is line-buffered unconditionally — even to a file,
+where stdio would block-buffer — so it interleaves correctly by accident and has
+no ordering to regress.
+
+---
+
+## `B-DIFF-FRESHNESS-CHECK-CERTIFIED-A-CACHED-LIBRARY` — the harnesses' anti-stale-build guard passed a build three commits old — ✅ FIXED 2026-08-24 (lane B)
+
+*(lane B, 2026-08-24)*
+
+**In short:** every diff harness begins by checking that the binaries it is
+about to compare were actually built from the source now in the tree — the
+check exists because comparing against a stale build produces a *false green*,
+the worst outcome a test can have. On 2026-08-24 the check passed against a
+build whose library half was three commits out of date, and a harness reported
+sixteen failures for a bug that had already been fixed. The check was looking
+at the wrong file.
+
+### Why it passed
+
+The check asked "is any `.rs` file newer than the binaries?" Cargo had relinked
+every binary — so every binary's mtime was newer than every source file, and the
+check was satisfied — while replaying the `coreutils` **library** unit from
+cache. The binaries were new; the code inside them was not.
+
+### How it was noticed
+
+Not by the check, and not by the harness. `interleave-diff.sh` reported 16
+differences against a fix that was demonstrably present in the tree, and the
+one utility that passed was `cat` — which flushes explicitly and would pass
+either way. The decisive evidence was in the build log: a replayed
+`warning: coreutils (lib) generated 1 warning` for a `dead_code` function that
+had been unused **only in the previous edit of the file**. A cached lib unit
+announcing itself. `cargo clean -p coreutils` was the entire cure, and the same
+harness then passed 21 for 21.
+
+A separate controlled experiment confirmed cargo *does* rebuild after
+`touch userspace/coreutils/src/stdfd.rs`, so this is not simply "cargo is
+broken" — the cache had been damaged earlier, exactly as in the
+`cannot find function close_stdout` incident recorded further up this file.
+
+### The fix
+
+`diff_first_stale` in `scripts/diff-wsl.sh` now checks the package's library
+artifact — the newest `deps/lib<pkg>-*.rlib` — **before** the binaries, and
+`diff_lib_artifact` was added to find it. A stale lib is reported and cured by
+the existing `cargo clean -p` + rebuild + recheck path. Verified afterwards
+that neither harness false-positives: two consecutive runs of
+`interleave-diff.sh` and one of `write-error-diff.sh` cleaned nothing.
+
+### The general lesson, which outlives this bug
+
+**A freshness check must look at the artifact that holds the code, not at the
+artifact that gets rewritten.** Link steps are cheap and run often; they touch
+the file a naive mtime check watches while leaving the compiled code beneath it
+untouched. Any future check of this shape — for another package, another
+language, another build system — should be pointed at the compilation unit, not
+at the final product.

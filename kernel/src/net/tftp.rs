@@ -783,6 +783,42 @@ static SERVER_STATE: Mutex<TftpServerState> = Mutex::new(TftpServerState::new())
 static SERVER_ENABLED: AtomicBool = AtomicBool::new(false);
 static LAST_SERVER_TICK: AtomicU64 = AtomicU64::new(0);
 
+/// Serialises `server_tick` against itself.
+///
+/// The tick used to hold `SERVER_STATE` from top to bottom, which gave that
+/// mutual exclusion for free — but it also meant the lock was held across
+/// `Vfs::read_file` and `Vfs::write_file`. The kernel's live lock order is
+/// *filesystem lock -> module state* (the VFS takes a filesystem's lock and,
+/// for generated filesystems like procfs, calls back into arbitrary
+/// subsystems underneath it), so holding module state across a VFS call runs
+/// that order backwards and can wedge two CPUs against each other. See
+/// `scripts/check-vfs-under-lock.py`, which enforces this.
+///
+/// The exclusion the tick actually needs is kept here instead, so
+/// `SERVER_STATE` can be taken in short bursts around the I/O rather than
+/// spanning it. Note the rate limiter above is *not* a substitute: its
+/// load/compare/store is not atomic, so two CPUs can both pass it.
+static SERVER_TICKING: AtomicBool = AtomicBool::new(false);
+
+/// Releases the `SERVER_TICKING` claim on every exit path, including panics.
+struct TickGuard;
+
+impl Drop for TickGuard {
+    fn drop(&mut self) {
+        SERVER_TICKING.store(false, Ordering::Release);
+    }
+}
+
+/// A write transfer that reached EOF and whose payload still has to be
+/// committed to disk — collected under the state lock, written after it is
+/// dropped.
+struct CompletedWrite {
+    path: String,
+    data: Vec<u8>,
+    client_ip: Ipv4Addr,
+    client_port: u16,
+}
+
 // Client statistics.
 static CLIENT_GETS: AtomicU64 = AtomicU64::new(0);
 static CLIENT_PUTS: AtomicU64 = AtomicU64::new(0);
@@ -850,18 +886,27 @@ fn server_tick() {
     }
     LAST_SERVER_TICK.store(now, Ordering::Relaxed);
 
-    let mut state = SERVER_STATE.lock();
+    // Claim the tick. Only one CPU runs the body at a time; see SERVER_TICKING.
+    if SERVER_TICKING
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let _ticking = TickGuard;
 
-    // Process incoming requests on port 69.
-    if let Some(listener) = state.listener_handle {
+    // Process incoming requests on port 69. The handlers lock `SERVER_STATE`
+    // themselves in short bursts, so nothing is held across their VFS calls.
+    let listener = SERVER_STATE.lock().listener_handle;
+    if let Some(listener) = listener {
         while let Some(dgram) = super::udp::recv(listener) {
             let opcode = parse_opcode(&dgram.data);
             match opcode {
                 Some(OP_RRQ) => {
-                    handle_rrq(&mut state, dgram.src_ip, dgram.src_port, &dgram.data);
+                    handle_rrq(dgram.src_ip, dgram.src_port, &dgram.data);
                 }
                 Some(OP_WRQ) => {
-                    handle_wrq(&mut state, dgram.src_ip, dgram.src_port, &dgram.data);
+                    handle_wrq(dgram.src_ip, dgram.src_port, &dgram.data);
                 }
                 _ => {
                     // Unexpected packet on port 69 — send error.
@@ -872,7 +917,11 @@ fn server_tick() {
         }
     }
 
-    // Process ongoing transfers.
+    // Process ongoing transfers. Payloads of write transfers that hit EOF are
+    // collected here and committed below, once the state lock is released.
+    let mut pending_writes: Vec<CompletedWrite> = Vec::new();
+    let mut state = SERVER_STATE.lock();
+
     for xfer in &mut state.transfers {
         if !xfer.active {
             continue;
@@ -968,20 +1017,22 @@ fn server_tick() {
                             xfer.last_sent_ns = crate::hrtimer::now_ns();
                             xfer.retries = 0;
 
-                            // Short block = EOF.
+                            // Short block = EOF. The payload cannot be written
+                            // here: `Vfs::write_file` must not run under the
+                            // state lock (see SERVER_TICKING). Hand it to the
+                            // commit pass below instead. The slot is freed now
+                            // either way — the client has already been ACKed,
+                            // so the transfer is over as far as it is
+                            // concerned, exactly as before.
                             if payload.len() < BLOCK_SIZE {
-                                // Write received data to filesystem.
-                                let _ = write_received_file(&xfer.filename, &xfer.recv_data);
+                                pending_writes.push(CompletedWrite {
+                                    path: xfer.filename.clone(),
+                                    data: core::mem::take(&mut xfer.recv_data),
+                                    client_ip: xfer.client_ip,
+                                    client_port: xfer.client_port,
+                                });
                                 super::udp::close(xfer.socket_handle);
                                 xfer.active = false;
-                                SERVER_COMPLETED.fetch_add(1, Ordering::Relaxed);
-                                crate::serial_println!(
-                                    "[tftp] Write transfer complete: {} ({} bytes) from {}:{}",
-                                    xfer.filename,
-                                    xfer.recv_data.len(),
-                                    xfer.client_ip,
-                                    xfer.client_port,
-                                );
                             }
                         }
                     }
@@ -1022,10 +1073,46 @@ fn server_tick() {
             }
         }
     }
+
+    drop(state);
+
+    // Commit finished uploads with no kernel lock held but our own tick claim.
+    for w in pending_writes {
+        let len = w.data.len();
+        match write_received_file(&w.path, &w.data) {
+            Ok(()) => {
+                SERVER_COMPLETED.fetch_add(1, Ordering::Relaxed);
+                crate::serial_println!(
+                    "[tftp] Write transfer complete: {} ({} bytes) from {}:{}",
+                    w.path,
+                    len,
+                    w.client_ip,
+                    w.client_port,
+                );
+            }
+            Err(e) => {
+                // Previously this error was discarded and the transfer still
+                // counted as completed, so a full disk looked like a success.
+                SERVER_ERRORS.fetch_add(1, Ordering::Relaxed);
+                crate::serial_println!(
+                    "[tftp] Write transfer failed to store: {} ({} bytes) from {}:{}: {:?}",
+                    w.path,
+                    len,
+                    w.client_ip,
+                    w.client_port,
+                    e,
+                );
+            }
+        }
+    }
 }
 
 /// Handle a RRQ (read request) from a client.
-fn handle_rrq(state: &mut TftpServerState, client_ip: Ipv4Addr, client_port: u16, data: &[u8]) {
+///
+/// Takes `SERVER_STATE` twice — once to read the server root, once to claim a
+/// transfer slot — rather than holding it across the `Vfs::read_file` in
+/// between, which would invert the kernel's lock order (see `SERVER_TICKING`).
+fn handle_rrq(client_ip: Ipv4Addr, client_port: u16, data: &[u8]) {
     SERVER_REQUESTS.fetch_add(1, Ordering::Relaxed);
 
     let (filename, mode) = match parse_request(data) {
@@ -1053,8 +1140,8 @@ fn handle_rrq(state: &mut TftpServerState, client_ip: Ipv4Addr, client_port: u16
         return;
     }
 
-    // Read the file from VFS.
-    let full_path = format!("{}/{}", state.root_path, filename);
+    // Read the file from VFS, with no state lock held.
+    let full_path = format!("{}/{}", SERVER_STATE.lock().root_path, filename);
     let file_data = match crate::fs::vfs::Vfs::read_file(&full_path) {
         Ok(d) => d,
         Err(_) => {
@@ -1064,6 +1151,8 @@ fn handle_rrq(state: &mut TftpServerState, client_ip: Ipv4Addr, client_port: u16
             return;
         }
     };
+
+    let mut state = SERVER_STATE.lock();
 
     // Find a free transfer slot.
     let slot = state.transfers.iter().position(|t| !t.active);
@@ -1119,7 +1208,11 @@ fn handle_rrq(state: &mut TftpServerState, client_ip: Ipv4Addr, client_port: u16
 }
 
 /// Handle a WRQ (write request) from a client.
-fn handle_wrq(state: &mut TftpServerState, client_ip: Ipv4Addr, client_port: u16, data: &[u8]) {
+///
+/// Takes `SERVER_STATE` twice — once to read the server root, once to claim a
+/// transfer slot — rather than holding it across the existence probe in
+/// between, which would invert the kernel's lock order (see `SERVER_TICKING`).
+fn handle_wrq(client_ip: Ipv4Addr, client_port: u16, data: &[u8]) {
     SERVER_REQUESTS.fetch_add(1, Ordering::Relaxed);
 
     let (filename, mode) = match parse_request(data) {
@@ -1145,14 +1238,19 @@ fn handle_wrq(state: &mut TftpServerState, client_ip: Ipv4Addr, client_port: u16
         return;
     }
 
-    // Check if file already exists.
-    let full_path = format!("{}/{}", state.root_path, filename);
-    if crate::fs::vfs::Vfs::read_file(&full_path).is_ok() {
+    // Check if the file already exists, with no state lock held. `exists` is
+    // used rather than a full `read_file`: the old probe pulled the entire
+    // file into the heap only to drop it, which a client could use to make the
+    // server allocate a file's worth of memory per rejected request.
+    let full_path = format!("{}/{}", SERVER_STATE.lock().root_path, filename);
+    if crate::fs::vfs::Vfs::exists(&full_path) {
         let err = build_error(ERR_FILE_EXISTS, "File already exists");
         let _ = super::udp::send(TFTP_PORT, client_ip, client_port, &err);
         SERVER_ERRORS.fetch_add(1, Ordering::Relaxed);
         return;
     }
+
+    let mut state = SERVER_STATE.lock();
 
     // Find a free slot.
     let slot = state.transfers.iter().position(|t| !t.active);

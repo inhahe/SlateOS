@@ -73165,9 +73165,37 @@ caret/selection/scrolling implementation into the change that moved five
 fields' arrows would have made a reviewable diff unreviewable. Nothing depends
 on it: `pathbar` is the toolkit field the shell actually uses for typing.
 
-## TD-C-THE-LOCK-SCREEN-THROWS-AWAY-THE-ANSWER-TO-THE-ONLY-QUESTION-IT-ASKS
+## TD-C-THE-LOCK-SCREEN-THROWS-AWAY-THE-ANSWER-TO-THE-ONLY-QUESTION-IT-ASKS — RESOLVED 2026-08-24
 
 **Lane C, found 2026-08-24 while planning the `authlib` rework.**
+
+**RESOLVED 2026-08-24.** Fixed exactly as the plan at the bottom of this
+entry describes, and the plan is left in place because it is the record of
+what was done. `submit_password` returns `AuthOutcome`; `unlock_requested`
+is a real field collected by `take_unlock_request()`; `PasswordAuthority`
+is the trait the verdict arrives through and `PasswordValidator` is now
+one interim implementor of it rather than the only way to get an answer.
+Eight tests drive `handle_event` and the mouse path instead of calling
+`submit_password` directly, including one that presses Enter with the
+right password and asserts an unlock was authorised — which is the
+assertion whose absence let this ship.
+
+Two things deliberately *not* done here, both recorded rather than
+silently decided:
+
+- **The `NoPassword` policy is unchanged**, so a passwordless account's
+  screen still opens on Enter as it always has. Refusing is the secure
+  answer and also locks the real user out forever; it is now one function
+  (`LockScreen::unlocks_for`) and one question in `open-questions.md`.
+  Changing who can unlock a machine is not something to slip into a
+  commit about interface shape.
+- **`PasswordValidator` is still here**, because `logind` answers
+  `system.logind.Error.UnknownCaller` to everyone until lane A can tell a
+  service who is calling it
+  (`requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`). Its
+  `PasswordAuthority` impl carries the note; when that lands the impl is
+  deleted and a bus connection is constructed in its place, and nothing
+  else in the file moves.
 
 `apps/lockscreen/src/main.rs` — `LockScreen::submit_password` returns `bool`,
 and **both of its call sites discard it**:

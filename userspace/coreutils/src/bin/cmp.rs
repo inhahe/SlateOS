@@ -738,13 +738,22 @@ fn main() -> std::process::ExitCode {
     std::process::ExitCode::from(EXIT_TROUBLE)
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
-/// [`stdfd::close_stderr`].
+/// No [`coreutils::stdfd::close_stderr`] funnel here, unlike almost every other
+/// binary in this crate — because `cmp` is diffutils, not coreutils, and
+/// diffutils does not register gnulib's `atexit (close_stdout)`. It checks its
+/// *output* with its own `check_stdout`, which is why a full stdout says
+/// `cmp: standard output: No space left on device` where a coreutils utility
+/// says `cmp: write error: …`; and it never looks at stderr at all.
+///
+/// Measured, GNU `cmp` 3.8: with `f` = `abcdef\n` and `g` = `abc`, the run
+/// `cmp f g` warns `cmp: EOF on g …` on stderr and exits **1** — and exits 1
+/// again with `2>/dev/full`, where a folding utility would have exited 2, its
+/// `exit_failure`. The same holds for `diff`, `diff3` and `sdiff`, which share
+/// the mechanism and the wording. Adding the funnel here would make us report 2
+/// where upstream reports 1.
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
-    coreutils::stdfd::close_stderr(imp::main(), 2)
+    imp::main()
 }
 
 #[cfg(unix)]

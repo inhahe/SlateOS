@@ -616,6 +616,45 @@ pub fn close_stderr(earned: ExitCode, failure: u8) -> ExitCode {
     }
 }
 
+/// [`close_stderr`] for a path that can never reach `main`.
+///
+/// The funnel above works because exactly one value leaves `main`. A diverging
+/// helper — `fn die(…) -> !`, the direct translation of upstream's
+/// `error (EXIT_FAILURE, …)` — leaves no value at all, so the funnel never sees
+/// it and the status it exits with is final. This takes the same decision the
+/// funnel would have, at the last moment it can be taken.
+///
+/// # Use it only where returning is not an option
+///
+/// Not as a shorthand for `process::exit` in ordinary code. The rule that
+/// [`close_stderr`] exists to enforce is *one* decision point per program;
+/// every extra call site is a place a future edit can add an exit path that
+/// forgets it. Exactly two shapes qualify:
+///
+/// 1. **A `-> !` helper** — `fn die(…) -> !`, upstream's
+///    `error (EXIT_FAILURE, …)`. It has no value to return, and restructuring
+///    would mean threading a `Result` through an entire interpreter to reach a
+///    conclusion the caller has already reached.
+/// 2. **A construct whose whole meaning is "terminate now", from a depth the
+///    return path cannot express** — the shell's `exit` builtin is the only
+///    one here. Real shells do not thread it either: dash's `exitcmd` raises
+///    `EXEXIT` through `longjmp`, and bash's is `EXITPROG`. Rust's honest
+///    equivalent is this function, *provided there is nothing to unwind* — the
+///    day `sh` grows a `trap … EXIT`, this becomes a genuine unwind and the
+///    call must move to wherever that unwinding ends.
+///
+/// Everything else — including a `process::exit` in `main` itself — should
+/// become `return ExitCode::from(n)` and go through the funnel.
+///
+/// `earned` is the status the helper meant to exit with; `failure` is
+/// upstream's `exit_failure`. They are often the same number, and the call is
+/// still worth making: `exit_failure` is a property of the program, `earned` a
+/// property of the path, and the two coincide only by accident.
+pub fn exit_now(earned: u8, failure: u8) -> ! {
+    let status = if diagnostic_lost() { failure } else { earned };
+    std::process::exit(i32::from(status))
+}
+
 /// How much a [`Stream`] holds before it goes to the descriptor.
 ///
 /// stdio picks this from the destination's `st_blksize`; 4096 is what that is

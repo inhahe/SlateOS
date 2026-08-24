@@ -72,12 +72,12 @@ mod keydef;
 mod order;
 
 use coreutils::diag;
-use coreutils::stdfd::Stream;
+use coreutils::stdfd::{self, Stream};
 use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::process;
+use std::process::ExitCode;
 
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
@@ -183,11 +183,19 @@ impl Default for Config {
     }
 }
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 2)
+}
+
+fn run_main() -> ExitCode {
     let raw: Vec<OsString> = std::env::args_os().skip(1).collect();
     let cfg = match parse_args(&raw) {
         Ok(Some(c)) => c,
-        Ok(None) => return,
+        Ok(None) => return ExitCode::SUCCESS,
         Err(e) => die_with(&e.message(), e.status),
     };
 
@@ -217,7 +225,7 @@ fn main() {
     let per_file: Vec<Vec<&[u8]>> = contents.iter().map(|c| split_lines(c, cfg.delim)).collect();
 
     if let Some(mode) = cfg.check {
-        process::exit(check(
+        return ExitCode::from(check(
             &cfg,
             per_file.first().map_or(&[], Vec::as_slice),
             mode,
@@ -238,10 +246,12 @@ fn main() {
         // A closed pipe is how `sort | head` ends. It is not a failure worth a
         // diagnostic, but it is not success either.
         if e.kind() == io::ErrorKind::BrokenPipe {
-            process::exit(2);
+            return ExitCode::from(2);
         }
         die(&format!("write failed: {}", strerror(&e)));
     }
+
+    ExitCode::SUCCESS
 }
 
 // ── comparison ──────────────────────────────────────────────────────────────
@@ -312,7 +322,7 @@ fn merge<'a>(cfg: &Config, per_file: &[Vec<&'a [u8]>]) -> Vec<&'a [u8]> {
 ///
 /// Returns the exit status. With `-u` an equal pair is also a failure, since
 /// the file would not be the output of `sort -u`.
-fn check(cfg: &Config, lines: &[&[u8]], mode: Check) -> i32 {
+fn check(cfg: &Config, lines: &[&[u8]], mode: Check) -> u8 {
     let name = cfg
         .files
         .first()
@@ -862,9 +872,15 @@ fn die(msg: &str) -> ! {
     die_with(msg, 2)
 }
 
+/// `sort`'s `error (status, 0, …)`: a diagnostic and an immediate exit.
+///
+/// [`stdfd::exit_now`] and not `process::exit`, because this never returns to
+/// `main` and so would otherwise slip past the [`stdfd::close_stderr`] funnel:
+/// a diagnostic that could not be written has to raise the status to 2 here
+/// too, exactly as it would on any path that does return.
 fn die_with(msg: &str, status: i32) -> ! {
     diag!("sort: {msg}");
-    process::exit(status)
+    stdfd::exit_now(u8::try_from(status).unwrap_or(2), 2)
 }
 
 #[cfg(test)]

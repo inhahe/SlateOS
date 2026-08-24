@@ -8,16 +8,26 @@
 
 use coreutils::diag;
 use coreutils::quote::quotef_os;
+use coreutils::stdfd;
 use std::env;
-use std::process::{self, Command};
+use std::process::Command;
+use std::process::ExitCode;
 use std::time::Instant;
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
 
     if args.is_empty() {
         diag!("time: missing command");
-        process::exit(1);
+        return ExitCode::from(1);
     }
 
     let cmd = &args[0];
@@ -29,7 +39,7 @@ fn main() {
         Ok(s) => s,
         Err(e) => {
             diag!("time: {}: {e}", quotef_os(cmd));
-            process::exit(127);
+            return ExitCode::from(127);
         }
     };
 
@@ -44,7 +54,15 @@ fn main() {
     // We can't distinguish user/sys time without kernel support,
     // so just show real time.
 
-    process::exit(status.code().unwrap_or(126));
+    // `126` when the child left no ordinary exit code — it was killed by a
+    // signal, or (impossibly, but the type admits it) returned something that
+    // does not fit a wait status byte.
+    ExitCode::from(
+        status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .unwrap_or(126),
+    )
 }
 
 /// Format the `Mm.SSSs` real-time line.  Negative or NaN/Infinity values are

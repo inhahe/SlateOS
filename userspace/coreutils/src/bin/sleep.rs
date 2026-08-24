@@ -4,21 +4,32 @@
 //!   SECONDS may be an integer or a decimal number.
 
 use coreutils::diag;
+use coreutils::stdfd;
 use std::env;
-use std::process;
+use std::process::ExitCode;
 use std::thread;
 use std::time::Duration;
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
 
     match parse_seconds(&args) {
         Ok(secs) => thread::sleep(Duration::from_secs_f64(secs)),
         Err(msg) => {
             diag!("sleep: {msg}");
-            process::exit(1);
+            return ExitCode::from(1);
         }
     }
+
+    ExitCode::SUCCESS
 }
 
 /// Parse sleep's command-line arguments into a non-negative duration in

@@ -4,6 +4,8 @@
 //!   Prints the current UTC date and time in a simple format.
 //!   (No timezone support yet — always UTC.)
 
+use coreutils::stdfd;
+use std::process::ExitCode;
 use std::time::SystemTime;
 
 /// A broken-down date/time in UTC.
@@ -18,7 +20,15 @@ struct DateTime {
     dow: usize, // 0=Sun..6=Sat
 }
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(dur) => {
             let dt = unix_secs_to_datetime(dur.as_secs());
@@ -28,6 +38,8 @@ fn main() {
             println!("date: unable to determine current time");
         }
     }
+
+    ExitCode::SUCCESS
 }
 
 /// Compute a broken-down UTC date/time from seconds since the Unix epoch.

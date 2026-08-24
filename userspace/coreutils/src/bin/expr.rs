@@ -72,8 +72,9 @@
 //! quietly answering the wrong question. See `known-issues.md`.
 
 use coreutils::diag;
+use coreutils::stdfd;
 use std::io::Write as _;
-use std::process;
+use std::process::ExitCode;
 
 use bignum::BigInt;
 use coreutils::quote::quote;
@@ -88,7 +89,15 @@ const USAGE: &str = "usage: expr EXPRESSION";
 /// failure, which is the only thing this program can fail at afterwards.
 struct Fail(String);
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 3)
+}
+
+fn run_main() -> ExitCode {
     let raw: Vec<Str> = std::env::args_os().skip(1).map(|a| arg_bytes(&a)).collect();
 
     // `--help` and `--version` are recognised only as the whole command line,
@@ -97,11 +106,11 @@ fn main() {
     if let [only] = raw.as_slice() {
         if only.as_slice() == b"--help" {
             println!("{USAGE}");
-            return;
+            return ExitCode::SUCCESS;
         }
         if only.as_slice() == b"--version" {
             println!("expr (SlateOS coreutils)");
-            return;
+            return ExitCode::SUCCESS;
         }
     }
 
@@ -115,7 +124,7 @@ fn main() {
     if args.is_empty() {
         diag!("expr: missing operand");
         diag!("{USAGE}");
-        process::exit(2);
+        return ExitCode::from(2);
     }
 
     let mut p = Parser { args, pos: 0 };
@@ -137,15 +146,20 @@ fn main() {
         .is_err()
     {
         // Nothing left to say it on; GNU's exit 3 is "an error occurred".
-        process::exit(3);
+        return ExitCode::from(3);
     }
     // The value *is* the status: a shell writes `if expr "$a" '<' "$b"`.
-    process::exit(i32::from(is_null(&value)));
+    ExitCode::from(u8::from(is_null(&value)))
 }
 
+/// `expr`'s `error (EXPR_INVALID, 0, …)`: a diagnostic and an immediate exit.
+///
+/// [`stdfd::exit_now`] and not `process::exit`, so a diagnostic that could not
+/// be written still folds the status the way [`stdfd::close_stderr`] would on
+/// any path that returns to `main`.
 fn die(msg: &str) -> ! {
     diag!("expr: {msg}");
-    process::exit(2)
+    stdfd::exit_now(2, 3)
 }
 
 /// An argument as bytes.

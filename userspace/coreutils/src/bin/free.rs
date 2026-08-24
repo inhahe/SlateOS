@@ -9,9 +9,11 @@
 //! Reads from /proc/meminfo.
 
 use coreutils::diag;
+use coreutils::stdfd;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use std::process::ExitCode;
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct FreeOpts {
@@ -32,7 +34,15 @@ struct MemInfo {
     swap_free: u64,
 }
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let opts = parse_args(&args);
 
@@ -40,7 +50,7 @@ fn main() {
         Ok(c) => c,
         Err(_) => {
             diag!("free: cannot read /proc/meminfo");
-            std::process::exit(1);
+            return ExitCode::from(1);
         }
     };
 
@@ -110,6 +120,8 @@ fn main() {
             mi.swap_free / unit
         );
     }
+
+    ExitCode::SUCCESS
 }
 
 /// Parse free's argv. Later flags override earlier ones for the unit.

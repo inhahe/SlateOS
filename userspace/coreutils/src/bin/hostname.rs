@@ -38,12 +38,13 @@
 //! program did nothing.
 
 use coreutils::diag;
+use coreutils::stdfd;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, ErrorKind, Write};
 use std::path::Path;
-use std::process;
+use std::process::ExitCode;
 
 use coreutils::errmsg::strerror;
 use coreutils::quote::{os_bytes, quote, quote_os};
@@ -617,7 +618,7 @@ fn root_hint(e: &io::Error) -> &'static str {
 /// `println!` panics when standard output cannot be written, which turns
 /// `hostname | head -1` into a panic message. A closed pipe is the one write
 /// error that means success.
-fn write_line(bytes: &[u8]) -> i32 {
+fn write_line(bytes: &[u8]) -> u8 {
     let mut out = io::stdout().lock();
     let result = out
         .write_all(bytes)
@@ -659,7 +660,7 @@ fn usage() -> &'static str {
 // ============================================================================
 
 /// Carry out a display request.
-fn show(query: &Query) -> Result<i32, String> {
+fn show(query: &Query) -> Result<u8, String> {
     match *query {
         Query::Ip | Query::AllIp => {
             let addrs = read_addresses();
@@ -683,7 +684,7 @@ fn show(query: &Query) -> Result<i32, String> {
 }
 
 /// Carry out a set request, honouring `--boot`.
-fn set(name: &[u8], boot: bool) -> Result<i32, String> {
+fn set(name: &[u8], boot: bool) -> Result<u8, String> {
     if boot && read_hostname().is_ok() {
         // `--boot` means "only if nothing has set one yet", so an existing
         // name is the expected case and not an error.
@@ -693,7 +694,7 @@ fn set(name: &[u8], boot: bool) -> Result<i32, String> {
     Ok(0)
 }
 
-fn run(action: &Action) -> Result<i32, String> {
+fn run(action: &Action) -> Result<u8, String> {
     match *action {
         Action::Help => Ok(write_line(usage().as_bytes())),
         Action::Version => Ok(write_line(b"hostname (SlateOS coreutils) 0.1.0")),
@@ -713,7 +714,15 @@ fn run(action: &Action) -> Result<i32, String> {
     }
 }
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     // `args_os`, not `args`: `env::args()` unwraps `into_string()` and so
     // panics on an argument that is not UTF-8. A host name that is not UTF-8
     // is invalid, but the right answer to it is a diagnostic, not a crash.
@@ -723,15 +732,15 @@ fn main() {
         Ok(action) => action,
         Err(message) => {
             diag!("hostname: {message}");
-            process::exit(1);
+            return ExitCode::from(1);
         }
     };
 
     match run(&action) {
-        Ok(status) => process::exit(status),
+        Ok(status) => ExitCode::from(status),
         Err(message) => {
             diag!("hostname: {message}");
-            process::exit(1);
+            ExitCode::from(1)
         }
     }
 }

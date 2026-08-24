@@ -50,10 +50,12 @@
 //! recorded in `todo.txt`.
 
 use coreutils::diag;
+use coreutils::stdfd;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, ErrorKind, Write};
-use std::process::{self, Command, ExitStatus};
+use std::process::ExitCode;
+use std::process::{Command, ExitStatus};
 
 use coreutils::errmsg::strerror;
 use coreutils::getopt::Program;
@@ -420,13 +422,33 @@ fn write_out(bytes: &[u8]) -> i32 {
     }
 }
 
-fn main() {
+/// A status as `main` must return it.
+///
+/// Every status in this file is an `i32`, because that is what
+/// [`coreutils::getopt::Error`] and [`ExitStatus::code`] deal in — but only a
+/// byte of it survives into the `$?` the caller reads. A value that does not
+/// fit is not a status at all, so it becomes `EXIT_CANCELED` ("`env` itself
+/// failed") rather than being silently truncated into some other command's
+/// meaning.
+fn status(code: i32) -> ExitCode {
+    ExitCode::from(u8::try_from(code).unwrap_or(125))
+}
+
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 125)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let cfg = match parse_args(&args) {
         Ok(c) => c,
         Err(e) => {
             diag!("env: {}", e.message);
-            process::exit(e.status);
+            return status(e.status);
         }
     };
 
@@ -443,9 +465,9 @@ fn main() {
                 quote_os(dir),
                 strerror(&e)
             );
-            process::exit(EXIT_CANCELED);
+            return status(EXIT_CANCELED);
         }
-        process::exit(write_out(&render(&vars, &cfg.sep)));
+        return status(write_out(&render(&vars, &cfg.sep)));
     };
 
     let mut cmd = Command::new(program);
@@ -457,10 +479,10 @@ fn main() {
     }
 
     match cmd.status() {
-        Ok(status) => process::exit(exit_status_code(&status)),
+        Ok(finished) => status(exit_status_code(&finished)),
         Err(e) => {
             diag!("env: {}: {}", quotef_os(program), strerror(&e));
-            process::exit(spawn_failure_status(e.kind()));
+            status(spawn_failure_status(e.kind()))
         }
     }
 }

@@ -389,9 +389,9 @@ fn surprise(new_mode: u32, naively_expected: u32) -> Option<String> {
 }
 
 #[cfg(not(unix))]
-fn main() {
+fn main() -> std::process::ExitCode {
     diag!("chmod: unix-only utility; not supported on this platform");
-    std::process::exit(1);
+    std::process::ExitCode::from(1)
 }
 
 // ------------------------------------------------------------------- unix ---
@@ -684,9 +684,13 @@ mod imp {
     }
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`coreutils::stdfd::close_stderr`].
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
-    imp::main()
+    coreutils::stdfd::close_stderr(imp::main(), 1)
 }
 
 #[cfg(test)]

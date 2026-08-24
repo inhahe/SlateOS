@@ -14,9 +14,10 @@
 use coreutils::diag;
 use coreutils::human::{Opts, human_readable};
 use coreutils::quote::quotef_os;
+use coreutils::stdfd;
 use std::env;
 use std::io::{self, Write};
-use std::process;
+use std::process::ExitCode;
 
 /// statvfs-like struct returned by our POSIX layer.
 #[cfg(target_os = "linux")]
@@ -46,7 +47,15 @@ struct DfArgs {
     paths: Vec<String>,
 }
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut parsed = parse_args(&args);
     if parsed.paths.is_empty() {
@@ -62,7 +71,7 @@ fn main() {
         "Filesystem", "Size", "Used", "Avail", "Use%"
     );
 
-    let mut exit_code = 0;
+    let mut exit_code = 0u8;
     for path in &parsed.paths {
         match stat_fs(path) {
             Ok(info) => {
@@ -76,7 +85,7 @@ fn main() {
         }
     }
 
-    process::exit(exit_code);
+    ExitCode::from(exit_code)
 }
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq, Clone))]

@@ -12,8 +12,9 @@
 //!   1  error
 
 use coreutils::diag;
+use coreutils::stdfd;
 use std::env;
-use std::process;
+use std::process::ExitCode;
 
 // POSIX priority target types.
 const PRIO_PROCESS: i32 = 0;
@@ -116,7 +117,15 @@ fn target_label(which: i32, who: u32) -> String {
     }
 }
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
 
     let parsed = match parse_args(&args) {
@@ -126,7 +135,7 @@ fn main() {
             if e == "missing operand" {
                 diag!("Usage: renice [-n INCREMENT] [-p PID...] [-u USER]");
             }
-            process::exit(1);
+            return ExitCode::from(1);
         }
     };
 
@@ -135,7 +144,7 @@ fn main() {
     let pids = parsed.pids;
     let user = parsed.user;
 
-    let mut exit_code = 0;
+    let mut exit_code = 0u8;
 
     // Handle user-based renice.
     if let Some(ref _username) = user {
@@ -146,7 +155,7 @@ fn main() {
             Err(_) => {
                 diag!("renice: unknown user: {_username}");
                 diag!("  (numeric UID required until /etc/passwd lookup is implemented)");
-                process::exit(1);
+                return ExitCode::from(1);
             }
         };
 
@@ -164,7 +173,7 @@ fn main() {
         }
     }
 
-    process::exit(exit_code);
+    ExitCode::from(exit_code)
 }
 
 #[cfg(target_os = "linux")]

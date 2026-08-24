@@ -6,20 +6,21 @@
 
 use coreutils::diag;
 use coreutils::quote::quote_os;
+use coreutils::stdfd;
 use std::env;
 use std::fmt::Write as FmtWrite;
 #[allow(unused_imports)]
 use std::io::{self, Read, Write};
-use std::process;
+use std::process::ExitCode;
 
 // ---------------------------------------------------------------------------
 // Exit codes
 // ---------------------------------------------------------------------------
 
-const EXIT_OK: i32 = 0;
-const EXIT_HTTP_ERROR: i32 = 1;
-const EXIT_CONN_ERROR: i32 = 2;
-const EXIT_BAD_ARGS: i32 = 3;
+const EXIT_OK: u8 = 0;
+const EXIT_HTTP_ERROR: u8 = 1;
+const EXIT_CONN_ERROR: u8 = 2;
+const EXIT_BAD_ARGS: u8 = 3;
 
 // ---------------------------------------------------------------------------
 // Configuration from CLI arguments
@@ -559,7 +560,7 @@ fn format_size(bytes: usize) -> String {
 // Single URL fetch (with redirect following)
 // ---------------------------------------------------------------------------
 
-fn fetch_url(config: &Config, url_str: &str) -> i32 {
+fn fetch_url(config: &Config, url_str: &str) -> u8 {
     let method = determine_method(config);
 
     let mut current_url = match ParsedUrl::parse(url_str) {
@@ -772,7 +773,7 @@ fn write_output(config: &Config, url: &ParsedUrl, body: &[u8]) -> io::Result<()>
 
 /// Outcome of CLI parsing: either a usable Config, a fatal error, or the
 /// caller-requested help screen (so the test-only `parse_args` doesn't
-/// need to call `process::exit`).
+/// need to exit on its own).
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 enum ParseOutcome {
     Config(Config),
@@ -927,18 +928,26 @@ Note: HTTPS is not yet supported (requires TLS implementation).
 // Entry point
 // ---------------------------------------------------------------------------
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let config = match parse_args(&args) {
         Ok(ParseOutcome::Config(c)) => c,
         Ok(ParseOutcome::Help) => {
             print_help();
-            process::exit(EXIT_OK);
+            return ExitCode::from(EXIT_OK);
         }
         Err(e) => {
             diag!("fetch: {e}");
             diag!("Try 'fetch --help' for usage information.");
-            process::exit(EXIT_BAD_ARGS);
+            return ExitCode::from(EXIT_BAD_ARGS);
         }
     };
 
@@ -951,7 +960,7 @@ fn main() {
         }
     }
 
-    process::exit(worst_exit);
+    ExitCode::from(worst_exit)
 }
 
 #[cfg(test)]

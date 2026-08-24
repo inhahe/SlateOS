@@ -2068,9 +2068,19 @@ pub fn self_test() {
                 skips.record("frame poison-on-free", "no HHDM");
                 serial_println!("[kasan]   frame poison-on-free SKIPPED: no HHDM");
             }
+            // A machine with no free frame is a reason not to run this; any
+            // other allocator error is a defect, and reading it as "no frame
+            // available" would let the allocator silence its own test.
+            (_, Err(crate::error::KernelError::OutOfMemory)) => {
+                skips.record("frame poison-on-free", "no free frame on this machine");
+                serial_println!("[kasan]   frame poison-on-free SKIPPED: no free frame");
+            }
             (_, Err(e)) => {
-                skips.record("frame poison-on-free", "frame allocation failed");
-                serial_println!("[kasan]   frame poison-on-free SKIPPED: alloc failed ({e:?})");
+                serial_println!(
+                    "[kasan]   FAIL: frame poison-on-free: alloc_frame returned {e:?}, which \
+                     is not a statement about how much memory is free"
+                );
+                panic!("kasan self-test: alloc_frame failed with {e:?}");
             }
             (hhdm, Ok(f)) => {
                 let va = f.addr().wrapping_add(hhdm);
@@ -2150,14 +2160,19 @@ pub fn self_test() {
                             // SAFETY: as above.
                             let _ = unsafe { crate::mm::frame::free_frame(f2) };
                         }
-                        Err(e) => {
-                            skips.record(
-                                "frame unpoison-on-alloc",
-                                "re-allocating the frame failed",
-                            );
+                        Err(crate::error::KernelError::OutOfMemory) => {
+                            skips
+                                .record("frame unpoison-on-alloc", "no free frame on this machine");
                             serial_println!(
-                                "[kasan]   frame unpoison-on-alloc SKIPPED: realloc failed ({e:?})"
+                                "[kasan]   frame unpoison-on-alloc SKIPPED: no free frame"
                             );
+                        }
+                        Err(e) => {
+                            serial_println!(
+                                "[kasan]   FAIL: frame unpoison-on-alloc: re-allocating \
+                                 returned {e:?}, which is not a statement about free memory"
+                            );
+                            panic!("kasan self-test: frame realloc failed with {e:?}");
                         }
                     }
                 }

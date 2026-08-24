@@ -610,12 +610,18 @@ pub fn self_test() {
             0,
             0,
         );
+        // Spawning a task is not an optional capability of this kernel, so a
+        // failure here is a defect, not an environment in which the live
+        // restart test does not apply.  Printing SKIP and then PASSED meant a
+        // scheduler that had stopped creating tasks read as a clean run.
         let tid = match tid {
             Ok(id) => id,
-            Err(_) => {
-                serial_println!("[supervisor]   Live restart: SKIP (spawn failed)");
-                serial_println!("[supervisor] Self-test PASSED");
-                return;
+            Err(e) => {
+                serial_println!(
+                    "[supervisor]   FAIL: Live restart: spawning the probe task returned {:?}",
+                    e
+                );
+                panic!("supervisor self-test: could not spawn the live-restart probe: {e:?}");
             }
         };
 

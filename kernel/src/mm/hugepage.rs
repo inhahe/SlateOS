@@ -368,15 +368,26 @@ pub fn self_test() {
     let pml4 = page_table::active_pml4_phys();
 
     // Test 1: Allocate a 2 MiB huge page.
+    // A machine that cannot spare 2 MiB of contiguous physical memory is a
+    // real reason not to run this test -- but it is the *only* one.  Reading
+    // every error as "insufficient memory" made the allocator's own defects
+    // (a corrupted order-7 free list, a cgroup charge that wrongly refuses)
+    // silence the test that exists to catch them.
     let frame = match alloc_huge_2m() {
         Ok(f) => f,
+        Err(crate::error::KernelError::OutOfMemory) => {
+            serial_println!(
+                "[hugepage] Self-test SKIPPED (no 2 MiB contiguous block free on this machine)"
+            );
+            return;
+        }
         Err(e) => {
             serial_println!(
-                "[hugepage]   Allocation failed: {:?} (insufficient memory?)",
+                "[hugepage]   FAIL: alloc_huge_2m returned {:?}, which is not a statement \
+                 about how much memory this machine has",
                 e
             );
-            serial_println!("[hugepage] Self-test SKIPPED (not enough contiguous memory)");
-            return;
+            panic!("hugepage self-test: alloc_huge_2m failed with {e:?}");
         }
     };
     let phys_addr = frame.addr();

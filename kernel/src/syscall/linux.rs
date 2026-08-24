@@ -49948,12 +49948,17 @@ pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
         // distinguishable from real content.
         content.push((((i * 31 + 7) & 0xff) as u8) | 1);
     }
+    if !crate::fs::selftest::is_mounted_rw("/") {
+        serial_println!("[syscall/linux]   file mmap self-test skipped (/ not mounted read-write)");
+        return Ok(());
+    }
     if let Err(e) = crate::fs::Vfs::write_file(PATH, &content) {
         serial_println!(
-            "[syscall/linux]   file mmap: SKIP (VFS write failed: {:?})",
+            "[syscall/linux]   FAIL: / is mounted read-write but writing {} failed: {:?}",
+            PATH,
             e
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
 
     // Throwaway process with its own address space.

@@ -71621,3 +71621,77 @@ module docs say so.
 closed-descriptor sweep (todo item 9). The port is complete and correct — it
 calls `getlogin` and reports its failure exactly as GNU does — so nothing in
 `logname` needs to change when this is fixed.
+
+---
+
+## TD-COREUTILS-AN-UNWRITABLE-STDERR-ABORTS-THE-PROCESS (lane B, 2026-08-24) — **open**
+
+**What it is.** Every coreutils binary reports its diagnostics with
+`eprintln!`, and `eprintln!` panics when the write fails. The panic handler
+then tries to print the panic message — to the same stderr — which fails
+again, so the runtime gives up and calls `abort()`. The process dies of
+`SIGABRT`: shell status **134**, `Aborted (core dumped)`, and on a terminal a
+`note: run with RUST_BACKTRACE=1` line that GNU never prints. Measured under
+WSL, with stderr on `/dev/full`:
+
+| | ours | GNU 9.4 |
+|---|---|---|
+| `id --nope` | 134 | 1 |
+| `uname --nope` | 134 | 1 |
+| `logname x` | 134 | 1 |
+| `whoami x` | 134 | 1 |
+| `tty x` | 134 | 3 |
+
+The same happens for `>&-` on stderr rather than `/dev/full`, for the same
+reason: `guard_std_fds!` leaves the descriptor genuinely closed, so the write
+returns `EBADF` and `eprintln!` panics on that instead.
+
+**What GNU does instead**, pinned by measurement rather than recall. gnulib's
+`close_stdout` closes *stderr* as well as stdout, and `_exit (exit_failure)`
+if that close fails. The rule that falls out of it has three cases:
+
+* **nothing was written to stderr** — the failure is invisible and the earned
+  status stands: `id --help` 0, `uname` 0, `logname --version` 0, `tty -s` 1.
+* **a diagnostic was attempted and lost** — `exit_failure`, *silently*, since
+  there is nowhere left to complain: `id --nope` 1, `logname x` 1, `whoami x`
+  1, `tty x` 3 (each utility's own failure status, not a fixed 1).
+* **stdout unwritable too** — the same, and it is stderr that has the last
+  word: `pwd x 2>/dev/full` is GNU 1 against our 0, so a lost diagnostic
+  overrides even a success.
+
+**Scope.** 354 `eprintln!`/`eprint!` sites across 72 of the 84 bins. Nineteen
+of them are binaries *already converted* by the closed-descriptor sweep, which
+fixed stdout and left stderr exactly as it was: `basename`, `cat`, `comm`,
+`dirname`, `expand`, `fold`, `join`, `logname`, `nice`, `nohup`, `paste`,
+`printf`, `pwd`, `seq`, `tsort`, `tty`, `unexpand`, `whoami`, `yes`. So this
+is not a backlog item behind the sweep — it is a hole *in* it.
+
+**The proper fix**, in this order:
+
+1. A diagnostic writer in `coreutils::stdfd` that cannot panic: raw `write(2)`
+   to fd 2, no `std::io::Stderr`, the result *recorded* rather than
+   propagated. Call it `stdfd::diag(program, args)` behind a macro shaped like
+   `eprintln!` so the 354 call sites convert mechanically.
+2. A process-global "a diagnostic was lost" flag it sets, and an extension of
+   `stdfd::close_stdout` to consult it: when set, the returned status becomes
+   the utility's failure status even if the run had earned success. The four
+   utilities that spell their tail out by hand (`env`, `ls`, `sort`, `tty`)
+   need the same check written into theirs.
+3. Retrofit the nineteen converted bins, then the rest as the sweep reaches
+   them.
+4. Harness cases. `pwd-diff.sh`, `whoami-diff.sh`, `logname-diff.sh` and
+   `tty-diff.sh` all exercise a closed and a full *stdout* and none of them
+   touches stderr, which is exactly why this survived four ports. Every
+   harness wants `2>/dev/full` and `2>&-` against both a quiet run and a
+   diagnostic-producing one.
+
+**Found on the way, and not the same bug.** `wc >/dev/full` exits **0**
+silently — it never checks the write at all. `head >/dev/full` reports the
+failure as `head: error reading '/etc/hostname'`, blaming the input for an
+output error. `nl >/dev/full` prints `nl: No space left on device` without
+GNU's `write error:` prefix. All three are stdout defects for the sweep to
+pick up; recorded here so they are not lost.
+
+**How it was found.** Probing `/dev/full` while porting `tty`, after a first
+probe that used `>/dev/full 2>&1` and so pointed the finger at stdout — the
+134 came from stderr all along.

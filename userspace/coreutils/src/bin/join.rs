@@ -354,10 +354,8 @@ fn main() -> ExitCode {
     // `join: write error: Bad file descriptor` and exits 1.
     let mut out = Stream::stdout();
     let (settings, first, second) = match request {
-        Request::Help => return say(out, format!("{USAGE}
-").as_bytes()),
-        Request::Version => return say(out, b"join (SlateOS coreutils)
-"),
+        Request::Help => return say(out, format!("{USAGE}\n").as_bytes()),
+        Request::Version => return say(out, b"join (SlateOS coreutils)\n"),
         Request::Run(settings, first, second) => (settings, first, second),
     };
     let outcome = run(&settings, &first, &second, &mut out);

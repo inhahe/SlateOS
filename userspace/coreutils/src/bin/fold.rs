@@ -217,10 +217,8 @@ fn main() -> ExitCode {
     // `fold: write error: Bad file descriptor` and exits 1.
     let mut out = Stream::stdout();
     let (settings, mut files) = match request {
-        Request::Help => return say(out, format!("{USAGE}
-").as_bytes()),
-        Request::Version => return say(out, b"fold (SlateOS coreutils)
-"),
+        Request::Help => return say(out, format!("{USAGE}\n").as_bytes()),
+        Request::Version => return say(out, b"fold (SlateOS coreutils)\n"),
         Request::Run(settings, files) => (settings, files),
     };
 

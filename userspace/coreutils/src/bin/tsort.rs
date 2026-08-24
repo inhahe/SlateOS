@@ -219,10 +219,8 @@ fn main() -> ExitCode {
     // `tsort: write error: Bad file descriptor` and exits 1.
     let mut out = Stream::stdout();
     let file = match request {
-        Request::Help => return say(out, format!("{USAGE}
-").as_bytes()),
-        Request::Version => return say(out, b"tsort (SlateOS coreutils)
-"),
+        Request::Help => return say(out, format!("{USAGE}\n").as_bytes()),
+        Request::Version => return say(out, b"tsort (SlateOS coreutils)\n"),
         Request::Run(file) => file,
     };
 

@@ -2144,12 +2144,7 @@ impl CalendarView {
         cmds
     }
 
-    fn render_nav_header(
-        &self,
-        p: &Palette,
-        cmds: &mut Vec<RenderCommand>,
-        layout: &MonthLayout,
-    ) {
+    fn render_nav_header(&self, p: &Palette, cmds: &mut Vec<RenderCommand>, layout: &MonthLayout) {
         let arrow_size = layout.px(NAV_ARROW_FONT);
         let arrow_ink = p.subtext0;
         let month_ink = p.text;
@@ -2223,12 +2218,7 @@ impl CalendarView {
         }
     }
 
-    fn render_dow_headers(
-        &self,
-        p: &Palette,
-        cmds: &mut Vec<RenderCommand>,
-        layout: &MonthLayout,
-    ) {
+    fn render_dow_headers(&self, p: &Palette, cmds: &mut Vec<RenderCommand>, layout: &MonthLayout) {
         let headers = dow_headers(self.config.first_day_of_week);
         let size = layout.px(DOW_HEADER_FONT);
         let dow_ink = p.subtext0;
@@ -4709,9 +4699,9 @@ description: Just a test";
                     _ => want.push(p.text),
                 }
                 match i {
-                    7 => want.push(p.lavender),              // 3 May, uncoloured
-                    11 => want.push(USER_ORANGE),            // 7 May, the user's
-                    22 => want.push(readable_on(p.accent)),  // 18 May, on the disc
+                    7 => want.push(p.lavender),             // 3 May, uncoloured
+                    11 => want.push(USER_ORANGE),           // 7 May, the user's
+                    22 => want.push(readable_on(p.accent)), // 18 May, on the disc
                     _ => {}
                 }
             }

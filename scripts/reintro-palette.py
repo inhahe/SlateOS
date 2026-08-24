@@ -116,6 +116,7 @@ CAL = "gui/desktop/src/calendar.rs"
 SESS = "gui/desktop/src/session_mgr.rs"
 FD = "gui/desktop/src/file_drop.rs"
 IM = "gui/desktop/src/input_method.rs"
+BL = "gui/desktop/src/blur.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -21310,6 +21311,461 @@ DEFECTS = [
             'every_preview_site_draws_the_role_it_claims',
             'no_site_in_this_module_wears_the_accent',
             'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the taskbar tints with mantle, the title bar's role",
+        BL,
+        [
+            ('Self::new(24.0, 0.65, tint(p.base, TINT_TASKBAR, p), 1.3, 0.03)',
+             'Self::new(24.0, 0.65, tint(p.mantle, TINT_TASKBAR, p), 1.3, 0.03)'),
+        ],
+        ["desktop"],
+        [
+        # mantle is a legal role that moves with the mode, so only the ordered
+        # table can tell it from the base it claims
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the taskbar's tint is still the Mocha BASE constant",
+        BL,
+        [
+            ('Self::new(24.0, 0.65, tint(p.base, TINT_TASKBAR, p), 1.3, 0.03)',
+             'Self::new(24.0, 0.65, Color::rgba(0x1E, 0x1E, 0x2E, scaled_tint(TINT_TASKBAR, p.panel_alpha)), 1.3, 0.03)'),
+        ],
+        ["desktop"],
+        [
+        # the conversion's own defect: a dark literal the light palette cannot
+        # contain, identical in both modes
+            'every_preset_tints_with_the_role_it_claims',
+            'every_tint_comes_from_its_palette',
+            'every_tint_moves_with_the_mode',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the taskbar tints with the accent',
+        BL,
+        [
+            ('Self::new(24.0, 0.65, tint(p.base, TINT_TASKBAR, p), 1.3, 0.03)',
+             'Self::new(24.0, 0.65, tint(p.accent, TINT_TASKBAR, p), 1.3, 0.03)'),
+        ],
+        ["desktop"],
+        [
+        # the accent is a role and it moves with the mode, so membership and the
+        # mode test both pass; on a stock palette it is merely blue
+            'every_preset_tints_with_the_role_it_claims',
+            'no_blur_tint_wears_the_accent',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: a title bar tints with base, so it stops separating from the taskbar',
+        BL,
+        [
+            ('Self::new(16.0, 0.75, tint(p.mantle, TINT_TITLE_BAR, p), 1.1, 0.02)',
+             'Self::new(16.0, 0.75, tint(p.base, TINT_TITLE_BAR, p), 1.1, 0.02)'),
+        ],
+        ["desktop"],
+        [
+        # a real collapse: two adjacent chrome surfaces become one colour, and
+        # nothing but the ordered table is looking at which role each claims
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a title bar's tint is still the Mocha MANTLE constant",
+        BL,
+        [
+            ('Self::new(16.0, 0.75, tint(p.mantle, TINT_TITLE_BAR, p), 1.1, 0.02)',
+             'Self::new(16.0, 0.75, Color::rgba(0x18, 0x18, 0x25, scaled_tint(TINT_TITLE_BAR, p.panel_alpha)), 1.1, 0.02)'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+            'every_tint_comes_from_its_palette',
+            'every_tint_moves_with_the_mode',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: a menu tints with base instead of the raised surface0',
+        BL,
+        [
+            ('Self::new(12.0, 0.80, tint(p.surface0, TINT_MENU, p), 1.0, 0.01)',
+             'Self::new(12.0, 0.80, tint(p.base, TINT_MENU, p), 1.0, 0.01)'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a menu's tint is still the Mocha SURFACE0 constant",
+        BL,
+        [
+            ('Self::new(12.0, 0.80, tint(p.surface0, TINT_MENU, p), 1.0, 0.01)',
+             'Self::new(12.0, 0.80, Color::rgba(0x31, 0x32, 0x44, scaled_tint(TINT_MENU, p.panel_alpha)), 1.0, 0.01)'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+            'every_tint_comes_from_its_palette',
+            'every_tint_moves_with_the_mode',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a notification tints with surface0, the menu's role",
+        BL,
+        [
+            ('Self::new(18.0, 0.70, tint(p.base, TINT_NOTIFICATION, p), 1.2, 0.02)',
+             'Self::new(18.0, 0.70, tint(p.surface0, TINT_NOTIFICATION, p), 1.2, 0.02)'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the standard surface tints with mantle',
+        BL,
+        [
+            ('Self::new(20.0, 0.70, tint(p.base, TINT_STANDARD, p), 1.2, 0.02)',
+             'Self::new(20.0, 0.70, tint(p.mantle, TINT_STANDARD, p), 1.2, 0.02)'),
+        ],
+        ["desktop"],
+        [
+        # this is the preset that replaced Default::default(), which is where
+        # the unfixable Mocha literal used to live
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the standard surface tints with the accent',
+        BL,
+        [
+            ('Self::new(20.0, 0.70, tint(p.base, TINT_STANDARD, p), 1.2, 0.02)',
+             'Self::new(20.0, 0.70, tint(p.accent, TINT_STANDARD, p), 1.2, 0.02)'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+            'no_blur_tint_wears_the_accent',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the no-blur fallback's tint is still the Mocha BASE constant",
+        BL,
+        [
+            ('Color::rgba(p.base.r, p.base.g, p.base.b, 255),',
+             'Color::rgba(0x1E, 0x1E, 0x2E, 255),'),
+        ],
+        ["desktop"],
+        [
+        # the worst-looking of the leftovers: opaque, so in light mode it is a
+        # solid dark slab rather than a subtle mis-tinting
+            'every_preset_tints_with_the_role_it_claims',
+            'every_tint_comes_from_its_palette',
+            'every_tint_moves_with_the_mode',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the no-blur fallback tints with mantle',
+        BL,
+        [
+            ('Color::rgba(p.base.r, p.base.g, p.base.b, 255),',
+             'Color::rgba(p.mantle.r, p.mantle.g, p.mantle.b, 255),'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the taskbar's and the menu's roles are transposed",
+        BL,
+        [
+            ('Self::new(24.0, 0.65, tint(p.base, TINT_TASKBAR, p), 1.3, 0.03)',
+             'Self::new(24.0, 0.65, tint(p.surface0, TINT_TASKBAR, p), 1.3, 0.03)'),
+            ('Self::new(12.0, 0.80, tint(p.surface0, TINT_MENU, p), 1.0, 0.01)',
+             'Self::new(12.0, 0.80, tint(p.base, TINT_MENU, p), 1.0, 0.01)'),
+        ],
+        ["desktop"],
+        [
+        # a transposition leaves every value present, so membership sees a legal
+        # set and the mode test sees two colours that both still move
+        # -- only an ordered table can see a permutation (lesson 9)
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: a title bar's and a menu's roles are transposed",
+        BL,
+        [
+            ('Self::new(16.0, 0.75, tint(p.mantle, TINT_TITLE_BAR, p), 1.1, 0.02)',
+             'Self::new(16.0, 0.75, tint(p.surface0, TINT_TITLE_BAR, p), 1.1, 0.02)'),
+            ('Self::new(12.0, 0.80, tint(p.surface0, TINT_MENU, p), 1.0, 0.01)',
+             'Self::new(12.0, 0.80, tint(p.mantle, TINT_MENU, p), 1.0, 0.01)'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a menu's and a notification's roles are transposed",
+        BL,
+        [
+            ('Self::new(12.0, 0.80, tint(p.surface0, TINT_MENU, p), 1.0, 0.01)',
+             'Self::new(12.0, 0.80, tint(p.base, TINT_MENU, p), 1.0, 0.01)'),
+            ('Self::new(18.0, 0.70, tint(p.base, TINT_NOTIFICATION, p), 1.2, 0.02)',
+             'Self::new(18.0, 0.70, tint(p.surface0, TINT_NOTIFICATION, p), 1.2, 0.02)'),
+        ],
+        ["desktop"],
+        [
+            'every_preset_tints_with_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the taskbar's tint weight drops to the menu's, flattening the hierarchy",
+        BL,
+        [
+            ('const TINT_TASKBAR: u8 = 160;',
+             'const TINT_TASKBAR: u8 = 100;'),
+        ],
+        ["desktop"],
+        [
+        # an alpha defect: every RGB is still right, so the role table, the
+        # membership sweep and the mode test all pass
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a menu's tint weight rises to the taskbar's",
+        BL,
+        [
+            ('const TINT_MENU: u8 = 100;',
+             'const TINT_MENU: u8 = 160;'),
+        ],
+        ["desktop"],
+        [
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a menu's tint weight rises to a title bar's, by one step",
+        BL,
+        [
+            ('const TINT_MENU: u8 = 100;',
+             'const TINT_MENU: u8 = 120;'),
+        ],
+        ["desktop"],
+        [
+        # a one-step collapse rather than a wholesale one: the ordering
+        # assertion catches it only because the comparison is strict
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a notification's tint weight drops to a menu's",
+        BL,
+        [
+            ('const TINT_NOTIFICATION: u8 = 140;',
+             'const TINT_NOTIFICATION: u8 = 100;'),
+        ],
+        ["desktop"],
+        [
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the standard surface's tint weight drifts away from a notification's",
+        BL,
+        [
+            ('const TINT_STANDARD: u8 = 140;',
+             'const TINT_STANDARD: u8 = 200;'),
+        ],
+        ["desktop"],
+        [
+        # the weight that sits between no two others, so a pure ordering check
+        # would let it take any value at all -- this is why the weights test
+        # pins an exact table and not just an inequality chain
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the standard surface's tint goes fully opaque",
+        BL,
+        [
+            ('Self::new(20.0, 0.70, tint(p.base, TINT_STANDARD, p), 1.2, 0.02)',
+             'Self::new(20.0, 0.70, Color::rgba(p.base.r, p.base.g, p.base.b, 255), 1.2, 0.02)'),
+        ],
+        ["desktop"],
+        [
+        # the hole this module's declarations found before the sweep ran: RGB is
+        # right, the mode moves, membership passes, the setting is honoured at
+        # Off -- and the surface is simply never see-through
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the no-blur fallback is put through the transparency scaling',
+        BL,
+        [
+            ('Color::rgba(p.base.r, p.base.g, p.base.b, 255),',
+             'tint(p.base, TINT_MENU, p),'),
+        ],
+        ["desktop"],
+        [
+        # the accessibility fallback hands translucency back to a user who
+        # reached for it to get rid of translucency; at Off it still reads 255,
+        # so only the Full-end table sees it
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the transparency setting is ignored again, as it was before the fix',
+        BL,
+        [
+            ('u8::try_from(u16::from(preset).saturating_add(lifted).min(255)).unwrap_or(255)',
+             'preset'),
+        ],
+        ["desktop"],
+        [
+        # the original bug restored: weights are absolute, so Transparency=Off
+        # leaves the taskbar 37% see-through. Identity at Full, so the weights
+        # table passes and only the two end-of-scale tests object
+            'transparency_off_leaves_no_blurred_surface_see_through',
+            'less_transparency_is_never_more_see_through',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the tint weights are anchored at Moderate instead of Full',
+        BL,
+        [
+            ('const TINT_ANCHOR: u16 = 160;',
+             'const TINT_ANCHOR: u16 = 200;'),
+        ],
+        ["desktop"],
+        [
+        # both ends of the scale still behave (Off is opaque, Full is the preset)
+        # and the interpolation stays monotone -- the only thing wrong is that
+        # the anchor no longer matches the level the weights were chosen at,
+        # which is exactly the one assertion that compares the two
+            'the_tint_weights_are_written_for_the_full_setting',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the clamp goes, and the interpolation subtracts without saturating',
+        BL,
+        [
+            ('let pa = u16::from(panel_alpha).max(TINT_ANCHOR);',
+             'let pa = u16::from(panel_alpha);'),
+            ('let travelled = pa.saturating_sub(TINT_ANCHOR);',
+             'let travelled = pa - TINT_ANCHOR;'),
+        ],
+        ["desktop"],
+        [
+        # a panel_alpha below the anchor now underflows. Both edits are needed:
+        # the saturating_sub alone would absorb the missing clamp, which is why
+        # the production comment says the clamp is intent and not overflow cover
+            'less_transparency_is_never_more_see_through',
+            'a_panel_alpha_below_the_anchor_is_clamped',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the interpolation divides by 255 rather than by the span it travels',
+        BL,
+        [
+            ('        .checked_div(span)',
+             '        .checked_div(255)'),
+        ],
+        ["desktop"],
+        [
+        # Off now reaches only 195 of 255 for the taskbar, so transparency-off
+        # is still see-through -- an off-by-scale that is invisible at the Full
+        # end, where travelled is zero either way
+            'transparency_off_leaves_no_blurred_surface_see_through',
+            'less_transparency_is_never_more_see_through',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: every tint takes the accent rather than the role it was handed',
+        BL,
+        [
+            ('    Color::rgba(role.r, role.g, role.b, scaled_tint(preset, p.panel_alpha))',
+             '    Color::rgba(p.accent.r, p.accent.g, p.accent.b, scaled_tint(preset, p.panel_alpha))'),
+        ],
+        ["desktop"],
+        [
+        # the whole shell goes accent-coloured, and on a default install that
+        # just looks blue-ish; the accent test is the one that names it
+            'every_preset_tints_with_the_role_it_claims',
+            'no_blur_tint_wears_the_accent',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: every scaled tint goes fully opaque',
+        BL,
+        [
+            ('    Color::rgba(role.r, role.g, role.b, scaled_tint(preset, p.panel_alpha))',
+             '    Color::rgba(role.r, role.g, role.b, 255)'),
+        ],
+        ["desktop"],
+        [
+        # blur stops being translucent at all, at every setting; the Off test
+        # passes precisely because opaque is what Off asks for
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: every preset is scaled with the menu's weight",
+        BL,
+        [
+            ('    Color::rgba(role.r, role.g, role.b, scaled_tint(preset, p.panel_alpha))',
+             '    Color::rgba(role.r, role.g, role.b, scaled_tint(TINT_MENU, p.panel_alpha))'),
+        ],
+        ["desktop"],
+        [
+        # the four weights collapse onto one, which is lesson 23's step function:
+        # the distinctions are gone but every individual value is still legal
+            'the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the taskbar stops blurring heavily',
+        BL,
+        [
+            ('Self::new(24.0, 0.65, tint(p.base, TINT_TASKBAR, p), 1.3, 0.03)',
+             'Self::new(8.0, 0.65, tint(p.base, TINT_TASKBAR, p), 1.3, 0.03)'),
+        ],
+        ["desktop"],
+        [
+        # not a palette defect: asked so the six pre-existing preset tests are
+        # shown to still hold the fields the new tests do not look at
+            'test_preset_taskbar',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the no-blur fallback becomes half-opaque',
+        BL,
+        [
+            ('            0.0,\n            1.0,\n            Color::rgba(p.base.r, p.base.g, p.base.b, 255),',
+             '            0.0,\n            0.5,\n            Color::rgba(p.base.r, p.base.g, p.base.b, 255),'),
+        ],
+        ["desktop"],
+        [
+            'test_preset_none',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the standard surface's blur radius drifts",
+        BL,
+        [
+            ('Self::new(20.0, 0.70, tint(p.base, TINT_STANDARD, p), 1.2, 0.02)',
+             'Self::new(5.0, 0.70, tint(p.base, TINT_STANDARD, p), 1.2, 0.02)'),
+        ],
+        ["desktop"],
+        [
+            'test_default_effect',
         ],
     ),
 ]

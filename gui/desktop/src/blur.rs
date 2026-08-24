@@ -95,8 +95,13 @@ const TINT_ANCHOR: u16 = 160;
 /// that still showed through would mean the setting had not been honoured.
 fn scaled_tint(preset: u8, panel_alpha: u8) -> u8 {
     // A `Palette`'s `panel_alpha` is a public field, so a caller can put a
-    // value below the anchor there. Clamping rather than trusting keeps the
-    // arithmetic below in range without a subtraction that could underflow.
+    // value below the anchor there — more transparency than the shell's own
+    // most-transparent setting offers. The clamp says what that means: the
+    // weights are already written at maximum transparency, so there is nothing
+    // below the anchor to interpolate toward. (The `saturating_sub` below would
+    // also stop it underflowing, but that is a coincidence of the arithmetic
+    // rather than the intent, and a reader should not have to derive the intent
+    // from an overflow rule.)
     let pa = u16::from(panel_alpha).max(TINT_ANCHOR);
     let span = 255_u16.saturating_sub(TINT_ANCHOR);
     let headroom = 255_u16.saturating_sub(u16::from(preset));
@@ -1372,19 +1377,51 @@ mod tests {
     /// A step function collapses distinctions (lesson 23), and a scaling that
     /// rounded four weights onto the same value would still satisfy the two
     /// end-point tests above while quietly making every surface identical.
+    ///
+    /// The expected weights are written out here rather than read from the
+    /// `TINT_*` constants. A table copied out of the code under test agrees
+    /// with whatever that code does, which is the one thing a test must not do
+    /// — and the exact table catches what a pure ordering assertion cannot:
+    /// `standard`'s weight appears in no inequality, because it sits between no
+    /// two others, so an ordering check would let it take any value at all.
     #[test]
-    fn the_presets_keep_their_order_at_full_transparency() {
+    fn the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as() {
         let p = dark();
-        let menu = BlurEffect::menu(&p).tint.a;
-        let title = BlurEffect::title_bar(&p).tint.a;
-        let note = BlurEffect::notification(&p).tint.a;
-        let bar = BlurEffect::taskbar(&p).tint.a;
+        let want: [(&str, u8); 6] = [
+            ("a menu", 100),
+            ("a title bar", 120),
+            ("a notification", 140),
+            ("the standard surface", 140),
+            ("the taskbar", 160),
+            ("the no-blur fallback", 255),
+        ];
+        let got = [
+            ("a menu", BlurEffect::menu(&p).tint.a),
+            ("a title bar", BlurEffect::title_bar(&p).tint.a),
+            ("a notification", BlurEffect::notification(&p).tint.a),
+            ("the standard surface", BlurEffect::standard(&p).tint.a),
+            ("the taskbar", BlurEffect::taskbar(&p).tint.a),
+            ("the no-blur fallback", BlurEffect::none(&p).tint.a),
+        ];
+        for ((name, w), (_, g)) in want.iter().zip(got.iter()) {
+            assert_eq!(
+                g, w,
+                "{name} tints at {g} of 255 at full transparency, not the {w} \
+                 it was designed as"
+            );
+        }
+
+        // Redundant with the table above, and kept for the same reason the
+        // accent test is kept: it states the *rule* the numbers exist to
+        // satisfy, so a future edit that changes all six numbers together
+        // still has to keep chrome heavier than transient surfaces.
+        let (menu, title) = (got[0].1, got[1].1);
+        let (note, bar) = (got[2].1, got[4].1);
         assert!(
             menu < title && title < note && note < bar,
             "the tint hierarchy collapsed: menu {menu}, title {title}, \
              notification {note}, taskbar {bar}"
         );
-        assert_eq!(BlurEffect::none(&p).tint.a, 255);
     }
 
     /// The scaling is monotone: asking for less transparency never yields a

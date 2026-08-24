@@ -50604,7 +50604,7 @@ guarantee, and on Windows the failure mode would be a sharing violation in
 whichever of the two processes lost the race. Wait for `[run-timeout] child
 exited` before running any cargo command against the same target directory.
 
-**Part 2 progress. 46 of 49 modules converted.**
+**Part 2 progress. 47 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -53947,6 +53947,132 @@ exited` before running any cargo command against the same target directory.
       `test_manager_render_preview_visible`, `test_empty_manager_tray_label`),
       one of them solely. The conversion did not make the old suite redundant;
       it filled the gaps around it.
+- [x] `blur.rs` — 3 constants over 6 tint sites, done 2026-08-24. 59 tests in
+  the module (eleven new), harness defects Ax76–Fx77 (thirty-two).
+  - **The headline defect here was not a colour at all: the module whose entire
+    job is transparency ignored the transparency setting.** `BlurEffect`'s five
+    presets each hardcoded a tint alpha (160/120/100/140/140), and nothing
+    anywhere read `TransparencyLevel`. A user who set transparency to **Off**
+    got a taskbar that was still 160/255 tint over a blur — about 37%
+    see-through — which is the one end of the scale that is not a matter of
+    taste: *Off* is a promise that nothing shows through, and it was being
+    broken. The conversion is what surfaced it, because threading a `Palette`
+    into the constructors put `panel_alpha` in scope at exactly the six sites
+    that had been ignoring it.
+  - **The fix anchors the existing weights at the end of the scale they were
+    written for.** The five presets' numbers are a designed hierarchy (a menu
+    tints least, the taskbar most), so they are not wrong — they are the
+    *Full*-transparency row of a table with only one row. `scaled_tint(preset,
+    panel_alpha)` interpolates each weight from its designed value at
+    `TINT_ANCHOR = 160` (`TransparencyLevel::Full`) up to fully opaque at 255
+    (`Off`), which keeps every existing look unchanged at the setting it was
+    drawn for and makes the other three settings mean something. The anchor is
+    named rather than inlined precisely so the "these numbers were written for
+    Full" claim is checkable, and
+    `the_tint_weights_are_written_for_the_full_setting` checks it.
+  - **`impl Default for BlurEffect` was deleted rather than fixed.** `Default`
+    takes no arguments, so it structurally cannot see a palette; any body it
+    could have would return a hardcoded colour, which is the defect this whole
+    task exists to remove. Keeping it and "fixing" it would have left a trait
+    impl *guaranteed* to be wrong in light mode while looking like the blessed
+    way to get a blur. Deleting it turned nine silently-wrong call sites into
+    nine compile errors, each resolved to `BlurEffect::standard(p)` at a point
+    where a palette was already in hand. **A trait whose signature cannot
+    accept the context the correct answer depends on is not a trait to
+    implement.**
+  - **Six preset tests existed and not one of them read `tint`.**
+    `test_preset_taskbar` and its siblings asserted radius, opacity, noise and
+    saturation — every field except the colour. That is the same shape as
+    lesson 24 (a delegate is a site): the tests were not weak, they were
+    *aimed elsewhere*, and a field nothing asserts is a field nothing
+    protects. Three of the thirty-two defects (`Dx77`, `Ex77`, `Fx77`) are
+    non-colour drifts kept in the set purely to confirm those six still work
+    as the guard for the fields they *do* cover.
+  - **`palette_check` grew a value-shaped entry point.** Every previous module
+    fed `assert_drawn_from` a `Vec<RenderCommand>`, but `BlurEffect` never
+    renders — its tint is a struct field consumed by the compositor. Rather
+    than have the tests synthesise fake `RenderCommand`s to be allowed through
+    the door, `assert_colours_from(p, &[(label, colour)], derived, what)` takes
+    the values directly; both entry points now delegate to one `assert_one`, so
+    the membership rule (RGB-only, black at any alpha, the two `readable_on`
+    endpoints) has exactly one definition. Two self-tests were added to
+    `palette_check` itself: one proves a leftover Mocha value fails *and names
+    its site*, one sweeps every role at every alpha through the value path.
+  - **A hole was found by predicting catchers, before the sweep rather than
+    after.** The first version of the weights test was an ordering chain
+    (`menu < title < notification < taskbar`), and `standard`'s weight appears
+    nowhere in it — it sits between no two others, so nothing constrained it at
+    all. **A pure ordering assertion cannot constrain a value that sits between
+    no two others** (lesson 25); the fix was a hand-written exact six-entry
+    table, with the ordering clause kept as a statement of *why* those numbers,
+    not as the check. Defects `Tx76` and `Ux76` exist only because that hole
+    was found.
+  - **Sweep: 32 caught, 0 escaped, 0 never asked, 0 under-caught, 0
+    under-declared** — the second fully clean sweep in a row, on a preflight of
+    `32 build, 0 do not, 0 not applied`, ending `restored: all files match
+    their recorded SHA-256`.
+  - Catcher census (32 defects, 46 catches, **1.44 per defect**):
+
+    | Test | Caught | Sole catcher |
+    |---|---|---|
+    | `every_preset_tints_with_the_role_it_claims` | 16 | 9 |
+    | `the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as` | 9 | 9 |
+    | `every_tint_comes_from_its_palette` | 4 | 0 |
+    | `every_tint_moves_with_the_mode` | 4 | 0 |
+    | `no_blur_tint_wears_the_accent` | 3 | 0 |
+    | `less_transparency_is_never_more_see_through` | 3 | 0 |
+    | `transparency_off_leaves_no_blurred_surface_see_through` | 2 | 0 |
+    | `the_tint_weights_are_written_for_the_full_setting` | 1 | 1 |
+    | `a_panel_alpha_below_the_anchor_is_clamped` | 1 | 0 |
+    | `test_preset_taskbar` | 1 | 1 |
+    | `test_preset_none` | 1 | 1 |
+    | `test_default_effect` | 1 | 1 |
+
+    - **1.44 catches per defect against `input_method`'s 2.44, and that drop is
+      the module's shape rather than a weakness.** Twenty-two of thirty-two
+      defects have exactly one catcher. Every previous module rendered, so a
+      defect passed through a membership test, a mode test, a contrast walk and
+      an ordered table on its way out; `blur` produces no `RenderCommand` at
+      all and has no ink-on-fill pair anywhere, so there is no contrast walk to
+      be redundant with, and its entire observable surface is six struct
+      fields. **Redundancy between tests is a property of how many independent
+      views of the output exist, not of how carefully the tests were written** —
+      a module with one view gets one catch per defect however hard you try.
+      The consequence to carry forward is that a module like this has no margin:
+      a single missing test is a defect class that escapes outright, which is
+      exactly what the pre-sweep hole would have been.
+    - **The exact-table test was the sole catcher on all nine of its catches,
+      and three of those nine would have escaped the ordering chain it
+      replaced.** `Bx77` (every tint opaque) and `Cx77` (every preset scaled
+      with the menu's weight) flatten the hierarchy, so the discarded
+      `menu < title < notification < taskbar` chain would have caught them, as
+      it would `Px76`–`Sx76`. But `Tx76` (the standard surface drifts to 200),
+      `Ux76` (the standard surface goes opaque) and `Vx76` (the no-blur
+      fallback is put through the scaling) touch only values the chain never
+      names, and would have gone out clean. Lesson 25 is therefore not a
+      theoretical hazard — it was worth exactly three escapes on the one module
+      where it was checked before the run rather than after.
+    - **All three pre-existing preset tests earned a catch, each solely.**
+      `test_preset_taskbar`, `test_preset_none` and `test_default_effect` cover
+      radius, opacity and noise — the fields the new colour tests deliberately
+      say nothing about — so `Dx77`, `Ex77` and `Fx77` have exactly one catcher
+      each and it is the old one. The eleven new tests did not subsume the old
+      six; the two sets partition the struct, and the sweep shows the partition
+      has no gap in it. `test_default_effect` survives the deletion of `impl
+      Default` because it was rewritten around `BlurEffect::standard(p)` —
+      keeping the test while removing the trait is what turned an unfixable
+      API into a fixed one without losing its coverage.
+    - **`every_preset_tints_with_the_role_it_claims` caught half the set (16 of
+      32) and nine of them solely,** which makes it by a wide margin the most
+      load-bearing test in the module. That is the expected shape for a
+      six-row hand-written role table checked against six constructors: it is
+      the only test that knows *which* role belongs to *which* preset, so every
+      substitution and every transposition lands on it and on nothing else.
+      Note the contrast with modules 42–45, where a hand-written table caught
+      nothing: those tables paired an ink with a fill and asserted a *contrast*,
+      which is a fact about the palette. This one asserts an *identity* —
+      "the taskbar's tint is `base`" — which is a fact about the module, and a
+      fact about the module is the only kind a test of the module can falsify.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

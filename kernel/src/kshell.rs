@@ -10514,6 +10514,54 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "a command that worked reports success");
     }
 
+    serial_println!("  kshell::self_test 21: a checker's verdict lives in its status");
+    // The fourth shape, and the one with the highest stakes: a command whose
+    // *entire purpose* is to return a verdict, printing "FAILED" and reporting
+    // success. These are the commands that end up in boot scripts and health
+    // checks -- the one place where the status is the only thing read.
+    //
+    // The failing side cannot be exercised from a healthy kernel: `syshealth`
+    // only says ISSUES DETECTED when the heap really is corrupt. That is
+    // exactly why the bug survived so long, so what is asserted here is the
+    // passing side (a checker that passes must still report 0 -- otherwise a
+    // blanket `set_exit(1)` would "fix" the bug and break every caller) plus
+    // the failure this rung *can* force: a category that checks nothing.
+    {
+        let out = capture_command("syshealth");
+        assert!(
+            out.starts_with(b"=== Active System Health Check ==="),
+            "`syshealth` ran its checks"
+        );
+        assert_eq!(last_exit(), 0, "a checker that passed reports success");
+
+        let out = capture_command("invariant");
+        assert!(
+            out.starts_with(b"=== Kernel Invariant Check "),
+            "`invariant` ran every category"
+        );
+        assert_eq!(last_exit(), 0, "all invariants hold on a healthy kernel");
+
+        // A misspelled category checks nothing, and nothing checked is not a
+        // clean bill of health.
+        let out = capture_command("invariant zzz_no_such_category");
+        assert!(
+            out.starts_with(b"No invariants found for category "),
+            "an unknown category is reported"
+        );
+        assert_eq!(last_exit(), 1, "a check that checked nothing did not pass");
+
+        // The other half of the rule: `diag` is a dashboard, and a dashboard
+        // that finds problems still succeeded at displaying them. This guards
+        // the distinction from being flattened in either direction.
+        let out = capture_command("diag");
+        assert!(!out.is_empty(), "`diag` printed its dashboard");
+        assert_eq!(
+            last_exit(),
+            0,
+            "a dashboard reports on the display, not the news"
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -13426,6 +13474,12 @@ fn cmd_dedup(args: &str) {
         );
         if delete_errors > 0 {
             shell_println!("  {} files could not be deleted.", delete_errors);
+            // The per-file arm above only counts; the count is the verdict.
+            // `dedup --delete` was asked to reclaim space and partly did not,
+            // so a script that reruns or alerts on failure has to be able to
+            // see that. Reporting success here means "every duplicate is gone"
+            // -- a claim this run just disproved on its own output.
+            set_exit(1);
         }
     } else if !delete_mode {
         shell_println!("(dry-run: no files deleted. Use --delete to remove duplicates.)");
@@ -40992,6 +41046,9 @@ fn cmd_sysdiag(args: &str) {
             if issues.is_empty() {
                 shell_println!("System health: OK — no issues detected");
             } else {
+                // No `set_exit(1)`: `diag` is a dashboard, not a checker. See
+                // the longer note on the same decision in `cmd_diag`'s overall
+                // assessment.
                 shell_println!("System health: {} issue(s)", issues.len());
                 for issue in &issues {
                     let sev = issue.severity.label();
@@ -107843,6 +107900,16 @@ fn cmd_diag() {
             "  Overall: {} issue(s) detected — investigate above warnings",
             issues
         );
+        // Deliberately no `set_exit(1)`, unlike `syshealth` and `invariant`
+        // which do set one on their failing verdict. This is a *dashboard*, not
+        // a checker: it reads passive counters and renders them, the way `top`
+        // and `vmstat` do, and those exit 0 whether the machine is idle or on
+        // fire. A checker runs tests and its verdict is the answer; a dashboard
+        // displays state and the display succeeding is the answer.
+        //
+        // The distinction is not invented here -- `cmd_syshealth`'s own doc
+        // comment draws it: "Unlike 'diag' (which reads passive counters), this
+        // command actively tests kernel subsystem integrity."
     }
 }
 
@@ -108379,6 +108446,18 @@ fn cmd_syshealth() {
         shell_println!("  System: ALL CHECKS PASSED");
     } else {
         shell_println!("  System: ISSUES DETECTED — investigate failures above");
+        // A checker's verdict belongs in its status, because the status is the
+        // only channel a script can read. `syshealth` is the `fsck` kind of
+        // command, not the `top` kind: it *runs* seven tests and the answer is
+        // pass or fail. Without this, a boot script's `syshealth || rescue`
+        // takes the healthy branch on a kernel with a corrupted heap -- the one
+        // case the check exists to catch.
+        //
+        // Note the fix is here and not at each `[FAIL]` row above. Those rows
+        // are a report; this line is the verdict, and a report row must not
+        // decide the command's status (see `vlan stats`, which is nothing but
+        // rows and one of which says "Unknown drops").
+        set_exit(1);
     }
 }
 
@@ -117679,6 +117758,10 @@ fn cmd_invariant(args: &str) {
     if results.total == 0 {
         shell_println!("No invariants found for category '{}'", category);
         shell_println!("Available: mm, sched, kernel, ipc, cap");
+        // A misspelled category checked *nothing* and must not look like a
+        // clean bill of health. `invariant mem || alert` (the category is
+        // `mm`) would otherwise pass silently forever.
+        set_exit(1);
         return;
     }
 
@@ -117705,6 +117788,12 @@ fn cmd_invariant(args: &str) {
         shell_println!("All {} invariants PASSED", results.total);
     } else {
         shell_println!("{} PASSED, {} FAILED", results.passed, results.failed);
+        // Same reason as `syshealth`: a command whose whole purpose is to
+        // return a verdict must put the verdict where a script can read it.
+        // This one printed the word FAILED and then told the caller it had
+        // succeeded, which is worse than not existing -- a missing command at
+        // least fails.
+        set_exit(1);
     }
 }
 

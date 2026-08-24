@@ -15,7 +15,6 @@
 
 userspace/coreutils/examples/extfloat-probe.rs:argv-as-string
 userspace/coreutils/src/bin/cal.rs:argv-as-string
-userspace/coreutils/src/bin/cmp.rs:argv-as-string
 userspace/coreutils/src/bin/dd.rs:argv-as-string
 userspace/coreutils/src/bin/df.rs:argv-as-string
 userspace/coreutils/src/bin/diff.rs:argv-as-string
@@ -37,7 +36,6 @@ userspace/coreutils/src/bin/sh.rs:argv-as-string
 userspace/coreutils/src/bin/sh.rs:env-as-string
 userspace/coreutils/src/bin/sha256sum.rs:argv-as-string
 userspace/coreutils/src/bin/sleep.rs:argv-as-string
-userspace/coreutils/src/bin/stat.rs:argv-as-string
 userspace/coreutils/src/bin/strings.rs:argv-as-string
 userspace/coreutils/src/bin/tar.rs:argv-as-string
 userspace/coreutils/src/bin/tee.rs:argv-as-string

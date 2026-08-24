@@ -109,6 +109,9 @@ SCRCAP = "gui/desktop/src/screen_capture.rs"
 SNAP = "gui/desktop/src/snap.rs"
 DISP = "gui/desktop/src/display_settings.rs"
 A11Y = "gui/desktop/src/accessibility_settings.rs"
+FOCUS = "gui/desktop/src/focus_assist.rs"
+PEEK = "gui/desktop/src/window_peek.rs"
+ABOUT = "gui/desktop/src/about.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -16940,9 +16943,2194 @@ DEFECTS = [
             'green_means_on_and_the_accent_means_chosen',
         ],
     ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the tray icon keeps its own Mocha base',
+        FOCUS,
+        [
+            ('            color: readable_on(color),',
+             '            color: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_tray_icon_is_inked_for_its_own_pill',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the title keeps its own Mocha text',
+        FOCUS,
+        [
+            ('            text: "Focus Assist".to_string(),\n            font_size: 18.0,\n            color: p.text,',
+             '            text: "Focus Assist".to_string(),\n            font_size: 18.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the engaged Current line keeps its own Mocha blue',
+        FOCUS,
+        [
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
+             '            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                Color::from_hex(0x89B4FA)\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_current_line_is_quiet_when_off_and_never_the_accent',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the quiet Current line keeps its own Mocha subtext0',
+        FOCUS,
+        [
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
+             '            color: if mode == FocusMode::Off {\n                Color::from_hex(0xA6ADC8)\n            } else {\n                p.blue\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_current_line_is_quiet_when_off_and_never_the_accent',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the suppressed-count line keeps its own Mocha overlay0',
+        FOCUS,
+        [
+            ('                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.overlay0,',
+             '                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the chosen row's background keeps its own Mocha surface0",
+        FOCUS,
+        [
+            ('            let bg = if selected { p.surface0 } else { p.mantle };',
+             '            let bg = if selected { Color::from_hex(0x313244) } else { p.mantle };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the unchosen rows' background keeps its own Mocha mantle",
+        FOCUS,
+        [
+            ('            let bg = if selected { p.surface0 } else { p.mantle };',
+             '            let bg = if selected { p.surface0 } else { Color::from_hex(0x181825) };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the unchosen rows' icon keeps its own Mocha subtext0",
+        FOCUS,
+        [
+            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
+             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { Color::from_hex(0xA6ADC8) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the chosen row's label keeps its own Mocha text",
+        FOCUS,
+        [
+            ('                font_size: 13.0,\n                color: if selected { p.text } else { p.subtext0 },',
+             '                font_size: 13.0,\n                color: if selected { Color::from_hex(0xCDD6F4) } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a row's description keeps its own Mocha overlay0",
+        FOCUS,
+        [
+            ('                text: m.description().to_string(),\n                font_size: 10.0,\n                color: p.overlay0,',
+             '                text: m.description().to_string(),\n                font_size: 10.0,\n                color: Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Automatic Rules heading keeps its own Mocha text',
+        FOCUS,
+        [
+            ('            text: "Automatic Rules".to_string(),\n            font_size: 14.0,\n            color: p.text,',
+             '            text: "Automatic Rules".to_string(),\n            font_size: 14.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the empty-state line keeps its own Mocha overlay0',
+        FOCUS,
+        [
+            ('                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.overlay0,',
+             '                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a rule's row keeps its own Mocha surface0",
+        FOCUS,
+        [
+            ('                    height: 28.0,\n                    color: p.surface0,',
+             '                    height: 28.0,\n                    color: Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: a rule's label keeps its own Mocha text",
+        FOCUS,
+        [
+            ('                    text: rule.label(),\n                    font_size: 12.0,\n                    color: p.text,',
+             '                    text: rule.label(),\n                    font_size: 12.0,\n                    color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a rule's mode keeps its own Mocha overlay0",
+        FOCUS,
+        [
+            ('                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+             '                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the mild-silence hue keeps its own Mocha blue',
+        FOCUS,
+        [
+            ('            Self::PriorityOnly => Some(p.blue),',
+             '            Self::PriorityOnly => Some(Color::from_hex(0x89B4FA)),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the alarms-only hue keeps its own Mocha yellow',
+        FOCUS,
+        [
+            ('            Self::AlarmsOnly => Some(p.yellow),',
+             '            Self::AlarmsOnly => Some(Color::from_hex(0xF9E2AF)),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the total-silence hue keeps its own Mocha red',
+        FOCUS,
+        [
+            ('            Self::TotalSilence => Some(p.red),',
+             '            Self::TotalSilence => Some(Color::from_hex(0xF38BA8)),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the tray icon is body text rather than the legible answer',
+        FOCUS,
+        [
+            ('            color: readable_on(color),',
+             '            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_tray_icon_is_inked_for_its_own_pill',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the tray icon is the panel colour, which is right in Mocha by luck',
+        FOCUS,
+        [
+            ('            color: readable_on(color),',
+             '            color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_tray_icon_is_inked_for_its_own_pill',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the tray icon is read off the accent instead of off the pill',
+        FOCUS,
+        [
+            ('            color: readable_on(color),',
+             '            color: readable_on(p.accent),'),
+        ],
+        ["desktop"],
+        # Not the mode-change sweep, though the ink is now a constant function
+        # of the accent: that test wears Mauve, whose Mocha and Latte values
+        # sit on opposite sides of readable_on's step, so the ink still differs
+        # between the two renders -- for the wrong reason, which is precisely
+        # what a "did anything change?" test cannot tell apart from the right
+        # one.
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_tray_icon_is_inked_for_its_own_pill',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the tray icon is read off the panel instead of off the pill',
+        FOCUS,
+        [
+            ('            color: readable_on(color),',
+             '            color: readable_on(p.base),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_tray_icon_is_inked_for_its_own_pill',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the title drops to the quiet rung',
+        FOCUS,
+        [
+            ('            text: "Focus Assist".to_string(),\n            font_size: 18.0,\n            color: p.text,',
+             '            text: "Focus Assist".to_string(),\n            font_size: 18.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the engaged Current line follows the accent',
+        FOCUS,
+        [
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
+             '            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.accent\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_current_line_is_quiet_when_off_and_never_the_accent',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the chosen row's icon is blue again, as it was before the split",
+        FOCUS,
+        [
+            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
+             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.blue } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the chosen row's icon is body text and marks nothing",
+        FOCUS,
+        [
+            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
+             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.text } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the unchosen rows' label is as loud as the chosen one's",
+        FOCUS,
+        [
+            ('                font_size: 13.0,\n                color: if selected { p.text } else { p.subtext0 },',
+             '                font_size: 13.0,\n                color: if selected { p.text } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the chosen row's label is as quiet as the unchosen ones'",
+        FOCUS,
+        [
+            ('                font_size: 13.0,\n                color: if selected { p.text } else { p.subtext0 },',
+             '                font_size: 13.0,\n                color: if selected { p.subtext0 } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a row's description climbs above its rung",
+        FOCUS,
+        [
+            ('                text: m.description().to_string(),\n                font_size: 10.0,\n                color: p.overlay0,',
+             '                text: m.description().to_string(),\n                font_size: 10.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the suppressed-count line is as loud as the title',
+        FOCUS,
+        [
+            ('                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.overlay0,',
+             '                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_suppressed_line_is_overlay_and_only_drawn_when_there_is_one',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the Automatic Rules heading stops being a heading',
+        FOCUS,
+        [
+            ('            text: "Automatic Rules".to_string(),\n            font_size: 14.0,\n            color: p.text,',
+             '            text: "Automatic Rules".to_string(),\n            font_size: 14.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: a rule's label sinks to the faintest rung",
+        FOCUS,
+        [
+            ('                    text: rule.label(),\n                    font_size: 12.0,\n                    color: p.text,',
+             '                    text: rule.label(),\n                    font_size: 12.0,\n                    color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a rule's mode is as loud as its label",
+        FOCUS,
+        [
+            ('                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+             '                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a rule's row sinks to the page behind it",
+        FOCUS,
+        [
+            ('                    height: 28.0,\n                    color: p.surface0,',
+             '                    height: 28.0,\n                    color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the unchosen rows are lifted to the chosen one's rung",
+        FOCUS,
+        [
+            ('            let bg = if selected { p.surface0 } else { p.mantle };',
+             '            let bg = if selected { p.surface0 } else { p.surface0 };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the chosen row sinks to the unchosen ones' rung",
+        FOCUS,
+        [
+            ('            let bg = if selected { p.surface0 } else { p.mantle };',
+             '            let bg = if selected { p.mantle } else { p.mantle };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the empty-state line is as loud as the heading above it',
+        FOCUS,
+        [
+            ('                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.overlay0,',
+             '                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the mild-silence hue drifts to a neighbouring colour',
+        FOCUS,
+        [
+            ('            Self::PriorityOnly => Some(p.blue),',
+             '            Self::PriorityOnly => Some(p.lavender),'),
+        ],
+        ["desktop"],
+        [
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: all three mode hues follow the accent, so the scale says nothing',
+        FOCUS,
+        [
+            ('            Self::PriorityOnly => Some(p.blue),',
+             '            Self::PriorityOnly => Some(p.accent),'),
+            ('            Self::AlarmsOnly => Some(p.yellow),',
+             '            Self::AlarmsOnly => Some(p.accent),'),
+            ('            Self::TotalSilence => Some(p.red),',
+             '            Self::TotalSilence => Some(p.accent),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'settings_render_not_empty',
+            'settings_render_with_rules',
+            'the_current_line_is_quiet_when_off_and_never_the_accent',
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+            'the_suppressed_line_is_overlay_and_only_drawn_when_there_is_one',
+            'the_tray_icon_is_inked_for_its_own_pill',
+            'tray_indicator_hidden_when_off',
+            'tray_indicator_shown_when_active',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the alarms-only and total-silence hues are swapped',
+        FOCUS,
+        [
+            ('            Self::AlarmsOnly => Some(p.yellow),',
+             '            Self::AlarmsOnly => Some(p.red),'),
+            ('            Self::TotalSilence => Some(p.red),',
+             '            Self::TotalSilence => Some(p.yellow),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: two modes share a rung of the severity scale',
+        FOCUS,
+        [
+            ('            Self::AlarmsOnly => Some(p.yellow),',
+             '            Self::AlarmsOnly => Some(p.blue),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: Off is given a hue, so the tray shows an indicator for no focus at all',
+        FOCUS,
+        [
+            ('            Self::Off => None,',
+             '            Self::Off => Some(p.overlay0),'),
+        ],
+        ["desktop"],
+        [
+            'the_mode_hues_are_a_severity_code_and_never_the_accent',
+            'tray_indicator_hidden_when_off',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a row's icon and label colours are traded",
+        FOCUS,
+        [
+            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
+             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.text } else { p.subtext0 },'),
+            ('                font_size: 13.0,\n                color: if selected { p.text } else { p.subtext0 },',
+             '                font_size: 13.0,\n                color: if selected { p.accent } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the Current line's engaged and quiet branches are swapped",
+        FOCUS,
+        [
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
+             '            color: if mode == FocusMode::Off {\n                p.blue\n            } else {\n                p.subtext0\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_current_line_is_quiet_when_off_and_never_the_accent',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the row background's chosen and unchosen branches are swapped",
+        FOCUS,
+        [
+            ('            let bg = if selected { p.surface0 } else { p.mantle };',
+             '            let bg = if selected { p.mantle } else { p.surface0 };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the row icon's chosen and unchosen branches are swapped",
+        FOCUS,
+        [
+            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
+             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.subtext0 } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the picker offers its modes in a different order than FocusMode::ALL',
+        FOCUS,
+        [
+            ('    pub const ALL: [Self; 4] = [\n        Self::Off,\n        Self::PriorityOnly,',
+             '    pub const ALL: [Self; 4] = [\n        Self::PriorityOnly,\n        Self::Off,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the settings page rebuilds the palette from the mode and loses the accent',
+        FOCUS,
+        [
+            ('    pub fn render_settings(&self, p: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {\n        let mut commands = Vec::new();',
+             '    pub fn render_settings(&self, p: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {\n        let p = &Palette::for_mode(p.light);\n        let mut commands = Vec::new();'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the tray is handed a palette of its own instead of the caller's",
+        FOCUS,
+        [
+            ('    pub fn render_tray_indicator(&self, p: &Palette, x: f32, y: f32) -> Vec<RenderCommand> {\n        let mut commands = Vec::new();',
+             '    pub fn render_tray_indicator(&self, p: &Palette, x: f32, y: f32) -> Vec<RenderCommand> {\n        let p = &Palette::for_mode(false);\n        let mut commands = Vec::new();'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'every_site_changes_when_the_mode_does',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_tray_icon_is_inked_for_its_own_pill',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: every row reads as the chosen one',
+        FOCUS,
+        [
+            ('            let selected = self.manual_mode == *m;',
+             '            let selected = self.manual_mode == *m || true;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: no row ever reads as chosen',
+        FOCUS,
+        [
+            ('            let selected = self.manual_mode == *m;',
+             '            let selected = self.manual_mode == *m && false;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_marks_the_chosen_row_with_the_accent',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the suppressed-count line is drawn when nothing was suppressed',
+        FOCUS,
+        [
+            ('        if self.is_active() && self.suppressed_count > 0 {',
+             '        if self.is_active() || self.suppressed_count == 0 {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_suppressed_line_is_overlay_and_only_drawn_when_there_is_one',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the popup background is still Mocha BASE',
+        PEEK,
+        [
+            ('        let bg = p.base;',
+             '        let bg = Color::from_hex(0x1E1E2E);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the popup border is still Mocha SURFACE2',
+        PEEK,
+        [
+            ('        let border = p.surface2;',
+             '        let border = Color::from_hex(0x585B70);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+            'only_the_focused_thumbnail_wears_the_accent',
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the hover wash is still Mocha SURFACE0',
+        PEEK,
+        [
+            ('            let wash = p.surface0;',
+             '            let wash = Color::from_hex(0x313244);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the minimized placeholder is still Mocha SURFACE0',
+        PEEK,
+        [
+            ('        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };',
+             '        let content_color = if snap.is_minimized {\n            Color::from_hex(0x313244)\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the unsampled placeholder is still Mocha SURFACE1',
+        PEEK,
+        [
+            ('        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };',
+             '        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(Color::from_hex(0x45475A))\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+            'an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the focus ring is still the Mocha BLUE it was hard-coded to',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            Color::from_hex(0x89B4FA)\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+            'only_the_focused_thumbnail_wears_the_accent',
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the hover ring is still Mocha OVERLAY0',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            Color::from_hex(0x6C7086)\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+            'only_the_focused_thumbnail_wears_the_accent',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the resting ring is still Mocha SURFACE2',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            Color::from_hex(0x585B70)\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+            'only_the_focused_thumbnail_wears_the_accent',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the Minimized legend is still Mocha SUBTEXT0',
+        PEEK,
+        [
+            ('                color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, a),',
+             '                color: Color::rgba(0xA6, 0xAD, 0xC8, a),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the window title is still Mocha TEXT',
+        PEEK,
+        [
+            ('            color: Color::rgba(p.text.r, p.text.g, p.text.b, a),',
+             '            color: Color::rgba(0xCD, 0xD6, 0xF4, a),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the hovered close button is still Mocha RED',
+        PEEK,
+        [
+            ('            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                p.surface2\n            };',
+             '            let close_bg = if self.close_hovered {\n                Color::from_hex(0xF38BA8)\n            } else {\n                p.surface2\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the resting close button is still Mocha SURFACE2',
+        PEEK,
+        [
+            ('            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                p.surface2\n            };',
+             '            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                Color::from_hex(0x585B70)\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the close X is still inked with Mocha TEXT, which is the original bug',
+        PEEK,
+        [
+            ('            let ink = readable_on(close_bg);',
+             '            let ink = Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_module_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_manager_renders_with_the_palette_it_was_given',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the popup background reads mantle instead of base',
+        PEEK,
+        [
+            ('        let bg = p.base;',
+             '        let bg = p.mantle;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the popup border reads overlay0 instead of surface2',
+        PEEK,
+        [
+            ('        let border = p.surface2;',
+             '        let border = p.overlay0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the hover wash reads surface1, the same value the thumbnail fill uses',
+        PEEK,
+        [
+            ('            let wash = p.surface0;',
+             '            let wash = p.surface1;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a minimized window gets the unsampled placeholder, so the two read alike',
+        PEEK,
+        [
+            ('        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };',
+             '        let content_color = if snap.is_minimized {\n            p.surface1\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_minimized_window_ignores_whatever_was_sampled_from_it',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: an unsampled window gets the minimized placeholder, so the two read alike',
+        PEEK,
+        [
+            ('        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };',
+             '        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface0)\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the focus ring reads blue, so the accent was never actually wired up',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.blue\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the hover ring reads surface2, so hovering a thumbnail shows nothing',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.surface2\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the resting ring reads overlay0, so every thumbnail looks hovered',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.overlay0\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the Minimized legend reads text, so the aside is as loud as the title',
+        PEEK,
+        [
+            ('                color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, a),',
+             '                color: Color::rgba(p.text.r, p.text.g, p.text.b, a),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the window title reads subtext0, so the title is quieter than the aside',
+        PEEK,
+        [
+            ('            color: Color::rgba(p.text.r, p.text.g, p.text.b, a),',
+             '            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, a),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the hovered close button reads peach, which is a warning and not a danger',
+        PEEK,
+        [
+            ('            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                p.surface2\n            };',
+             '            let close_bg = if self.close_hovered {\n                p.peach\n            } else {\n                p.surface2\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the resting close button reads surface1 instead of surface2',
+        PEEK,
+        [
+            ('            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                p.surface2\n            };',
+             '            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                p.surface1\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the close X reads text instead of being inked for its own button',
+        PEEK,
+        [
+            ('            let ink = readable_on(close_bg);',
+             '            let ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a minimized window still draws the colour that was sampled before it went',
+        PEEK,
+        [
+            ('        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };',
+             '        let content_color = snap.dominant_color.unwrap_or(p.surface1);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_minimized_window_ignores_whatever_was_sampled_from_it',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the sampled colour is thrown away, so every window shows the placeholder',
+        PEEK,
+        [
+            ('        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };',
+             '        let content_color = p.surface1;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not',
+            # Collapsing the whole conditional takes the minimized arm with it,
+            # so the placeholder this test pins becomes SURFACE1 as well.
+            'a_minimized_window_ignores_whatever_was_sampled_from_it',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the minimized and unsampled placeholders are swapped',
+        PEEK,
+        [
+            ('        let content_color = if snap.is_minimized {\n            p.surface0\n        } else {\n            snap.dominant_color.unwrap_or(p.surface1)\n        };',
+             '        let content_color = if snap.is_minimized {\n            snap.dominant_color.unwrap_or(p.surface1)\n        } else {\n            p.surface0\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_minimized_window_ignores_whatever_was_sampled_from_it',
+            'an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: hover outranks focus, so pointing at the focused window unfocuses it',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if is_hovered {\n            p.overlay0\n        } else if snap.is_focused {\n            p.accent\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the focus test is inverted, so every window but the focused one is ringed',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if !snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the hover wash is painted under every thumbnail, hovered or not',
+        PEEK,
+        [
+            ('        // Hover highlight background\n        if is_hovered {',
+             '        // Hover highlight background\n        if true {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the hover wash is never painted, so hovering a thumbnail is invisible',
+        PEEK,
+        [
+            ('        // Hover highlight background\n        if is_hovered {',
+             '        // Hover highlight background\n        if false {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: every thumbnail gets a close button, not just the one under the pointer',
+        PEEK,
+        [
+            ('        if is_hovered && self.config.show_close_buttons {',
+             '        if self.config.show_close_buttons {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+            'an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: no thumbnail gets a close button',
+        PEEK,
+        [
+            ('        if is_hovered && self.config.show_close_buttons {',
+             '        if is_hovered && false {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+            'test_popup_render_with_hovered_thumbnail',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the Minimized legend is drawn on every window except the minimized one',
+        PEEK,
+        [
+            ('        // Minimized indicator\n        if snap.is_minimized {',
+             '        // Minimized indicator\n        if !snap.is_minimized {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not',
+            'test_popup_render_minimized_window',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: hovering one thumbnail marks them all as hovered',
+        PEEK,
+        [
+            ('            let is_hovered = self.hovered_slot == Some(i);',
+             '            let is_hovered = self.hovered_slot.is_some();'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+            'only_the_focused_thumbnail_wears_the_accent',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the manager renders with a palette of its own instead of the caller\'s',
+        PEEK,
+        [
+            ('        self.popup.render(p)',
+             '        self.popup.render(&Palette::for_mode(false))'),
+        ],
+        ["desktop"],
+        [
+            'the_manager_renders_with_the_palette_it_was_given',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the close X is inked for the popup background rather than for the button',
+        PEEK,
+        [
+            ('            let ink = readable_on(close_bg);',
+             '            let ink = readable_on(p.base);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the close X is hard-coded to the pale readable_on endpoint',
+        PEEK,
+        [
+            ('            let ink = readable_on(close_bg);',
+             '            let ink = Color::from_hex(0xEFF1F5);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the close X is hard-coded to the near-black readable_on endpoint',
+        PEEK,
+        [
+            ('            let ink = readable_on(close_bg);',
+             '            let ink = Color::from_hex(0x11111B);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the title is drawn in the window\'s own colour instead of the text role',
+        PEEK,
+        [
+            ('            color: Color::rgba(p.text.r, p.text.g, p.text.b, a),',
+             '            color: Color::rgba(content_color.r, content_color.g, content_color.b, a),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the popup\'s background and its border are swapped',
+        PEEK,
+        [
+            ('        let bg = p.base;',
+             '        let bg = p.surface2;'),
+            ('        let border = p.surface2;',
+             '        let border = p.base;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the focus ring wears the accent\'s ink rather than the accent',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.on_accent()\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+            'a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the hover ring and the resting ring are swapped',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.surface2\n        } else {\n            p.overlay0\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the Minimized legend wears the accent, so an aside claims to be a choice',
+        PEEK,
+        [
+            ('                color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, a),',
+             '                color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, a),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the hover wash wears the accent, so hovering looks like selecting',
+        PEEK,
+        [
+            ('            let wash = p.surface0;',
+             '            let wash = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: readable_on is applied twice, which inverts the ink it just chose',
+        PEEK,
+        [
+            ('            let ink = readable_on(close_bg);',
+             '            let ink = readable_on(readable_on(close_bg));'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the close X is drawn in the button\'s own colour, so it is invisible',
+        PEEK,
+        [
+            ('            let line_color = Color::rgba(ink.r, ink.g, ink.b, a);',
+             '            let line_color = Color::rgba(close_bg.r, close_bg.g, close_bg.b, a);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the close button never notices the pointer is on it',
+        PEEK,
+        [
+            ('            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                p.surface2\n            };',
+             '            let close_bg = if false {\n                p.red\n            } else {\n                p.surface2\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the close button always looks as though the pointer is on it',
+        PEEK,
+        [
+            ('            let close_bg = if self.close_hovered {\n                p.red\n            } else {\n                p.surface2\n            };',
+             '            let close_bg = if true {\n                p.red\n            } else {\n                p.surface2\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_close_button_x_is_legible_on_the_button_it_marks',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the resting ring wears the accent, so every window claims to be focused',
+        PEEK,
+        [
+            ('        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.surface2\n        };',
+             '        let border_color = if snap.is_focused {\n            p.accent\n        } else if is_hovered {\n            p.overlay0\n        } else {\n            p.accent\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_focused_thumbnail_wears_the_accent',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the dialog background is still Mocha BASE',
+        ABOUT,
+        [
+            ('        let bg = p.base;',
+             '        let bg = guitk::color::Color::from_hex(0x1E1E2E);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the dialog border is still Mocha SURFACE1',
+        ABOUT,
+        [
+            ('        let border = p.surface1;',
+             '        let border = guitk::color::Color::from_hex(0x45475A);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the title is still lettered in Mocha TEXT',
+        ABOUT,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = guitk::color::Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the chosen tab's fill is still Mocha SURFACE1",
+        ABOUT,
+        [
+            ('        let tab_fill = p.surface1;',
+             '        let tab_fill = guitk::color::Color::from_hex(0x45475A);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the logo tile is still Mocha BLUE',
+        ABOUT,
+        [
+            ('        let logo = p.blue;',
+             '        let logo = guitk::color::Color::from_hex(0x89B4FA);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the version line is still Mocha TEXT',
+        ABOUT,
+        [
+            ('        let version_ink = p.text;',
+             '        let version_ink = guitk::color::Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the build date is still Mocha SUBTEXT0',
+        ABOUT,
+        [
+            ('        let built_ink = p.subtext0;',
+             '        let built_ink = guitk::color::Color::from_hex(0xA6ADC8);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the tagline is still Mocha OVERLAY0',
+        ABOUT,
+        [
+            ('        let tagline_ink = p.overlay0;',
+             '        let tagline_ink = guitk::color::Color::from_hex(0x6C7086);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the Hardware heading is still Mocha TEXT',
+        ABOUT,
+        [
+            ('        let hardware_heading = p.text;',
+             '        let hardware_heading = guitk::color::Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the Software heading is still Mocha TEXT',
+        ABOUT,
+        [
+            ('        let software_heading = p.text;',
+             '        let software_heading = guitk::color::Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Licenses heading is still Mocha TEXT',
+        ABOUT,
+        [
+            ('        let licenses_heading = p.text;',
+             '        let licenses_heading = guitk::color::Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a licence's header bar is still Mocha SURFACE0",
+        ABOUT,
+        [
+            ('        let name_bg = p.surface0;',
+             '        let name_bg = guitk::color::Color::from_hex(0x313244);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a licence's name is still Mocha LAVENDER",
+        ABOUT,
+        [
+            ('        let name_ink = p.lavender;',
+             '        let name_ink = guitk::color::Color::from_hex(0xB4BEFE);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: a licence's body is still Mocha SUBTEXT0",
+        ABOUT,
+        [
+            ('        let body_ink = p.subtext0;',
+             '        let body_ink = guitk::color::Color::from_hex(0xA6ADC8);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a property row's label is still Mocha SUBTEXT0",
+        ABOUT,
+        [
+            ('    let label_ink = p.subtext0;',
+             '    let label_ink = guitk::color::Color::from_hex(0xA6ADC8);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a property row's value is still Mocha TEXT",
+        ABOUT,
+        [
+            ('    let value_ink = p.text;',
+             '    let value_ink = guitk::color::Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the wordmark is back to the hard-coded Mocha MANTLE that made it unreadable in Latte',
+        ABOUT,
+        [
+            ('        let wordmark = readable_on(logo);',
+             '        let wordmark = guitk::color::Color::from_hex(0x181825);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_wordmark_is_legible_on_the_logo_tile',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the chosen tab's label is still the Mocha BLUE it was hard-coded to",
+        ABOUT,
+        [
+            ('            let label = if is_active { p.accent } else { p.subtext0 };',
+             '            let label = if is_active { guitk::color::Color::from_hex(0x89B4FA) } else { p.subtext0 };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the unchosen tabs are still lettered in Mocha SUBTEXT0',
+        ABOUT,
+        [
+            ('            let label = if is_active { p.accent } else { p.subtext0 };',
+             '            let label = if is_active { p.accent } else { guitk::color::Color::from_hex(0xA6ADC8) };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the empty-licence line is still Mocha SUBTEXT0 — a site only the empty fixture renders',
+        ABOUT,
+        [
+            ('        let empty_ink = p.subtext0;',
+             '        let empty_ink = guitk::color::Color::from_hex(0xA6ADC8);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_empty_licence_list_is_drawn_from_the_palette',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the dialog is filled with MANTLE, so it does not sit above the desktop',
+        ABOUT,
+        [
+            ('        let bg = p.base;',
+             '        let bg = p.mantle;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the dialog border is a rung too loud',
+        ABOUT,
+        [
+            ('        let border = p.surface1;',
+             '        let border = p.surface2;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the dialog's own title is as quiet as a property label",
+        ABOUT,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the chosen tab is filled a rung too quietly to read as chosen',
+        ABOUT,
+        [
+            ('        let tab_fill = p.surface1;',
+             '        let tab_fill = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the chosen tab's fill takes the logo's colour, so the strip competes with the branding",
+        ABOUT,
+        [
+            ('        let tab_fill = p.surface1;',
+             '        let tab_fill = p.blue;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the chosen tab stops being marked as chosen at all',
+        ABOUT,
+        [
+            ('            let label = if is_active { p.accent } else { p.subtext0 };',
+             '            let label = if is_active { p.text } else { p.subtext0 };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: every tab is lettered as loudly as the chosen one',
+        ABOUT,
+        [
+            ('            let label = if is_active { p.accent } else { p.subtext0 };',
+             '            let label = if is_active { p.accent } else { p.text };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the tab strip is inverted, so the three tabs you are not on look chosen',
+        ABOUT,
+        [
+            ('            let label = if is_active { p.accent } else { p.subtext0 };',
+             '            let label = if is_active { p.subtext0 } else { p.accent };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the logo tile follows the user's accent, so the product's mark changes with a preference",
+        ABOUT,
+        [
+            ('        let logo = p.blue;',
+             '        let logo = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+            'every_site_changes_when_the_mode_does',
+            # The wordmark is readable_on(logo), so pointing the logo at the
+            # accent re-derives the ink from the fixture's off-palette magenta.
+            # readable_on answers white there, and white on magenta is 3.14:1 —
+            # so the legibility test fires too, and correctly. That is the
+            # off-palette fixture earning its keep twice: it is not a member of
+            # the palette *and* it is not a colour anything reads well on.
+            'the_wordmark_is_legible_on_the_logo_tile',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the logo tile is the wrong hue',
+        ABOUT,
+        [
+            ('        let logo = p.blue;',
+             '        let logo = p.mauve;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            # The accent test's other half is `colors[8] == p.blue` — a claim
+            # about the logo, not about the accent — so it sees any hue swap
+            # there, not merely a swap to the accent.
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the wordmark is body text, which is unreadable on the tile in both modes',
+        ABOUT,
+        [
+            ('        let wordmark = readable_on(logo);',
+             '        let wordmark = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_wordmark_is_legible_on_the_logo_tile',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the wordmark is inked for the page behind the tile rather than the tile',
+        ABOUT,
+        [
+            ('        let wordmark = readable_on(logo);',
+             '        let wordmark = readable_on(p.base);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_wordmark_is_legible_on_the_logo_tile',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the wordmark is CRUST — which is what readable_on answers in Mocha, so only the light render can see it',
+        ABOUT,
+        [
+            ('        let wordmark = readable_on(logo);',
+             '        let wordmark = p.crust;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            # This is the documented hole in the membership sweep — CRUST is
+            # 0x11111B, which is a readable_on endpoint, so assert_drawn_from
+            # is obliged to accept it in a light render and cannot see this at
+            # all. The contrast test can: near-black on Latte's *dark* blue is
+            # 1.36:1. A membership test cannot check a value it was told to
+            # accept, but a test that computes a ratio never agreed to anything.
+            'the_wordmark_is_legible_on_the_logo_tile',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: readable_on is applied twice, which inverts the ink it just chose',
+        ABOUT,
+        [
+            ('        let wordmark = readable_on(logo);',
+             '        let wordmark = readable_on(readable_on(logo));'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_wordmark_is_legible_on_the_logo_tile',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the wordmark is inked for the accent, a colour it is not drawn on',
+        ABOUT,
+        [
+            ('        let wordmark = readable_on(logo);',
+             '        let wordmark = readable_on(p.accent);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_wordmark_is_legible_on_the_logo_tile',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the version number is as quiet as the date under it',
+        ABOUT,
+        [
+            ('        let version_ink = p.text;',
+             '        let version_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the build date is as loud as the version above it',
+        ABOUT,
+        [
+            ('        let built_ink = p.subtext0;',
+             '        let built_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the tagline is a rung louder than the quietest text on the page',
+        ABOUT,
+        [
+            ('        let tagline_ink = p.overlay0;',
+             '        let tagline_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the Hardware tab's heading is as quiet as the labels under it",
+        ABOUT,
+        [
+            ('        let hardware_heading = p.text;',
+             '        let hardware_heading = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the Software tab's heading is as quiet as the labels under it",
+        ABOUT,
+        [
+            ('        let software_heading = p.text;',
+             '        let software_heading = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the Licenses tab's heading is as quiet as the bodies under it",
+        ABOUT,
+        [
+            ('        let licenses_heading = p.text;',
+             '        let licenses_heading = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: an empty licence list is reported in RED, as though having no licences were an error',
+        ABOUT,
+        [
+            ('        let empty_ink = p.subtext0;',
+             '        let empty_ink = p.red;'),
+        ],
+        ["desktop"],
+        [
+            'the_empty_licence_list_is_drawn_from_the_palette',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a licence's header bar is a rung too loud",
+        ABOUT,
+        [
+            ('        let name_bg = p.surface0;',
+             '        let name_bg = p.surface1;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: every licence name wears the accent, so a list with no selection looks entirely selected',
+        ABOUT,
+        [
+            ('        let name_ink = p.lavender;',
+             '        let name_ink = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a licence's name is indistinguishable from its body",
+        ABOUT,
+        [
+            ('        let name_ink = p.lavender;',
+             '        let name_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: licence bodies are a rung quieter than everything else on the page',
+        ABOUT,
+        [
+            ('        let body_ink = p.subtext0;',
+             '        let body_ink = p.overlay0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: a property row's label is as loud as its value, so nothing distinguishes the question from the answer",
+        ABOUT,
+        [
+            ('    let label_ink = p.subtext0;',
+             '    let label_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a property row's value is as quiet as its label",
+        ABOUT,
+        [
+            ('    let value_ink = p.text;',
+             '    let value_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the dialog builds a palette of its own instead of drawing with the one it was handed',
+        ABOUT,
+        [
+            ('        let mut cmds = Vec::with_capacity(64);',
+             '        let mut cmds = Vec::with_capacity(64);\n        let p = &Palette::for_mode(false);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+            'the_empty_licence_list_is_drawn_from_the_palette',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the Overview tab builds a palette of its own, so only that one tab ignores the mode',
+        ABOUT,
+        [
+            ("        // The product's own mark: themed, but never the user's accent.\n        let logo = p.blue;",
+             "        // The product's own mark: themed, but never the user's accent.\n        let p = &Palette::for_mode(false);\n        let logo = p.blue;"),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+            'the_chosen_tab_wears_the_accent_and_the_logo_never_does',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the property row builds a palette of its own, so the Hardware and Software tabs ignore the mode',
+        ABOUT,
+        [
+            ('    let label_ink = p.subtext0;\n    let value_ink = p.text;',
+             '    let p = &Palette::for_mode(false);\n    let label_ink = p.subtext0;\n    let value_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: a property row draws its label and value in each other's roles",
+        ABOUT,
+        [
+            ('    let label_ink = p.subtext0;\n    let value_ink = p.text;',
+             '    let label_ink = p.text;\n    let value_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
 ]
-
-
 def run_tests(pkg):
     r = subprocess.run(
         ["cargo", "test", "-p", pkg, "--target", TARGET],

@@ -37182,6 +37182,122 @@ on the same side.
 
 ---
 
+## 526. A window's sampled colour is an `Option`, because "nobody has looked yet" is not a colour, and the placeholder for it belongs to the renderer
+
+**Date:** 2026-08-23
+**Decided by:** Claude (autonomous)
+
+**In short:** Hovering a taskbar button pops up a small preview of that
+application's windows. Real thumbnail images do not exist yet, so each preview
+is a rectangle filled with one flat colour "sampled" from the window. The field
+holding that colour used to *always* hold one, seeded to a fixed dark grey — so
+a window nobody had sampled and a window that genuinely was that grey were the
+same value, and in light mode the placeholder stayed dark, because the grey was
+a hard-coded dark-theme constant. It is now `Option<Color>`: `None` means "not
+sampled", and the renderer decides what to draw for it, out of the palette it
+was handed.
+
+Terms, once each: a *palette* is the resolved set of colours for the current
+light/dark mode and accent (see 525); *Mocha* and *Latte* are the dark and
+light variants of the colour scheme the shell uses; a *role* is what a colour
+is *for* ("the window background") rather than a hex value like `0x45475A`.
+
+### The alternative was to keep it a plain `Color` and seed it from the palette
+
+That needs `WindowSnapshot::new` to take a `&Palette`. A snapshot is window
+bookkeeping — id, application, title, size, minimized, focused — produced by
+whatever tracks windows, which has no business knowing what mode the desktop is
+in. Threading a palette through it in order to fill a field the renderer is
+about to read anyway inverts the dependency: the cheapest way to make the data
+structure theme-aware is to not make it theme-aware.
+
+It also bakes the mode in at the wrong moment. A snapshot taken while the
+desktop was dark and rendered after the user switched to light would still
+carry the dark placeholder, and would keep carrying it until that window was
+next sampled. An `Option` cannot go stale that way, because it is holding no
+colour that *could* be stale.
+
+### What the `Option` costs
+
+Every consumer has to handle `None`, and the compiler makes that non-optional.
+Today it is one line — `snap.dominant_color.unwrap_or(p.surface1)` — and the
+next consumer will be told about it at the point it is written, which is the
+argument for the shape rather than against it.
+
+Against that cost: the two states are now distinguishable *at all*. Before, a
+window whose real dominant colour happened to be `#45475A` was reported as
+unsampled, and an unsampled window claimed to have been sampled. Nothing could
+tell them apart, because there was nothing to tell apart — they were one value
+with two meanings.
+
+### Minimized is a third state, not a repeat of the second
+
+A minimized window is showing nothing, so whatever was sampled from it before
+it went is no longer true. Drawing it would be a confident statement about what
+that window currently contains, which is worse than admitting ignorance. It
+gets `surface0` where an unsampled window gets `surface1` — deliberately one
+step dimmer, so that "nothing there" and "nothing known" still read apart
+instead of collapsing into a single grey. Three states, three renderer-side
+answers, all of them roles, none of them stored on the snapshot.
+
+The counter-argument is real and was weighed: a stale sample is still
+*evidence*, and a user about to restore a minimized window might find the old
+colour a better cue than a flat placeholder. It was rejected because the
+preview's entire claim is "this is what that window looks like", and a claim
+that is knowingly out of date is the kind of small dishonesty a shell
+accumulates until nothing it displays can be relied on. When real thumbnails
+land, the same reasoning decides the same way: a minimized window gets its last
+frame *marked* as stale, or it gets nothing.
+
+---
+
+## 527. The logo is the product's colour and the tab strip is the user's, so two sites that drew the same blue now mean different things
+
+**Date:** 2026-08-23
+**Decided by:** Claude (autonomous)
+
+**In short:** The About dialog draws blue in two places: the square logo tile
+next to the product name, and the label of whichever tab you have selected.
+Until now both read the same hard-coded blue, so they were indistinguishable —
+and when the shell gained a user-chosen accent colour, the obvious move was to
+point both at it. That would have meant a user who picks pink gets a pink
+SlateOS logo. The decision is to split them: the **logo stays `blue`** whatever
+accent is chosen, and only the **tab strip follows the accent**. Two sites that
+used to be one constant now answer to two different owners.
+
+The rule underneath it is that a palette role and a *brand* are not the same
+kind of thing even when they hold the same bytes. `p.accent` means "the colour
+this user chose to mark the thing they are pointing at"; `p.blue` means "the
+colour SlateOS is". The accent is a preference and is expected to move. The
+logo is an identity and is not — an operating system whose logo changes colour
+with a settings toggle has no logo, it has a swatch. Both are still read from
+the palette, so both still flip correctly between Mocha and Latte; what differs
+is *which* palette entry each site is entitled to.
+
+The counter-argument, and it is not weak: users who set an accent generally
+expect the shell to look like it, and a stubbornly blue tile in an otherwise
+pink dialog reads as a site that was missed by the theming rather than one that
+was excluded on purpose. Some shells do exactly that — recolour the mark along
+with everything else. It was rejected because the About dialog is precisely the
+place where the product identifies itself, and a version screen that reports
+the wrong colours for the thing it is reporting on is a small lie in the one
+dialog whose entire job is to be factual.
+
+There is a testing consequence, which is why this is worth writing down rather
+than leaving as a two-line comment. Because the sites drew the same value, a
+single `blue` assertion used to cover both, and any test that stayed at that
+level would keep passing if the two were re-merged in either direction. So the
+tests pin them **separately and by position**: the logo is checked at its own
+index against `p.blue` in a fixture whose accent is deliberately *off-palette*
+magenta, and the tab strip is checked at the active tab's index against
+`p.accent`, with the accent's total occurrence count asserted to be exactly one.
+Either half of the split failing — the logo drifting to the accent, or the tab
+falling back to blue — moves a colour the other assertion is watching. A fixture
+that left the accent at its stock value could not have made this claim at all,
+because the stock accent *is* `blue`.
+
+---
+
 ## §279 — Delegating a *subset* of authority to a child gets its own syscall number and a self-describing argument struct, and an impossible request fails the spawn rather than being trimmed
 
 **Date:** 2026-08-22
@@ -39748,3 +39864,329 @@ ledger that needs the heap cannot report on the heap; a ledger that needs the
 frame allocator cannot report on the frame allocator. `&'static str` in an
 inline array needs nothing but a stack, which is why it is the right shape here
 and not merely a convenient one.
+
+---
+
+## §371 — `stat`'s `%N` is quoted in the built-in block too, so a file name cannot forge a line of `stat`'s own output
+
+**Date:** 2026-08-23
+**Decided by:** Claude (autonomous)
+
+**In short:** `stat somefile` prints a little report — `File:`, `Size:`,
+`Access:` and so on, one field per line. GNU prints the file's name in that
+report *exactly as it is*, with no quotes. A file name is allowed to contain a
+newline on this system, so a file called `a<newline>Size: 0` makes GNU's report
+contain a second, fake `Size:` line that nothing downstream can tell from the
+real one. Our `stat` puts quotes around the name instead, so the fake line
+cannot appear. The cost is that the ordinary report now shows `File: 'notes.txt'`
+with quotes, where GNU shows `File: notes.txt`.
+
+**The mechanism upstream, exactly.** `stat.c`'s `main` does:
+
+```c
+if (format) { if (strstr (format, "%N")) getenv_quoting_style (); format2 = format; }
+else { format = default_format (fs, terse, false); ... }
+```
+
+`getenv_quoting_style` is what sets the style to `shell-escape-always` (that is
+its `else` branch, taken when `QUOTING_STYLE` is unset — not a fallback to
+literal). It is called **only** when the user passed `-c`/`--printf` *and* that
+format contains the literal two characters `%N`. The built-in block contains
+`%N` too, but never reaches this call, so it renders with gnulib's untouched
+default, `literal_quoting_style`.
+
+Two consequences, both measured against GNU 9.4 rather than reasoned about:
+
+| Command | GNU 9.4 |
+|---|---|
+| `stat f` (name `a<LF>b`) | `  File: a` then a raw newline then `b` |
+| `stat -c '%N' f` | `'a'$'\n''b'` |
+| `stat -c '%.3N' f` | `a` — **unquoted**, because `strstr` does not find `%N` in `%.3N` |
+
+The third row is the tell: this is not a policy, it is a `strstr` on the format
+string. A directive that differs only by a width or a precision gets a
+different quoting style, which no one designed.
+
+**The decision.** `%N` is rendered through `QUOTING_STYLE` (defaulting to
+`shell-escape-always`) everywhere it appears — in `-c`, in `--printf`, in the
+built-in human-readable block, and with any width or precision attached.
+
+**For:**
+
+* The human-readable block is the only output here that a person reads
+  line-by-line, and it is the only one where a forged line does damage. A name
+  is attacker-chosen input in every case that matters: a tarball, a download
+  directory, a shared `/tmp`. `design.txt` permits every byte but `/` and NUL
+  in a name, so this is not a hypothetical on this OS.
+* It removes an inconsistency rather than adding one. Under this rule `%N`
+  means one thing; under upstream's it means two, chosen by a substring search.
+* `%n` still exists and is still raw. A caller that genuinely wants the
+  unquoted bytes has always had the directive for it, and that is the directive
+  scripts already use for machine consumption.
+* `ls` on this system already quotes by default for the same reason, so the two
+  agree about what a name looks like on a terminal.
+
+**Against:**
+
+* It is a visible difference from GNU in the *default* output, which is the one
+  people paste into bug reports and the one a naive `stat f | grep File:`
+  parses. `File: 'notes.txt'` is not what a manual page shows.
+* A script that already parses the built-in block (rather than using `-c`, as
+  it should) will see the quotes. This is the real cost, and it is why the
+  divergence is documented in the module docs as well as here.
+* Reproducing upstream bug-for-bug has value of its own: it is the property
+  that makes "measure GNU, assert the measurement" a usable method, and every
+  deliberate exception weakens it.
+
+**Why the balance falls this way.** The against-side costs are cosmetic and
+recoverable — `%n` is one character away. The for-side cost is a forged line in
+a security-relevant report, which is not recoverable by the reader, because by
+construction it is indistinguishable from a real one. Where a divergence trades
+appearance for a forgery, appearance loses.
+
+---
+
+## §372 — `stat`'s `%C` prints a silent `?`, because a security context is a field this system does not have rather than a lookup that failed
+
+**Date:** 2026-08-23
+**Decided by:** Claude (autonomous)
+
+**In short:** `%C` asks `stat` to print a file's SELinux security label — a
+Linux access-control tag that does not exist on this system at all. GNU, run on
+a machine without SELinux, treats that as an *error*: it prints a complaint to
+stderr for every file and exits 1. Ours prints a `?` in that column and says
+nothing, the way it already does for other fields it has no value for.
+
+**Measured, GNU 9.4 on a non-SELinux kernel:**
+
+```
+$ stat -c '%C' f
+stat: failed to get security context of 'f': No data available
+?
+$ echo $?
+1
+```
+
+**The decision.** `%C` renders `?`, adds no diagnostic, and does not set the
+exit status. It is also omitted from `--help`'s specifier table, and from the
+`--terse` format (upstream's terse constant appends `%C` on an SELinux build).
+
+**For:**
+
+* GNU itself uses exactly this rendering — a silent `?`, no message, no failure
+  — for a field the kernel does not supply: `print_statfs`'s `%t` on a system
+  whose `statfs` has no `f_type` member. Our `%C` is that case, not a failed
+  syscall. `%t` in filesystem mode is likewise `?` here, for the same reason.
+* Upstream's message would be a lie in its particulars: nothing "failed", and
+  there is no errno to report, so the text would have to invent one.
+* The failure is not actionable. A user cannot install a security context here;
+  telling them once per file that they have not is noise that would make `stat
+  -c '%C%s'` exit 1 on every well-formed run.
+* Leaving it out of `--help` keeps the help honest: the table lists what the
+  program can tell you, and this it cannot.
+
+**Against:**
+
+* A script ported from Linux that *relies* on the non-zero exit to detect an
+  SELinux-less system will now see success. This is thin — such a script would
+  more naturally test for the tooling — but it is the real behavioural
+  difference.
+* `%C` accepted-but-empty is a small piece of ambient dishonesty: it lets a
+  format look supported when it is not. The counter is that `?` is precisely
+  the "no value" marker, and it is the one GNU chose for the same situation.
+* If a context concept is ever added, this becomes a directive that silently
+  returned `?` for a while, and old output cannot be distinguished from new
+  absent-value output. Accepted: at that point `%C` gains a value and the `?`
+  means what it always meant.
+
+**If this is revisited,** the thing to change is not the `?` — it is whether
+`%C` should be an *unknown specifier* instead. It is currently indistinguishable
+from one (both print `?`), which is deliberate: `%Q` and `%C` are equally
+unsatisfiable here, and giving them the same rendering means one rule rather
+than two.
+
+## §373 — `cmp` quotes the file names in its own output, because GNU prints them raw and one newline forges a whole result line
+
+**Date:** 2026-08-23
+**Decided by:** Claude (autonomous)
+
+**In short:** When two files differ, `cmp` prints one line naming both of them:
+`a b differ: byte 5, line 2`. GNU pastes the names into that line exactly as
+they arrived, so a file whose *name* contains a newline splits the line in two
+and a file whose name contains no printable text scribbles on the terminal. We
+print the names quoted and escaped instead, the same way every other utility
+here already prints a name. The cost is that our line is not byte-identical to
+GNU's for such names; the benefit is that a name cannot fabricate output.
+
+### What GNU does, measured
+
+GNU diffutils 3.10, in an empty directory holding `sp ace` and a file whose
+name is the four characters `nl`, a newline, and `name`:
+
+```
+$ cmp 'sp ace' $'nl\nname'
+sp ace nl
+name differ: byte 1, line 1
+$ cmp 'sp ace' $'nl\nname' | od -An -c
+   s   p       a   c   e       n   l  \n   n   a   m   e       d
+   i   f   f   e   r   :       b   y   t   e       1   ,       l
+   i   n   e       1  \n
+```
+
+Two lines where there was one difference. A script reading `cmp`'s output line
+by line — and that is the only reason to read it rather than the exit status —
+now sees `sp ace nl` as a complete record and `name differ: byte 1, line 1` as
+another. Neither is true. The same applies to a name that is not text at all:
+
+```
+$ cmp $'\xff\xfe-bad' $'\xff\xfe-bad2' | od -An -c
+ 377 376   -   b   a   d     377 376   -   b   a   d   2       d
+   i   f   f   e   r   :       b   y   t   e       1   ,       l
+   i   n   e       1  \n
+```
+
+The `\377\376` go to the terminal as-is. On this OS that is not a curiosity:
+`design.txt` permits every byte but `/` and NUL in a name, so a name that is
+not valid UTF-8 is ordinary, not hostile.
+
+### What we do
+
+The same `quotef` every other utility here uses, which is gnulib's
+`shell-escape` style — bare when the name is safe, single-quoted when it is
+not, and `$'…'` around anything that has to be escaped:
+
+```
+$ cmp 'sp ace' $'nl\nname'
+'sp ace' 'nl'$'\n''name' differ: byte 1, line 1
+$ cmp $'\xff\xfe-bad' $'\xff\xfe-bad2'
+''$'\377\376''-bad' ''$'\377\376''-bad2' differ: byte 1, line 1
+```
+
+One line, always. The `EOF on …` note on stderr is quoted the same way, and so
+is the `cmp: NAME: No such file or directory` diagnostic — which GNU *already*
+quotes, through `error (0, errno, "%s", file[i])` reaching gnulib's quoting.
+That inconsistency inside GNU is part of the argument: upstream quotes the name
+when it prints it as a diagnostic and does not when it prints it as a result,
+and there is no reason for the two to differ.
+
+### The alternative, and why it lost
+
+**Reproduce GNU byte for byte, raw names and all.** This project's default is
+to match upstream exactly, and every departure has to earn itself; a harness
+full of "differs on purpose" entries is a harness nobody reads. The case for
+raw names is that something, somewhere, might diff `cmp`'s output against a
+recorded copy produced by GNU.
+
+It loses on two counts. First, nothing can *usefully* depend on the raw form:
+the moment a name contains a space — `sp ace`, above — GNU's line is already
+ambiguous about where one name ends and the next begins, so a consumer parsing
+it is broken before newlines are even considered. Quoting makes the line
+parseable for the first time. Second, this is the same call already made three
+times in this tree for the same reason: §369 (a diagnostic naming an
+undecodable byte prints `\377`, never raw and never U+FFFD), §371 (`stat`'s
+`%N` is quoted in the built-in block so a name cannot forge a line of `stat`'s
+own output), and the whole existence of `userspace/quoting` (§370). A utility
+that printed names raw would be the only one here that does.
+
+**What it costs.** Four cases in `scripts/cmp-diff.sh` are recorded as `xfail`
+rather than pass. Anyone comparing our result line against GNU's for a name
+containing a space, a newline, a quote or a non-UTF-8 byte will see a
+difference — and will see it *reported*, which is the point of the xfail.
+
+**If this is revisited,** the switch is small and lives in one place: `cmp.rs`
+calls `quotef` at exactly three sites (the result line, the EOF note, the open
+diagnostic). Dropping the quoting is a three-line change plus four xfail
+entries becoming plain cases. The reverse — adding it later, after something
+has come to depend on the raw form — is the expensive direction, which is why
+it is being done now.
+
+## §374 — The four WSL-built differential harnesses share one target directory, and building for Linux under WSL is now the standing answer for a `#[cfg(unix)]` binary
+
+**Date:** 2026-08-23
+**Decided by:** Claude (autonomous)
+
+**In short:** Some utilities here only compile on Unix, so on this Windows
+build machine they compile to a stub that prints "unix-only utility" and quits
+— which means the automated tests never run a line of their real code. §365
+solved that for `du` by building it for Linux inside WSL and comparing it
+against the real GNU tool there. `find`, `ls` and now `cmp` do the same. This
+entry does two things: it promotes that from "what `du` does" to the standing
+answer for every such binary, and it merges the four separate build caches
+those scripts had accumulated into one, because they were storing four copies
+of the same compiled dependencies.
+
+### The generalisation
+
+§365 argued the case for `du` in `du`'s terms — `du` measures disk usage, and
+disk usage only exists on a real filesystem. The argument turns out not to
+depend on that at all. What actually drives it is the shape of the binary:
+
+```rust
+#[cfg(not(unix))]
+fn main() -> std::process::ExitCode {
+    eprintln!("cmp: unix-only utility; not supported on this platform");
+    std::process::ExitCode::from(EXIT_TROUBLE)
+}
+```
+
+Eight binaries in `userspace/coreutils/src/bin` are built this way — `chmod`,
+`chown`, `cmp`, `du`, `find`, `id`, `ls`, `stat`. For all eight, `cargo test`
+on the host reaches the argument parser and the string formatters and *nothing
+else*: not the syscalls, not the I/O loop, not the error paths that wrap them.
+And an ordinary `scripts/*-diff.sh` — which builds a native Windows subject and
+reaches into WSL only for the GNU reference — would run the stub every time and
+report a uniform disagreement that says nothing about the program.
+
+Four of the eight now have a WSL-built harness (`du`, `find`, `ls`, `cmp`);
+four do not (`chmod`, `chown`, `id`, `stat`). Several `known-issues.md` entries
+for that second group end with "not verified end-to-end; needs QEMU". That is
+no longer the right conclusion, and this entry is here so the next reader does
+not draw it: they do not need QEMU, they need one script each. `cmp`'s is the
+evidence — it had 33 passing unit tests and was clippy-clean on two targets
+when the harness found three real defects, all of them in the half no host test
+can reach.
+
+*What this does not claim:* WSL's kernel is Linux and its filesystem is ext4,
+so where our POSIX layer diverges from Linux the harness is silent. A QEMU
+harness measuring the real target is still worth building, and when it is these
+scripts are not thrown away — the case tables move into it and the WSL run
+stays as the fast pre-check.
+
+### The consolidation
+
+The three existing scripts each named their own cache: `$HOME/du-diff-target`
+(270 MB), `$HOME/find-diff-target` (116 MB), and `ls`'s. They build different
+binaries out of *the same workspace, for the same target triple*, so the
+compiled dependencies in them — `libc`, `memchr`, `bstr`, every local crate a
+binary pulls in — are byte-identical across all three and stored three times.
+`cmp` would have made four.
+
+All four now use `$HOME/.cache/slateos-diff-target`. Cargo keys artifacts by
+crate, features and target, so sharing is exactly what it is designed for: the
+second harness to run after the first mostly links.
+
+| | *What changes* |
+|---|---|
+| **A directory per tool** | Four caches, ~500 MB, most of it the same objects four times. Each harness's first run compiles the whole dependency graph again. |
+| **One shared directory** *(chosen)* | One cache. A harness run after another one builds only its own binary. |
+
+The argument for separate directories is isolation — one harness cannot
+invalidate another's cache. It does not apply here: the invalidation that
+matters is a *feature-set* difference, and these four builds share a workspace,
+a profile and a triple, so there is nothing to differ over. (The genuine
+conflict, which is why none of these use the repository's own `target/`, is
+between the *Windows* build and a Linux one: same directory, different
+fingerprint database, each forcing a full rebuild of the other. That remains
+true and the shared directory is still outside the repository.)
+
+Two further reasons for the location, both inherited from §365 and worth
+restating: the repository is reached through `/mnt/d` inside WSL, where a Rust
+build is an order of magnitude slower and where a second `target/` would be a
+tens-of-gigabytes surprise for whoever next runs `du -sh` on the worktree; and
+`D:` is the drive that actually runs out of space, while the WSL volume is not.
+Each script's header says how to delete the cache.
+
+**If this is revisited,** the thing most likely to force separate directories
+again is a harness that needs a *different profile* — a release build, or one
+with a feature flag the others do not set. At that point give that one script
+its own directory and say so in its header, rather than un-sharing all four.

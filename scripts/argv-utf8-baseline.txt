@@ -39,4 +39,3 @@ userspace/coreutils/src/bin/time_cmd.rs:argv-as-string
 userspace/coreutils/src/bin/tty.rs:argv-as-string
 userspace/coreutils/src/bin/which.rs:argv-as-string
 userspace/coreutils/src/bin/xargs.rs:argv-as-string
-userspace/coreutils/src/bin/yes.rs:argv-as-string

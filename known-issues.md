@@ -72796,3 +72796,69 @@ staged from a healthy kernel — and it looked like the weak half of the test at
 the time it was written. It is the half that found both bugs. A test that
 pins "healthy means 0" fails loudly the moment anything makes healthy stop
 meaning 0, which is precisely the regression a status-carrying checker invites.
+
+### 2026-08-24 — and a third, in the same seven rows: the page-fault check
+
+Fixed in `98a19ac11` and `c8d55ccdd`. With lockdep's check 5 green, `syshealth`
+still failed — `[FAIL] Page faults: 5 fatal fault(s)` — so the same rung caught
+a third independent bug behind the first two. (This is also the entry that
+makes the heading above read "two"; it should read "three".)
+
+Finding it took one boot rather than two only because the rung now dumps a
+failed captured command's output to serial (`dump_if_failed`, `75f186b29`). The
+first time, a bare `assert_eq!(last_exit(), 0)` panic named neither the failing
+row nor the reason, and identifying it cost a whole extra 13-minute boot cycle.
+
+**The counter was wrong.** `handle_page_fault` called `mm::fault::record_fatal()`
+on entry to its "the kernel cannot resolve this" path — before the Linux
+`SIGSEGV` delivery attempt, before SEH dispatch, before any kill. Two of the
+five were faults the *program handled and survived*:
+
+| Fault | What actually happened | Counted as |
+|---|---|---|
+| task 97, `spawn-test-seh-exit` | SEH handler entered, called `SYS_EXIT` | fatal |
+| task 295, glibc ring-3 | real `rt_sigframe` → SIGSEGV handler → `siglongjmp` recovery | fatal |
+
+Both are the *success condition* of a self-test proving fault delivery works.
+The counter was recording those successes as crashes. The tally now happens in
+`dispatch_or_kill_userspace_raw`, immediately before the kill that diverges —
+the last instant at which it can be taken and the first at which the outcome is
+known. A new `FAULTS_DELIVERED` counts the other branch, so a handled fault
+stays visible instead of merely uncounted (`pgfault` → "Handled by userspace").
+
+**And the question was wrong.** The remaining three were user processes the
+kernel correctly killed for faulting with no handler — normal operation, not a
+kernel health problem; no other OS calls itself unhealthy because a process
+segfaulted. A fatal *kernel* fault would be a real verdict, but that path ends
+in `halt_loop()`, so no shell ever runs to report one. Check 7 could therefore
+only ever fail for the one reason that did not matter.
+
+It was also a passive counter, which this command's own doc comment excludes:
+"Unlike `diag` (which reads passive counters), this command actively tests
+kernel subsystem integrity." `diag` already had the row.
+
+Check 7 is now an **active probe**: `mm::fault::probe_demand_page()` registers
+an anonymous VMA at a reserved kernel address, writes to it — which must take a
+fault — and requires the handler to have mapped a full 16 KiB frame (all four
+4 KiB pages, so a resolver that mapped only the first would not pass), then
+unmaps and frees it. That matches how checks 1, 2 and 6 exercise the allocators
+instead of reading their counters. `mm::fault::self_test` is now a logging
+wrapper over the same probe.
+
+**Making the probe repeatable exposed a fourth, latent bug.** The boot-only
+original removed its VMA on the failure paths but never freed the frame the
+fault had mapped. Invisible while it ran once per boot and only on success;
+from `syshealth` a single failure would have leaked a frame, and every later
+run would then have failed with `AddressBusy` — a real bug reported as a
+different, fictitious one. The probe now releases everything on every path, and
+`AddressBusy` is a failure rather than the old silent `SKIP` → `Ok(())`, which
+was the sweep's own bug class hiding inside the test for it.
+
+**The lesson this one adds.** The first two bugs were about a verdict nobody
+read. This one is about a verdict about the wrong thing — which survives even a
+loudly-reported status, because it fails *correctly*, forever, for a reason no
+operator can act on. A check that has never once passed is not a strict check;
+it is a check whose subject is wrong, and the fix is to change the question,
+not the threshold. Ask what the checker could observe that would be *actionable*
+— here, "does demand paging still work?" — rather than what it happens to have
+a counter for.

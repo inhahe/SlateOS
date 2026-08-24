@@ -50401,7 +50401,7 @@ guarantee, and on Windows the failure mode would be a sharing violation in
 whichever of the two processes lost the race. Wait for `[run-timeout] child
 exited` before running any cargo command against the same target directory.
 
-**Part 2 progress. 40 of 49 modules converted.**
+**Part 2 progress. 41 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -52991,6 +52991,109 @@ exited` before running any cargo command against the same target directory.
       fixture underneath it; a narrow test is an assertion about the rule, and
       survives the fixture changing. That is why the pin's ever-growing share
       of the census is not an argument for writing only pins.
+- [x] `window_peek.rs` — 9 constants over 13 colour sites, done 2026-08-23.
+  Sixty-six tests in the module (ten new or strengthened), harness defects
+  Ax64–Zx65 (fifty-two).
+  - **The first contrast bug in the series that is broken in the theme the
+    shell actually ships.** The close button's X was a hard-coded `TEXT`
+    (`#CDD6F4`) drawn on a hard-coded hover `RED` (`#F38BA8`). That measures
+    **1.60:1 in Mocha** and 1.47:1 in Latte — so unlike the previous forty
+    modules, whose near-black-on-accent bugs only surfaced when the light
+    palette was rendered, this one was illegible in the dark mode the shell
+    starts in, and had been since the module was written. The idle state was
+    failing too, less spectacularly: `TEXT` on `SURFACE2` is 4.62:1 in Mocha
+    but 3.69:1 in Latte. Both sites now read `readable_on(close_bg)`, which
+    gives 8.10:1 / 4.80:1 hovered and 5.90:1 / 8.67:1 idle.
+    - Worth being precise about why the *dark* failure survived: nobody was
+      looking at the dark render, because the entire method of this task is
+      "render in light and see what does not belong". A membership sweep asks
+      whether a colour is *in* the palette, and `TEXT` on `RED` is two
+      perfectly good palette members — it is their *pairing* that is
+      unreadable. Contrast is not a membership property, and no amount of
+      sweeping finds it. It took a test that computes the ratio.
+  - **A window's own colour is not the shell's to theme**, so
+    `WindowSnapshot::dominant_color` became an `Option<Color>` rather than a
+    `Color` seeded from the palette — see `design-decisions.md` 526. The
+    placeholder for "nobody has sampled this window yet" belongs to the
+    renderer, which knows the mode; the snapshot, which is built long before
+    any palette is in scope, must be able to say "no colour" without naming
+    one.
+  - **Three coverage holes, all found by *designing* the defects rather than
+    running them** — and the sweep then confirmed each was real by making the
+    test written for it the *sole* catcher of the defect that exposed it.
+    - **Lesson 23: a step function collapses distinctions, so a test that
+      asserts only its output cannot see its input change.**
+      `readable_on(bg)` returns one of two values. `readable_on(p.peach)` and
+      `readable_on(p.red)` are equal in *both* modes — near-black in Mocha,
+      near-white in Latte. So the defect "the hovered close button is repainted
+      peach" changes the button and changes nothing the module's headline
+      legibility test can observe: the ink it asserts is identical, and the
+      ratio it computes stays above the floor. The test was structurally blind
+      to the thing it was named for. The fix is not a better assertion inside
+      that test but an ordered pin that names the *fill* — so the pin now loops
+      `close_hovered` over both states, which is also what made the hovered
+      fill and its ink into rendered sites at all.
+    - **Lesson 24: a test that calls the inner function cannot see a defect in
+      the outer one.** Every colour test in the module called
+      `PeekPopup::render`. The desktop calls `PeekManager::render`, a one-line
+      delegate. A hard-coded palette constructed *there* — `&Palette::for_mode
+      (false)` instead of the caller's — would have passed all sixty-five other
+      tests and shipped a peek popup that ignored the theme entirely. A
+      delegate is a site. `the_manager_renders_with_the_palette_it_was_given`
+      is the sole catcher of that defect, exactly as predicted.
+    - **A fixture that hands two states to two different objects never
+      exercises their precedence.** `four_states()` hovers slot 0 and focuses
+      slot 1, so no render in the module ever had one thumbnail that was both.
+      Swapping the focus and hover branches of the border colour — which would
+      make pointing at the focused window visibly unfocus it — passed
+      everything. `a_focused_thumbnail_stays_accented_while_the_pointer_is_over
+      _it` is the sole catcher of that one. The general form is worth stating:
+      a fixture built to be *rich* is not the same as a fixture built to be
+      *ambiguous*, and precedence is only visible under ambiguity.
+  - **Preflight then sweep: 52 build / 0 do not / 0 not applied, then 52
+    caught, 0 escaped, 0 never asked, 0 under-caught, 1 under-declared.** The
+    single under-declaration is benign and is now recorded in the harness: the
+    defect that collapses `content_color`'s whole conditional to `p.surface1`
+    takes the *minimized* arm with it, so
+    `a_minimized_window_ignores_whatever_was_sampled_from_it` fires too. It was
+    declared against the two tests that name the sampled colour, which is the
+    defect's headline; the minimized placeholder is collateral. Under-declaring
+    costs nothing but the reconciliation — it is over-declaring, which claims a
+    test catches something it does not, that the sweep exists to punish.
+  - **The pre-sweep declaration review found the error by reading, for the
+    fourth consecutive module.** The peach defect above was declared against
+    the legibility test; a by-hand check of `readable_on(p.peach)` against
+    `readable_on(p.red)` in both modes showed it would have been caught by
+    *nothing at all*. That is a hole in the tests, not a mis-declaration, and
+    running the sweep would have reported it as `escaped` twenty-five minutes
+    later. Reading the test beats running it — but note what actually did the
+    work here: not reading the *test*, but evaluating the function the test
+    depends on, at the two inputs the defect swaps between.
+  - **The catcher census**, from the fifty-two:
+    `every_site_draws_the_role_it_claims` 50 and **sole on 10**;
+    `every_site_changes_when_the_mode_does` 15, sole on none;
+    `only_the_focused_thumbnail_wears_the_accent` 14, sole on none;
+    `the_close_button_x_is_legible_on_the_button_it_marks` 14, sole on none;
+    `every_colour_the_module_draws_comes_from_its_palette` 13, sole on none;
+    `none_of_the_nine_deleted_constants_is_still_drawn` 13, sole on none;
+    `the_manager_renders_with_the_palette_it_was_given` 13 and **sole on 1**;
+    `a_focused_thumbnail_stays_accented_while_the_pointer_is_over_it` 8 and
+    **sole on 1**;
+    `an_unsampled_window_follows_the_theme_and_a_sampled_one_does_not` 7, sole
+    on none; `a_minimized_window_ignores_whatever_was_sampled_from_it` 4, sole
+    on none; then two pre-existing tests,
+    `test_popup_render_with_hovered_thumbnail` and
+    `test_popup_render_minimized_window`, 1 each and sole on none — both
+    catching by command *count* rather than by colour, which is the usual
+    accident.
+    - The pin's 50-of-52 is the highest of the series, and its sole-on-10 is
+      too. That is not a sign the other tests are redundant: two of the three
+      defects the pin *cannot* see are the two coverage holes above, and each
+      needed a test built specifically for it. A pin is an assertion about one
+      render. It sees every site that render contains, and nothing about the
+      sites it does not reach — which is why widening the fixture (looping the
+      close button) raised its score, and why the manager delegate, which no
+      fixture of `PeekPopup` can reach at all, stayed invisible to it.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

@@ -54,25 +54,34 @@ use alloc::vec::Vec;
 /// printed to the console.  Used for `> file`, `>> file`, and `|` piping.
 ///
 /// Only one capture is active at a time (the kshell is single-threaded).
-static SHELL_OUTPUT: Mutex<Option<String>> = Mutex::new(None);
+///
+/// A `Vec<u8>`, not a `String`, because this buffer is what `$(…)` hands back
+/// and what `>` writes to a file. A command that prints a filename prints
+/// whatever bytes the filesystem holds, and our paths admit every byte but
+/// `/` and NUL — so a `String` here would force the capture path to either
+/// refuse such output or rewrite it as U+FFFD, i.e. `$(ls)` would produce a
+/// name that does not exist. See `known-issues.md`
+/// → `TD-KSHELL-LINE-EDITOR-IS-UTF8`, which names this sink as the binding
+/// constraint on the rest of the byte-clean conversion.
+static SHELL_OUTPUT: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
 /// Begin capturing shell output to an internal buffer.
 fn capture_start() {
-    *SHELL_OUTPUT.lock() = Some(String::with_capacity(4096));
+    *SHELL_OUTPUT.lock() = Some(Vec::with_capacity(4096));
 }
 
-/// Stop capturing and return the captured text.
-fn capture_stop() -> String {
+/// Stop capturing and return the captured bytes.
+fn capture_stop() -> Vec<u8> {
     SHELL_OUTPUT.lock().take().unwrap_or_default()
 }
 
-/// Execute a command and capture its output as a string.
+/// Execute a command and capture its output as raw bytes.
 ///
 /// Used for `$(command)` substitution.  Handles recursive capture by
 /// saving and restoring the previous capture state (since a command
 /// substitution can appear inside a pipeline or redirect that's already
 /// capturing).
-pub fn capture_command(cmd: &str) -> String {
+pub fn capture_command(cmd: &str) -> Vec<u8> {
     // Save any existing capture state (supports nesting).
     let prev = SHELL_OUTPUT.lock().take();
 
@@ -87,17 +96,64 @@ pub fn capture_command(cmd: &str) -> String {
     output
 }
 
+/// Write captured shell output to `path`, appending when `append` is set.
+///
+/// The VFS has no append mode, so `>>` is a read-modify-write. That is the
+/// reason this is a named helper rather than the four copies it replaces:
+/// every copy has to get the *read* half right, and the version it replaces
+/// did not.
+///
+/// It decoded the existing contents with `from_utf8` and substituted an
+/// **empty string** when that failed, so `cmd >> file` silently discarded
+/// everything already in `file` whenever `file` was not valid UTF-8. That
+/// turned append into truncate for every binary file — an archive, an image,
+/// a compiled object — while reporting success and setting exit status 0.
+/// Bytes in, bytes out: there is now nothing to decode and so nothing to
+/// fail. See `known-issues.md` → `B-KSHELL-APPEND-TRUNCATES-BINARY-FILES`.
+///
+/// A read error is propagated rather than treated as "no previous contents",
+/// for the same reason: only `NotFound` legitimately means "start empty"
+/// (`>>` is allowed to create). Any other failure — a permission error, a
+/// disk error — would otherwise be laundered into an empty buffer and the
+/// file overwritten with just the new output, which is the same destruction
+/// arriving by a different route.
+fn redirect_write(path: &str, output: &[u8], append: bool) -> crate::error::KernelResult<()> {
+    use crate::fs::vfs::Vfs;
+    if !append {
+        return Vfs::write_file(path, output);
+    }
+    let mut combined = match Vfs::read_file(path) {
+        Ok(existing) => existing,
+        Err(crate::error::KernelError::NotFound) => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    combined.extend_from_slice(output);
+    Vfs::write_file(path, &combined)
+}
+
 /// Write a string to the shell output destination.
 ///
 /// If capture mode is active, appends to the capture buffer.
 /// Otherwise, writes to the console as normal.
 fn shell_write(s: &str) {
+    shell_write_bytes(s.as_bytes());
+}
+
+/// Write raw bytes to the shell output destination.
+///
+/// The byte-clean primitive behind [`shell_write`]; use it wherever the thing
+/// being printed came from the filesystem rather than from a format string.
+/// Both destinations are byte-capable ([`SHELL_OUTPUT`] is a `Vec<u8>` and
+/// `console::write_bytes` always fed `putchar` one byte at a time), so this
+/// adds no new lossy step — it removes the `&str` ceiling that used to force
+/// callers to launder a filename through `Path::display` first.
+pub fn shell_write_bytes(bytes: &[u8]) {
     let mut guard = SHELL_OUTPUT.lock();
     if let Some(ref mut buf) = *guard {
-        buf.push_str(s);
+        buf.extend_from_slice(bytes);
     } else {
         drop(guard);
-        crate::console::write_str(s);
+        crate::console::write_bytes(bytes);
     }
 }
 
@@ -616,7 +672,9 @@ fn expand_vars(input: &str) -> String {
                     if let Ok(cmd) = core::str::from_utf8(cmd_bytes) {
                         let output = capture_command(cmd);
                         // POSIX: strip trailing newlines from substitution.
-                        result.push_str(output.trim_end_matches('\n'));
+                        if let Some(s) = shell_bytes_as_str(trim_trailing_newlines(&output), cmd) {
+                            result.push_str(s);
+                        }
                     }
                 }
                 // Skip past `)`.
@@ -687,7 +745,10 @@ fn expand_vars(input: &str) -> String {
             if let Some(cmd_bytes) = bytes.get(start..i) {
                 if let Ok(cmd) = core::str::from_utf8(cmd_bytes) {
                     let output = capture_command(cmd);
-                    result.push_str(output.trim_end_matches('\n'));
+                    // POSIX: strip trailing newlines from substitution.
+                    if let Some(s) = shell_bytes_as_str(trim_trailing_newlines(&output), cmd) {
+                        result.push_str(s);
+                    }
                 }
             }
             if i < len && bytes[i] == b'`' {
@@ -5642,7 +5703,7 @@ fn execute_single(line: &str) {
     // Check for here-string (cmd <<< word).
     if let Some((command, word)) = parse_here_string(line) {
         let input = alloc::format!("{}\n", word);
-        dispatch_with_input(command, &input);
+        dispatch_with_input(command, input.as_bytes());
         return;
     }
 
@@ -5876,41 +5937,24 @@ fn execute_input_redirect(command: &str, path: &str) {
             return;
         }
     };
-    let text = match core::str::from_utf8(&data) {
-        Ok(s) => s,
-        Err(_) => {
-            crate::console_println!("{}: not a text file", path);
-            set_exit(1);
-            return;
-        }
-    };
-
-    // If the command itself has output redirection, handle it.
+    // The file's bytes go through unexamined: this function used to reject a
+    // non-UTF-8 file here with "not a text file", but that gate now belongs to
+    // [`dispatch_with_input`], which knows which command is about to receive
+    // the bytes.  Deciding here would keep a byte-safe consumer from ever
+    // seeing a file it could have handled.
     if let Some(redir) = parse_redirect(command) {
         capture_start();
-        dispatch_with_input(redir.command, text);
+        dispatch_with_input(redir.command, &data);
         let output = capture_stop();
         if !output.is_empty() {
-            use crate::fs::vfs::Vfs;
-            let result = if redir.append {
-                let existing = Vfs::read_file(redir.path).unwrap_or_default();
-                let mut combined = match core::str::from_utf8(&existing) {
-                    Ok(s) => String::from(s),
-                    Err(_) => String::new(),
-                };
-                combined.push_str(&output);
-                Vfs::write_file(redir.path, combined.as_bytes())
-            } else {
-                Vfs::write_file(redir.path, output.as_bytes())
-            };
-            if let Err(e) = result {
+            if let Err(e) = redirect_write(redir.path, &output, redir.append) {
                 crate::console_println!("Redirect error: {:?}", e);
                 set_exit(1);
                 return;
             }
         }
     } else {
-        dispatch_with_input(command, text);
+        dispatch_with_input(command, &data);
     }
     set_exit(0);
 }
@@ -5976,21 +6020,7 @@ fn execute_redirect(command: &str, path: &str, append: bool) {
         return;
     }
 
-    use crate::fs::vfs::Vfs;
-    let result = if append {
-        // Read existing file contents and append.
-        let existing = Vfs::read_file(path).unwrap_or_default();
-        let mut combined = match core::str::from_utf8(&existing) {
-            Ok(s) => String::from(s),
-            Err(_) => String::new(),
-        };
-        combined.push_str(&output);
-        Vfs::write_file(path, combined.as_bytes())
-    } else {
-        Vfs::write_file(path, output.as_bytes())
-    };
-
-    if let Err(e) = result {
+    if let Err(e) = redirect_write(path, &output, append) {
         crate::console_println!("Redirect error: {:?}", e);
     }
 }
@@ -6011,7 +6041,7 @@ fn execute_heredoc(command: &str, suffix: &str, body: &str) {
 
     if suffix.is_empty() {
         // Simple case: just feed body to command.
-        dispatch_with_input(command, body);
+        dispatch_with_input(command, body.as_bytes());
         return;
     }
 
@@ -6019,7 +6049,7 @@ fn execute_heredoc(command: &str, suffix: &str, body: &str) {
     // Capture the command's output with the heredoc body as input,
     // then feed that output through the suffix.
     capture_start();
-    dispatch_with_input(command, body);
+    dispatch_with_input(command, body.as_bytes());
     let output = capture_stop();
 
     // Now execute the suffix with the captured output.
@@ -6033,25 +6063,13 @@ fn execute_heredoc(command: &str, suffix: &str, body: &str) {
     } else if let Some((path, append)) = parse_bare_redirect(suffix) {
         // Suffix is a bare redirect (e.g., "> /tmp/out" or ">> /tmp/out").
         if !output.is_empty() {
-            use crate::fs::vfs::Vfs;
-            let result = if append {
-                let existing = Vfs::read_file(path).unwrap_or_default();
-                let mut combined = match core::str::from_utf8(&existing) {
-                    Ok(s) => String::from(s),
-                    Err(_) => String::new(),
-                };
-                combined.push_str(&output);
-                Vfs::write_file(path, combined.as_bytes())
-            } else {
-                Vfs::write_file(path, output.as_bytes())
-            };
-            if let Err(e) = result {
+            if let Err(e) = redirect_write(path, &output, append) {
                 crate::console_println!("Redirect error: {:?}", e);
             }
         }
     } else {
         // Suffix doesn't look like a pipe or redirect — just print.
-        shell_print!("{}", output);
+        shell_write_bytes(&output);
     }
 }
 
@@ -6123,19 +6141,7 @@ fn execute_pipe_chain(segments: &[&str]) {
         dispatch_with_input(redir.command, &piped_data);
         let output = capture_stop();
         if !output.is_empty() {
-            use crate::fs::vfs::Vfs;
-            let result = if redir.append {
-                let existing = Vfs::read_file(redir.path).unwrap_or_default();
-                let mut combined = match core::str::from_utf8(&existing) {
-                    Ok(s) => String::from(s),
-                    Err(_) => String::new(),
-                };
-                combined.push_str(&output);
-                Vfs::write_file(redir.path, combined.as_bytes())
-            } else {
-                Vfs::write_file(redir.path, output.as_bytes())
-            };
-            if let Err(e) = result {
+            if let Err(e) = redirect_write(redir.path, &output, redir.append) {
                 crate::console_println!("Redirect error: {:?}", e);
             }
         }
@@ -6145,16 +6151,63 @@ fn execute_pipe_chain(segments: &[&str]) {
     set_exit(0);
 }
 
+/// Narrow captured shell output to `&str` for a stage that still requires it.
+///
+/// The capture buffer and the pipe channel are bytes, but two consumers are
+/// not yet: the 19 `cmd_*_input` implementations behind [`dispatch_with_input`]
+/// are Rust text processors (`sed`, `awk`, `tr`, `cut`, `fold` parse `char`s),
+/// and [`expand_vars`] accumulates into a `String`. This is the single, named
+/// place that gap is crossed, rather than a scatter of unnamed
+/// `from_utf8_lossy` calls inside them.
+///
+/// It refuses instead of substituting U+FFFD, which matters most for the
+/// consumers that *write* rather than print — `tee` writes its input to a
+/// file, so a lossy decode there is the same data-destruction class as the
+/// `>>` truncation [`redirect_write`] documents, just arriving through a
+/// different door. Refusing is visible; corrupting is not.
+///
+/// Behaviour is unchanged today: every producer still emits UTF-8, so this
+/// never fires. It is the marker for the follow-up, and the guard that stops
+/// the first byte-clean producer from silently corrupting these stages.
+/// Tracked in `known-issues.md` → `TD-KSHELL-LINE-EDITOR-IS-UTF8`.
+fn shell_bytes_as_str<'a>(bytes: &'a [u8], what: &str) -> Option<&'a str> {
+    match core::str::from_utf8(bytes) {
+        Ok(s) => Some(s),
+        Err(_) => {
+            crate::console_println!(
+                "{what}: not valid UTF-8, and this stage cannot handle arbitrary bytes yet"
+            );
+            None
+        }
+    }
+}
+
+/// Strip trailing newlines, as POSIX requires of `$(…)` substitution.
+fn trim_trailing_newlines(bytes: &[u8]) -> &[u8] {
+    let mut end = bytes.len();
+    while end > 0 && bytes.get(end.saturating_sub(1)) == Some(&b'\n') {
+        end = end.saturating_sub(1);
+    }
+    bytes.get(..end).unwrap_or(bytes)
+}
+
 /// Execute a command with optional piped input.
 ///
-/// Commands that support piped input will read from the input string
-/// when no file argument is provided.  Commands that don't support
-/// piped input ignore the input and execute normally.
-/// Split a string into the first whitespace-delimited word and the rest.
+/// Commands that support piped input read from `input` when no file argument
+/// is provided.  Commands that don't support piped input ignore it and execute
+/// normally.
 ///
-/// Returns `(first_word, remaining)`.  If there is no second word,
-/// `remaining` is an empty string.
-fn dispatch_with_input(line: &str, input: &str) {
+/// `input` is bytes because the pipe channel and the capture buffer are bytes,
+/// but every `cmd_*_input` implementation below still takes `&str`, so the
+/// narrowing happens once here via [`shell_bytes_as_str`] rather than 19 times
+/// with 19 different failure behaviours.  A command whose input cannot be
+/// decoded does not run at all and exits non-zero, which is what stops `tee`
+/// from writing a U+FFFD-mangled copy of a binary file.
+fn dispatch_with_input(line: &str, input: &[u8]) {
+    let Some(input) = shell_bytes_as_str(input, line.split(' ').next().unwrap_or("")) else {
+        set_exit(1);
+        return;
+    };
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
     let args = parts.next().unwrap_or("").trim();
@@ -8970,6 +9023,60 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert_eq!(resolve_path(&b"\xff"[..]).as_path().as_bytes(), b"/\xff");
 
     *CWD.lock() = saved_cwd;
+
+    serial_println!("  kshell::self_test 6: `>>` appends instead of truncating");
+    // The regression this section exists for (`B-KSHELL-APPEND-TRUNCATES-BINARY-FILES`):
+    // four duplicated copies of the append path read the existing file, decoded
+    // it with `from_utf8`, and substituted an *empty* string on failure. So
+    // `cmd >> file` silently discarded everything already in `file` whenever
+    // `file` was not valid UTF-8 — every binary file — while reporting success
+    // and setting exit status 0. Asserted on a real VFS write, not a mock,
+    // because the bug lived in the read-modify-write, not in the decision to
+    // append.
+    {
+        use crate::fs::vfs::Vfs;
+        let path = "/tmp/kshell_append_selftest.bin";
+        // 0x80 and 0xFF are not valid UTF-8 anywhere, so the old code's
+        // `from_utf8(...).unwrap_or("")` threw exactly these bytes away.
+        redirect_write(path, b"\x80\xffhead", false)?;
+        redirect_write(path, b"tail\n", true)?;
+        let got = Vfs::read_file(path)?;
+        assert_eq!(
+            got.as_slice(),
+            &b"\x80\xffheadtail\n"[..],
+            "append must preserve non-UTF-8 existing contents"
+        );
+        // `>` still truncates, which is the half that was always correct and
+        // must stay that way.
+        redirect_write(path, b"fresh", false)?;
+        assert_eq!(Vfs::read_file(path)?.as_slice(), &b"fresh"[..]);
+        // `>>` onto a file that does not exist creates it: `NotFound` is the
+        // one read error that legitimately means "start empty".
+        let missing = "/tmp/kshell_append_selftest_absent.bin";
+        let _ = Vfs::remove(missing);
+        redirect_write(missing, b"\xffcreated", true)?;
+        assert_eq!(Vfs::read_file(missing)?.as_slice(), &b"\xffcreated"[..]);
+        let _ = Vfs::remove(path);
+        let _ = Vfs::remove(missing);
+    }
+
+    serial_println!("  kshell::self_test 7: substitution trimming is byte-clean");
+    // `$(…)` strips *trailing* newlines only, and must not touch a 0x0A that
+    // happens to sit inside the output, nor any other byte.
+    assert_eq!(trim_trailing_newlines(b"a\nb\n\n"), b"a\nb");
+    assert_eq!(trim_trailing_newlines(b"\n\n"), b"");
+    assert_eq!(trim_trailing_newlines(b""), b"");
+    assert_eq!(trim_trailing_newlines(b"no newline"), b"no newline");
+    // A bare CR is not a newline for this purpose, and neither is a high byte
+    // that a `char`-oriented trim might have mis-decoded.
+    assert_eq!(trim_trailing_newlines(b"a\r\n"), b"a\r");
+    assert_eq!(trim_trailing_newlines(b"re\xffport\n"), b"re\xffport");
+    // The narrowing chokepoint accepts UTF-8 and refuses everything else,
+    // rather than substituting U+FFFD. (The refusal prints one line to the
+    // console; that line appearing in the boot log is expected here.)
+    assert_eq!(shell_bytes_as_str(b"caf\xc3\xa9", "selftest"), Some("café"));
+    assert_eq!(shell_bytes_as_str(b"", "selftest"), Some(""));
+    assert_eq!(shell_bytes_as_str(b"re\xffport", "selftest"), None);
 
     serial_println!("  kshell::self_test PASSED");
     Ok(())

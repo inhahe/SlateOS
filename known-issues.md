@@ -67939,14 +67939,14 @@ parser and the formatter, and *nothing else*: not `open`, not `skip`, not the
 same-file shortcut, not the comparison loop's interaction with real files. Most
 `scripts/*-diff.sh` harnesses build a native Windows subject and reach into WSL
 only for the GNU reference, which for this shape of binary would run the stub
-138 times and report a uniform disagreement that says nothing about the
+141 times and report a uniform disagreement that says nothing about the
 program.
 
 The answer already existed for three other binaries: `du-diff.sh`,
 `find-diff.sh` and `ls-diff.sh` build their subject *for Linux inside WSL* and
 compare it against GNU there (`design-decisions.md` §365).
 `scripts/cmp-diff.sh` is the fourth, and it goes one step further in running
-*both* sides inside WSL. 138 cases, 9 recorded as differing on purpose.
+*both* sides inside WSL. 141 cases, 9 recorded as differing on purpose.
 `OURS=/usr/bin/cmp scripts/cmp-diff.sh` turns exactly those 9 into XPASS and
 nothing else, which is what shows the harness discriminates. It needs a Rust
 toolchain under the WSL user's `$HOME` and skips with a message and exit 0 if
@@ -68028,6 +68028,28 @@ these scripts had accumulated into one.
     wrong origin. A lone positional `SKIP1` is the one asymmetry — unlike a
     lone `-i`, it says nothing about the second file, so `cmp a b 5` skips 5
     bytes of `a` and none of `b`.
+
+### The seventeenth, found by the pre-push gate
+
+17. **`LONG_OPTIONS` listed `--help` before `--version`; diffutils declares them
+    the other way round.** Every coreutils bin in this tree ends its table with
+    `GETOPT_HELP_OPTION_DECL` then `GETOPT_VERSION_OPTION_DECL`, and I carried
+    that habit into a diffutils program, which writes both entries out by hand
+    in the opposite order. The order is not cosmetic: glibc reports `pfound` —
+    the first table entry an ambiguous prefix matched — and lists the remaining
+    matches after it, so two tables holding the same names in different orders
+    name a different option in their diagnostics.
+
+    `scripts/getopt-ambiguity-check.py` caught it at `git push`, which is
+    exactly the case it was written for: the prefixes it sweeps are generated
+    from *our* names, so a same-names-different-order table survives the sweep
+    untouched and only the sequence comparison can see it. Nothing in 138
+    differential cases could either — no prefix shorter than the empty one
+    matches both `--version` and `--help`. The harness now runs `cmp --=x`,
+    whose empty prefix matches every entry and so prints the whole table in
+    declaration order, plus `--p` and `--v` for the two ambiguous prefixes that
+    do occur; that is the same one-command readout the check script uses, and
+    it belongs in any future bin's harness for the same reason.
 
 ### Deliberate divergences, all recorded as `xfail` in the harness
 

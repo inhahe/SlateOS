@@ -275,6 +275,17 @@ const SHORT_OPTIONS: &str = "bci:ln:sv";
 
 /// Upstream's `longopts`, in its order. `--print-chars` has been an alias of
 /// `--print-bytes` since diffutils 2.7.3 and is still accepted.
+///
+/// `--version` comes *before* `--help`, which is the opposite of every
+/// coreutils bin in this tree: coreutils spells the tail of its table with
+/// `GETOPT_HELP_OPTION_DECL` then `GETOPT_VERSION_OPTION_DECL`, while diffutils
+/// writes both entries out by hand in the other order. The order is not
+/// cosmetic — glibc reports `pfound`, the first entry an ambiguous prefix
+/// matched, so a table holding the same names in a different order names a
+/// different option in its diagnostics. Measured with `cmp --=x`, whose empty
+/// prefix matches everything and so prints the whole table in declaration
+/// order; `scripts/getopt-ambiguity-check.py` compares the two as sequences and
+/// caught this one.
 const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("print-bytes", Takes::Nothing),
     ("print-chars", Takes::Nothing),
@@ -283,8 +294,8 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("bytes", Takes::Required),
     ("silent", Takes::Nothing),
     ("quiet", Takes::Nothing),
-    ("help", Takes::Nothing),
     ("version", Takes::Nothing),
+    ("help", Takes::Nothing),
 ];
 
 /// Every way of naming a skip *raises* it; none of them lowers it.

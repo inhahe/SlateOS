@@ -422,6 +422,17 @@ run_case --sil a b
 run_case --byt=4 a b
 run_case --ign=4 a b
 run_case --print-chars a b
+# Ambiguous prefixes, whose diagnostic lists the matches in *table* order --
+# glibc reports `pfound`, the first entry that matched, and lists the rest
+# after it. The empty prefix `--=x` matches every entry, so this one case is a
+# direct readout of the whole table, names and order together. It is how
+# `scripts/getopt-ambiguity-check.py` reads GNU's copy, and it is the only case
+# here that can see the tail of the table: diffutils declares `--version`
+# before `--help`, the opposite of every coreutils bin, and nothing shorter
+# than the empty prefix matches both.
+run_case --=x a b
+run_case --p a b
+run_case --v a b
 
 # --- diagnostics -------------------------------------------------------------
 run_case

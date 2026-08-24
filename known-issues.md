@@ -72586,6 +72586,130 @@ shape:
 That last control is the one that makes the set meaningful. Without it, a
 kshell that set status 1 unconditionally would pass rungs 17–20.
 
+### Reopened 2026-08-24 — the gates leaked, and ~500 more sites were found
+
+**In short:** the three sweeps above were real, but each was guarded by a list
+of words the message had to contain, and that list was too short. A second wave
+found roughly five hundred more commands with the same bug. The rule that
+replaced the word list is that an `Err` arm needs no word list at all.
+
+Commits `89354fcb8`, `c2b986242`, `0b4dd69c9`, `66749a61c`, `aad3bcdaf`.
+Self-test rungs 21–24.
+
+**How the leak was found: by accident.** Not by an audit. While reading an
+unrelated site, an `Err` arm went past that plainly reported a failure and set
+no status. Enumerating the shape turned up **223** more the first sweep had
+rejected, every one for a wording near-miss:
+
+| message | why the gate rejected it |
+|---|---|
+| `Error rebuilding index` | no colon after `Error` |
+| `Transaction {} failed` | the list had `failed to`, not `failed` |
+| `[oci] Could not read …` | the list had `cannot`, not `could not` |
+| `tag add: {:?}` | no listed word at all |
+| ~60 × `<subsystem>: test FAILED: {:?}` | a *self-test* announcing a failed test, then reporting success |
+
+Rule 5 above already said `Err` arms need no anchoring. The sweep applied one
+anyway, and those 60 self-test arms are what it cost.
+
+#### Four distinctions that decided the ambiguous sites
+
+These are the useful output of the second wave; the status changes are
+mechanical once these are settled.
+
+1. **Checker vs dashboard.** A checker runs tests and its verdict *is* the
+   answer, so the verdict belongs in the status: `fsck`, `sha256sum -c`,
+   `syshealth`, `invariant`, `integrity verify`. A dashboard displays state and
+   the display succeeding is the answer: `top`, `vmstat`, and this shell's
+   `diag`, which is left exiting 0 on purpose. The distinction is the source's
+   own — `cmd_syshealth`'s doc comment reads *"Unlike 'diag' (which reads
+   passive counters), this command actively tests kernel subsystem integrity."*
+2. **A report row must not decide the command's status; its summary must.**
+   `syshealth`'s `[FAIL]` rows, `vlan stats`'s `Unknown drops`, `snmp
+   sysinfo`'s `(timeout)` rows, `integrity verify`'s `[MODIFY]` rows. Fix the
+   verdict line, not the row. The corollary bit in `zip`, which counts read
+   failures and then interpolates `", N errors"` into a *success* line: no
+   summary carried the verdict, so there the row had to.
+3. **Named lookup vs state query.** Asking for a **named item** that is not
+   there is a failed lookup — `printenv FOO`, `git config --get` and `grep` all
+   exit non-zero. Asking about **state** and being told the state is a
+   successful query — `getfacl` prints the permissions and exits 0 whatever
+   they are. This is what separates `"{}: not set"` (swept) from `"No active
+   profile."` and `seal check`'s `DENIED` (not swept: the check answered the
+   question it was asked, and the answer being "no" is not a failed command).
+4. **Did the container start?** For `oci run`, flipping the status when an
+   option could not be applied is *actively dangerous*, not merely wrong:
+   `oci run … || cleanup` would tear down a container that is up and running.
+   Eleven `[oci]` sites are excluded on this rule. Whether `oci run` should
+   instead refuse to start is a genuine question about the command's contract
+   and is filed in `open-questions.md`.
+
+#### The residue: braced arms, and what a brace means
+
+79 `Err` arms had a `{ … }` body, which no mechanical pass reaches. Reading
+them showed a brace means one of two very different things. Usually it means
+nothing: `cargo fmt` wrapped one long line and the arm beside it already sets a
+status. Sometimes it is deliberate, and then the test is whether the arm
+*returns its outcome*: one ending in `false` or `None` hands the decision to a
+caller, but one ending in a bare `shell_println!(..)` evaluates to `()` and
+defers to nobody. That is **not** the same test as "ends without a semicolon",
+which was the first draft's, and the difference was eight sites.
+
+Six such arms end in `continue;` — the per-file loops in tar/cpio/zip/sed. The
+status has to be raised *before* control leaves the arm or it is dead code;
+rustc caught the naive placement as `unreachable_statement`.
+
+#### Two process lessons, both learned the expensive way
+
+**Key an exclusion list on the message, never on a line number.** A line number
+is a fact about a moment; a message is a fact about the site. The first
+exclusion list used line numbers, merging `main` shifted every one, and the run
+reported *"9 excluded"* while excluding **nothing** and sweeping all four sites
+the list existed to protect. Both sweep scripts now key on message text and
+**abort if any exclusion matches no site**, so the failure cannot recur
+silently.
+
+**The string-literal guard was unsound for two sweeps.** Every rewrite was
+checked with "the ordered list of string literals must be byte-identical before
+and after", implemented as `re.findall(r'"((?:[^"\\]|\\.)*)"')`. That regex
+pairs quotes sequentially from the top of the file, so a single *stray* quote
+desynchronises everything below it — and `kshell.rs:826` is
+
+```rust
+b'/' | b' ' | b'\t' | b'"' | b'\'' | b':'
+```
+
+where `b'"'` contributes one unpaired `"`. Past it the regex stops matching
+literals and starts matching the **gaps between** them, and since `[^"\\]`
+matches a newline those pseudo-literals swallow whole blocks of code: 4,951 of
+its 40,803 matches contained a newline. Found because it aborted a rewrite that
+touched no message at all; the dangerous direction is that it can equally
+*pass* while a real literal moved. Replaced with a proper Rust lexer (comments,
+nested block comments, char literals, byte/raw strings), which finds 40,581
+literals and only 23 containing a newline — all genuine `\`-continued strings.
+The earlier sweeps are fine on other evidence (brace balance, net `set_exit`
+delta, a diff-shape audit, a clean build, a green boot test), but the guard
+they leaned on was weaker than believed.
+
+#### Still outstanding
+
+- **~356 statusless *bail* sites** (`survey_bail.py`). Unlike an `Err` arm, a
+  bail is **not** by construction a failure: `return;` after a print covers both
+  "you invoked me wrong" and "here is your answer, done". The survey found
+  `dirname`'s `/` — literally the command's output — beside `zip: no input
+  files`. Gating on an argument test (`args.is_empty()`, `parts.len() < 2`)
+  narrows it to 29 but does not separate them either, because `alias`,
+  `declare`, `trap`, `volume` and `zoom` all use "no arguments" to mean *show
+  me the current value*. This set has to be read, not swept.
+- **~17 `"Syntax error: …"` sites** in `handle_control_flow`. Verified safe to
+  fix: `execute()` returns immediately after `handle_control_flow` returns true
+  without touching the status. Use `set_exit(1)`, not bash's 2 — a half-migrated
+  POSIX table (2 for syntax but not 127/126/128+N) is worse than a consistent
+  one.
+- `zip` has three more statusless bails of its own (`need at least an archive
+  name and one file`, `'{}' is a directory (use -r)`, `no input files`) — the
+  sites that revealed the bail gate had leaked.
+
 ### Known under-sweep, left deliberately
 
 Rule 3 rejects `"base64: decode error: {}"` and `"tee: write error: {:?}"`,

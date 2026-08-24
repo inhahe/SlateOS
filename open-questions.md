@@ -1960,3 +1960,81 @@ that has to be re-checked if the default changes. Nothing is blocked. The
 inconsistency that *was* dangerous — the piped half printing `1: alpha` while
 the file half printed `1:alpha` — is already fixed (`afe5b0ae2`); what remains
 here is only the choice of default.
+
+---
+
+## Should `oci run` refuse to start when an option cannot be applied? (lane A)
+
+**In short:** `oci run` starts a container. If you ask it for something extra —
+a shared folder (`-v`), a published port (`-p`), a file of labels or
+environment variables — and it cannot do that one thing, it currently prints a
+warning, starts the container anyway, and reports success. So you can ask for a
+container with your data folder attached, get one *without* it, and be told
+everything worked. Docker refuses to start at all in this situation. The
+question is which of those two behaviours we want.
+
+**Where:** `kernel/src/kshell.rs`, the `oci run` argument loop — eleven sites,
+all reading `[oci] Warning: could not …` or `[oci] Could not read …-file`.
+Raised during the exit-status sweep (`known-issues.md` →
+`A-KSHELL-3676-FAILING-COMMANDS-REPORTED-SUCCESS`), which deliberately left all
+eleven alone because changing the *status* without deciding the *contract*
+would be the dangerous half of the change on its own.
+
+### Why the sweep did not just fix it
+
+Every other failing command in the shell got a non-zero exit status. These
+eleven did not, because here a non-zero status is worse than the bug. The
+idiom `oci run … || cleanup` exists, and `cleanup` tears down a container.
+Flipping the status would make it tear down a container that is **up and
+running** — turning a wrong exit code into destroyed work. The rule the sweep
+used for this command instead was "did the container start?", and the one site
+that answers no (`Cannot allocate IP from network`) already sets a status and
+returns.
+
+That leaves the real question untouched: should asking for an option that
+cannot be applied mean the container should not have started?
+
+### Options
+
+**A — refuse to start (Docker's behaviour).** Validate every requested option
+before launching; if any cannot be applied, print the reason, start nothing,
+exit non-zero.
+*What changes:* `oci run -v /data:/data img` on an unmountable `/data` prints
+the error and you get **no container**, instead of a running container with no
+`/data`. `|| cleanup` becomes correct, because there is nothing to clean up.
+
+**B — start anyway, but exit non-zero** (today's behaviour plus a status).
+*What changes:* the container still starts without `/data`, but the command
+reports failure — so `|| cleanup` fires **against a live container** and
+destroys it. This is the option that looks like a small fix and is not.
+
+**C — leave exactly as is: warn, start, exit 0.**
+*What changes:* nothing. A script cannot tell that an option was dropped, and
+must inspect the container afterwards to find out.
+
+**D — split by option kind.** Treat options that change what the container *is*
+(`-v`, `-p`, `--label-file`, `--env-file`) as A, and options that are advisory
+(`--read-only` best-effort, tmpfs) as C.
+*What changes:* the dangerous ones fail closed, the cosmetic ones stay
+warnings. More faithful, and more code, and the boundary needs writing down or
+it will drift.
+
+### My recommendation
+
+**A**, matching Docker. The reason is that a container is not a partial
+artifact: you cannot inspect one to discover which options were silently
+dropped, so "started, but not as requested" is a state no caller can act on. A
+is also the only option under which the existing `|| cleanup` idiom is safe,
+because it guarantees there is nothing running to clean up. **D** is defensible
+if refusing to start over an unapplied tmpfs feels too strict — but it needs an
+explicit list, not a judgement call per site.
+
+**Not B.** It is the smallest diff and it is actively harmful.
+
+### If this is never answered
+
+Safe, and stable — today's behaviour destroys nothing and the sweep left it
+untouched on purpose. It does not degrade with time. What it costs is that
+`oci run` cannot be scripted reliably: any script that cares whether its
+options took effect has to verify them itself afterwards, and every such script
+is a place that would need revisiting if the contract later changes.

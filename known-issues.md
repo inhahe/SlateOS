@@ -68685,7 +68685,7 @@ to hold to that, which is what the new self-test is there to enforce.
 
 ---
 
-### TD-KERNEL-CLIPPY-HAS-8-DENY-LEVEL-ERRORS — `cargo clippy -p kernel` does not pass — ✅ FIXED 2026-08-24 (lane A, `7465db994`)
+### TD-KERNEL-CLIPPY-HAS-8-DENY-LEVEL-ERRORS — `cargo clippy -p kernel` does not pass — ✅ FIXED 2026-08-24 (lane A, `7465db994`; gate added `81a12435c`)
 
 **What.** `CLAUDE.md` → "When You Finish a Task" requires `cargo clippy`
 clean. The kernel is not: `cargo clippy -p kernel --release` ends with
@@ -68738,6 +68738,56 @@ open question is where to put it, since a clippy run and a `cargo check` run
 invalidate each other's fingerprints in a shared `target/`, so naïvely adding
 one to `boot-test.sh` doubles every boot's build time. Tracked as the
 remaining half of this entry rather than closed outright.
+
+**Gate built 2026-08-24 (`81a12435c`) — this entry is now fully closed.**
+`scripts/boot-test.sh` → `check_kernel_clippy`, run with the other pre-build
+checks and before `cargo build`.
+
+**The paragraph above is wrong, and the way it is wrong is the more useful
+half of this entry.** "A clippy run and a `cargo check` run invalidate each
+other's fingerprints" was never measured — it was plausible reasoning written
+in the voice of a finding, and it deferred the gate for a day. `cargo clippy`
+sets `RUSTC_WORKSPACE_WRAPPER`, which is hashed into the fingerprint of every
+workspace unit, so clippy's artifacts occupy their own entries and leave the
+build's untouched. Measured:
+
+| Step | Time |
+|---|---|
+| `cargo build` (warm baseline) | 13.8 s |
+| `cargo clippy -p kernel` (cold) | 200 s |
+| `cargo build` immediately after | **4.7 s** — not invalidated |
+| `cargo clippy` again, no source edit | 5 s |
+| `cargo clippy` after touching one file | **113 s** — what a real run pays |
+| `cargo build` after touch + clippy | 215 s — an ordinary full kernel codegen |
+
+113 s against a QEMU window of 400–900 s. Not free, and the comment at the
+gate says so in numbers rather than calling it cheap.
+
+Four choices, each recorded at the gate rather than here:
+
+* **`-p kernel`, not the workspace** — a workspace-wide clippy would let a red
+  crate in lane B's or lane C's tree block lane A's boot test, which is the
+  exact coupling the lane split exists to prevent. Each lane gates its own.
+* **Same profile as the build** — `cfg(debug_assertions)` selects real code in
+  this kernel, so linting debug while shipping release would leave a hole of
+  precisely the size of the difference.
+* **Output to `build/clippy-kernel.log`, not the boot log** — clippy emits
+  18,163 lines here, all `pedantic`-level backlog, and they would bury the
+  output the rest of the script greps.
+* **Not a pipe.** `cargo … | grep` makes `$?` grep's, and grep's status answers
+  "did I match" — which for an *error* filter is inverted: a clean crate would
+  report failure and a broken one success. This is the failure mode a gate can
+  carry indefinitely, because it only misfires in the direction nobody checks.
+
+**Tested on both paths before shipping**, which for a gate is not optional —
+one that has only ever been seen green is indistinguishable from one that
+cannot fire. Green: exit 0 and a single summary line. Red: a deliberate
+`ptr_arg` violation appended to `ksyms.rs` produced exit 101 and
+``kernel\src\ksyms.rs:626:34: error: writing `&Vec` instead of `&[_]` …``
+through the failure filter; then reverted.
+
+**Still not gated:** the `bench/**` crates, also lane A's. Same one-line
+addition if they turn out to be clippy-clean; unmeasured as of this writing.
 
 ---
 

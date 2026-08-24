@@ -10228,10 +10228,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "echo '{a,b}'",
             "a quoted brace is literal"
         );
+        // A quoted comma does not separate alternatives -- and the surviving
+        // quotes in the answer are the point of the whole change, not an
+        // artefact: this stage expands braces and removes nothing. The
+        // dequoted form is what the *command* sees, one stage later.
         assert_eq!(
             expand_braces("echo {a,'b,c'}"),
-            "echo a b,c",
+            "echo a 'b,c'",
             "a quoted comma does not separate alternatives"
+        );
+        assert_eq!(
+            remove_quotes("a 'b,c'"),
+            "a b,c",
+            "...and the quotes come off at the dispatch boundary, not before"
         );
 
         // --- Quote removal in isolation. Not a word splitter: it splits

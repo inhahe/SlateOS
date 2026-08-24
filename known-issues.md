@@ -71816,7 +71816,32 @@ those 56, and been wrong in a way that is very hard to see.
 
 ### BUG-C-GUITK-CONTRAST_TEXT-PICKS-WHITE-WHERE-BLACK-IS-FOUR-TIMES-MORE-LEGIBLE
 
-**Status: OPEN** — found 2026-08-24 while fixing the same defect in `appearance::readable_on` (§536).
+**Status: FIXED** 2026-08-24, the same day it was found — see §537. Kept here
+in full because the *prediction* at the bottom of this entry was wrong, and how
+it was wrong is the useful part.
+
+**What actually happened.** `contrast_text` and `is_dark` had **no production
+callers at all** — only their own six tests, between them checking `#14141E`,
+`#F0F0F0`, pure black, pure white, and the Mocha and Latte backgrounds
+(`#1E1E2E`, `#EFF1F5`). Every one of those is far from the 0.179 crossover, so
+all six passed before the fix and all six pass after it, unchanged: they never
+constrained the rule they were named for. The "run of pinned-colour test
+failures" this entry
+told a future reader to expect was zero, and the blast radius it told them to
+reconcile was empty. The entry asserted "a crate with many widget callers"
+without grepping for one. **A blast-radius estimate that was not measured
+should say so** — an unmarked guess in a tracking file is read later as a
+finding, and this one made a fifteen-minute change look like a second project
+and kept it queued longer than it needed to be.
+
+The severity figures below were also understated. Measured over the whole
+24-bit cube: the wrong rule disagreed with the right one on **41.78 %** of all
+colours, and its worst case was `#21D828`, where it returned white at
+**1.92:1** with black available at **10.92:1**.
+
+---
+
+**Status when filed: OPEN** — found 2026-08-24 while fixing the same defect in `appearance::readable_on` (§536).
 
 **Where:** `gui/toolkit/src/theme.rs:16-35` — `luminance`, `is_dark`, `contrast_text`.
 

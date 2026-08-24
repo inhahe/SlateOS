@@ -758,41 +758,19 @@ pub const LIGHT_EXTREME: Color = Color::from_hex(0xEFF1F5);
 /// a leftover `CRUST` constant. See `gui/desktop/src/palette_check.rs`.
 pub const DARK_EXTREME: Color = Color::from_hex(0x11111B);
 
-/// The relative luminance of an opaque colour, as WCAG 2 defines it.
+/// The relative luminance of an opaque colour, and the WCAG 2 contrast ratio
+/// between two of them — re-exported from the toolkit, not defined here.
 ///
-/// Each channel is un-gamma'd back to light before it is weighted, which is
-/// the step that separates this from a plain luma sum: sRGB stores brightness
-/// on a curve, so averaging the stored bytes measures the encoding rather than
-/// the light. Alpha is ignored — a translucent colour has no luminance of its
-/// own until you know what is behind it, so compose first and ask after.
+/// They belong there because the toolkit is what everything else on this
+/// desktop already depends on, whereas this crate is not: a widget asking
+/// which ink to use cannot reach an answer that lives in the appearance model,
+/// so if the answer lived here the toolkit would grow a second one. It did,
+/// for a while, and the copy was wrong for 41.78 % of the colour cube. See
+/// `guitk::theme::contrast_text`.
 ///
-/// Public because it is the input to every legibility question the shell asks,
-/// and there must be exactly one implementation of it to ask.
-#[must_use]
-pub fn relative_luminance(c: Color) -> f32 {
-    fn channel(v: u8) -> f32 {
-        let v = f32::from(v) / 255.0;
-        if v <= 0.039_28 {
-            v / 12.92
-        } else {
-            ((v + 0.055) / 1.055).powf(2.4)
-        }
-    }
-    0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
-}
-
-/// The WCAG 2 contrast ratio between two opaque colours: 1.0 for a colour
-/// against itself, 21.0 for black against white.
-///
-/// The accessibility floors quoted throughout the shell are ratios on this
-/// scale: 4.5 for body text (SC 1.4.3) and 3.0 for a control's outline
-/// (SC 1.4.11).
-#[must_use]
-pub fn contrast_ratio(a: Color, b: Color) -> f32 {
-    let (la, lb) = (relative_luminance(a), relative_luminance(b));
-    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
-    (hi + 0.05) / (lo + 0.05)
-}
+/// The re-export is deliberate rather than a wrapper: a wrapper would be a
+/// place where the two could drift apart.
+pub use guitk::theme::{contrast_ratio, relative_luminance};
 
 /// Black-ish or white-ish, whichever can be read on `bg`.
 ///
@@ -818,7 +796,9 @@ pub fn contrast_ratio(a: Color, b: Color) -> f32 {
 /// Deliberately not [`guitk::theme::contrast_text`], which answers the same
 /// question with pure black and pure white. That is the right answer for a
 /// widget that may be drawn on any background; this is the right answer for a
-/// surface that belongs to a specific palette.
+/// surface that belongs to a specific palette. The two now share their
+/// arithmetic — [`contrast_ratio`] *is* the toolkit's — so the only thing that
+/// differs between them is the pair of inks they choose between.
 #[must_use]
 pub fn readable_on(bg: Color) -> Color {
     // `>=` rather than `>`: at the exact crossover both inks are equally
@@ -2440,6 +2420,30 @@ mod tests {
                 "{c:?}: the crate says {mine:.4}:1, the standard says {theirs:.4}:1"
             );
         }
+    }
+
+    /// The ratio this crate publishes is the toolkit's, not a copy of it.
+    ///
+    /// Structural rather than behavioural: two independent implementations
+    /// agreeing on every colour tested is exactly what the tree had before,
+    /// and it is not the same thing as there being one implementation. If
+    /// someone gives `appearance` its own luminance again, the two items stop
+    /// being the same item and this fails, even though every ratio still
+    /// matches.
+    #[test]
+    fn the_ratio_is_the_toolkits_own_and_not_a_second_copy_of_it() {
+        let here: fn(Color, Color) -> f32 = contrast_ratio;
+        let toolkit: fn(Color, Color) -> f32 = guitk::theme::contrast_ratio;
+        assert!(
+            core::ptr::fn_addr_eq(here, toolkit),
+            "appearance::contrast_ratio is no longer guitk::theme::contrast_ratio"
+        );
+        let here: fn(Color) -> f32 = relative_luminance;
+        let toolkit: fn(Color) -> f32 = guitk::theme::relative_luminance;
+        assert!(
+            core::ptr::fn_addr_eq(here, toolkit),
+            "appearance::relative_luminance is no longer guitk::theme::relative_luminance"
+        );
     }
 
     /// A dense walk of the colour cube, because the accent is not a list.

@@ -122,6 +122,10 @@ WP = "gui/desktop/src/wallpaper.rs"
 AX = "gui/desktop/src/a11y.rs"
 SWITCH = "gui/desktop/src/switch.rs"
 SLIDER = "gui/desktop/src/slider.rs"
+# The toolkit, one crate *below* `appearance`. 537 moved the WCAG arithmetic
+# down here so there would be one copy of it; a defect patched into this file
+# is therefore visible to `appearance` and `desktop` as well as to `guitk`.
+THEME = "gui/toolkit/src/theme.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -22561,12 +22565,17 @@ DEFECTS = [
     ),
     (
         "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: luminance is read straight off the stored bytes, skipping the sRGB curve",
-        APP,
+        # Re-targeted by 537: the function moved from `appearance` down into the
+        # toolkit, so that the toolkit's own ink chooser could reach it instead
+        # of keeping a second copy. The patch text is unchanged -- only the file
+        # it lands in. Its catchers gained the toolkit's tests and kept all the
+        # others, since `appearance` now re-exports what this breaks.
+        THEME,
         [
             ('        if v <= 0.039_28 {\n            v / 12.92\n        } else {\n            ((v + 0.055) / 1.055).powf(2.4)\n        }\n',
              '        v\n'),
         ],
-        ["appearance", "desktop"],
+        ["guitk", "appearance", "desktop"],
         [
             # The plausible simplification: the weights are still there, only
             # the un-gamma-ing is gone. It moves the crossover from a true
@@ -22574,6 +22583,22 @@ DEFECTS = [
             # palette constants -- every light accent among them -- so unlike
             # the luma rule this one is caught by anything walking a palette.
             'the_published_ratios_are_what_this_crate_computes',
+            # Added by 537, when the function moved into the toolkit: the
+            # toolkit now has its own transcription of the standard to disagree
+            # with, and its own cube walk.
+            'the_published_ratios_are_what_this_module_computes',
+            # NOT the toolkit's cube walk, though it was predicted here and the
+            # sweep of 2026-08-24 proved otherwise. The walk is written entirely
+            # in terms of `contrast_text` and `contrast_ratio`, which share this
+            # very luminance function -- so replacing the sRGB curve moves both
+            # sides of every comparison together. `chosen >= other` still holds
+            # (it is the max by construction), and the 4.58:1 floor still holds
+            # because for *any* luminance mapping into [0,1] the worst case sits
+            # at the crossover and is 1.05/sqrt(1.05*0.05). The walk proves the
+            # decision *rule*; only the f64 re-transcription above can prove the
+            # *arithmetic*. Ex81 -- a wrong rule with this same curve -- is the
+            # complementary case, and the walk does catch that one.
+            'plain_red_and_mid_grey_are_lettered_in_black',
             'the_chosen_ink_is_the_more_legible_of_the_two_for_any_colour_at_all',
             'a_title_is_readable_on_every_bar_the_settings_can_produce',
             'the_knob_is_legible_on_every_track_a_panel_can_choose',
@@ -22601,13 +22626,35 @@ DEFECTS = [
     ),
     (
         "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the contrast ratio is computed upside down, dividing the darker by the lighter",
-        APP,
+        # Re-targeted by 537 along with Cx81, for the same reason: the ratio
+        # itself now lives in the toolkit and `appearance` re-exports it.
+        THEME,
         [
             ('    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };\n',
              '    let (hi, lo) = if la > lb { (lb, la) } else { (la, lb) };\n'),
         ],
-        ["appearance", "desktop"],
+        ["guitk", "appearance", "desktop"],
         [
+            # Added by 537: the toolkit's own definitional anchors and cube walk
+            # see this too, and `contrast_text` -- picking the larger of two
+            # reciprocals -- returns the worse ink for every colour.
+            'the_published_ratios_are_what_this_module_computes',
+            'the_chosen_ink_is_the_more_legible_of_the_two_for_every_colour_there_is',
+            'plain_red_and_mid_grey_are_lettered_in_black',
+            # Found undeclared by the sweep of 2026-08-24, and worth recording
+            # rather than just adding: these are the six pre-537 tests that
+            # 537's own write-up noted could *not* see the old luma rule, and
+            # they cannot see Cx81's wrong curve either. They see this one
+            # because inverting the ratio flips the ink on every colour at once,
+            # including the six hand-picked ones they pin. The rule they encode
+            # is "these particular colours get this particular ink", which is
+            # blind to how the answer was reached and sharp about the answer.
+            'test_catppuccin_latte_is_light_mode',
+            'test_catppuccin_mocha_is_dark_mode',
+            'test_contrast_text_on_dark_bg',
+            'test_contrast_text_on_light_bg',
+            'test_is_dark_black',
+            'test_is_dark_white',
             # Returns the reciprocal, so every floor assertion in the tree
             # compares a number below 1.0 against 3.0 or 4.5 -- and
             # `readable_on`, picking the larger of two reciprocals, returns the
@@ -22660,6 +22707,107 @@ DEFECTS = [
             'the_section_headings_keep_their_hue_in_both_modes',
             'the_wordmark_is_legible_on_the_logo_tile',
             'what_is_drawn_on_the_accent_is_chosen_for_the_accent',
+        ],
+    ),
+    # ---------------------------------------------------------------- 52
+    # 537: the toolkit's own ink chooser, which had the same defect as
+    # `readable_on` in a worse form and no production caller to reveal it.
+    #
+    # The six tests it shipped with all passed both before and after the fix,
+    # because every colour they name is far from the crossover. That is the
+    # condition this module exists to make impossible: after it, breaking the
+    # rule is caught, and a future reader can tell the tests constrain it.
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the toolkit's ink chooser goes back to thresholding luminance at a half",
+        THEME,
+        [
+            ('    if contrast_ratio(background, Color::BLACK) >= contrast_ratio(background, Color::WHITE) {\n        Color::BLACK\n    } else {\n        Color::WHITE\n    }\n',
+             '    if relative_luminance(background) < 0.5 {\n        Color::WHITE\n    } else {\n        Color::BLACK\n    }\n'),
+        ],
+        ["guitk", "appearance", "desktop"],
+        [
+            # The exact code 537 removed, minus its `powf(2.2)` (which is
+            # Cx81's business). It is wrong for 41.78% of the cube, but for
+            # none of the six colours the module's original tests name -- so
+            # the two tests 537 added are expected to be the only catchers,
+            # exactly as Ax81 was for `readable_on`.
+            'the_chosen_ink_is_the_more_legible_of_the_two_for_every_colour_there_is',
+            'plain_red_and_mid_grey_are_lettered_in_black',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the toolkit returns whichever of black and white is harder to read",
+        THEME,
+        [
+            ('    if contrast_ratio(background, Color::BLACK) >= contrast_ratio(background, Color::WHITE) {\n',
+             '    if contrast_ratio(background, Color::BLACK) < contrast_ratio(background, Color::WHITE) {\n'),
+        ],
+        ["guitk", "appearance", "desktop"],
+        [
+            # Wrong for every colour rather than 41.78% of them, so unlike Ex81
+            # the module's original tests do see it -- which is worth recording,
+            # because it is the difference between a test that pins the answer
+            # at the extremes and one that constrains the rule.
+            'the_chosen_ink_is_the_more_legible_of_the_two_for_every_colour_there_is',
+            'plain_red_and_mid_grey_are_lettered_in_black',
+            'test_contrast_text_on_dark_bg',
+            'test_contrast_text_on_light_bg',
+            'test_is_dark_black',
+            'test_is_dark_white',
+            'test_catppuccin_mocha_is_dark_mode',
+            'test_catppuccin_latte_is_light_mode',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: is_dark gets a threshold of its own again and drifts from the ink it explains",
+        THEME,
+        [
+            ('    contrast_text(color) == Color::WHITE\n',
+             '    relative_luminance(color) < 0.5\n'),
+        ],
+        ["guitk", "appearance", "desktop"],
+        [
+            # The whole reason `is_dark` is defined in terms of `contrast_text`
+            # rather than given a corrected threshold: two thresholds can
+            # disagree about a colour, and this is what that looks like.
+            'is_dark_and_contrast_text_cannot_disagree',
+            'plain_red_and_mid_grey_are_lettered_in_black',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the appearance crate goes back to its own copy of the luminance curve",
+        APP,
+        [
+            ('pub use guitk::theme::{contrast_ratio, relative_luminance};\n',
+             ('#[must_use]\n'
+              'pub fn relative_luminance(c: Color) -> f32 {\n'
+              '    fn channel(v: u8) -> f32 {\n'
+              '        let v = f32::from(v) / 255.0;\n'
+              '        if v <= 0.039_28 {\n'
+              '            v / 12.92\n'
+              '        } else {\n'
+              '            ((v + 0.055) / 1.055).powf(2.4)\n'
+              '        }\n'
+              '    }\n'
+              '    0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)\n'
+              '}\n'
+              '#[must_use]\n'
+              'pub fn contrast_ratio(a: Color, b: Color) -> f32 {\n'
+              '    let (la, lb) = (relative_luminance(a), relative_luminance(b));\n'
+              '    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };\n'
+              '    (hi + 0.05) / (lo + 0.05)\n'
+              '}\n')),
+        ],
+        ["guitk", "appearance", "desktop"],
+        [
+            # A *correct* copy -- byte-for-byte what the toolkit computes, so
+            # every ratio in the tree is unchanged and no legibility test can
+            # see it. That is the point: the defect 537 fixed is the existence
+            # of the second copy, not a wrong number in it, and a defect that
+            # nothing observes is a rule nothing is holding. The one test that
+            # catches this compares the two as function items rather than
+            # comparing their answers.
+            'the_ratio_is_the_toolkits_own_and_not_a_second_copy_of_it',
         ],
     ),
 ]

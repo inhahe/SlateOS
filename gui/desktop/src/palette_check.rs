@@ -127,24 +127,56 @@ fn is_accounted_for(p: &Palette, c: Color, derived: &[Color]) -> bool {
 /// mode, because "some colour is wrong somewhere in 300 commands" is not an
 /// actionable failure.
 pub fn assert_drawn_from(p: &Palette, cmds: &[RenderCommand], derived: &[Color], what: &str) {
-    let mode = if p.light { "light" } else { "dark" };
     for (i, cmd) in cmds.iter().enumerate() {
         for c in colors_of(cmd) {
-            assert!(
-                is_accounted_for(p, c, derived),
-                "{what}: command {i} in {mode} mode draws \
-                 #{:02X}{:02X}{:02X} (alpha {}), which is not a role of the \
-                 {mode} palette, not black, not a readable_on endpoint, and \
-                 not declared as derived. A colour constant was probably left \
-                 behind by the conversion — see known-issues.md \
-                 TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE.",
-                c.r,
-                c.g,
-                c.b,
-                c.a,
-            );
+            assert_one(p, &format!("command {i}"), c, derived, what);
         }
     }
+}
+
+/// Assert every colour in `named` is one `p` can account for.
+///
+/// The sibling of [`assert_drawn_from`] for a module whose themed colours are
+/// *values* rather than draw commands — a blur tint, a wallpaper fallback, a
+/// preset. Such a module carries exactly the same defect (a Catppuccin Mocha
+/// literal that a light palette cannot contain) and is invisible to
+/// [`assert_drawn_from`] for the uninteresting reason that it never builds a
+/// [`RenderCommand`]. Rather than have those modules synthesise a fake command
+/// to get checked — an artifice that would make the test about the wrapper
+/// instead of the value — they hand their colours over directly, each with the
+/// name of the site it belongs to.
+///
+/// The name is what makes the failure actionable: `command 7` is a useful
+/// locator inside a scene, but a preset table has no scene, so "the taskbar's
+/// tint" is the only thing that tells the reader *which* value is wrong.
+///
+/// # Panics
+///
+/// On the same condition as [`assert_drawn_from`]: a colour that is neither a
+/// role of `p`, nor black, nor a [`readable_on`](appearance::readable_on)
+/// endpoint, nor listed in `derived`.
+pub fn assert_colours_from(p: &Palette, named: &[(&str, Color)], derived: &[Color], what: &str) {
+    for (label, c) in named {
+        assert_one(p, label, *c, derived, what);
+    }
+}
+
+/// The one assertion both public entry points are made of.
+fn assert_one(p: &Palette, label: &str, c: Color, derived: &[Color], what: &str) {
+    let mode = if p.light { "light" } else { "dark" };
+    assert!(
+        is_accounted_for(p, c, derived),
+        "{what}: {label} in {mode} mode draws \
+         #{:02X}{:02X}{:02X} (alpha {}), which is not a role of the \
+         {mode} palette, not black, not a readable_on endpoint, and \
+         not declared as derived. A colour constant was probably left \
+         behind by the conversion — see known-issues.md \
+         TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE.",
+        c.r,
+        c.g,
+        c.b,
+        c.a,
+    );
 }
 
 #[cfg(test)]
@@ -243,5 +275,52 @@ mod tests {
             result.is_err(),
             "a leftover colour in a span went unchecked"
         );
+    }
+
+    /// The value-shaped entry point must reject what the command-shaped one
+    /// rejects, and must say which site was wrong.
+    ///
+    /// A second entry point is a second place for the predicate to be applied
+    /// wrongly — the obvious way to write [`assert_colours_from`] badly is to
+    /// iterate the names and forget to check the colours, which passes
+    /// everything silently. So this asserts both halves: that the leftover
+    /// fails at all, and that the panic message carries the site's name rather
+    /// than an index the caller has no scene to look up.
+    #[test]
+    fn a_leftover_mocha_value_fails_and_names_its_site() {
+        let light = Palette::for_mode(true);
+        let named = [("the taskbar's tint", Color::from_hex(0x1E1E2E))];
+        let result = std::panic::catch_unwind(|| {
+            assert_colours_from(&light, &named, &[], "probe");
+        });
+        let payload = result.err();
+        assert!(
+            payload.is_some(),
+            "the value sweep accepted Mocha base in a light render, so it \
+             would certify an unconverted module as converted"
+        );
+        let msg = payload
+            .as_ref()
+            .and_then(|p| p.downcast_ref::<String>())
+            .map_or_else(String::new, Clone::clone);
+        assert!(
+            msg.contains("the taskbar's tint"),
+            "the failure did not name the offending site: {msg}"
+        );
+    }
+
+    /// And it must accept the palette it was given, at every alpha, or the
+    /// modules that hold their colours as values all fail.
+    #[test]
+    fn every_role_at_every_alpha_passes_the_value_sweep() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (name, role) in p.roles() {
+                for alpha in [0_u8, 60, 140, 255] {
+                    let named = [(name, Color::rgba(role.r, role.g, role.b, alpha))];
+                    assert_colours_from(&p, &named, &[], "probe");
+                }
+            }
+        }
     }
 }

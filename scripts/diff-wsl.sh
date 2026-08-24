@@ -154,6 +154,88 @@ diff_ours() {
   printf '%s/x86_64-unknown-linux-gnu/debug/%s' "$target_dir" "$1"
 }
 
+# Did the build above actually rebuild what changed?
+#
+# `cargo build` exiting 0 is not that promise. On 2026-08-24 this target
+# directory reached a state where cargo judged the `coreutils` *library* fresh
+# while its artifacts told a different story: every binary that called a
+# function added to `coreutils::stdfd` that morning failed to compile with
+# `cannot find function `close_stdout` in module `stdfd``, and `cargo clean -p
+# coreutils` was the whole fix. The directory had a `debug/` full of finished
+# binaries and no `deps/` at all, so something had removed the intermediates
+# and left the fingerprints -- a disk that filled, or a kill during a write;
+# the cause was not recoverable after the fact.
+#
+# A compile error is the *lucky* shape of that bug. The unlucky shape is a
+# harness whose subject compiles against a stale library and passes, certifying
+# a binary nobody built. `diff-subject.sh` argues at length that a harness must
+# not merely run whatever path it was given; this is the same argument one
+# level down, because a build that silently did nothing is a path that was
+# merely run.
+#
+# The check is the invariant a successful `cargo build` establishes: cargo's
+# freshness for a path dependency is mtime-based, so any source file newer than
+# the binary is a file the build should have reacted to and did not. One
+# `cargo clean -p` and one retry, then refuse -- running anyway is how the
+# false green happens.
+#
+# Scanned: `userspace/` (this package and every path dependency it has) plus
+# the crates it reaches outside it. `target` directories are pruned, since a
+# build's own `*.rs` output is always newer than the binary and always
+# irrelevant.
+diff_fresh_roots() {
+  for diff_r in "$root/userspace" "$root/sha2" "$root/tzrules"; do
+    [ -d "$diff_r" ] && printf '%s\n' "$diff_r"
+  done
+}
+
+# The first source file newer than $1, or nothing.
+diff_newer_than() {
+  # shellcheck disable=SC2046
+  find $(diff_fresh_roots) -name target -prune -o \
+       -name '*.rs' -newer "$1" -print -quit 2>/dev/null
+}
+
+# `BINARY|NEWER-FILE` for the first stale binary among `$DIFF_BINS`, or nothing.
+# A binary the build did not produce at all counts as stale.
+diff_first_stale() {
+  local diff_b diff_bin diff_late
+  for diff_b in $DIFF_BINS; do
+    diff_bin=$(diff_ours "$diff_b")
+    if [ ! -f "$diff_bin" ]; then
+      printf '%s|<the build left nothing here>\n' "$diff_bin"
+      return 0
+    fi
+    diff_late=$(diff_newer_than "$diff_bin")
+    if [ -n "$diff_late" ]; then
+      printf '%s|%s\n' "$diff_bin" "$diff_late"
+      return 0
+    fi
+  done
+  return 0
+}
+
+diff_assert_fresh() {
+  local diff_stale
+  diff_stale=$(diff_first_stale)
+  [ -z "$diff_stale" ] && return 0
+
+  echo "$DIFF_PROG-diff: ${diff_stale%%|*}" >&2
+  echo "  is older than ${diff_stale#*|} -- the build cache is stale. Cleaning." >&2
+  ( cd "$root" && cargo clean -p "$DIFF_PKG" \
+      --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2
+  # shellcheck disable=SC2086
+  ( cd "$root" && cargo build -p "$DIFF_PKG" $diff_args \
+      --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || return 1
+
+  diff_stale=$(diff_first_stale)
+  [ -z "$diff_stale" ] && return 0
+  echo "$DIFF_PROG-diff: ${diff_stale%%|*}" >&2
+  echo "  is STILL older than ${diff_stale#*|} after a clean rebuild." >&2
+  echo "  Refusing to run: the comparison would be against a binary nobody built." >&2
+  return 1
+}
+
 OURS=${OURS:-}
 if [ -z "$OURS" ]; then
   # shellcheck disable=SC1091
@@ -173,6 +255,7 @@ if [ -z "$OURS" ]; then
   # shellcheck disable=SC2086
   ( cd "$root" && cargo build -p "$DIFF_PKG" $diff_args \
       --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || exit 1
+  diff_assert_fresh || exit 1
   case $DIFF_BINS in
     *' '*) ;;   # a family: the harness picks binaries with `diff_ours`
     *) OURS=$(diff_ours "$DIFF_BINS") ;;

@@ -118,6 +118,7 @@ FD = "gui/desktop/src/file_drop.rs"
 IM = "gui/desktop/src/input_method.rs"
 BL = "gui/desktop/src/blur.rs"
 WP = "gui/desktop/src/wallpaper.rs"
+AX = "gui/desktop/src/a11y.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -22107,6 +22108,339 @@ DEFECTS = [
             'an_images_underlay_follows_the_theme_too',
             'a_chosen_background_overrides_the_theme_and_does_not_move',
             'render_solid_produces_one_fill',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the magnifier lens is the Mocha base literal again",
+        AX,
+        [
+            ('                    color: p.base,\n                    corner_radii: radii,\n',
+             '                    color: Color::from_hex(0x1E1E2E),\n                    corner_radii: radii,\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'the_lens_is_the_desktops_base_in_both_shapes_and_both_modes',
+            'the_crosshairs_are_legible_on_the_lens_in_both_modes',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the magnifier lens is the Latte base literal",
+        AX,
+        [
+            ('                    color: p.base,\n                    corner_radii: radii,\n',
+             '                    color: Color::from_hex(0xEFF1F5),\n                    corner_radii: radii,\n'),
+        ],
+        ["desktop"],
+        # Deliberately NOT the membership sweep, which is structurally unable to
+        # see this one. 0xEFF1F5 is Latte `base` -- a role, so allowed outright in
+        # light mode -- and it is also readable_on(Mocha base), which this module
+        # declares in `derived`, so it is allowed in dark mode too. Both
+        # readable_on endpoints are permanently inside the allowed set of any
+        # module that derives them: 0xEFF1F5 is a Latte role and the dark-mode
+        # ink; 0x11111B is a Mocha role and the light-mode ink. The site-shaped
+        # tests are what catch it. (Contrast defect A, the Mocha base literal,
+        # which the sweep does catch -- 0x1E1E2E is a role in one mode only.)
+        [
+            'the_lens_is_the_desktops_base_in_both_shapes_and_both_modes',
+            'the_crosshairs_are_legible_on_the_lens_in_both_modes',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the magnifier lens falls back to mantle rather than base",
+        AX,
+        [
+            ('                    color: p.base,\n                    corner_radii: radii,\n',
+             '                    color: p.mantle,\n                    corner_radii: radii,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_lens_is_the_desktops_base_in_both_shapes_and_both_modes',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the lens crosshairs go back to white at half alpha",
+        AX,
+        [
+            ('                    let ink = readable_on(p.base);\n',
+             '                    let ink = Color::rgba(255, 255, 255, 128);\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'the_crosshairs_are_legible_on_the_lens_in_both_modes',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the crosshair ink is chosen for the rim rather than the fill it sits on",
+        AX,
+        [
+            ('                    let ink = readable_on(p.base);\n',
+             '                    let ink = readable_on(p.accent);\n'),
+        ],
+        ["desktop"],
+        [
+            'the_crosshairs_are_legible_on_the_lens_in_both_modes',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the lens rim is the Mocha blue it used to name",
+        AX,
+        [
+            ('                    color: p.accent,\n                    line_width: bw,\n',
+             '                    color: Color::from_hex(0x89B4FA),\n                    line_width: bw,\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'the_lens_rim_and_the_focus_ring_are_the_accent',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the lens rim falls back to blue rather than the accent",
+        AX,
+        [
+            ('                    color: p.accent,\n                    line_width: bw,\n',
+             '                    color: p.blue,\n                    line_width: bw,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_lens_rim_and_the_focus_ring_are_the_accent',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the docked strip's underline falls back to blue rather than the accent",
+        AX,
+        [
+            ('                    color: p.accent,\n                    width: bw,\n',
+             '                    color: p.blue,\n                    width: bw,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_lens_rim_and_the_focus_ring_are_the_accent',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the docked strip goes back to assuming the screen is 1920 wide",
+        AX,
+        [
+            ('                    width: screen_w,\n                    height: strip_h,\n',
+             '                    width: 1920.0,\n                    height: strip_h,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_docked_strip_spans_the_screen_it_was_given',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the docked strip's underline goes back to ending at 1920",
+        AX,
+        [
+            ('                    x2: screen_w,\n',
+             '                    x2: 1920.0,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_docked_strip_spans_the_screen_it_was_given',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the magnifier lens becomes translucent again",
+        AX,
+        [
+            ('                    color: p.base,\n                    corner_radii: radii,\n',
+             '                    color: Color::rgba(p.base.r, p.base.g, p.base.b, 200),\n                    corner_radii: radii,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_lens_is_opaque_in_both_modes',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the docked strip becomes translucent again",
+        AX,
+        [
+            ('                    color: p.base,\n                    corner_radii: CornerRadii::ZERO,\n',
+             '                    color: Color::rgba(p.base.r, p.base.g, p.base.b, 220),\n                    corner_radii: CornerRadii::ZERO,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_lens_is_opaque_in_both_modes',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the focus ring is pre-filled with Mocha blue instead of left unset",
+        AX,
+        [
+            ('            color: None,\n            width: 2.0,\n',
+             '            color: Some(Color::from_hex(0x89B4FA)),\n            width: 2.0,\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'the_lens_rim_and_the_focus_ring_are_the_accent',
+            'an_unset_ring_follows_the_accent_and_a_chosen_one_does_not',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: an unset focus ring resolves to blue rather than the accent",
+        AX,
+        [
+            ('        self.color.unwrap_or(p.accent)\n',
+             '        self.color.unwrap_or(p.blue)\n'),
+        ],
+        ["desktop"],
+        [
+            'the_lens_rim_and_the_focus_ring_are_the_accent',
+            'an_unset_ring_follows_the_accent_and_a_chosen_one_does_not',
+            # Folded back after the first sweep reported it undeclared: the
+            # "give it back to the theme" test also reads the resolved colour,
+            # so breaking the fallback breaks it too.
+            'following_the_accent_is_reachable_again_after_choosing',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a chosen focus-ring colour is ignored and the accent drawn instead",
+        AX,
+        [
+            ('        self.color.unwrap_or(p.accent)\n',
+             '        p.accent\n'),
+        ],
+        ["desktop"],
+        [
+            'an_unset_ring_follows_the_accent_and_a_chosen_one_does_not',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the locator ring is pre-filled with Mocha blue instead of left unset",
+        AX,
+        [
+            ('            locator_color: None,\n',
+             '            locator_color: Some(Color::from_hex(0x89B4FA)),\n'),
+        ],
+        ["desktop"],
+        [
+            'an_unset_ring_follows_the_accent_and_a_chosen_one_does_not',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a chosen locator colour is ignored and the accent drawn instead",
+        AX,
+        [
+            ('        self.locator_color.unwrap_or(p.accent)\n',
+             '        p.accent\n'),
+        ],
+        ["desktop"],
+        [
+            'an_unset_ring_follows_the_accent_and_a_chosen_one_does_not',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: giving the focus ring back to the theme silently does nothing",
+        AX,
+        [
+            ('    pub fn follow_accent(&mut self) {\n        self.color = None;\n    }\n',
+             '    pub fn follow_accent(&mut self) {\n        self.color = self.color.or(None);\n    }\n'),
+        ],
+        ["desktop"],
+        [
+            'following_the_accent_is_reachable_again_after_choosing',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: giving the locator ring back to the theme silently does nothing",
+        AX,
+        [
+            ('    pub fn follow_accent_locator(&mut self) {\n        self.locator_color = None;\n    }\n',
+             '    pub fn follow_accent_locator(&mut self) {\n        self.locator_color = self.locator_color.or(None);\n    }\n'),
+        ],
+        ["desktop"],
+        [
+            'following_the_accent_is_reachable_again_after_choosing',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: a high-contrast text colour drifts toward the theme's own green",
+        AX,
+        [
+            ('            Self::YellowOnBlack => Color::from_hex(0xFFFF00),\n            Self::GreenOnBlack => Color::from_hex(0x00FF00),\n',
+             '            Self::YellowOnBlack => Color::from_hex(0xFFFF00),\n            Self::GreenOnBlack => Color::from_hex(0xA6E3A1),\n'),
+        ],
+        ["desktop"],
+        [
+            'the_four_high_contrast_schemes_are_the_ones_the_module_was_written_with',
+            'no_high_contrast_colour_is_a_palette_role',
+            'every_high_contrast_scheme_is_legible_with_itself',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: two high-contrast accents are transposed between their schemes",
+        AX,
+        [
+            ('            Self::YellowOnBlack => Color::from_hex(0x00FFFF),\n            Self::GreenOnBlack => Color::from_hex(0xFF00FF),\n',
+             '            Self::YellowOnBlack => Color::from_hex(0xFF00FF),\n            Self::GreenOnBlack => Color::from_hex(0x00FFFF),\n'),
+        ],
+        ["desktop"],
+        [
+            'the_four_high_contrast_schemes_are_the_ones_the_module_was_written_with',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a high-contrast background stops being an extreme and becomes a role",
+        AX,
+        [
+            ('            Self::YellowOnBlack => Color::from_hex(0x000000),\n            Self::GreenOnBlack => Color::from_hex(0x000000),\n',
+             '            Self::YellowOnBlack => Color::from_hex(0x1E1E2E),\n            Self::GreenOnBlack => Color::from_hex(0x000000),\n'),
+        ],
+        ["desktop"],
+        [
+            'the_four_high_contrast_schemes_are_the_ones_the_module_was_written_with',
+            'no_high_contrast_colour_is_a_palette_role',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the high-contrast border stops following the text it outlines",
+        AX,
+        [
+            ('    pub fn border(&self) -> Color {\n        self.text()\n    }\n',
+             '    pub fn border(&self) -> Color {\n        self.accent()\n    }\n'),
+        ],
+        ["desktop"],
+        [
+            'the_four_high_contrast_schemes_are_the_ones_the_module_was_written_with',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the animated focus ring keeps the alpha and drops the role",
+        AX,
+        [
+            ('        let ring_color = Color::rgba(base.r, base.g, base.b, alpha);\n',
+             '        let ring_color = Color::rgba(255, 255, 255, base.a.min(alpha));\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'the_lens_rim_and_the_focus_ring_are_the_accent',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: a colour filter acquires a constant of its own",
+        AX,
+        [
+            ('                invert_channel(color.b),\n',
+             '                0x1B,\n'),
+        ],
+        ["desktop"],
+        [
+            'a_colour_filter_introduces_no_colour_of_its_own',
+            # Folded back after the first sweep reported them undeclared. The
+            # inverter is the most-tested filter in the module and four older
+            # tests already pin it; the new test is the only one that would
+            # also catch the same constant appearing in any *other* filter.
+            'black_and_white_survive_every_filter',
+            'inverting_twice_returns_the_original_color',
+            'test_color_filter_inverted',
+            'the_filters_still_produce_the_weights_they_were_written_with',
         ],
     ),
 ]

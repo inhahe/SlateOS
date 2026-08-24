@@ -1987,15 +1987,65 @@ mod tests {
         }
     }
 
-    /// The lens rim and the focus ring both wear the accent.
+    /// The lens is filled with the desktop's own `base`, not some other
+    /// surface role.
+    ///
+    /// The membership sweep cannot see this: `mantle`, `crust` and `surface0`
+    /// are all roles, so substituting one for another draws a colour the
+    /// palette owns and the sweep passes. Only an *identity* claim — "the lens
+    /// is `base`" — can falsify a role-for-role swap, which is the lesson
+    /// module 47 recorded and module 48 confirmed.
+    #[test]
+    fn the_lens_is_the_desktops_base_in_both_shapes_and_both_modes() {
+        for light in [false, true] {
+            let p = accented(light);
+            for shape in [MagnifierShape::Circle, MagnifierShape::DockedTop] {
+                let fill = lens(shape)
+                    .render_overlay(&p, SCREEN_W)
+                    .iter()
+                    .find_map(|c| match c {
+                        RenderCommand::FillRect { color, .. } => Some(*color),
+                        _ => None,
+                    })
+                    .expect("the lens draws a background");
+                assert_eq!(
+                    (fill.r, fill.g, fill.b),
+                    (p.base.r, p.base.g, p.base.b),
+                    "the {shape:?} lens in {} mode is not `base`",
+                    if light { "light" } else { "dark" }
+                );
+            }
+        }
+    }
+
+    /// Every rim this module draws wears the accent: the lens border, the
+    /// docked strip's underline, and the focus ring.
     ///
     /// The fixture accent is off-palette, so this cannot pass by drawing blue
     /// and calling it the accent — which is precisely what the module did
-    /// before, since the stock accent *is* blue.
+    /// before, since the stock accent *is* blue. All three are checked
+    /// together because they are one decision: the docked underline is the
+    /// circular lens's rim, unrolled.
     #[test]
     fn the_lens_rim_and_the_focus_ring_are_the_accent() {
         for light in [false, true] {
             let p = accented(light);
+            // The docked strip's rim is a Line, not a StrokeRect, which is
+            // exactly why it needs naming here: a sweep sees a role either way
+            // and the circular lens's assertion never reaches it.
+            let underline = lens(MagnifierShape::DockedTop)
+                .render_overlay(&p, SCREEN_W)
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Line { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .expect("the docked strip draws an underline");
+            assert_eq!(
+                underline, p.accent,
+                "the docked underline is not the accent"
+            );
+
             let rim = lens(MagnifierShape::Circle)
                 .render_overlay(&p, SCREEN_W)
                 .iter()

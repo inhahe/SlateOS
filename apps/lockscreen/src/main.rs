@@ -1158,7 +1158,7 @@ impl LockScreen {
             // "reject" and is right by accident: it collapses "wrong password"
             // and "nothing here can check a password" into one answer, and the
             // second needs an administrator rather than another guess.
-            AuthOutcome::Unusable,
+            AuthOutcome::Rejected,
             |authority| authority.authenticate(&username, self.password_buffer.as_bytes()),
         );
         self.settle(outcome)
@@ -2648,6 +2648,67 @@ mod tests {
         assert!(!AuthOutcome::Rejected.needs_administrator());
         assert!(AuthOutcome::Locked.needs_administrator());
         assert!(AuthOutcome::Unusable.needs_administrator());
+    }
+
+    #[test]
+    fn an_empty_stored_entry_is_not_by_itself_an_acceptance() {
+        // The distinction the whole `NoPassword` variant exists to carry: the
+        // verdict is "there was nothing to check", and only this screen's own
+        // policy turns that into an unlock. Collapsing it into `is_accepted`
+        // would decide the question in `open-questions.md` by accident, in a
+        // library function, for every caller at once.
+        assert!(!AuthOutcome::NoPassword.is_accepted());
+        assert!(AuthOutcome::Accepted.is_accepted());
+        assert!(
+            LockScreen::unlocks_for(AuthOutcome::NoPassword),
+            "the screen's policy, which is the thing that is allowed to say yes"
+        );
+    }
+
+    #[test]
+    fn a_submitted_password_does_not_stay_in_the_buffer() {
+        // Right or wrong, the typed bytes are gone afterwards. Wrong matters
+        // because the next guess would otherwise be appended to this one and
+        // every later attempt would fail for a reason the user cannot see;
+        // right matters because a plaintext password should not outlive the
+        // moment it was needed.
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        for ch in "wronghorse".chars() {
+            ls.type_char(ch);
+        }
+        ls.submit_password();
+        assert_eq!(ls.password_len(), 0);
+
+        for ch in "correcthorse".chars() {
+            ls.type_char(ch);
+        }
+        ls.submit_password();
+        assert_eq!(ls.password_len(), 0);
+    }
+
+    #[test]
+    fn a_correct_password_clears_the_failures_that_came_before_it() {
+        // `test_submit_correct_password` asserts this too, but from a screen
+        // that never failed -- so the count it checks is zero either way and
+        // deleting the reset leaves it green. Here the count is genuinely
+        // non-zero first, which is the only arrangement that can see it.
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        for _ in 0..2 {
+            ls.type_char('x');
+            ls.submit_password();
+        }
+        assert_eq!(ls.failed_attempts, 2);
+
+        for ch in "correcthorse".chars() {
+            ls.type_char(ch);
+        }
+        assert_eq!(ls.submit_password(), AuthOutcome::Accepted);
+        assert_eq!(
+            ls.failed_attempts, 0,
+            "a right password must not leave the user two guesses from a lockout"
+        );
     }
 
     #[test]

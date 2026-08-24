@@ -73,14 +73,18 @@
 //! `scripts/seq-diff.sh` runs both binaries over the same command lines and
 //! compares stdout, stderr and the exit status separately.
 
-use coreutils::errmsg::strerror;
 use coreutils::extfloat::{self, ExtF80, Spec};
 use coreutils::getopt::{self, Program};
 use coreutils::quote::quote;
+use coreutils::stdfd::{self, Stream};
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
+
+// Before `main`, so that `stdfd::restore` still sees a caller's `seq >&-` as
+// the closed descriptor it is. See `coreutils::stdfd`.
+coreutils::guard_std_fds!();
 
 const SEQ: Program = Program::new("seq", 1);
 
@@ -161,8 +165,13 @@ impl Trouble {
                 eprintln!("seq: {}", e.message());
                 ExitCode::from(u8::try_from(e.status).unwrap_or(1))
             }
+            // Unreachable when the writer is a [`Stream`], whose `Write` impl
+            // never returns `Err` — the verdict is `finish()` in `main`, which
+            // is where upstream's `atexit (close_stdout)` reaches it too. The
+            // variant stays because the number-printing functions are generic
+            // over their writer and the tests hand them ones that can fail.
             Self::Write(e) => {
-                eprintln!("seq: write error: {}", strerror(e));
+                stdfd::write_error("seq", e);
                 ExitCode::FAILURE
             }
         }
@@ -218,21 +227,31 @@ impl Operand {
 // ---------------------------------------------------------------------- main
 
 fn main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
-    match run(&args) {
+
+    // Upstream finds the write error in `atexit (close_stdout)`, which runs
+    // after whatever diagnostic ended the run and overrides its exit status.
+    // Two consequences are observable and both are reproduced here: `seq 1 3`
+    // with a closed standard output prints the numbers' failure *after* nothing
+    // else, and `seq --bogus >&-` prints the usage message *alone* — nothing
+    // was owed to the stream, so there is no write to fail.
+    let mut out = Stream::stdout();
+    let code = match run(&args, &mut out) {
         Ok(code) => code,
         Err(trouble) => trouble.report(),
-    }
+    };
+    stdfd::close_stdout("seq", out, code)
 }
 
-fn run(args: &[OsString]) -> Result<ExitCode, Trouble> {
+fn run(args: &[OsString], out: &mut Stream) -> Result<ExitCode, Trouble> {
     let (settings, operands) = match parse_args(args)? {
         Request::Help => {
-            println!("{USAGE}");
+            let _ = writeln!(out, "{USAGE}");
             return Ok(ExitCode::SUCCESS);
         }
         Request::Version => {
-            println!("seq (SlateOS coreutils)");
+            let _ = writeln!(out, "seq (SlateOS coreutils)");
             return Ok(ExitCode::SUCCESS);
         }
         Request::Run(settings, operands) => (settings, operands),
@@ -265,11 +284,7 @@ fn run(args: &[OsString]) -> Result<ExitCode, Trouble> {
             .into());
     }
 
-    let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
-
-    if try_fast_from_strings(&mut out, &settings, &operands)? {
-        out.flush()?;
+    if try_fast_from_strings(&mut *out, &settings, &operands)? {
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -296,8 +311,7 @@ fn run(args: &[OsString]) -> Result<ExitCode, Trouble> {
         }
     }
 
-    if try_fast_from_values(&mut out, &settings, first, step, last)? {
-        out.flush()?;
+    if try_fast_from_values(&mut *out, &settings, first, step, last)? {
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -305,8 +319,7 @@ fn run(args: &[OsString]) -> Result<ExitCode, Trouble> {
         Some(format) => format,
         None => default_format(&settings, first, step, last),
     };
-    print_numbers(&mut out, &format, &settings.separator, first, step, last)?;
-    out.flush()?;
+    print_numbers(&mut *out, &format, &settings.separator, first, step, last)?;
     Ok(ExitCode::SUCCESS)
 }
 

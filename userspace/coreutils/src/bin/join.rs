@@ -159,12 +159,17 @@
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::{os_bytes, quote, quoteaf_os, quotef_os};
+use coreutils::stdfd::{self, Stream};
 use std::cmp::Ordering;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::ExitCode;
+
+// Before `main`, so that `stdfd::restore` still sees a caller's
+// `join >&-` as the closed descriptor it is. See `coreutils::stdfd`.
+coreutils::guard_std_fds!();
 
 const JOIN: Program = Program::new("join", 1);
 
@@ -311,7 +316,7 @@ impl Trouble {
         match self {
             Self::Open(name, e) => eprintln!("join: {}: {}", quotef_os(name), strerror(e)),
             Self::Read(e) => eprintln!("join: read error: {}", strerror(e)),
-            Self::Write(e) => eprintln!("join: write error: {}", strerror(e)),
+            Self::Write(e) => stdfd::write_error("join", e),
             Self::BothStdin => eprintln!("join: both files cannot be standard input"),
             Self::Unsorted(sentence) => diagnose(sentence),
         }
@@ -334,6 +339,7 @@ fn diagnose(body: &[u8]) {
 }
 
 fn main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
         Ok(request) => request,
@@ -343,31 +349,44 @@ fn main() -> ExitCode {
         }
     };
 
+    // `--help` and `--version` are writes like any other, so they fail like
+    // any other: measured, `join --help >&-` is
+    // `join: write error: Bad file descriptor` and exits 1.
+    let mut out = Stream::stdout();
     let (settings, first, second) = match request {
-        Request::Help => {
-            println!("{USAGE}");
-            return ExitCode::SUCCESS;
-        }
-        Request::Version => {
-            println!("join (SlateOS coreutils)");
-            return ExitCode::SUCCESS;
-        }
+        Request::Help => return say(out, format!("{USAGE}
+").as_bytes()),
+        Request::Version => return say(out, b"join (SlateOS coreutils)
+"),
         Request::Run(settings, first, second) => (settings, first, second),
     };
-
-    let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
     let outcome = run(&settings, &first, &second, &mut out);
 
     // Buffered output has to reach the OS on *every* exit path, including the
     // ones ending in a diagnostic: upstream gets that from
     // `atexit (close_stdout)`, and `--check-order`'s fatal exit is exactly the
     // case where the lines already written must not be lost.
-    let flushed = out.flush();
+    // The reader having gone away is the one write failure not reported: GNU
+    // dies of `SIGPIPE` there and says nothing, and this system has no signal
+    // to die of -- see `coreutils::stdfd::reader_gone`. It therefore counts as
+    // a flush that succeeded, and the run keeps the status it had earned.
+    let flushed = match out.finish() {
+        Err(e) if stdfd::reader_gone(&e) => Ok(()),
+        verdict => verdict,
+    };
 
     let disordered = match outcome {
         Ok(disordered) => disordered,
-        Err(trouble) => return trouble.report(),
+        // `close_stdout` runs *after* the diagnostic and overrides its status,
+        // so a run that failed for its own reason still reports a standard
+        // output that could not take what it had written.
+        Err(trouble) => {
+            let code = trouble.report();
+            return match flushed {
+                Ok(()) => code,
+                Err(e) => Trouble::Write(e).report(),
+            };
+        }
     };
     if let Err(e) = flushed {
         return Trouble::Write(e).report();
@@ -377,6 +396,16 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Say one thing and stop -- `--help` and `--version`.
+///
+/// The stream is closed here rather than at the end of `main`, because these
+/// two return without reaching it -- and closing it is what discovers that
+/// there was nowhere to say it.
+fn say(mut out: Stream, bytes: &[u8]) -> ExitCode {
+    let _ = out.write_all(bytes);
+    stdfd::close_stdout("join", out, ExitCode::SUCCESS)
 }
 
 /// Open both operands and join them. `true` if either file was warned about.

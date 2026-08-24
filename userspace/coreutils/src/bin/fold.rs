@@ -99,12 +99,17 @@
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::quotef_os;
+use coreutils::stdfd::{self, Stream};
 use coreutils::xnum::xdectoumax;
 use std::env;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::ExitCode;
+
+// Before `main`, so that `stdfd::restore` still sees a caller's `fold >&-` as
+// the closed descriptor it is. See `coreutils::stdfd`.
+coreutils::guard_std_fds!();
 
 const FOLD: Program = Program::new("fold", 1);
 
@@ -200,21 +205,22 @@ impl Refusal {
 }
 
 fn main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
         Ok(request) => request,
         Err(refusal) => return refusal.report(),
     };
 
+    // `--help` and `--version` are writes like any other, so they fail like
+    // any other: measured, `fold --help >&-` is
+    // `fold: write error: Bad file descriptor` and exits 1.
+    let mut out = Stream::stdout();
     let (settings, mut files) = match request {
-        Request::Help => {
-            println!("{USAGE}");
-            return ExitCode::SUCCESS;
-        }
-        Request::Version => {
-            println!("fold (SlateOS coreutils)");
-            return ExitCode::SUCCESS;
-        }
+        Request::Help => return say(out, format!("{USAGE}
+").as_bytes()),
+        Request::Version => return say(out, b"fold (SlateOS coreutils)
+"),
         Request::Run(settings, files) => (settings, files),
     };
 
@@ -222,8 +228,6 @@ fn main() -> ExitCode {
         files.push(OsString::from("-"));
     }
 
-    let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
     let mut ok = true;
 
     for name in &files {
@@ -235,16 +239,16 @@ fn main() -> ExitCode {
 
     // Buffered output has to reach the OS before success can be claimed; a
     // flush that fails here is a truncated file reported as a complete one.
-    // Upstream gets this from `atexit (close_stdout)`.
-    if let Err(e) = out.flush() {
-        return Trouble::Write(e).report();
-    }
-
-    if ok {
+    // Upstream gets this from `atexit (close_stdout)`, which is also why the
+    // failure is discovered only here and not at the operand it happened on:
+    // measured, `fold f nope g >/dev/full` still complains about `nope`, and
+    // still prints exactly one `write error`, at the end.
+    let earned = if ok {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
-    }
+    };
+    stdfd::close_stdout("fold", out, earned)
 }
 
 /// A failure that ends the run rather than the file.
@@ -256,10 +260,20 @@ enum Trouble {
 impl Trouble {
     fn report(&self) -> ExitCode {
         match self {
-            Self::Write(e) => eprintln!("fold: write error: {}", strerror(e)),
+            Self::Write(e) => stdfd::write_error("fold", e),
         }
         ExitCode::FAILURE
     }
+}
+
+/// Say one thing and stop -- `--help` and `--version`.
+///
+/// The stream is closed here rather than left to `main`, because these two
+/// return without reaching it -- and closing it is what discovers that there
+/// was nowhere to say it.
+fn say(mut out: Stream, bytes: &[u8]) -> ExitCode {
+    let _ = out.write_all(bytes);
+    stdfd::close_stdout("fold", out, ExitCode::SUCCESS)
 }
 
 // ----------------------------------------------------------------- conversion

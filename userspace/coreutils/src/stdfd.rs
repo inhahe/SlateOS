@@ -87,8 +87,14 @@
 //! `EPIPE` here where GNU's `yes` dies of the signal and reports 141. That
 //! divergence is *forced*: the target kernel has no Unix signals at all (see
 //! `design.txt` — "No Unix signals for process control"), so there is no
-//! behaviour to restore, only a different one to invent. It is documented per
-//! utility instead; see `yes.rs` and `tee.rs`.
+//! behaviour to restore, only a different one to invent.
+//!
+//! What it does instead is name the case once, in [`reader_gone`], so that a
+//! utility answering it inherits the tree's established convention — say
+//! nothing, keep the status the run had already earned — rather than deriving
+//! it again and landing somewhere slightly different. Without that, every
+//! caller of [`write_error`] would print `prog: write error: Broken pipe`
+//! where GNU prints nothing at all.
 //!
 //! ## Host builds
 //!
@@ -100,6 +106,7 @@
 //! configuration a `cargo test` run ever produces.
 
 use std::io::{self, Write};
+use std::process::ExitCode;
 
 use crate::errmsg::strerror;
 
@@ -354,6 +361,75 @@ pub fn write_error(program: &str, err: &io::Error) {
     // The diagnostic about a failed write has no better recourse than the
     // failed write did; a caller has already decided the exit status.
     let _ = write_all(2, line.as_bytes());
+}
+
+/// Whether a failed write failed because the reader went away.
+///
+/// The one write failure a utility does not report. GNU answers it by dying of
+/// `SIGPIPE`: no diagnostic, status 141, and the pipeline ends. SlateOS does
+/// not use Unix signals for process control (`design.txt`) and Rust masks the
+/// signal anyway, so "die of `SIGPIPE`" has no translation — the faithful one
+/// is to stay quiet and keep whatever status the run had already earned, which
+/// is also what upstream's own `EPIPE` branches do where it has them
+/// (`tee`'s `--output-error` default, `iopoll`'s callers).
+///
+/// `cut`, `head`, `tail` and `uniq` each derived that convention separately,
+/// with the same paragraph of comment copied between them. It lives here now
+/// so the next utility inherits it. Guard [`write_error`] with it:
+///
+/// ```ignore
+/// match out.finish() {
+///     Ok(()) => code,
+///     // Nothing downstream is listening, so there is nobody to tell.
+///     Err(e) if stdfd::reader_gone(&e) => code,
+///     Err(e) => {
+///         stdfd::write_error("seq", &e);
+///         ExitCode::FAILURE
+///     }
+/// }
+/// ```
+///
+/// The status stays the caller's: it is 1 for most of the family but 125 for
+/// `env`, 2 for `ls` and `sort`, 3 for `tty`, so folding it in here would get
+/// four utilities wrong to save three lines in the rest.
+#[must_use]
+pub fn reader_gone(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::BrokenPipe
+}
+
+/// The last thing a utility does with its standard output: gnulib's
+/// `atexit (close_stdout)`, spelled as a return value.
+///
+/// `earned` is the status the run had otherwise reached. It is returned when
+/// the final flush succeeds, and also when it fails with nobody left to read —
+/// the case GNU answers by dying of `SIGPIPE`, which see [`reader_gone`].
+/// Any other failure prints
+///
+/// ```text
+/// fold: write error: No space left on device
+/// ```
+///
+/// and returns [`ExitCode::FAILURE`], discarding `earned`: upstream's handler
+/// runs *after* whatever diagnostic ended the run and overrides its status, so
+/// a run that already failed for its own reason still reports the output it
+/// could not deliver, and still exits 1 rather than 2.
+///
+/// # Which utilities cannot use this
+///
+/// Two kinds. Those whose write failure is not status 1 — `env` (125), `ls`
+/// and `sort` (2), `tty` (3) — and those that must know the flush's verdict
+/// *before* they finish deciding what to print, such as `comm` and `join`,
+/// which report a disordered input only if the output survived. Both spell the
+/// tail out with [`reader_gone`] and [`write_error`] instead.
+pub fn close_stdout(program: &str, out: Stream, earned: ExitCode) -> ExitCode {
+    match out.finish() {
+        Ok(()) => earned,
+        Err(e) if reader_gone(&e) => earned,
+        Err(e) => {
+            write_error(program, &e);
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// How much a [`Stream`] holds before it goes to the descriptor.
@@ -631,6 +707,28 @@ mod tests {
         // usual `RLIMIT_NOFILE`, so this is `EBADF` and not a limit error.
         let e = super::probe(4096).expect_err("an unopened descriptor probed ok");
         assert_eq!(e.raw_os_error(), Some(9), "want EBADF, got {e}");
+    }
+
+    #[test]
+    fn only_a_broken_pipe_is_the_reader_going_away() {
+        use std::io::{Error, ErrorKind};
+
+        assert!(super::reader_gone(&Error::from(ErrorKind::BrokenPipe)));
+        // The three that the family's `write error:` line is actually for.
+        // `EBADF` in particular must not be swallowed: reporting it is the
+        // whole reason this module exists.
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::StorageFull,
+            ErrorKind::WriteZero,
+        ] {
+            assert!(
+                !super::reader_gone(&Error::from(kind)),
+                "{kind:?} must still be reported"
+            );
+        }
+        // `EBADF` has no stable `ErrorKind`, so it is checked as raw errno.
+        assert!(!super::reader_gone(&Error::from_raw_os_error(9)));
     }
 
     #[test]

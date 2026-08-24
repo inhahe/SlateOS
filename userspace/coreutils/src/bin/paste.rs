@@ -115,11 +115,16 @@
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::{quote_c_maybe_colon, quotef_os};
+use coreutils::stdfd::{self, Stream};
 use std::env;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::ExitCode;
+
+// Before `main`, so that `stdfd::restore` still sees a caller's `paste >&-`
+// as the closed descriptor it is. See `coreutils::stdfd`.
+coreutils::guard_std_fds!();
 
 const PASTE: Program = Program::new("paste", 1);
 
@@ -222,28 +227,29 @@ impl Trouble {
         match self {
             Self::Open(name, e) => eprintln!("paste: {}: {}", quotef_os(name), strerror(e)),
             Self::StdinClosed => eprintln!("paste: standard input is closed"),
-            Self::Write(e) => eprintln!("paste: write error: {}", strerror(e)),
+            Self::Write(e) => stdfd::write_error("paste", e),
         }
         ExitCode::FAILURE
     }
 }
 
 fn main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
         Ok(request) => request,
         Err(refusal) => return refusal.report(),
     };
 
+    // `--help` and `--version` are writes like any other, so they fail like
+    // any other: measured, `paste --help >&-` is
+    // `paste: write error: Bad file descriptor` and exits 1.
+    let mut out = Stream::stdout();
     let (settings, mut files) = match request {
-        Request::Help => {
-            println!("{USAGE}");
-            return ExitCode::SUCCESS;
-        }
-        Request::Version => {
-            println!("paste (SlateOS coreutils)");
-            return ExitCode::SUCCESS;
-        }
+        Request::Help => return say(out, format!("{USAGE}
+").as_bytes()),
+        Request::Version => return say(out, b"paste (SlateOS coreutils)
+"),
         Request::Run(settings, files) => (settings, files),
     };
 
@@ -252,8 +258,6 @@ fn main() -> ExitCode {
     }
 
     let mut stdin = Source::new(Box::new(io::stdin().lock()));
-    let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
 
     let outcome = if settings.serial {
         paste_serial(&files, &mut stdin, &settings, &mut out)
@@ -263,23 +267,28 @@ fn main() -> ExitCode {
             Err(trouble) => Err(trouble),
         }
     };
-    let ok = match outcome {
-        Ok(ok) => ok,
-        Err(trouble) => return trouble.report(),
+    // `atexit (close_stdout)` runs after the diagnostic that ended the run and
+    // overrides its status, so a run that failed for its own reason still
+    // delivers what it had written -- and still says so if it could not.
+    let earned = match outcome {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(trouble) => trouble.report(),
     };
 
     // Buffered output has to reach the OS before success can be claimed; a
     // flush that fails here is a truncated file reported as a complete one.
-    // Upstream gets this from `atexit (close_stdout)`.
-    if let Err(e) = out.flush() {
-        return Trouble::Write(e).report();
-    }
+    stdfd::close_stdout("paste", out, earned)
+}
 
-    if ok {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+/// Say one thing and stop -- `--help` and `--version`.
+///
+/// The stream is closed here rather than left to the end of `main`, because
+/// these two return without reaching it -- and closing it is what discovers
+/// that there was nowhere to say it.
+fn say(mut out: Stream, bytes: &[u8]) -> ExitCode {
+    let _ = out.write_all(bytes);
+    stdfd::close_stdout("paste", out, ExitCode::SUCCESS)
 }
 
 // ----------------------------------------------------------------- delimiters

@@ -771,7 +771,7 @@ pub fn self_test() -> KernelResult<()> {
     // taken.  A skip that is reported gets acted on; a silent one gets
     // believed — the same lesson `report_pathz_skips` in `scripts/boot-test.sh`
     // was written for after 26 tcc rungs no-op'd unnoticed for weeks.
-    let mut skipped: Vec<&'static str> = Vec::new();
+    let mut skipped = crate::fs::selftest::Skips::new();
 
     // --- Test 1: extension extraction (pure logic, no FS needed) ---
     {
@@ -1022,7 +1022,7 @@ pub fn self_test() -> KernelResult<()> {
             // but it walked nothing, so the part of this test that matters —
             // that a walk *finds* files and files them into the index — did
             // not happen.  That is a skip, not a pass.
-            skipped.push("rebuild found no files (no filesystem mounted)");
+            skipped.record("rebuild walk finds files", "no filesystem mounted");
             serial_println!("[index]   rebuild bookkeeping OK, but walk found 0 entries");
         } else {
             serial_println!(
@@ -1084,29 +1084,19 @@ pub fn self_test() -> KernelResult<()> {
             let _ = super::Vfs::remove(test_path);
             serial_println!("[index]   VFS add/search/remove OK");
         } else {
-            skipped.push("VFS add/search/remove (/tmp not mounted)");
+            skipped.record("VFS add/search/remove", "/tmp not mounted");
             serial_println!("[index]   VFS add/search/remove: SKIPPED (/tmp not mounted)");
         }
     }
 
     let final_stats = stats();
-    if skipped.is_empty() {
-        serial_println!(
-            "[index] Self-test passed ({} entries, {} rebuilds).",
-            final_stats.total_entries,
-            final_stats.rebuild_count,
-        );
-    } else {
-        serial_println!(
-            "[index] Self-test passed with {} section(s) SKIPPED ({} entries, {} rebuilds).",
-            skipped.len(),
-            final_stats.total_entries,
-            final_stats.rebuild_count,
-        );
-        for reason in &skipped {
-            serial_println!("[index]   SKIP: {}", reason);
-        }
-    }
+    skipped.report("[index]");
+    serial_println!(
+        "[index] Self-test passed ({} entries, {} rebuilds){}.",
+        final_stats.total_entries,
+        final_stats.rebuild_count,
+        skipped.suffix(),
+    );
 
     Ok(())
 }

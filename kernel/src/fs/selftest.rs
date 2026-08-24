@@ -364,18 +364,6 @@ impl Skips {
         self.entries.push((section, why));
     }
 
-    /// Whether every section ran.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// How many sections did not run.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
     /// Print one `SKIP:` line per skipped section, prefixed with `tag`.
     ///
     /// Call this immediately before the closing line, not at the point of the

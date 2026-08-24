@@ -777,6 +777,7 @@ fn read_probe_events(watch_id: u64, max: usize) -> KernelResult<Vec<FsEvent>> {
 #[allow(clippy::arithmetic_side_effects)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[notify] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // Regression guard for the boundary-matching bug: a watch on a directory
     // must match its direct children and itself, but not grandchildren
@@ -1022,25 +1023,55 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[notify]   Watch cleanup verified ✓");
 
     // The end-to-end hooks below need a *writable* root; everything above this
-    // point is synthetic and runs on any root.  A probe write rather than a
-    // mount-flag check because that is the real precondition: it accounts for a
-    // read-only mount, a quota, a file tag and anything else that could stand
-    // between here and a successful write.
+    // point is synthetic and runs on any root.
+    //
+    // This used to be `if write_file(probe, b"").is_ok()`, defended in a
+    // comment as "the real precondition, since it accounts for a read-only
+    // mount, a quota, a file tag and anything else".  That defence is exactly
+    // backwards, and self-concealing: `write_file` is itself one of the hooks
+    // under test here, so a notify hook that started returning an error would
+    // have failed the probe, switched off the only section that would have
+    // noticed, and left `Self-test passed.` as the last line.  The probe stays
+    // -- it really does cover quotas and tags that no flag does -- but its
+    // error is now *classified*: only "this system cannot" is a reason to skip.
+    // Anything else means the system was asked and refused, which is a defect.
+    let root_mounted = super::vfs::Vfs::mounts()
+        .iter()
+        .any(|(p, _)| p.as_path() == crate::fs::path::Path::new("/"));
     let probe = "/_notify_writable_probe";
-    if super::vfs::Vfs::write_file(probe, b"").is_ok() {
-        // Absence is the expected end state, so a failure here is nothing to
-        // report.
-        let _ = super::vfs::Vfs::remove(probe);
-        end_to_end_vfs_hooks_self_test()?;
+    if !root_mounted {
+        skips.record("end-to-end VFS/handle hooks", "/ is not mounted");
+        crate::serial_println!("[notify]   / not mounted — skipping end-to-end VFS/handle hooks.");
     } else {
-        crate::serial_println!(
-            "[notify]   Root is not writable — skipping end-to-end VFS/handle hooks."
-        );
+        match crate::fs::selftest::classify(super::vfs::Vfs::write_file(probe, b"")) {
+            crate::fs::selftest::Setup::Ready => {
+                // Absence is the expected end state, so a failure here is
+                // nothing to report.
+                let _ = super::vfs::Vfs::remove(probe);
+                end_to_end_vfs_hooks_self_test()?;
+            }
+            crate::fs::selftest::Setup::Unsupported(_) => {
+                skips.record("end-to-end VFS/handle hooks", "root is not writable");
+                crate::serial_println!(
+                    "[notify]   Root is not writable — skipping end-to-end VFS/handle hooks."
+                );
+            }
+            crate::fs::selftest::Setup::Failed(e) => {
+                crate::serial_println!(
+                    "[notify]   FAIL: / is mounted read-write but writing {} failed: {:?} — that \
+                     is not a missing feature, so it is a defect rather than a reason to skip",
+                    probe,
+                    e
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
     }
 
     waiter_registry_self_test()?;
 
-    crate::serial_println!("[notify] Self-test passed.");
+    skips.report("[notify]");
+    crate::serial_println!("[notify] Self-test passed{}.", skips.suffix());
     Ok(())
 }
 

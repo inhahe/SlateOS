@@ -394,6 +394,7 @@ fn notify_all(cpu: usize, event: HotplugEvent) -> bool {
 /// Self-test of the CPU hotplug framework.
 pub fn self_test() {
     serial_println!("[hotplug] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // Test 1: All CPUs should be online after init.
     let cpus = smp::cpu_count();
@@ -461,8 +462,14 @@ pub fn self_test() {
         assert_eq!(online_count(), cpus);
         serial_println!("[hotplug]   CPU {} online again: OK", target);
     } else {
+        // A fact about the machine, not a swallowed error: `cpu_count` is the
+        // SMP topology, so this genuinely cannot be exercised here.  It still
+        // has to reach the summary, because "PASSED" after a single-CPU boot
+        // otherwise looks identical to "PASSED" after a real offline/online.
+        skips.record("offline/online cycle", "single-CPU system");
         serial_println!("[hotplug]   Single-CPU: skipping offline/online cycle");
     }
 
-    serial_println!("[hotplug] Self-test PASSED");
+    skips.report("[hotplug]");
+    serial_println!("[hotplug] Self-test PASSED{}", skips.suffix());
 }

@@ -674,6 +674,8 @@ pub fn clear_all() {
 pub fn self_test() -> KernelResult<()> {
     use crate::serial_println;
 
+    let mut skips = crate::fs::selftest::Skips::new();
+
     // Baseline-relative, *not* `clear_all()` at entry. The trust store is
     // something a user genuinely populates and `certmgr test` is a shell
     // command, so clearing it to make room for fixtures would be a
@@ -845,11 +847,17 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq!(total, 0, "init_defaults must not fabricate certificates");
         assert_eq!(roots, 0, "init_defaults must not fabricate root CAs");
     } else {
+        // A fact about the store this run found, not a swallowed error.  It
+        // still has to reach the last line: "all 8 tests passed" on a machine
+        // with a populated trust store would otherwise be indistinguishable
+        // from a run that actually checked test 8.
+        skips.record("init defaults", "the trust store is not empty");
         serial_println!(
             "certmgr::self_test 8: skipped — {base_total} certificate(s) already in the store"
         );
     }
 
-    serial_println!("certmgr::self_test: all 8 tests passed");
+    skips.report("certmgr::self_test:");
+    serial_println!("certmgr::self_test: all 8 tests passed{}", skips.suffix());
     Ok(())
 }

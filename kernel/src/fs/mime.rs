@@ -466,6 +466,7 @@ pub fn self_test() -> KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[mime] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // --- Test 1: Magic byte detection ---
     {
@@ -569,25 +570,51 @@ pub fn self_test() -> KernelResult<()> {
         use crate::fs::Vfs;
 
         let test_path = "/tmp/_mime_test.txt";
-        if let Ok(()) = Vfs::write_file(test_path, b"Hello, MIME world!\n") {
-            match detect(test_path) {
+        // Whether /tmp exists is a question for the mount table. The old form
+        // -- `if let Ok(()) = write_file(..)` -- read as "skip when there is
+        // nowhere to write", but meant "skip whenever the write failed", which
+        // includes a permission gate wrongly refusing us and the detection bug
+        // this section exists to catch.
+        let tmp_mounted = Vfs::mounts()
+            .iter()
+            .any(|(p, _)| p.as_path() == crate::fs::path::Path::new("/tmp"));
+        if tmp_mounted {
+            if let Err(e) = Vfs::write_file(test_path, b"Hello, MIME world!\n") {
+                serial_println!(
+                    "[mime]   FAIL: /tmp is mounted but writing {} failed: {:?}",
+                    test_path,
+                    e
+                );
+                return Err(crate::error::KernelError::InternalError);
+            }
+            // The outcome is checked, not merely printed: a `detect` that
+            // errors, or that calls a plain ASCII file something other than
+            // `text/*`, is the exact defect this section is here to find.
+            let detected = detect(test_path);
+            let _ = Vfs::remove(test_path);
+            match detected {
+                Ok(mime) if mime.starts_with("text/") => {
+                    serial_println!("[mime]   detect() on text file: {} OK", mime);
+                }
                 Ok(mime) => {
-                    if !mime.starts_with("text/") {
-                        serial_println!("[mime]   WARN: text file detected as {}", mime);
-                    } else {
-                        serial_println!("[mime]   detect() on text file: {} OK", mime);
-                    }
+                    serial_println!(
+                        "[mime]   FAIL: text file detected as {}, want a text/* type",
+                        mime
+                    );
+                    return Err(crate::error::KernelError::InternalError);
                 }
                 Err(e) => {
-                    serial_println!("[mime]   detect() error: {:?}", e);
+                    serial_println!("[mime]   FAIL: detect() on a written file failed: {:?}", e);
+                    return Err(crate::error::KernelError::InternalError);
                 }
             }
-            let _ = Vfs::remove(test_path);
         } else {
-            serial_println!("[mime]   SKIP: cannot write test file");
+            skips.record("detect() on a real file", "/tmp not mounted");
+            serial_println!("[mime]   SKIP: /tmp not mounted");
         }
     }
 
-    serial_println!("[mime] Self-test passed (6 tests).");
+    skips.report("[mime]");
+    serial_println!("[mime] Self-test passed (6 tests){}.", skips.suffix());
     Ok(())
 }

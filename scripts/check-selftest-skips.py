@@ -202,22 +202,43 @@ def _selftest_bodies(src: str) -> list[tuple[str, int, int]]:
         name: {m.group(1) for m in CALL_IDENT.finditer(src, lo, hi)}
         for name, (lo, hi) in bodies.items()
     }
+    # Callers, keyed by callee: a function is a suite *helper* only if the suite
+    # is the only thing in the file that calls it.
+    callers: dict[str, set[str]] = {n: set() for n in bodies}
+    for name, (lo, hi) in bodies.items():
+        for cand in calls[name]:
+            if cand not in bodies or cand == name:
+                continue
+            # A recursive or self-overlapping span is not a call edge.
+            clo, chi = bodies[cand]
+            if clo >= lo and chi <= hi:
+                continue
+            callers[cand].add(name)
+
     selected = {n for n in bodies if SELFTEST_NAME.match(n)}
-    frontier = set(selected)
-    while frontier:
-        nxt: set[str] = set()
-        for name in frontier:
-            lo, hi = bodies[name]
-            for cand in calls[name]:
-                if cand in selected or cand not in bodies:
-                    continue
-                # A recursive or self-overlapping span is not a call edge.
-                clo, chi = bodies[cand]
-                if clo >= lo and chi <= hi:
-                    continue
-                nxt.add(cand)
-        selected |= nxt
-        frontier = nxt
+    # Reachability alone is the wrong closure, and `kshell.rs` is the proof: its
+    # `self_test` drives commands through the real `dispatch_with_input`, which
+    # is what an integration test *should* do -- and that one edge pulled 1050
+    # of the file's 1052 functions into "the suite", after which the gate was
+    # really just grepping the whole shell for the word "skip".
+    #
+    # The distinction that matters is not "can the suite reach it" but "does it
+    # exist for the suite".  A helper's only callers are the suite; production
+    # code reached through a dispatcher has other callers, and its own error
+    # handling is not a test disabling itself.  So a callee joins only when
+    # *every* in-file caller is already in.  `io_ring.rs`'s `test_fh_read_write`
+    # -- called from `self_test` and nothing else, which is the case this
+    # closure was added for -- still joins.
+    changed = True
+    while changed:
+        changed = False
+        for name in bodies:
+            if name in selected:
+                continue
+            who = callers[name]
+            if who and who <= selected:
+                selected.add(name)
+                changed = True
     return [(n, bodies[n][0], bodies[n][1]) for n in sorted(selected)]
 
 
@@ -465,7 +486,92 @@ def check_file(path: Path, rel: str) -> list[str]:
     return findings
 
 
+# A suite that skips itself, a helper that skips itself, an unconditional
+# PASSED after a skip -- and, as the control, a production command reached only
+# through a dispatcher, whose own "Warning: skipping <file>" must NOT be read as
+# a test disabling itself.  The control is the point: the closure that decides
+# what counts as "the suite" is the part of this gate most likely to go wrong,
+# and it goes wrong silently in both directions (too wide and it grades the
+# whole file, too narrow and it grades nothing).
+_SELFTEST_FIXTURE = '''pub fn self_test() -> Result<(), E> {
+    helper()?;
+    dispatch("archive create out.zip a b");
+    if Vfs::write_file("/tmp/p", b"").is_ok() {
+        do_the_real_check();
+    } else {
+        serial_println!("skipping the write section");
+    }
+    serial_println!("Self-test PASSED");
+    Ok(())
+}
+
+fn helper() -> Result<(), E> {
+    if Vfs::write_file("/tmp/q", b"").is_err() {
+        serial_println!("  skipped: no /tmp");
+        return Ok(());
+    }
+    Ok(())
+}
+
+fn production_command(a: &str) {
+    match Vfs::read_file(a) {
+        Ok(d) => use_it(d),
+        Err(e) => shell_println!("Warning: skipping {}: {:?}", a, e),
+    }
+}
+
+fn dispatch(c: &str) { production_command(c); }
+
+fn real_shell_entry(line: &str) { dispatch(line); }
+'''
+
+
+def self_test() -> int:
+    """Check the gate against a fixture with known answers.
+
+    Run with `--self-test`.  A gate whose scope quietly collapses reports zero
+    findings, which reads exactly like a clean tree -- so the scope itself needs
+    a test, not just the rules built on top of it.
+    """
+    import tempfile
+
+    failures = 0
+    src = _rl.strip_noise(_SELFTEST_FIXTURE)
+    suite = sorted(n for n, _, _ in _selftest_bodies(src))
+    if suite != ["helper", "self_test"]:
+        failures += 1
+        print(f"FAIL closure: expected ['helper', 'self_test'], got {suite}")
+
+    tmp = Path(tempfile.gettempdir()) / "_selftest_skips_fixture.rs"
+    tmp.write_text(_SELFTEST_FIXTURE, encoding="utf-8")
+    try:
+        found = check_file(tmp, "fixture.rs")
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    def one(substr: str, why: str) -> None:
+        nonlocal failures
+        if not any(substr in f for f in found):
+            failures += 1
+            print(f"FAIL: no finding for {why}")
+
+    one("`self_test` decides to skip", "a suite skipping on a failed call")
+    one("`helper` decides to skip", "a suite helper skipping on a failed call")
+    one("unconditional success", "PASSED printed after a skip")
+    if any("production_command" in f for f in found):
+        failures += 1
+        print("FAIL: graded `production_command`, which is reached only via a dispatcher")
+
+    if failures:
+        print(f"\n[selftest-skips self-test] {failures} failure(s)", file=sys.stderr)
+        return 1
+    print("[selftest-skips self-test] OK", file=sys.stderr)
+    return 0
+
+
 def main() -> int:
+    if "--self-test" in sys.argv[1:]:
+        return self_test()
     root = Path(__file__).resolve().parent.parent / "kernel" / "src"
     if not root.is_dir():
         print(f"error: no such directory: {root}", file=sys.stderr)

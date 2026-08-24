@@ -2401,6 +2401,21 @@ check_recursive_locks() {
         return 0
     fi
 
+    # The four source gates share one Rust scanner, and its failure mode is
+    # silence: a scanner that loses brace nesting sees no functions, so it
+    # reports no findings, which reads exactly like a clean tree.  It really did
+    # hide a lock-order inversion for as long as `kshell.rs` contained a `'"'`.
+    # Run its own cases first so a parser regression is reported as one.
+    echo "=== Checking the shared Rust source scanner ==="
+    if ! "$py" "$PROJECT_ROOT/scripts/check-recursive-locks.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The scanner that backs the lock, VFS" >&2
+        echo "and self-test gates mis-parses a Rust literal form.  Until it is" >&2
+        echo "fixed those gates are not checking anything, and their silence" >&2
+        echo "must not be read as a pass." >&2
+        return 1
+    fi
+
     echo "=== Checking for guards held across a re-acquiring call ==="
     if "$py" "$PROJECT_ROOT/scripts/check-recursive-locks.py"; then
         return 0
@@ -2600,6 +2615,20 @@ check_selftest_skips() {
     else
         echo "=== Self-test skip check: skipped (no python) ===" >&2
         return 0
+    fi
+
+    # This gate decides what counts as "the suite" by a call-graph closure, and
+    # that closure fails silently in both directions: too wide and it grades the
+    # whole file, too narrow and it grades nothing.  Its fixture runs first so
+    # either collapse is reported as a gate fault rather than as a clean tree.
+    echo "=== Checking the self-test skip gate against its fixture ==="
+    if ! "$py" "$PROJECT_ROOT/scripts/check-selftest-skips.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The self-test skip gate no longer" >&2
+        echo "agrees with its own fixture, so its verdict on the tree means" >&2
+        echo "nothing -- a gate that grades the wrong set of functions reports" >&2
+        echo "zero findings just like a clean tree does." >&2
+        return 1
     fi
 
     echo "=== Checking that self-test skips are looked up and reported ==="

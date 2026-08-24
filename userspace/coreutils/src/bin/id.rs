@@ -369,7 +369,9 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
         // default line as if they had not been given would answer a question
         // that was not asked.
         if use_real || use_name {
-            return Err(ID.usage("cannot print only names or real IDs in default format".to_string()));
+            return Err(
+                ID.usage("cannot print only names or real IDs in default format".to_string())
+            );
         }
         if zero {
             return Err(ID.usage("option --zero not permitted in default format".to_string()));
@@ -633,11 +635,19 @@ fn print_stuff(
     let delim = if settings.zero { b'\0' } else { b' ' };
     match settings.format {
         Format::User => {
-            let uid = if settings.use_real { ids.ruid } else { ids.euid };
+            let uid = if settings.use_real {
+                ids.ruid
+            } else {
+                ids.euid
+            };
             print_user(out, uid, settings.use_name, db);
         }
         Format::Group => {
-            let gid = if settings.use_real { ids.rgid } else { ids.egid };
+            let gid = if settings.use_real {
+                ids.rgid
+            } else {
+                ids.egid
+            };
             print_group(out, gid, settings.use_name, db);
         }
         Format::GroupList => print_group_list(
@@ -670,7 +680,9 @@ fn main() {
 
 #[cfg(unix)]
 mod imp {
-    use super::{Ids, Output, Request, Settings, help_text, parse_args, print_stuff, resolve_operand};
+    use super::{
+        Ids, Output, Request, Settings, help_text, parse_args, print_stuff, resolve_operand,
+    };
     use coreutils::errmsg::strerror;
     use coreutils::quote::{os_bytes, quote};
     use pwdb::Db;
@@ -754,7 +766,12 @@ mod imp {
         written
     }
 
-    fn run(settings: &Settings, db: &Db, out: &mut Output, sink: &mut impl Write) -> io::Result<()> {
+    fn run(
+        settings: &Settings,
+        db: &Db,
+        out: &mut Output,
+        sink: &mut impl Write,
+    ) -> io::Result<()> {
         if settings.users.is_empty() {
             print_stuff(
                 out,
@@ -881,7 +898,12 @@ mod tests {
     }
 
     /// Render one report the way `main` would, and return stdout plus stderr.
-    fn report(args: &[&str], ids: Ids, username: Option<&[u8]>, groups: &[u32]) -> (Vec<u8>, Vec<String>) {
+    fn report(
+        args: &[&str],
+        ids: Ids,
+        username: Option<&[u8]>,
+        groups: &[u32],
+    ) -> (Vec<u8>, Vec<String>) {
         let settings = settings(args);
         let mut out = Output::new();
         print_stuff(
@@ -954,7 +976,10 @@ mod tests {
         // The defect this file was rewritten for: `id alice` used to print the
         // caller's own ids and exit 0.
         assert_eq!(settings(&["alice"]).users, argv(&["alice"]));
-        assert_eq!(settings(&["-u", "alice", "bob"]).users, argv(&["alice", "bob"]));
+        assert_eq!(
+            settings(&["-u", "alice", "bob"]).users,
+            argv(&["alice", "bob"])
+        );
     }
 
     #[test]
@@ -1100,10 +1125,7 @@ mod tests {
 
     #[test]
     fn a_number_with_no_account_of_that_name_is_a_uid() {
-        assert_eq!(
-            resolve_operand(b"0", &db()),
-            Some((b"root".to_vec(), 0, 0))
-        );
+        assert_eq!(resolve_operand(b"0", &db()), Some((b"root".to_vec(), 0, 0)));
     }
 
     #[test]
@@ -1145,9 +1167,10 @@ mod tests {
     #[test]
     fn a_username_uses_the_database_and_leads_with_the_login_group() {
         let db = db();
-        assert_eq!(groups_for(Some(b"alice"), 1000, &db, &[]), vec![
-            1000, 2000, 3000
-        ]);
+        assert_eq!(
+            groups_for(Some(b"alice"), 1000, &db, &[]),
+            vec![1000, 2000, 3000]
+        );
         // The login group is suppressed from the member-list half even when it
         // is reached under a different name, so no duplicate appears.
         assert_eq!(groups_for(Some(b"alice"), 2000, &db, &[]), vec![2000, 3000]);
@@ -1157,14 +1180,16 @@ mod tests {
     fn no_username_uses_the_process_list_with_the_gid_in_front() {
         let db = db();
         assert_eq!(groups_for(None, 1000, &db, &[]), vec![1000]);
-        assert_eq!(groups_for(None, 1000, &db, &[2000, 3000]), vec![
-            1000, 2000, 3000
-        ]);
+        assert_eq!(
+            groups_for(None, 1000, &db, &[2000, 3000]),
+            vec![1000, 2000, 3000]
+        );
         // gnulib's weak dedup: equal to the first element, or to the previous
         // kept one.
-        assert_eq!(groups_for(None, 1000, &db, &[1000, 2000, 2000, 1000]), vec![
-            1000, 2000
-        ]);
+        assert_eq!(
+            groups_for(None, 1000, &db, &[1000, 2000, 2000, 1000]),
+            vec![1000, 2000]
+        );
     }
 
     #[test]
@@ -1301,7 +1326,10 @@ mod tests {
     fn zero_and_group_list_double_the_nul_only_for_several_users() {
         // Measured: `id -Gz root inhahe | od -c` shows `0 \0 \0 … \0 \0`.
         let (out, _, _) = run_users(&["-Gz", "root", "alice"]);
-        assert_eq!(out, ["0", "\0\0", "1000", "\0", "2000", "\0", "3000", "\0\0"].concat());
+        assert_eq!(
+            out,
+            ["0", "\0\0", "1000", "\0", "2000", "\0", "3000", "\0\0"].concat()
+        );
     }
 
     #[test]

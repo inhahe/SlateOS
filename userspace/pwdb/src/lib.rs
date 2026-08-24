@@ -910,9 +910,10 @@ mod tests {
     /// the caller's copy of it rather than searching for it.
     #[test]
     fn the_measured_group_list_replays() {
-        assert_eq!(measured_db().group_list(b"inhahe", 1000), vec![
-            1000, 4, 24, 27, 30, 46, 100, 1001
-        ]);
+        assert_eq!(
+            measured_db().group_list(b"inhahe", 1000),
+            vec![1000, 4, 24, 27, 30, 46, 100, 1001]
+        );
     }
 
     /// `os.getgrouplist("inhahe", 4)` — the same account and the same `adm`
@@ -921,9 +922,10 @@ mod tests {
     /// one it was given.
     #[test]
     fn the_passed_gid_suppresses_the_member_list_entry_with_the_same_gid() {
-        assert_eq!(measured_db().group_list(b"inhahe", 4), vec![
-            4, 24, 27, 30, 46, 100, 1001
-        ]);
+        assert_eq!(
+            measured_db().group_list(b"inhahe", 4),
+            vec![4, 24, 27, 30, 46, 100, 1001]
+        );
     }
 
     /// `os.getgrouplist("inhahe", 65534)` — a gid belonging to no line at all
@@ -931,9 +933,10 @@ mod tests {
     /// account's login group need not appear in `/etc/group`.
     #[test]
     fn a_login_group_with_no_group_line_is_still_first() {
-        assert_eq!(measured_db().group_list(b"inhahe", 65534), vec![
-            65534, 4, 24, 27, 30, 46, 100, 1001
-        ]);
+        assert_eq!(
+            measured_db().group_list(b"inhahe", 65534),
+            vec![65534, 4, 24, 27, 30, 46, 100, 1001]
+        );
     }
 
     /// `os.getgrouplist("root", 0)` — an account in no member list gets a

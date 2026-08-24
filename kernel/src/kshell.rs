@@ -6236,6 +6236,7 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         "rev" => cmd_rev_input(args, input),
         "tac" => cmd_tac_input(args, input),
         "tee" => cmd_tee_input(args, input),
+        "paste" => cmd_paste_input(args, input),
         "cat" if args.is_empty() => {
             // `cat` with no args reads from pipe.
             shell_write_bytes(input);
@@ -6249,11 +6250,13 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         //
         // `grep`, `cut`, `tr` and `fold` are `char`-oriented (character
         // classes, field indices, display width); `sed` and `awk` are real
-        // text interpreters; `mapfile` and `paste` are blocked on something
-        // else rather than on themselves — both store `String`s in the shell
-        // environment, which is still a `String` map.
-        "grep" | "mapfile" | "readarray" | "cut" | "tr" | "fold" | "paste" | "xargs" | "column"
-        | "sed" | "awk" => {
+        // text interpreters; `xargs` and `column` re-parse into words and
+        // measure display width. `mapfile` is blocked on something else rather
+        // than on itself — it stores its lines as `String`s in the shell
+        // environment, which is still a `String` map, so converting it here
+        // would only move the decode one call deeper.
+        "grep" | "mapfile" | "readarray" | "cut" | "tr" | "fold" | "xargs" | "column" | "sed"
+        | "awk" => {
             let Some(text) = shell_bytes_as_str(input, cmd) else {
                 set_exit(1);
                 return;
@@ -6264,7 +6267,6 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
                 "cut" => cmd_cut_input(args, text),
                 "tr" => cmd_tr_input(args, text),
                 "fold" => cmd_fold_input(args, text),
-                "paste" => cmd_paste_input(args, text),
                 "xargs" => cmd_xargs_input(args, text),
                 "column" => cmd_column_input(args, text),
                 "sed" => cmd_sed_input(args, text),
@@ -9211,6 +9213,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 Vfs::read_file(path)?.as_slice(),
                 &payload[..],
                 "tee must write a byte-identical copy"
+            );
+            let _ = Vfs::remove(path);
+        }
+
+        // `paste` joins the pipe against a file column-wise. Its file read used
+        // `from_utf8(&data).unwrap_or("")`, which turned an undecodable file
+        // into an *empty* column: the output kept its shape, so the blank
+        // cells read as "that file had nothing there" rather than as an error.
+        {
+            use crate::fs::vfs::Vfs;
+            let path = "/tmp/kshell_paste_selftest.bin";
+            Vfs::write_file(path, b"\xffB1\n\xffB2\n")?;
+            assert_eq!(
+                piped("paste /tmp/kshell_paste_selftest.bin", b"a1\na2\n").as_slice(),
+                &b"a1\t\xffB1\na2\t\xffB2\n"[..]
             );
             let _ = Vfs::remove(path);
         }
@@ -95041,14 +95058,11 @@ fn cmd_paste(args: &str) {
     }
 
     // Read all files.
-    let mut columns: Vec<Vec<String>> = Vec::new();
+    let mut columns: Vec<Vec<Vec<u8>>> = Vec::new();
     for file in &files {
         let path = resolve_path(file);
         match crate::fs::Vfs::read_file(&path) {
-            Ok(data) => {
-                let text = core::str::from_utf8(&data).unwrap_or("");
-                columns.push(text.lines().map(String::from).collect());
-            }
+            Ok(data) => columns.push(paste_column(&data)),
             Err(e) => {
                 crate::console_println!("paste: {}: {:?}", file, e);
                 set_exit(1);
@@ -95060,19 +95074,16 @@ fn cmd_paste(args: &str) {
     paste_output(&columns);
 }
 
-fn cmd_paste_input(args: &str, input: &str) {
-    let mut columns: Vec<Vec<String>> = Vec::new();
+fn cmd_paste_input(args: &str, input: &[u8]) {
+    let mut columns: Vec<Vec<Vec<u8>>> = Vec::new();
     // Input becomes the first column.
-    columns.push(input.lines().map(String::from).collect());
+    columns.push(paste_column(input));
 
     // If there's a file argument, add it as additional columns.
     for file in args.split_whitespace() {
         let path = resolve_path(file);
         match crate::fs::Vfs::read_file(&path) {
-            Ok(data) => {
-                let text = core::str::from_utf8(&data).unwrap_or("");
-                columns.push(text.lines().map(String::from).collect());
-            }
+            Ok(data) => columns.push(paste_column(&data)),
             Err(e) => {
                 crate::console_println!("paste: {}: {:?}", file, e);
                 set_exit(1);
@@ -95084,18 +95095,32 @@ fn cmd_paste_input(args: &str, input: &str) {
     paste_output(&columns);
 }
 
-fn paste_output(columns: &[Vec<String>]) {
-    let max_lines = columns.iter().map(|c| c.len()).max().unwrap_or(0);
+/// Split one input into the owned lines of a `paste` column.
+///
+/// Owned rather than borrowed because a column read from a file must outlive
+/// the `Vec<u8>` the VFS handed back, and the columns are all collected before
+/// any of them is printed.
+///
+/// This replaces `from_utf8(&data).unwrap_or("")`, which turned a file that
+/// was not valid UTF-8 into an *empty* column — so `paste a.txt bin.dat`
+/// printed a-values against blank cells and exited 0, rather than either
+/// pasting the bytes or reporting the problem.
+fn paste_column(data: &[u8]) -> Vec<Vec<u8>> {
+    data.lines().map(<[u8]>::to_vec).collect()
+}
+
+fn paste_output(columns: &[Vec<Vec<u8>>]) {
+    let max_lines = columns.iter().map(Vec::len).max().unwrap_or(0);
     for i in 0..max_lines {
         for (ci, col) in columns.iter().enumerate() {
             if ci > 0 {
-                shell_print!("\t");
+                shell_write_bytes(b"\t");
             }
             if let Some(line) = col.get(i) {
-                shell_print!("{}", line);
+                shell_write_bytes(line);
             }
         }
-        shell_println!();
+        shell_write_bytes(b"\n");
     }
 }
 

@@ -72496,3 +72496,62 @@ recurring shape is not "the wrong value was computed" but "no value was
 computed and the default was reported as if it were one." A default of
 success is a claim, and every early `return` past it is an unexamined
 assertion that the claim still holds.
+
+## TD-B-BC-QUIT-FIRES-AT-THE-WRONG-TIME-AND-HALT-DOES-NOT-EXIST (lane B, 2026-08-24) — **open**
+
+**In short:** `bc` is a calculator, and it has two ways to stop: `quit` and
+`halt`. Ours implements one of them, and implements it at the wrong moment.
+GNU `bc` stops as soon as it *reads* the word `quit`, before running anything
+on the same line; ours stops when it *reaches* it, having already run what came
+before. So a one-line script that GNU answers with nothing, ours answers with
+half its output. And `halt` — the one that really is meant to stop when
+reached — we do not recognise at all, so a script using it dies with a syntax
+error.
+
+**Where:** `userspace/coreutils/src/bin/bc.rs`. The keyword table at the `"quit"
+=> Token::Quit` arm; `Stmt::Quit`; `Interpreter::exec_stmt`'s `Stmt::Quit` arm;
+`Parser::parse_program`; and `eval_input`, which parses a whole file in one go
+where GNU compiles and runs it a line at a time.
+
+**Measured**, GNU `bc` 1.07.1 under WSL:
+
+| Input | GNU prints | Ours prints |
+|---|---|---|
+| `print "A"` / `quit` / `print "B"` on three lines | `A` | `A` |
+| `print "A"; quit; print "B"` on **one** line | *(nothing)* | `A` |
+| `print "A"` / `if (0) { quit }` / `print "B"` | `A` | `AB` |
+| `print "A"` / `if (0) { halt }` / `print "B"` | `AB` | syntax error |
+| `print "A"` / `halt` / `print "B"` | `A` | syntax error |
+| `define f() { quit }` then `print "before"` | *(nothing)* | `before` |
+
+The rule the table encodes is the one the GNU manual states outright: *"quit:
+when this statement is read, the bc processor is terminated, regardless of
+where the quit statement is found"*, versus *"halt: … an executed statement"*.
+The granularity of "read" is one input line — that is why the three-line case
+agrees and the one-line case does not, and why a `quit` buried in an
+`if (0)` or in a function body that is never called still ends the run.
+
+**The proper fix**, in three parts:
+
+1. Rename the existing statement to `Stmt::Halt` and add `"halt" =>
+   Token::Halt`. The execute-time machinery already exists and is already
+   correct for it — `StmtResult::Quit`/`LoopFlow::Quit`/`RuntimeError::Quit`
+   and `Session`, added in `abce71f46`, are exactly `halt`'s plumbing and
+   should be renamed with it.
+2. Make `quit` a *parse*-time event: `Parser::parse_program` truncates the
+   statement list at the `quit` token and reports that it saw one, and the
+   caller runs the truncated list and then stops. Nothing after the `quit` in
+   the same chunk runs, which is what the one-line and `define` rows above
+   require.
+3. Give `eval_input` the same line-at-a-time chunking `eval_stdin` already has,
+   or the file rows will still differ: GNU compiles and runs a file line by
+   line, so `print "A"` before a `quit` on the next line does print.
+
+**What is safe about the current state:** the exit *status* is right —
+`abce71f46` removed the `process::exit(0)` that bypassed the `close_stderr`
+funnel, so `quit` after an unwritable `print` now correctly exits 1. What is
+wrong is only *how much runs first*, and `halt` being missing.
+
+**Needs** a `bc-diff.sh` differential harness against GNU `bc` under WSL, like
+the ones for `cmp`/`tee`/`echo`/`tty`; there is none yet, which is why this
+went unnoticed.

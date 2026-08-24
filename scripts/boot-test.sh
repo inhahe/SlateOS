@@ -2567,6 +2567,68 @@ check_vfs_permission_gate() {
 
 check_vfs_permission_gate
 
+# Keep self-test skips honest: looked up, and reported.
+#
+# A self-test may legitimately skip -- there is no second CPU to offline on a
+# uniprocessor, no PCID on a CPU without it.  Two things make a skip a lie
+# instead of a fact, and this gate refuses both.
+#
+# The first is the reported half.  If the skip never reaches the summary, the
+# last line still reads `Self-test PASSED` and a half-run is
+# byte-indistinguishable from a full one.  That is not hypothetical: 26 tcc
+# rungs no-op'd unnoticed for weeks behind a green line
+# (known-issues.md -> B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT).
+#
+# The second is the larger one: how the skip was *decided*.  Writing
+# `if mkdir(d).is_ok() { ..test.. } else { skip }` reads as "skip when this
+# filesystem has no directories" but means "skip on **any** failure" --
+# including the regression the section exists to catch.  Under that shape the
+# worse the code under test gets, the more sections switch themselves off, and
+# the suite goes green precisely when it should be loudest.  The precondition
+# must be a fact the test looked up (the mount table, CPUID, a feature query),
+# never an error it inferred.
+#
+# Placed before the build for the same reason as its siblings: it costs
+# milliseconds against a ten-minute build, and exit 2 (could not run) counts as
+# failure so a check that cannot fire never looks like one that passed.
+check_selftest_skips() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Self-test skip check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking that self-test skips are looked up and reported ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-selftest-skips.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A self-test may skip, but it must skip" >&2
+    echo "for a reason it looked up, and it must say so in the line a reader" >&2
+    echo "believes." >&2
+    echo "" >&2
+    echo "For a skip decided from .is_ok()/.is_err() on the code under test:" >&2
+    echo "ask the environment instead -- crate::fs::selftest::is_mounted(p) /" >&2
+    echo "is_mounted_rw(p), a CPUID/feature query, a capability lookup.  When" >&2
+    echo "an error genuinely must be classified, use selftest::classify: only" >&2
+    echo "NotSupported / ReadOnlyFilesystem / NoSuchDevice mean 'this system" >&2
+    echo "cannot'.  Anything else means the system was asked and refused, and" >&2
+    echo "that is a defect the test must fail on." >&2
+    echo "" >&2
+    echo "For an unconditional success line printed after a section skipped:" >&2
+    echo "thread a crate::fs::selftest::Skips through the test, record(section," >&2
+    echo "why) at each skip, and close with skips.report(tag) plus" >&2
+    echo "skips.suffix() appended to the PASSED line." >&2
+    exit 1
+}
+
+check_selftest_skips
+
 # Keep `.unwrap()` / `.expect()` out of kernel production paths.
 #
 # The count reached zero on 2026-08-22 and the script that measured it was

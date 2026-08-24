@@ -1303,12 +1303,12 @@ mod tests {
         // that is what makes this a test rather than a coincidence. The wrong
         // implementation here is `readable_on(p.accent)` -- lettering the
         // label for the wash *over* the scrim instead of the scrim itself --
-        // and `readable_on` is a threshold at luma 140. The fixture accent
-        // `#FF00FF` has luma 105, so it lands on the same side as black and
-        // the wrong implementation returns the right answer. Yellow, Peach,
-        // Rosewater and Flamingo land on the other side; under those the
+        // and `readable_on` answers with whichever endpoint is further from
+        // what it is given. Half the accents share an answer with the scrim's,
+        // so under those the wrong implementation returns the right value;
+        // Yellow, Peach, Rosewater and Flamingo do not, and under those the
         // labels would go near-*black* on a black scrim. One accent is one
-        // sample of a step function, which is no sample at all.
+        // sample of a two-valued function, which is no sample at all.
         const NEAR_WHITE: u32 = 0x00EF_F1F5;
         let mut seen = Vec::new();
         for light in [false, true] {

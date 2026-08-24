@@ -1335,13 +1335,31 @@ mod tests {
         // This dialog is allowed three moving commands: the selected
         // printer's name and the Print button's fill both take the accent,
         // and the Print button's label is derived from it via `on_accent`.
+        //
+        // The two accents must **straddle** `readable_on`'s answer, or the
+        // third of those three sites does not move and the count silently
+        // becomes a count of two. `B` was `#129E7D` until `readable_on`
+        // stopped estimating brightness from a luma sum and started measuring
+        // contrast (§536): a luma sum called that teal dark (112, under 140)
+        // and inked it pale, but near-black on it is 5.55:1 against near-white
+        // at 2.99:1, so it now inks dark — the same side as `A`. `#0F5A47` is
+        // the same hue taken far enough down to ink pale by the ratio (7.2:1
+        // pale against 2.3:1 dark), with margin no retune can close. The
+        // assertion below is what stops this happening silently a third time.
         const A: Color = Color::from_hex(0x00FF_8C1A);
-        const B: Color = Color::from_hex(0x0012_9E7D);
+        const B: Color = Color::from_hex(0x000F_5A47);
 
         for light in [false, true] {
             let (mut pa, mut pb) = (Palette::for_mode(light), Palette::for_mode(light));
             pa.accent = A;
             pb.accent = B;
+            assert_ne!(
+                pa.on_accent(),
+                pb.on_accent(),
+                "the two fixture accents ink the same way, so the Print \
+                 button's label cannot move and only two of the three allowed \
+                 sites are being counted"
+            );
             for (what, d) in every_state() {
                 let ca = d.render(&pa, &printers(), 0.0, 0.0, 800.0, 600.0);
                 let cb = d.render(&pb, &printers(), 0.0, 0.0, 800.0, 600.0);

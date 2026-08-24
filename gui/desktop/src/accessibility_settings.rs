@@ -1138,19 +1138,26 @@ mod tests {
     ///
     /// The shipped accent *is* `blue`, so a fixture that leaves it alone
     /// cannot tell "this site followed the accent" from "this site drew the
-    /// blue role" — the two are the same value. Magenta is in neither
-    /// palette, and unlike module 38's calibration page there are no
-    /// instruments here for it to collide with.
+    /// blue role" — the two are the same value. Indigo is in neither palette,
+    /// and unlike module 38's calibration page there are no instruments here
+    /// for it to collide with.
     ///
-    /// It is also chosen for its *brightness*: `readable_on(#FF00FF)` is
-    /// 105 luma, below the 140 threshold, so [`Palette::on_accent`] answers
-    /// near-**white** in both modes. That is what lets
+    /// It is also chosen for its *darkness*: `#4B0082` reaches 11.4:1 against
+    /// the pale extreme and 1.4:1 against the dark one, so
+    /// [`Palette::on_accent`] answers near-**white** in both modes with a
+    /// margin no retune of the palette can close. That is what lets
     /// [`none_of_the_nine_deleted_constants_is_still_drawn`] name `CRUST`
     /// among the forbidden values — with a pale accent the same near-black
     /// would be the *correct* answer and the check would have to drop it.
+    ///
+    /// It used to be magenta, which is dark to a *luma sum* (105) but not to a
+    /// contrast ratio: near-black on `#FF00FF` is 5.98:1 and near-white only
+    /// 2.77:1, so when `readable_on` stopped estimating brightness and started
+    /// measuring contrast (§536) magenta's ink flipped and this fixture's
+    /// premise with it. Indigo is dark by both readings.
     fn accented(light: bool) -> Palette {
         let mut p = Palette::for_mode(light);
-        p.accent = Color::from_hex(0x00FF_00FF);
+        p.accent = Color::from_hex(0x004B_0082);
         assert!(
             !p.roles()
                 .iter()

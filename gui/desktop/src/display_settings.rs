@@ -47,9 +47,10 @@
 //! are not, and the file previously had no way to say which it meant.
 //!
 //! **The selected chip's lettering was near-black and had to stop being.**
-//! `MOCHA_MANTLE` on Mocha blue is legible; on Latte's blue (`#1D62EC`, luma
-//! 93) it is not, so the ink is [`Palette::on_accent`] — computed from the
-//! fill rather than named beside it.
+//! `MOCHA_MANTLE` on Mocha blue is legible; on Latte's blue (`#1D62EC`, a
+//! deep blue that near-black reaches only 1.9:1 against) it is not, so the ink
+//! is [`Palette::on_accent`] — computed from the fill rather than named beside
+//! it.
 
 use appearance::Palette;
 use guitk::color::Color;
@@ -2190,10 +2191,36 @@ mod tests {
         // rather than by calling `readable_on`, because a test that called the
         // renderer's own function would agree with it however wrong both were.
         //
-        // Walked over all fourteen accents: `on_accent` is a threshold at luma
-        // 140, and one accent samples one side of it (lesson 20).
+        // Walked over all fourteen accents: `on_accent` picks whichever
+        // endpoint is further from the fill, and one accent samples one side
+        // of that choice (lesson 20).
+        //
+        // The model below is the WCAG ratio, transcribed here rather than
+        // called from `appearance` — the same independence the pinned
+        // endpoints buy. It used to be a luma sum thresholded at 140, which is
+        // the rule `readable_on` itself followed until §536. That model
+        // survived its own replacement only by luck: all fourteen accents fall
+        // on the same side under both readings, so this test would have gone
+        // on passing while modelling a rule the shell no longer follows, which
+        // is exactly how a hand-written oracle rots.
         const NEAR_BLACK: u32 = 0x0011_111B;
         const NEAR_WHITE: u32 = 0x00EF_F1F5;
+        fn luminance(c: Color) -> f32 {
+            fn channel(v: u8) -> f32 {
+                let v = f32::from(v) / 255.0;
+                if v <= 0.039_28 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            }
+            0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+        }
+        fn ratio(a: Color, b: Color) -> f32 {
+            let (la, lb) = (luminance(a), luminance(b));
+            let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+            (hi + 0.05) / (lo + 0.05)
+        }
         for light in [false, true] {
             for accent in OFFERED {
                 let p = wearing(light, accent);
@@ -2203,16 +2230,15 @@ mod tests {
                 let cmds = mgr.render(&p, 0.0, 0.0, 600.0, 400.0);
                 let (fill, ink) = chips(&cmds)[0];
                 assert_eq!(fill, p.accent, "the chosen chip is not accented");
-                let luma = 0.299 * f32::from(fill.r)
-                    + 0.587 * f32::from(fill.g)
-                    + 0.114 * f32::from(fill.b);
-                let want = if luma > 140.0 { NEAR_BLACK } else { NEAR_WHITE };
+                let dark = ratio(fill, Color::from_hex(NEAR_BLACK));
+                let pale = ratio(fill, Color::from_hex(NEAR_WHITE));
+                let want = if dark >= pale { NEAR_BLACK } else { NEAR_WHITE };
                 let got = (u32::from(ink.r) << 16) | (u32::from(ink.g) << 8) | u32::from(ink.b);
                 assert_eq!(
                     got,
                     want,
-                    "{accent:?} in {} mode: a chip of luma {luma:.0} was \
-                     lettered #{got:06X}",
+                    "{accent:?} in {} mode: a chip worth {dark:.2}:1 near-black \
+                     and {pale:.2}:1 near-white was lettered #{got:06X}",
                     if light { "light" } else { "dark" }
                 );
             }

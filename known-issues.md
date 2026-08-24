@@ -71285,3 +71285,144 @@ plumbing.
 **Lesson:** a comment explaining why a test cannot assert something is a bug
 report that nobody filed. When the reason a test is weak is "the code under it
 does not survive nesting," the weakness is the finding.
+
+---
+
+## A-KSHELL-BRACE-EXPANSION-DELETED-EVERY-QUOTE-IN-THE-SHELL — ✅ FIXED 2026-08-24 (lane A)
+
+**In short:** the kernel shell threw away quotation marks before it read the
+command line. `echo 'a > b'` did not print `a > b`; it printed `a` into a file
+called `b`. `echo 'a && b'` ran two commands. `echo 'a   b'` printed one space.
+And `trap 'grep zeta f' ERR` — the case that surfaced it — installed a trap on
+a signal named `zeta`. One function was responsible for all of it.
+
+**Where:** `kernel/src/kshell.rs::expand_braces`, called from `execute` on
+every line the shell runs.
+
+### What it was
+
+`expand_braces` was written as:
+
+```rust
+let tokens = split_words(input);
+for token in tokens { ...; result.push(' '); }
+```
+
+`split_words` is a *word splitter*, and word splitters remove quotes — that is
+their job, and it is correct there. It is catastrophic here, because
+`expand_braces` runs at `execute` line 5528, **before the line is parsed at
+all**. So the rejoin handed every downstream stage a line with all quoting
+deleted and all whitespace runs collapsed:
+
+| written | what the parsers actually received |
+|---|---|
+| `trap 'grep zeta f' ERR` | `trap grep zeta f ERR` |
+| `echo 'a   b'` | `echo a b` |
+| `echo 'a && b'` | `echo a && b` — two chained commands |
+| `echo 'a > b'` | `echo a > b` — an output redirect |
+
+The function's own doc comment promised "Tokens without `{` or `}` pass through
+unchanged." The rejoin broke that promise for every token in the shell.
+
+### How it was found, and the tell that it was systemic
+
+Boot test batch52 failed in kshell self-test §13 with `last_exit()` reading 0
+where 1 was expected. The serial log showed `trap` printing *two* errors:
+
+```
+trap: unsupported signal 'zeta'
+trap: unsupported signal '/tmp/kshell_trap_selftest.txt'
+```
+
+`cmd_trap`'s own quote parser was hand-traced against the failing string and
+proved correct — it handles `trap 'cmd args' SIG` exactly right. It simply
+never received a quote.
+
+The tell that this was not a `trap` bug: `split_chain_operators` (5601),
+`parse_redirect` (6035) and `parse_input_redirect` (6190) all carefully track
+`in_sq`/`in_dq` and refuse to split inside a quoted region. **Every one of
+those checks was dead code**, because no quote ever reached them. The shell was
+written throughout for quotes to survive to the parsers, and this one function
+was quietly guaranteeing they never did.
+
+### The fix
+
+Two stages, each doing one thing:
+
+1. **`expand_braces` is now byte-preserving.** It scans tokens itself, tracking
+   quote state, and re-emits separators, quotes, prefixes and suffixes exactly
+   as written. Only a token containing an *unquoted* `{`…`}` is rewritten, so
+   `echo '{a,b}'` is literal, as in bash. New helpers `unquoted_positions` and
+   `split_unquoted` keep the brace/comma scans quote-aware; the expansion
+   arithmetic itself moved unchanged into `expand_braces_token`.
+2. **Quote removal became an explicit, named, per-command stage.**
+   `remove_quotes` deletes quote characters and moves nothing else — it is not
+   a splitter, which is how `'a   b'`'s interior spacing now survives — and it
+   is applied in `dispatch` and `dispatch_with_input`, after the parsers have
+   had their look at the line with the quoting still in it.
+
+Commands listed in `command_parses_own_quotes` are handed the line as written
+instead. `trap` is the founding member: its handler *is* a command line
+followed by another argument, so where the handler ends is precisely the fact
+quote removal destroys.
+
+**Covered by** kshell self-test §15 ("quoting survives expansion"): the two
+stages asserted in isolation, then end-to-end through `capture_command` for
+quoted whitespace, a quoted `&&`, a quoted `>` (including that no file was
+created by it), and the `trap` handler round-trip.
+
+**Lesson:** a parser full of careful quote handling, in a shell where quotes
+never reach a parser, is not evidence that quoting works. It is evidence that
+someone upstream is eating them.
+
+---
+
+## TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV — tech debt, lane A
+
+**In short:** kshell hands each of its ~750 commands a single string of
+arguments rather than a list. A string cannot record that `a b` was written as
+`'a b'` and is therefore *one* argument, so `grep 'a b' file` searches for `a`
+in files `b` and `file`. Real shells pass a list (argv) and do not have this
+problem.
+
+**Where:** `kernel/src/kshell.rs` — 630 functions with the signature
+`fn cmd_x(args: &str)`, dispatched from `dispatch` (6648) and
+`dispatch_with_input` (6554).
+
+**Status:** the quoting *structure* now survives all the way to the dispatch
+boundary — see `A-KSHELL-BRACE-EXPANSION-DELETED-EVERY-QUOTE-IN-THE-SHELL`
+above, which fixed the stage that was destroying it earlier. What remains is
+that the boundary itself is lossy: `remove_quotes` flattens
+`'a b'` to `a b`, and a command that then calls `split_whitespace` sees two
+words. That is not a regression — it is what the shell has always done — but it
+is now the *only* place the information is lost, rather than one of several.
+
+**What the proper fix looks like:** pass `argv: &[String]` (produced once, by
+the existing quote-aware `split_words`) instead of `args: &str`. The migration
+does not have to be a single 750-function change: `command_parses_own_quotes`
+is the incremental path. A command joins that list when it learns to parse its
+own arguments quote-aware; until then it keeps receiving the dequoted string it
+was written for, and nothing regresses. When every command is on the list,
+`command_parses_own_quotes` and `remove_quotes` both delete themselves in
+favour of a real argv.
+
+**Not purely mechanical**, which is why it is debt rather than an afternoon:
+the commands disagree about what they want. `echo` wants the rest of the line
+joined; `grep` wants words; `trap` wants word 1 as a command string and word 2
+as a signal. Each conversion is a small semantic decision, and there are no
+per-command tests to catch getting one wrong.
+
+### Two smaller bugs found in the same area, not yet fixed
+
+- **`parse_inline_assignment` splits the first word on raw whitespace**
+  (`line.find([' ', '\t'])`, kshell.rs 6131), so `FOO='a b'` is read as
+  `first_word = FOO='a`, `command = b'` — it tries to run `b'`. It was equally
+  broken before the quoting fix (it read `FOO=a` and ran `b`); the fix changed
+  the wrong answer, not its wrongness. It needs the same quote-aware scan
+  `expand_braces` now uses.
+- **`grep` with no arguments prints its usage and exits 0.** Its usage arm is a
+  `console_println!` followed by a bare `return`, never reaching `set_exit(1)`.
+  This is the same silent-success class as
+  `A-KSHELL-CAPTURE-DID-NOT-NEST` and the exit-status fixes before it, and is
+  very likely not unique to `grep` — the usage arms of the other ~750 commands
+  have not been audited.

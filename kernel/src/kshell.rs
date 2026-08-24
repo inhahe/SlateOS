@@ -872,6 +872,294 @@ fn expand_vars(input: &str) -> String {
     }
 }
 
+/// Byte offsets of the first and last *unquoted* occurrences of `needle`.
+///
+/// Quoting is tracked the way the rest of the shell's parsers track it: a
+/// `'` opens a region that only another `'` closes, likewise `"`, and the
+/// other quote character is ordinary inside such a region.
+fn unquoted_positions(s: &str, needle: u8) -> (Option<usize>, Option<usize>) {
+    let bytes = s.as_bytes();
+    let mut first = None;
+    let mut last = None;
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while let Some(&b) = bytes.get(i) {
+        match quote {
+            Some(q) => {
+                if b == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if b == b'\'' || b == b'"' {
+                    quote = Some(b);
+                } else if b == needle {
+                    if first.is_none() {
+                        first = Some(i);
+                    }
+                    last = Some(i);
+                }
+            }
+        }
+        i = i.saturating_add(1);
+    }
+    (first, last)
+}
+
+/// Split `s` on *unquoted* occurrences of `sep`, keeping the pieces verbatim.
+///
+/// Always returns at least one piece, so `parts.len() > 1` is the test for
+/// "the separator actually occurred outside quotes".
+fn split_unquoted(s: &str, sep: u8) -> Vec<&str> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while let Some(&b) = bytes.get(i) {
+        match quote {
+            Some(q) => {
+                if b == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if b == b'\'' || b == b'"' {
+                    quote = Some(b);
+                } else if b == sep {
+                    out.push(s.get(start..i).unwrap_or(""));
+                    start = i.saturating_add(1);
+                }
+            }
+        }
+        i = i.saturating_add(1);
+    }
+    out.push(s.get(start..).unwrap_or(""));
+    out
+}
+
+/// Expand shell brace patterns: `{a,b,c}` and `{N..M}` ranges.
+///
+/// A token like `prefix{a,b,c}suffix` expands to
+/// `prefixasuffix prefixbsuffix prefixcsuffix`. Numeric ranges `{1..5}`
+/// expand to `1 2 3 4 5`; ranges with a step, `{1..10..2}`, to `1 3 5 7 9`.
+///
+/// **Everything that is not a brace expansion passes through byte for
+/// byte** — quotes, runs of spaces and tabs, and any token with no unquoted
+/// brace in it. That is the whole contract, and this function used to break
+/// it in a way that broke the shell.
+///
+/// It was written as `split_words(input)` followed by a rejoin on single
+/// spaces. `split_words` is a *word splitter*, so it removes quotes — which
+/// is correct for a word splitter and catastrophic here, because
+/// `expand_braces` runs on every line in [`execute`], before the line is
+/// parsed. Every quote in the shell was therefore deleted, and every run of
+/// whitespace collapsed, before any parser or command saw the line:
+///
+/// | written | what the parsers actually got |
+/// |---|---|
+/// | `trap 'grep zeta f' ERR` | `trap grep zeta f ERR` |
+/// | `echo 'a   b'` | `echo a b` |
+/// | `echo 'a && b'` | `echo a && b` — two commands |
+/// | `echo 'a > b'` | `echo a > b` — a redirect |
+///
+/// The last two are the tell: [`split_chain_operators`], [`parse_redirect`]
+/// and [`parse_input_redirect`] all carefully skip quoted regions, and every
+/// one of those checks was dead code, because no quote ever reached them.
+/// The shell was written for quotes to survive to the parsers; this function
+/// was quietly making sure they never did.
+///
+/// Quote *removal* is a separate, later stage — [`remove_quotes`], applied
+/// per command at the dispatch boundary — and deliberately not this
+/// function's business. As a consequence a brace is only a brace when it is
+/// unquoted, so `echo '{a,b}'` prints `{a,b}`, as it does in bash.
+fn expand_braces(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        // Copy the run of separators verbatim. Collapsing them here is what
+        // made `echo 'a   b'` print one space.
+        while let Some(&b) = bytes.get(i) {
+            if b == b' ' || b == b'\t' {
+                result.push(char::from(b));
+                i = i.saturating_add(1);
+            } else {
+                break;
+            }
+        }
+
+        // Scan one token: everything up to the next *unquoted* space or tab.
+        let start = i;
+        let mut quote: Option<u8> = None;
+        while let Some(&b) = bytes.get(i) {
+            match quote {
+                Some(q) => {
+                    if b == q {
+                        quote = None;
+                    }
+                }
+                None => {
+                    if b == b'\'' || b == b'"' {
+                        quote = Some(b);
+                    } else if b == b' ' || b == b'\t' {
+                        break;
+                    }
+                }
+            }
+            i = i.saturating_add(1);
+        }
+        if i == start {
+            break;
+        }
+        // Only ASCII bytes are ever matched above, and every byte of a
+        // multi-byte UTF-8 sequence is >= 0x80, so `start..i` is always a
+        // char boundary pair.
+        expand_braces_token(input.get(start..i).unwrap_or(""), &mut result);
+    }
+
+    result
+}
+
+/// Expand one whitespace-delimited token, appending the result.
+///
+/// The token arrives exactly as written, quotes included, and the prefix and
+/// suffix around the braces are re-emitted the same way.
+fn expand_braces_token(token: &str, result: &mut String) {
+    let (brace_start, _) = unquoted_positions(token, b'{');
+    let (_, brace_end) = unquoted_positions(token, b'}');
+    let (Some(brace_start), Some(brace_end)) = (brace_start, brace_end) else {
+        result.push_str(token);
+        return;
+    };
+    if brace_end <= brace_start {
+        result.push_str(token);
+        return;
+    }
+
+    let prefix = token.get(..brace_start).unwrap_or("");
+    let inner = token
+        .get(brace_start.saturating_add(1)..brace_end)
+        .unwrap_or("");
+    let suffix = token.get(brace_end.saturating_add(1)..).unwrap_or("");
+
+    // Check for range pattern: `{N..M}` or `{N..M..S}`.
+    if inner.contains("..") {
+        let parts: Vec<&str> = inner.splitn(3, "..").collect();
+        if let (Some(&start_s), Some(&end_s)) = (parts.first(), parts.get(1)) {
+            if let (Ok(start), Ok(end)) = (start_s.parse::<i64>(), end_s.parse::<i64>()) {
+                let step: i64 = if let Some(&step_s) = parts.get(2) {
+                    step_s.parse::<i64>().unwrap_or(1)
+                } else if start <= end {
+                    1
+                } else {
+                    -1
+                };
+
+                if step == 0 {
+                    result.push_str(token);
+                    return;
+                }
+
+                let mut first = true;
+                let mut val = start;
+                let mut count: u32 = 0;
+                loop {
+                    if step > 0 && val > end {
+                        break;
+                    }
+                    if step < 0 && val < end {
+                        break;
+                    }
+                    if count > 10_000 {
+                        break;
+                    } // Safety limit.
+
+                    if !first {
+                        result.push(' ');
+                    }
+                    first = false;
+                    result.push_str(prefix);
+                    result.push_str(&alloc::format!("{}", val));
+                    result.push_str(suffix);
+
+                    val = val.wrapping_add(step);
+                    count = count.saturating_add(1);
+                }
+                return;
+            }
+        }
+        // Not a valid range — fall through to comma check.
+    }
+
+    // Check for comma-separated alternatives: `{a,b,c}`. The commas must be
+    // unquoted too, so `{a,'b,c'}` is two alternatives and not three.
+    let alternatives = split_unquoted(inner, b',');
+    if alternatives.len() > 1 {
+        for (ai, alt) in alternatives.iter().enumerate() {
+            if ai > 0 {
+                result.push(' ');
+            }
+            result.push_str(prefix);
+            result.push_str(alt);
+            result.push_str(suffix);
+        }
+        return;
+    }
+
+    // No comma, no valid range — emit the token literally.
+    result.push_str(token);
+}
+
+/// Remove shell quote characters, leaving every other byte where it was.
+///
+/// This is the shell's quote-removal stage, and it runs once per command at
+/// the dispatch boundary — after [`expand_vars`], [`expand_braces`], chain
+/// splitting and redirect parsing have all had their look at the line *with
+/// the quoting still in it*.
+///
+/// It is not a word splitter. [`split_words`] removes quotes as a side
+/// effect of splitting, which is fine when the caller wants words, and was
+/// the bug when [`expand_braces`] used it and rejoined the words: the
+/// interior spacing of `'a   b'` cannot survive a rejoin. Here nothing is
+/// split, so it does.
+fn remove_quotes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut quote: Option<char> = None;
+    for ch in s.chars() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => out.push(ch),
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Whether a command receives its arguments with the quoting still in place.
+///
+/// The flat `&str` argument this shell passes to its ~750 commands cannot
+/// express "these two words were one argument", so quote removal at the
+/// dispatch boundary is lossy for any command that needs to know. The list
+/// below is the set of commands that parse their own quotes and therefore
+/// must be handed the line as written; everything else gets the dequoted
+/// form, which is what it has always got and what it is written for.
+///
+/// `trap` is here because its handler *is* a command line followed by
+/// another argument — `trap 'cmd a b' ERR` — so where the handler ends is
+/// exactly the fact that quote removal destroys. [`cmd_trap`] has always had
+/// a correct quote-aware parser; it simply never received a quote.
+///
+/// The list is the migration path, not a special case: a command moves onto
+/// it when it learns to parse quotes, and when everything is on it this
+/// function and [`remove_quotes`] both go away in favour of a real argv.
+/// See `known-issues.md` → `TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV`.
+fn command_parses_own_quotes(cmd: &str) -> bool {
+    matches!(cmd, "trap")
+}
+
 /// Expand a `${...}` brace expression.
 ///
 /// Handles:
@@ -885,115 +1173,6 @@ fn expand_vars(input: &str) -> String {
 ///   - `${NAME%%suffix}` — remove longest suffix match
 ///   - `${NAME#prefix}` — remove shortest prefix match
 ///   - `${NAME##prefix}` — remove longest prefix match
-///     Expand shell brace patterns: `{a,b,c}` and `{N..M}` ranges.
-///
-/// Brace expansion is applied to each whitespace-delimited token in the input.
-/// A token like `prefix{a,b,c}suffix` expands to `prefixa suffix prefixbsuffix
-/// prefixcsuffix`.  Numeric ranges `{1..5}` expand to `1 2 3 4 5`.
-/// Ranges with step: `{1..10..2}` → `1 3 5 7 9`.
-///
-/// Tokens without `{` or `}` pass through unchanged.
-fn expand_braces(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let tokens = split_words(input);
-
-    for (ti, token) in tokens.iter().enumerate() {
-        if ti > 0 {
-            result.push(' ');
-        }
-
-        // Find the first `{` and its matching `}`.
-        let brace_start = match token.find('{') {
-            Some(pos) => pos,
-            None => {
-                result.push_str(token);
-                continue;
-            }
-        };
-        let brace_end = match token.get(brace_start..).and_then(|s| s.rfind('}')) {
-            Some(pos) => brace_start.saturating_add(pos),
-            None => {
-                result.push_str(token);
-                continue;
-            }
-        };
-
-        let prefix = token.get(..brace_start).unwrap_or("");
-        let inner = token
-            .get(brace_start.saturating_add(1)..brace_end)
-            .unwrap_or("");
-        let suffix = token.get(brace_end.saturating_add(1)..).unwrap_or("");
-
-        // Check for range pattern: `{N..M}` or `{N..M..S}`.
-        if inner.contains("..") {
-            let parts: Vec<&str> = inner.splitn(3, "..").collect();
-            if let (Some(&start_s), Some(&end_s)) = (parts.first(), parts.get(1)) {
-                if let (Ok(start), Ok(end)) = (start_s.parse::<i64>(), end_s.parse::<i64>()) {
-                    let step: i64 = if let Some(&step_s) = parts.get(2) {
-                        step_s.parse::<i64>().unwrap_or(1)
-                    } else if start <= end {
-                        1
-                    } else {
-                        -1
-                    };
-
-                    if step == 0 {
-                        result.push_str(token);
-                        continue;
-                    }
-
-                    let mut first = true;
-                    let mut val = start;
-                    let mut count: u32 = 0;
-                    loop {
-                        if step > 0 && val > end {
-                            break;
-                        }
-                        if step < 0 && val < end {
-                            break;
-                        }
-                        if count > 10_000 {
-                            break;
-                        } // Safety limit.
-
-                        if !first {
-                            result.push(' ');
-                        }
-                        first = false;
-                        result.push_str(prefix);
-                        result.push_str(&alloc::format!("{}", val));
-                        result.push_str(suffix);
-
-                        val = val.wrapping_add(step);
-                        count = count.saturating_add(1);
-                    }
-                    continue;
-                }
-            }
-            // Not a valid range — fall through to comma check.
-        }
-
-        // Check for comma-separated alternatives: `{a,b,c}`.
-        if inner.contains(',') {
-            let alternatives: Vec<&str> = inner.split(',').collect();
-            for (ai, alt) in alternatives.iter().enumerate() {
-                if ai > 0 {
-                    result.push(' ');
-                }
-                result.push_str(prefix);
-                result.push_str(alt);
-                result.push_str(suffix);
-            }
-            continue;
-        }
-
-        // No comma, no valid range — emit the token literally.
-        result.push_str(token);
-    }
-
-    result
-}
-
 fn expand_brace_expr(inner: &str, result: &mut String) {
     // ${#NAME[@]} — array length.
     if let Some(name) = inner.strip_prefix('#') {
@@ -6375,7 +6554,19 @@ fn trim_trailing_newlines(bytes: &[u8]) -> &[u8] {
 fn dispatch_with_input(line: &str, input: &[u8]) {
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
-    let args = parts.next().unwrap_or("").trim();
+    let raw_args = parts.next().unwrap_or("").trim();
+
+    // Same quote-removal boundary as `dispatch` — a pipeline stage is a
+    // command like any other, and `cat f | grep 'a b'` must see the same
+    // argument bytes as `grep 'a b' f`. The fallback arm below re-enters
+    // `dispatch`, which dequotes again; that is a no-op, since a dequoted
+    // string has no quotes left to remove.
+    let dequoted = if command_parses_own_quotes(cmd) {
+        None
+    } else {
+        Some(remove_quotes(raw_args))
+    };
+    let args = dequoted.as_deref().unwrap_or(raw_args);
 
     // Establish the same baseline `dispatch` does. Only the fallback arm below
     // reaches `dispatch`, so without this the `*_input` variants inherited
@@ -6457,7 +6648,19 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
 fn dispatch(line: &str) {
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
-    let args = parts.next().unwrap_or("").trim();
+    let raw_args = parts.next().unwrap_or("").trim();
+
+    // Quote removal happens here, and only here. It used to happen line-wide
+    // in `expand_braces`, before the line was parsed at all, which deleted the
+    // quoting the parsers and `cmd_trap` were written to read. Commands on
+    // `command_parses_own_quotes` get the line as written; the rest get the
+    // dequoted form they have always been given.
+    let dequoted = if command_parses_own_quotes(cmd) {
+        None
+    } else {
+        Some(remove_quotes(raw_args))
+    };
+    let args = dequoted.as_deref().unwrap_or(raw_args);
 
     // Default to success; commands that fail will set_exit(1).
     set_exit(0);
@@ -9974,6 +10177,120 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         let _ = Vfs::remove(src);
         let _ = Vfs::remove(out);
+    }
+
+    serial_println!("  kshell::self_test 15: quoting survives expansion");
+    // `expand_braces` runs on every line before the line is parsed, and it
+    // used to be `split_words` + a rejoin on single spaces -- so it deleted
+    // every quote and collapsed every run of whitespace in the shell. The
+    // quote-awareness in `split_chain_operators`, `parse_redirect` and
+    // `cmd_trap` was all dead code as a result. These assertions are what
+    // keeps the quoting alive long enough for those parsers to see it.
+    {
+        use crate::fs::vfs::Vfs;
+
+        // --- The stage in isolation. It must change braces and nothing else.
+        assert_eq!(
+            expand_braces("trap 'grep zeta f' ERR"),
+            "trap 'grep zeta f' ERR",
+            "a line with no brace in it must come back byte for byte"
+        );
+        assert_eq!(
+            expand_braces("echo 'a   b'"),
+            "echo 'a   b'",
+            "runs of spaces are not the brace expander's to collapse"
+        );
+        assert_eq!(
+            expand_braces("echo\ta\t\tb"),
+            "echo\ta\t\tb",
+            "tabs are separators, and are preserved as written"
+        );
+        // ...while still doing its actual job.
+        assert_eq!(expand_braces("echo {1..3}"), "echo 1 2 3", "ranges expand");
+        assert_eq!(
+            expand_braces("echo {1..5..2}"),
+            "echo 1 3 5",
+            "ranges with a step expand"
+        );
+        assert_eq!(
+            expand_braces("echo {3..1}"),
+            "echo 3 2 1",
+            "descending ranges expand"
+        );
+        assert_eq!(
+            expand_braces("cp a{b,c}.txt d"),
+            "cp ab.txt ac.txt d",
+            "alternatives expand, and the untouched token stays put"
+        );
+        // A brace is only a brace when it is unquoted, as in bash.
+        assert_eq!(
+            expand_braces("echo '{a,b}'"),
+            "echo '{a,b}'",
+            "a quoted brace is literal"
+        );
+        assert_eq!(
+            expand_braces("echo {a,'b,c'}"),
+            "echo a b,c",
+            "a quoted comma does not separate alternatives"
+        );
+
+        // --- Quote removal in isolation. Not a word splitter: it splits
+        // nothing, which is exactly how the interior spacing survives.
+        assert_eq!(remove_quotes("'a   b'"), "a   b");
+        assert_eq!(
+            remove_quotes("a\"b c\"d"),
+            "ab cd",
+            "quotes may be mid-word"
+        );
+        assert_eq!(
+            remove_quotes("\"it's\""),
+            "it's",
+            "the other quote character is ordinary inside a quoted region"
+        );
+
+        // --- End to end. Each of these produced something else entirely.
+        assert_eq!(
+            capture_command("echo 'a   b'").as_slice(),
+            &b"a   b\n"[..],
+            "quoted interior whitespace reaches the command"
+        );
+        assert_eq!(
+            capture_command("echo 'a && b'").as_slice(),
+            &b"a && b\n"[..],
+            "`&&` inside quotes is text, not a chain operator"
+        );
+
+        // The sharpest one: a quoted `>` used to be honoured as a redirect,
+        // so this line silently created a file instead of printing.
+        let out = "/tmp/kshell_quote_selftest.out";
+        let _ = Vfs::remove(out);
+        assert_eq!(
+            capture_command("echo 'a > /tmp/kshell_quote_selftest.out'").as_slice(),
+            &b"a > /tmp/kshell_quote_selftest.out\n"[..],
+            "`>` inside quotes is text, not a redirect"
+        );
+        assert!(
+            Vfs::read_file(out).is_err(),
+            "...and no file may have been created by it"
+        );
+
+        // And the case that started this: a trap handler is a command line
+        // followed by another argument, so where the handler ends is precisely
+        // the fact quote removal destroys. `trap` is therefore on
+        // `command_parses_own_quotes` and receives the line as written.
+        assert!(command_parses_own_quotes("trap"));
+        assert!(!command_parses_own_quotes("echo"));
+        let _ = capture_command("trap 'grep zeta /tmp/nonexistent' ERR");
+        assert_eq!(
+            TRAP_HANDLERS.lock().get("ERR").map(String::as_str),
+            Some("grep zeta /tmp/nonexistent"),
+            "the whole quoted handler is the handler, signal excluded"
+        );
+        let _ = capture_command("trap - ERR");
+        assert!(
+            TRAP_HANDLERS.lock().get("ERR").is_none(),
+            "the self-test must not leave a trap armed behind it"
+        );
     }
 
     serial_println!("  kshell::self_test PASSED");

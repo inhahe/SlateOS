@@ -10594,6 +10594,44 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "answering the question is succeeding at it");
     }
 
+    serial_println!("  kshell::self_test 23: a braced error arm still owes a status");
+    // The residue of the status sweep: `Err` arms with a `{ ... }` body. No
+    // mechanical pass reached them -- the brace-less rewriters skip them by
+    // construction, and the fall-through rule only fires when the diagnostic
+    // ends its block -- so they had to be read one at a time.
+    //
+    // Reading them turned up two things worth pinning down here. First, most
+    // of those braces are not a body anybody wrote: they are `cargo fmt`
+    // wrapping one long line, and the arm beside them already sets a status.
+    // Second, the ones that *are* deliberate divide on whether the arm hands
+    // its outcome back: an arm ending in `false` or `None` lets the caller
+    // decide, but one ending in a bare `shell_println!(..)` evaluates to `()`
+    // and defers to nobody -- so it owes the status itself.
+    {
+        // Asked for something the shell cannot do. This is the sharpest form
+        // of the bug: `netspeed test` announces it is unimplemented and then
+        // reports success, so `netspeed test || fallback` never falls back.
+        let out = capture_command("netspeed test");
+        assert!(
+            out.starts_with(b"Speed testing is not yet implemented."),
+            "`netspeed test` says it cannot do it"
+        );
+        assert_eq!(last_exit(), 1, "a command that did nothing did not succeed");
+
+        // A failed resolution, and the same command succeeding, so the test
+        // pins the difference rather than just the failing side.
+        let out = capture_command("realpath /zzz_no_such_path");
+        assert!(
+            out.starts_with(b"realpath: '/zzz_no_such_path'"),
+            "the failure names the path"
+        );
+        assert_eq!(last_exit(), 1, "a path that does not resolve is an error");
+
+        let out = capture_command("realpath /tmp");
+        assert!(out.starts_with(b"/tmp"), "`realpath /tmp` resolved");
+        assert_eq!(last_exit(), 0, "and resolving it is a success");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -11428,6 +11466,7 @@ fn cmd_blkread(args: &str) {
             }
             Err(e) => {
                 shell_println!("Error reading sector {}: {:?}", sector, e);
+                set_exit(1);
             }
         }
     });
@@ -12121,6 +12160,7 @@ fn cmd_df(args: &str) {
             }
             Err(e) => {
                 shell_println!("df: {:?}", e);
+                set_exit(1);
             }
         }
     } else {
@@ -12155,6 +12195,7 @@ fn cmd_df(args: &str) {
             }
             Err(e) => {
                 shell_println!("df: {:?}", e);
+                set_exit(1);
             }
         }
     }
@@ -12319,6 +12360,7 @@ fn cmd_chmod(args: &str) {
         }
         Err(e) => {
             shell_println!("chmod: {:?}", e);
+            set_exit(1);
         }
     }
 }
@@ -12377,6 +12419,7 @@ fn cmd_chown(args: &str) {
         }
         Err(e) => {
             shell_println!("chown: {:?}", e);
+            set_exit(1);
         }
     }
 }
@@ -12727,6 +12770,7 @@ fn cmd_append(args: &str) {
         }
         Err(e) => {
             shell_println!("append: {}: {:?}", path.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -13643,6 +13687,7 @@ fn cmd_integrity(args: &str) {
                                 }
                                 Err(crate::error::KernelError::NotFound) => {
                                     shell_println!("{}: not in baseline", resolved.display());
+                                    set_exit(1);
                                 }
                                 Err(e) => {
                                     shell_println!("Error: {:?}", e);
@@ -17469,6 +17514,7 @@ fn cmd_encrypt(args: &str) {
                         },
                         Err(crate::error::KernelError::PermissionDenied) => {
                             shell_println!("Authentication failed — wrong key or file tampered.");
+                            set_exit(1);
                         }
                         Err(e) => {
                             shell_println!("Decryption failed: {:?}", e);
@@ -17507,6 +17553,7 @@ fn cmd_encrypt(args: &str) {
                         }
                         Err(crate::error::KernelError::PermissionDenied) => {
                             shell_println!("Authentication failed — wrong key or tampered.");
+                            set_exit(1);
                         }
                         Err(e) => {
                             shell_println!("Decryption failed: {:?}", e);
@@ -18795,6 +18842,7 @@ fn cmd_undelete(args: &str) {
                 Err(crate::error::KernelError::NotFound) => {
                     shell_println!("No recoverable data found for: {}", path);
                     shell_println!("Tip: use `undelete scan` to see what's available.");
+                    set_exit(1);
                 }
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
@@ -53743,6 +53791,7 @@ fn cmd_httpc(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("Request failed: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -53763,6 +53812,7 @@ fn cmd_httpc(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("Request failed: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -53798,6 +53848,7 @@ fn cmd_httpc(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("Request failed: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -55501,6 +55552,7 @@ fn cmd_pcap(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("Export failed: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -55644,6 +55696,7 @@ fn cmd_traceroute(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("traceroute failed: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -55767,6 +55820,7 @@ fn cmd_traceroute6(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("traceroute6 failed: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -79433,6 +79487,7 @@ fn cmd_netspeed(args: &str) {
                     shell_println!(
                         "Use `netspeed bandwidth` to view real per-interface byte counters."
                     );
+                    set_exit(1);
                 }
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
@@ -95032,6 +95087,7 @@ fn cmd_fallocate(args: &str) {
         }
         Err(e) => {
             shell_println!("fallocate: {}: {:?}", path.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -95165,6 +95221,7 @@ fn cmd_lsp(args: &str) {
             }
             Err(e) => {
                 shell_println!("lsp: error: {:?}", e);
+                set_exit(1);
                 break;
             }
         }
@@ -95368,6 +95425,7 @@ fn cmd_umount(args: &str) {
         }
         Err(e) => {
             shell_println!("umount: {}: {:?}", path.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -95389,6 +95447,7 @@ fn cmd_sync() {
         }
         Err(e) => {
             shell_println!("sync: {:?}", e);
+            set_exit(1);
         }
     }
 }
@@ -96163,6 +96222,7 @@ fn cmd_dhcp() {
         }
         Err(e) => {
             shell_println!("DHCP failed: {:?}", e);
+            set_exit(1);
         }
     }
 }
@@ -96281,6 +96341,7 @@ fn cmd_ping(args: &str) {
             }
             Err(e) => {
                 shell_println!("ping: send failed: {:?}", e);
+                set_exit(1);
             }
         }
 
@@ -96390,6 +96451,7 @@ fn cmd_ping6(args: &str) {
             }
             Err(e) => {
                 shell_println!("ping6: send failed: {:?}", e);
+                set_exit(1);
             }
         }
 
@@ -97730,6 +97792,7 @@ fn cmd_dns(args: &str) {
             }
             Err(e) => {
                 shell_println!("AAAA resolution failed: {:?}", e);
+                set_exit(1);
             }
         }
     } else {
@@ -97740,6 +97803,7 @@ fn cmd_dns(args: &str) {
             }
             Err(e) => {
                 shell_println!("DNS resolution failed: {:?}", e);
+                set_exit(1);
             }
         }
     }
@@ -98909,7 +98973,8 @@ fn container_exec_rootfs(rest: &[&str]) {
                         code
                     ),
                     Err(e) => {
-                        shell_println!("[run-in] wait failed for pid {}: {:?}", spawned.pid, e)
+                        shell_println!("[run-in] wait failed for pid {}: {:?}", spawned.pid, e);
+                        set_exit(1);
                     }
                 }
                 // Unregister the finished process from container bookkeeping
@@ -100056,6 +100121,7 @@ fn cmd_container(args: &str) {
                     }
                     Err(crate::error::KernelError::InvalidArgument) => {
                         shell_println!("Container {} has no overlay rootfs (nothing to diff)", id);
+                        set_exit(1);
                     }
                     Err(e) => {
                         shell_println!("Container {}: Error: {:?}", id, e);
@@ -100297,7 +100363,8 @@ fn cmd_container(args: &str) {
                                         dst
                                     ),
                                     Err(e) => {
-                                        shell_println!("Failed to write '{}': {:?}", dst, e)
+                                        shell_println!("Failed to write '{}': {:?}", dst, e);
+                                        set_exit(1);
                                     }
                                 },
                                 Err(e) => {
@@ -100334,7 +100401,8 @@ fn cmd_container(args: &str) {
                                         }
                                     }
                                     Err(e) => {
-                                        shell_println!("Failed to archive '{}': {:?}", src, e)
+                                        shell_println!("Failed to archive '{}': {:?}", src, e);
+                                        set_exit(1);
                                     }
                                 }
                             }
@@ -100353,7 +100421,8 @@ fn cmd_container(args: &str) {
                                     }
                                 },
                                 Err(e) => {
-                                    shell_println!("Failed to read '{}': {:?}", src, e)
+                                    shell_println!("Failed to read '{}': {:?}", src, e);
+                                    set_exit(1);
                                 }
                             },
                             Err(e) => {
@@ -100569,7 +100638,8 @@ fn cmd_container(args: &str) {
                             out_path
                         ),
                         Err(e) => {
-                            shell_println!("Failed to write '{}': {:?}", out_path, e)
+                            shell_println!("Failed to write '{}': {:?}", out_path, e);
+                            set_exit(1);
                         }
                     },
                     Err(e) => {
@@ -103317,17 +103387,20 @@ fn cmd_oci(args: &str) {
                                         out_path
                                     ),
                                     Err(e) => {
-                                        shell_println!("Failed to write '{}': {:?}", out_path, e)
+                                        shell_println!("Failed to write '{}': {:?}", out_path, e);
+                                        set_exit(1);
                                     }
                                 }
                             }
                             Err(e) => {
-                                shell_println!("Failed to pack image '{}': {:?}", src, e)
+                                shell_println!("Failed to pack image '{}': {:?}", src, e);
+                                set_exit(1);
                             }
                         }
                     }
                     Err(e) => {
-                        shell_println!("Not a valid OCI image at '{}': {:?}", pack_dir, e)
+                        shell_println!("Not a valid OCI image at '{}': {:?}", pack_dir, e);
+                        set_exit(1);
                     }
                 }
                 if temp {
@@ -106821,6 +106894,7 @@ fn cmd_readlink(args: &str) {
         }
         Err(e) => {
             shell_println!("readlink: '{}': {:?}", path, e);
+            set_exit(1);
         }
     }
 }
@@ -106874,6 +106948,7 @@ fn cmd_xattr(args: &str) {
             }
             Err(e) => {
                 shell_println!("xattr: list '{}': {:?}", file, e);
+                set_exit(1);
             }
         }
         return;
@@ -106909,6 +106984,7 @@ fn cmd_xattr(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("xattr: get '{}' from '{}': {:?}", key, file, e);
+                    set_exit(1);
                 }
             }
         }
@@ -106925,6 +107001,7 @@ fn cmd_xattr(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("xattr: set '{}' on '{}': {:?}", key, file, e);
+                    set_exit(1);
                 }
             }
         }
@@ -106940,6 +107017,7 @@ fn cmd_xattr(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("xattr: rm '{}' from '{}': {:?}", key, file, e);
+                    set_exit(1);
                 }
             }
         }
@@ -107330,6 +107408,7 @@ fn cmd_realpath(args: &str) {
         }
         Err(e) => {
             shell_println!("realpath: '{}': {:?}", path, e);
+            set_exit(1);
         }
     }
 }
@@ -113857,6 +113936,7 @@ fn cmd_tar(args: &str) {
             }
             Err(e) => {
                 shell_println!("tar: write '{}': {:?}", archive_path.display(), e);
+                set_exit(1);
             }
         }
     } else if extract || list {
@@ -114029,6 +114109,7 @@ fn cmd_tar(args: &str) {
                             Ok(()) | Err(crate::error::KernelError::AlreadyExists) => {}
                             Err(e) => {
                                 shell_println!("tar: mkdir '{}': {:?}", out_path.display(), e);
+                                set_exit(1);
                             }
                         }
                         if verbose {
@@ -114053,6 +114134,7 @@ fn cmd_tar(args: &str) {
                             Ok(()) => {}
                             Err(e) => {
                                 shell_println!("tar: write '{}': {:?}", out_path.display(), e);
+                                set_exit(1);
                             }
                         }
                         if verbose {
@@ -114395,6 +114477,7 @@ fn cmd_unzip(args: &str) {
                 Err(e) => {
                     shell_println!("  unzip: mkdir '{}': {:?}", out_path.display(), e);
                     errors = errors.saturating_add(1);
+                    set_exit(1);
                 }
             }
             shell_println!("  creating: {}", out_path.display());
@@ -114416,6 +114499,7 @@ fn cmd_unzip(args: &str) {
             Err(e) => {
                 shell_println!("  unzip: '{}': {:?}", entry.name.display(), e);
                 errors = errors.saturating_add(1);
+                set_exit(1);
                 continue;
             }
         };
@@ -114433,6 +114517,7 @@ fn cmd_unzip(args: &str) {
             Err(e) => {
                 shell_println!("  unzip: write '{}': {:?}", out_path.display(), e);
                 errors = errors.saturating_add(1);
+                set_exit(1);
             }
         }
     }
@@ -114673,6 +114758,7 @@ fn cmd_cpio_extract(args: &[&str]) {
                     Err(e) => {
                         shell_println!("cpio: symlink '{}': {:?}", dest.display(), e);
                         errors = errors.wrapping_add(1);
+                        set_exit(1);
                     }
                 }
             }
@@ -114695,6 +114781,7 @@ fn cmd_cpio_extract(args: &[&str]) {
                     Err(e) => {
                         shell_println!("cpio: write '{}': {:?}", dest.display(), e);
                         errors = errors.wrapping_add(1);
+                        set_exit(1);
                     }
                 }
             }
@@ -114744,6 +114831,7 @@ fn cmd_cpio_create(args: &[&str]) {
                         Ok(d) => d,
                         Err(e) => {
                             shell_println!("cpio: read '{}': {:?}", path.display(), e);
+                            set_exit(1);
                             continue;
                         }
                     }
@@ -114776,6 +114864,7 @@ fn cmd_cpio_create(args: &[&str]) {
             }
             Err(e) => {
                 shell_println!("cpio: '{}': {:?}", path.display(), e);
+                set_exit(1);
             }
         }
     }
@@ -114804,6 +114893,7 @@ fn cmd_cpio_create(args: &[&str]) {
         }
         Err(e) => {
             shell_println!("cpio: write '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -114981,6 +115071,7 @@ fn cmd_ar_extract(args: &[&str]) {
             Err(e) => {
                 shell_println!("ar: write '{}': {:?}", dest.display(), e);
                 errors = errors.wrapping_add(1);
+                set_exit(1);
             }
         }
     }
@@ -115025,6 +115116,7 @@ fn cmd_ar_create(args: &[&str]) {
             }
             Err(e) => {
                 shell_println!("ar: read '{}': {:?}", path.display(), e);
+                set_exit(1);
             }
         }
     }
@@ -115053,6 +115145,7 @@ fn cmd_ar_create(args: &[&str]) {
         }
         Err(e) => {
             shell_println!("ar: write '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -115454,6 +115547,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
             Err(e) => {
                 shell_println!("dpkg: write '{}': {:?}", dest.display(), e);
                 errors = errors.wrapping_add(1);
+                set_exit(1);
             }
         }
     }
@@ -115623,6 +115717,7 @@ fn cmd_un7z(args: &str) {
             Err(e) => {
                 shell_println!("un7z: write '{}': {:?}", dest.display(), e);
                 errors = errors.wrapping_add(1);
+                set_exit(1);
             }
         }
     }
@@ -115814,11 +115909,13 @@ fn cmd_unrar(args: &str) {
                 Err(e) => {
                     shell_println!("unrar: write '{}': {:?}", dest.display(), e);
                     errors = errors.wrapping_add(1);
+                    set_exit(1);
                 }
             },
             Err(e) => {
                 shell_println!("unrar: extract '{}': {:?}", entry.name.display(), e);
                 errors = errors.wrapping_add(1);
+                set_exit(1);
             }
         }
     }
@@ -116011,6 +116108,7 @@ fn cmd_zip(args: &str) {
             Err(e) => {
                 shell_println!("  zip: read '{}': {:?}", abs_path.display(), e);
                 errors = errors.saturating_add(1);
+                set_exit(1);
                 continue;
             }
         };
@@ -116081,6 +116179,7 @@ fn cmd_crc32(args: &str) {
             }
             Err(e) => {
                 shell_println!("crc32: '{}': {:?}", path.display(), e);
+                set_exit(1);
             }
         }
     }
@@ -116227,6 +116326,7 @@ fn cmd_base64(args: &str) {
             }
             Err(e) => {
                 shell_println!("base64: decode error: {}", e);
+                set_exit(1);
             }
         }
     } else {
@@ -116284,11 +116384,13 @@ fn cmd_wipe(args: &str) {
                     }
                     Err(e) => {
                         shell_println!("wipe: remove '{}': {:?}", path.display(), e);
+                        set_exit(1);
                     }
                 }
             }
             Err(e) => {
                 shell_println!("wipe: '{}': {:?}", path.display(), e);
+                set_exit(1);
             }
         }
     }
@@ -116333,6 +116435,7 @@ fn cmd_checksum(args: &str) {
                     }
                     Err(e) => {
                         shell_println!("checksum: sha256 '{}': {:?}", path.display(), e);
+                        set_exit(1);
                     }
                 },
                 _ => {
@@ -116346,6 +116449,7 @@ fn cmd_checksum(args: &str) {
             },
             Err(e) => {
                 shell_println!("checksum: '{}': {:?}", path.display(), e);
+                set_exit(1);
             }
         }
     }
@@ -116461,6 +116565,7 @@ fn cmd_gunzip(args: &str) {
             }
             Err(e) => {
                 shell_println!("gzip: write '{}': {:?}", out.display(), e);
+                set_exit(1);
             }
         }
         return;
@@ -116543,6 +116648,7 @@ fn cmd_gunzip(args: &str) {
         }
         Err(e) => {
             shell_println!("gunzip: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -116665,6 +116771,7 @@ fn cmd_bunzip2(args: &str) {
         }
         Err(e) => {
             shell_println!("bunzip2: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -116767,6 +116874,7 @@ fn cmd_bzip2(args: &str) {
         }
         Err(e) => {
             shell_println!("bzip2: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -116861,6 +116969,7 @@ fn cmd_xz(args: &str) {
         }
         Err(e) => {
             shell_println!("xz: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -116975,6 +117084,7 @@ fn cmd_unxz(args: &str) {
         }
         Err(e) => {
             shell_println!("unxz: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -117102,6 +117212,7 @@ fn cmd_unzstd(args: &str) {
         }
         Err(e) => {
             shell_println!("unzstd: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -117205,6 +117316,7 @@ fn cmd_zstd(args: &str) {
         }
         Err(e) => {
             shell_println!("zstd: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -117337,6 +117449,7 @@ fn cmd_unlz4(args: &str) {
         }
         Err(e) => {
             shell_println!("unlz4: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -117432,6 +117545,7 @@ fn cmd_lz4(args: &str) {
         }
         Err(e) => {
             shell_println!("lz4: write '{}': {:?}", out.display(), e);
+            set_exit(1);
         }
     }
 }
@@ -117527,6 +117641,7 @@ fn cmd_sed(args: &str) {
             Ok(d) => d,
             Err(e) => {
                 shell_println!("sed: '{}': {:?}", path.display(), e);
+                set_exit(1);
                 continue;
             }
         };
@@ -117585,6 +117700,7 @@ fn cmd_sed(args: &str) {
                 Ok(()) => {}
                 Err(e) => {
                     shell_println!("sed: write '{}': {:?}", path.display(), e);
+                    set_exit(1);
                 }
             }
         } else {
@@ -117889,6 +118005,7 @@ fn cmd_awk(args: &str) {
             Ok(d) => d,
             Err(e) => {
                 shell_println!("awk: '{}': {:?}", path.display(), e);
+                set_exit(1);
                 continue;
             }
         };

@@ -93,12 +93,53 @@ fn detect_personality(argv0: &str) -> Personality {
 // Libc FFI for identity syscalls
 // ============================================================================
 
+#[cfg(unix)]
 unsafe extern "C" {
     fn getuid() -> u32;
     fn geteuid() -> u32;
     fn getgid() -> u32;
     fn getegid() -> u32;
     fn getgroups(size: i32, list: *mut u32) -> i32;
+}
+
+// Fallback for non-POSIX hosts. This crate targets SlateOS and Linux, but the
+// whole workspace is type-checked and tested on the Windows host, where none of
+// these five symbols exist and the link fails outright. Declaring them
+// unconditionally cost `cargo test --workspace` — nobody can run it while a
+// crate refuses to link, and a gate nobody runs is a gate that has stopped
+// checking.
+//
+// # Why `u32::MAX` and not `0`
+//
+// `0` is root, and these values feed the `id`/`groups` personalities'
+// permission and membership decisions. A host build that quietly answered
+// "you are root" would let a test assert an outcome the real program would
+// never produce, which is worse than not building at all — the failure this
+// change is meant to remove would come back as a false pass instead of a link
+// error. `u32::MAX` is `(uid_t)-1`, which POSIX itself already reserves to
+// mean "no such user", so it matches nothing in `/etc/passwd` or `/etc/group`
+// and every lookup falls through to its not-found path.
+#[cfg(not(unix))]
+unsafe fn getuid() -> u32 {
+    u32::MAX
+}
+#[cfg(not(unix))]
+unsafe fn geteuid() -> u32 {
+    u32::MAX
+}
+#[cfg(not(unix))]
+unsafe fn getgid() -> u32 {
+    u32::MAX
+}
+#[cfg(not(unix))]
+unsafe fn getegid() -> u32 {
+    u32::MAX
+}
+/// Reports failure, which `get_supplementary_gids` already reads as "no
+/// supplementary groups" — see its `count <= 0` arm.
+#[cfg(not(unix))]
+unsafe fn getgroups(_size: i32, _list: *mut u32) -> i32 {
+    -1
 }
 
 // ============================================================================

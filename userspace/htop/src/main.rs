@@ -103,9 +103,29 @@ unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
 // POSIX FFI for setpriority (provided by the POSIX compatibility layer)
 // ============================================================================
 
+#[cfg(unix)]
 unsafe extern "C" {
     fn setpriority(which: i32, who: u32, prio: i32) -> i32;
     fn getpriority(which: i32, who: u32) -> i32;
+}
+
+// Fallback for non-POSIX hosts, in the same spirit as `syscall3` above: this
+// crate targets SlateOS and Linux, but the whole workspace is type-checked and
+// tested on the Windows host, where these two symbols do not exist and the link
+// fails. Declaring them unconditionally cost `cargo test --workspace` — nobody
+// can run it while a crate refuses to link, and a gate nobody runs is a gate
+// that has stopped checking.
+//
+// Both report failure rather than a plausible value. `renice` then says
+// "Failed to renice", which is the truth on a host that has no `setpriority`;
+// a stub returning 0 would have the host confirm a renice that did not happen.
+#[cfg(not(unix))]
+unsafe fn setpriority(_which: i32, _who: u32, _prio: i32) -> i32 {
+    -1
+}
+#[cfg(not(unix))]
+unsafe fn getpriority(_which: i32, _who: u32) -> i32 {
+    -1
 }
 
 // ============================================================================

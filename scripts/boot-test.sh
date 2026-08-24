@@ -2617,6 +2617,20 @@ check_selftest_skips() {
         return 0
     fi
 
+    # This gate decides what counts as "the suite" by a call-graph closure, and
+    # that closure fails silently in both directions: too wide and it grades the
+    # whole file, too narrow and it grades nothing.  Its fixture runs first so
+    # either collapse is reported as a gate fault rather than as a clean tree.
+    echo "=== Checking the self-test skip gate against its fixture ==="
+    if ! "$py" "$PROJECT_ROOT/scripts/check-selftest-skips.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The self-test skip gate no longer" >&2
+        echo "agrees with its own fixture, so its verdict on the tree means" >&2
+        echo "nothing -- a gate that grades the wrong set of functions reports" >&2
+        echo "zero findings just like a clean tree does." >&2
+        return 1
+    fi
+
     echo "=== Checking that self-test skips are looked up and reported ==="
     if "$py" "$PROJECT_ROOT/scripts/check-selftest-skips.py"; then
         return 0

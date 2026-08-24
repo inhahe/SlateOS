@@ -4815,6 +4815,19 @@ pub fn self_test() -> KernelResult<()> {
 
     let has_tmp = mounts.iter().any(|(p, _)| p.as_path() == Path::new("/tmp"));
 
+    // Twelve of the sections below are gated on `has_tmp`. The gate itself is
+    // honest — it is a mount-table fact, not a swallowed error — but without
+    // this record the last line would read `Self-test PASSED` after a run that
+    // skipped most of the suite, and a reader who scrolls to the bottom would
+    // have no way to tell that from a full one.
+    let mut skips = crate::fs::selftest::Skips::new();
+    if !has_tmp {
+        skips.record(
+            "symlink resolution, xattrs, ACLs, quotas, mount normalisation and 7 more",
+            "/tmp not mounted",
+        );
+    }
+
     // --- Basic path validation ---
     match Vfs::stat("relative/path") {
         Err(KernelError::InvalidArgument) => {
@@ -6047,7 +6060,8 @@ pub fn self_test() -> KernelResult<()> {
         acl_gate_self_test()?;
     }
 
-    serial_println!("[vfs] Self-test PASSED");
+    skips.report("[vfs]");
+    serial_println!("[vfs] Self-test PASSED{}", skips.suffix());
     Ok(())
 }
 

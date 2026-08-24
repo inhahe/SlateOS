@@ -653,17 +653,29 @@ pub fn self_test() -> KernelResult<()> {
         if parsed.len() != 1 || parsed[0].name.as_path() != Path::new("data.bin") {
             return Err(KernelError::CorruptedData);
         }
-        // Should have been deflated since the data is repetitive.
+        // 1 KiB of a 16-byte pattern repeated 64 times is not a borderline
+        // case: any DEFLATE implementation that emits more bytes than it was
+        // given here is broken, and `method` must be 8 because `store_only` is
+        // false and the compressor did shrink it.
+        //
+        // These two used to print a WARNING and continue, which meant a
+        // deflate that silently stopped compressing -- falling back to stored
+        // for every input -- still ended the suite with "Self-test passed."
+        // A check whose failure is a printed word is not a check.
         if parsed[0].compressed_size >= parsed[0].uncompressed_size {
-            serial_println!("[zip]   WARNING: deflate did not compress (skipping size check)");
+            serial_println!(
+                "[zip]   FAIL: deflate did not compress 1 KiB of a 16-byte pattern ({} -> {} bytes)",
+                parsed[0].uncompressed_size,
+                parsed[0].compressed_size
+            );
+            return Err(KernelError::CorruptedData);
         }
         if parsed[0].method != 8 {
-            // If compression didn't help, method might be 0.  Only fail
-            // if the data is clearly compressible but method is wrong.
             serial_println!(
-                "[zip]   method={} (expected 8 for repetitive data)",
+                "[zip]   FAIL: method={}, expected 8 (deflate) for data that did compress",
                 parsed[0].method
             );
+            return Err(KernelError::CorruptedData);
         }
         let data = extract_entry(&archive, &parsed[0])?;
         if data != text {

@@ -1529,3 +1529,75 @@ side of the question whichever way it goes.
 
 Background: `known-issues.md` →
 `TD-A-MOST-BOOT-SELF-TESTS-PANIC-THE-KERNEL-INSTEAD-OF-REPORTING`.
+
+---
+
+## kshell's `grep` defaults differ from POSIX: line numbers and case-insensitivity are always on
+
+**Lane A.** Raised 2026-08-24. Code: `kernel/src/kshell.rs`, `GrepFlags::new()`.
+
+**In short:** In the kernel shell, `grep alpha file` prints `1:alpha` — with the
+line number — and matches `ALPHA` too. Every other `grep` in the world prints
+just `alpha` and does not match `ALPHA` unless you ask, with `-n` and `-i`
+respectively. Ours turns both on and gives no way to turn them off. This is
+pleasant when you are typing at a prompt and wrong when a script is reading the
+output, and I do not think it is my call which of those two users wins.
+
+### What it is now
+
+```rust
+impl GrepFlags {
+    fn new() -> Self {
+        Self {
+            case_insensitive: true, // default: case-insensitive (like original)
+            show_line_numbers: true,
+            ...
+```
+
+The `-i` and `-n` flags exist but only *set* these to `true` — the value they
+already have — so there is no spelling of `grep` in this shell that turns either
+off. The comment "like original" suggests this was inherited from an earlier
+kshell rather than chosen.
+
+Why it surfaced now: the shell just gained working exit statuses and working
+`$(…)` capture through pipelines, so `grep` output is for the first time
+something programs consume rather than something a human reads. `$(grep p f)`
+returns `1:match`, and stripping that prefix requires knowing it is there.
+
+### Options
+
+**A — leave both on, add `+i`/`+n` (or `--no-line-number`) to turn them off.**
+*What changes:* nothing by default; `grep +n p f` becomes a way to get bare
+lines. Existing habits and any existing scripts keep working.
+
+**B — default both off, matching POSIX; `-i`/`-n` turn them on as everywhere else.**
+*What changes:* `grep alpha f` prints `alpha` instead of `1:alpha`, and stops
+matching `ALPHA`. Anything that currently relies on the prefix breaks, and
+interactive use loses the line numbers unless you type `-n`.
+
+**C — split the difference: line numbers off (they corrupt piped output),
+case-insensitivity left on (it only widens the match set).**
+*What changes:* `grep alpha f` prints `alpha`; `grep ALPHA f` still finds
+`alpha`. `-n` starts working as a real flag.
+
+**D — leave it exactly as is and document it.**
+*What changes:* nothing; scripts must strip the `N:` prefix themselves.
+
+### My recommendation
+
+**C**, weakly. The two defaults are not equally defensible: a line-number prefix
+changes the *bytes* of every line, so it breaks any consumer of the output,
+whereas case-insensitivity only changes *which* lines are selected — surprising,
+but it yields a superset, and a caller who cares can pick a case-specific
+pattern. If you would rather not have a shell that is subtly non-standard in two
+places, **B** is the honest answer and the breakage is small: this shell has few
+scripts, and all of them are ours.
+
+### If this is never answered
+
+Safe, and it does not get worse quickly — but it gets more expensive with
+every script written against the current output, since each becomes a place
+that has to be re-checked if the default changes. Nothing is blocked. The
+inconsistency that *was* dangerous — the piped half printing `1: alpha` while
+the file half printed `1:alpha` — is already fixed (`afe5b0ae2`); what remains
+here is only the choice of default.

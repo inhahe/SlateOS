@@ -51,81 +51,23 @@
 # discriminates: it should report every xfail as XPASS and nothing else.
 set -u
 
-export MSYS2_ARG_CONV_EXCL='*'
-
-# --- get ourselves into WSL --------------------------------------------------
-if ! command -v wslpath >/dev/null 2>&1; then
-  if ! command -v wsl >/dev/null 2>&1; then
-    echo "nice-diff: no WSL on this host; skipping (ours is a unix-only binary)"
-    exit 0
-  fi
-  here=$(cd "$(dirname "$0")" && pwd)
-  if command -v cygpath >/dev/null 2>&1; then here=$(cygpath -m "$here"); fi
-  inside=$(wsl wslpath -u "$here" 2>/dev/null) || {
-    echo "nice-diff: could not map $here into WSL; skipping"
-    exit 0
-  }
-  exec wsl -e env "OURS=${OURS:-}" "VERBOSE=${VERBOSE:-}" \
-    bash "$inside/nice-diff.sh"
-fi
-
-root=$(cd "$(dirname "$0")/.." && pwd) || exit 1
-
-# --- the reference -----------------------------------------------------------
-if ! command -v nice >/dev/null 2>&1; then
-  echo "nice-diff: no GNU nice inside WSL; skipping"
-  exit 0
-fi
-
-# --- the subject -------------------------------------------------------------
-OURS=${OURS:-}
-if [ -z "$OURS" ]; then
-  # shellcheck disable=SC1091
-  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "nice-diff: no cargo inside WSL; skipping"
-    echo "  install one with:  wsl -e sh -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal'"
-    exit 0
-  fi
-  target_dir=$HOME/.cache/slateos-diff-target
-  ( cd "$root" && cargo build -p coreutils --bin nice \
-      --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || exit 1
-  OURS=$target_dir/x86_64-unknown-linux-gnu/debug/nice
-fi
-if [ ! -x "$OURS" ]; then
-  echo "nice-diff: $OURS is not executable" >&2
-  exit 1
-fi
-case $OURS in
-  /*) ;;
-  *) OURS=$(cd "$(dirname "$OURS")" && pwd)/$(basename "$OURS") ;;
-esac
-
-# Diagnostics are referenced under a UTF-8 locale, as everywhere since §351:
-# getopt renders an unknown or ambiguous option with directional single quotes
-# under a UTF-8 locale and ASCII apostrophes under `C`, so the whole
-# option-error family would disagree for a reason unrelated to this program.
-export LC_ALL=C.UTF-8
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `nice` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+#
+# `$bindir/$side` is *prepended* to `PATH` below rather than replacing it,
+# because this harness runs real commands (`nice` itself, `sh`, `printf`)
+# through the program under test and they have to be findable. `argv[0]` is the
+# bare word `nice` on both sides either way, so the `nice: ` prefix matches; and
+# `nice nice` reaches the *same* side's binary, which is what makes the niceness
+# readback below a test of one implementation rather than a mixture.
+DIFF_PROG=nice
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-# --- one name for both sides -------------------------------------------------
-# Each binary is reached through a symlink called `nice`, in a directory
-# *prepended* to `PATH` — prepended rather than replacing it, because this
-# harness runs real commands (`nice` itself, `sh`, `printf`) through the program
-# under test and they have to be findable. `argv[0]` is the bare word `nice` on
-# both sides either way, so the `nice: ` prefix matches; and `nice nice`
-# reaches the *same* side's binary, which is what makes the niceness readback
-# below a test of one implementation rather than a mixture.
-gnu_real=$(command -v nice)
-bindir=$(mktemp -d)
-mkdir -p "$bindir/ours" "$bindir/gnu"
-ln -s "$OURS" "$bindir/ours/nice"
-ln -s "$gnu_real" "$bindir/gnu/nice"
-
-work=$(mktemp -d)
-cleanup() { rm -rf "$bindir" "$work"; }
-trap cleanup EXIT
+work=$DIFF_TMP/work
+mkdir -p "$work"
 
 case_no=0
 

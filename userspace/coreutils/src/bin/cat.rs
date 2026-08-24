@@ -83,6 +83,7 @@
 //! * **A file that cannot be opened does not stop the run.** The remaining
 //!   files are still copied; the exit status is 1 at the end.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::quotef_os;
@@ -138,6 +139,15 @@ enum Request {
 }
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
@@ -145,7 +155,7 @@ fn main() -> ExitCode {
         Err(e) => {
             // The referral is part of the message, and only the first line
             // carries the `cat: ` prefix — which is what GNU prints.
-            eprintln!("cat: {e}");
+            diag!("cat: {e}");
             return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
     };
@@ -162,7 +172,7 @@ fn main() -> ExitCode {
     // The position is observable: `cat missing f >&-` names the descriptor and
     // never mentions `missing`, because it never got as far as opening it.
     if let Err(e) = stdfd::probe(1) {
-        eprintln!("cat: standard output: {}", strerror(&e));
+        diag!("cat: standard output: {}", strerror(&e));
         return ExitCode::FAILURE;
     }
 
@@ -188,7 +198,7 @@ fn main() -> ExitCode {
                 // A file we cannot open is not a reason to abandon the ones we
                 // can: `cat a b > out` with `a` missing should still contain
                 // `b`. The status carries the failure instead.
-                eprintln!("cat: {}: {}", quotef_os(path), strerror(&e));
+                diag!("cat: {}: {}", quotef_os(path), strerror(&e));
                 failed = true;
                 continue;
             }
@@ -225,7 +235,7 @@ fn main() -> ExitCode {
         if let Err(e) = result {
             // A read failure is reported against the file it came from and the
             // run goes on.
-            eprintln!("cat: {}: {}", e.subject(path), strerror(&e.error));
+            diag!("cat: {}: {}", e.subject(path), strerror(&e.error));
             failed = true;
         }
     }

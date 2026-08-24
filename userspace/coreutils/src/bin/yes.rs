@@ -43,6 +43,7 @@
 //! The one visible difference from GNU: a shell reports 141 for a
 //! `SIGPIPE`-killed `yes` and 0 for ours. There is no signal to report.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::os_bytes;
@@ -89,12 +90,21 @@ enum Request {
 }
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         Ok(Request::Help) => say(help_text().as_bytes()),
         Ok(Request::Version) => say(b"yes (SlateOS coreutils) 0.1.0\n"),
-        Ok(Request::Run(operands)) => run(&fill(&record(&operands))),
+        Ok(Request::Run(operands)) => repeat(&fill(&record(&operands))),
         Err(e) => {
             YES.report(&e);
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
@@ -214,7 +224,7 @@ fn say(bytes: &[u8]) -> ExitCode {
 /// `io::stdout()` is what makes this loop *stop*: std reopens a closed
 /// descriptor on /dev/null and then reports `EBADF` as a completed write, so
 /// `yes >&-` through std has no failure to end on.
-fn run(buf: &[u8]) -> ExitCode {
+fn repeat(buf: &[u8]) -> ExitCode {
     loop {
         if let Err(e) = stdfd::write_all(1, buf) {
             // The normal ending: the reader went away. GNU is killed by
@@ -222,7 +232,7 @@ fn run(buf: &[u8]) -> ExitCode {
             if e.kind() == ErrorKind::BrokenPipe {
                 return ExitCode::SUCCESS;
             }
-            eprintln!("yes: standard output: {}", strerror(&e));
+            diag!("yes: standard output: {}", strerror(&e));
             return ExitCode::from(1);
         }
     }

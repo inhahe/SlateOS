@@ -2068,11 +2068,29 @@ fn erase_cell(fb: u64, pitch: u32, col: u32, row: u32, bg: u32) {
 /// Each byte is passed through [`putchar`].  Also mirrors the string
 /// to the serial port for debugging.
 pub fn write_str(s: &str) {
+    write_bytes(s.as_bytes());
+}
+
+/// Render raw bytes to the console, with no UTF-8 interpretation.
+///
+/// This is the primitive and [`write_str`] is the wrapper, not the other way
+/// round: the renderer was always byte-oriented — [`putchar`] takes a `u8` and
+/// this loop always fed it one byte at a time — so `write_str`'s `&str` was a
+/// restriction on *callers*, not a property the console needed. Paths admit
+/// every byte but `/` and NUL, so a caller printing a filename could not
+/// satisfy `&str` without either refusing the name or substituting U+FFFD;
+/// this lets it print what the filesystem actually holds.
+///
+/// Bytes that are not valid UTF-8 render as whatever glyph the font maps that
+/// byte to, which is the honest outcome: the console is a glyph grid, not a
+/// text decoder, and a byte with no glyph was never going to survive display
+/// intact by any route.
+pub fn write_bytes(bytes: &[u8]) {
     // Mirror to serial first so it appears even if the framebuffer is
     // not yet initialized.
-    crate::serial_print!("{}", s);
+    crate::serial::_print_bytes(bytes);
 
-    for byte in s.bytes() {
+    for &byte in bytes {
         putchar(byte);
     }
 }

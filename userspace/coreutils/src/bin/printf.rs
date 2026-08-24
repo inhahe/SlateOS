@@ -78,13 +78,18 @@
 //! compares stdout, stderr and the exit status separately.
 
 use coreutils::cfmt::{self, Value};
-use coreutils::errmsg::strerror;
+use coreutils::diag;
 use coreutils::extfloat::{self, ExtF80, Spec};
 use coreutils::getopt::{self, Program};
 use coreutils::quote::{self, os_bytes, quote, quotef};
+use coreutils::stdfd::{self, Stream};
 use std::env;
 use std::io::{self, Write};
 use std::process::ExitCode;
+
+// Before `main`, so that `stdfd::restore` still sees a caller's `printf >&-` as
+// the closed descriptor it is. See `coreutils::stdfd`.
+coreutils::guard_std_fds!();
 
 const PRINTF: Program = Program::new("printf", 1);
 
@@ -156,6 +161,16 @@ enum Stop {
 // ----------------------------------------------------------------------- main
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<Vec<u8>> = env::args_os()
         .skip(1)
         .map(|a| os_bytes(&a).into_owned())
@@ -166,18 +181,15 @@ fn main() -> ExitCode {
     // abbreviations — or accepted these anywhere — would eat formats.
     if let [only] = args.as_slice() {
         if only == b"--help" {
-            println!("{USAGE}");
-            return ExitCode::SUCCESS;
+            return say(format!("{USAGE}\n").as_bytes());
         }
         if only == b"--version" {
-            println!("printf (SlateOS coreutils)");
-            return ExitCode::SUCCESS;
+            return say(b"printf (SlateOS coreutils)\n");
         }
     }
 
-    let stdout = io::stdout();
     let mut printer = Printer {
-        out: io::BufWriter::new(stdout.lock()),
+        out: Stream::stdout(),
         status: 0,
         stream_failed: false,
         // The one thing `POSIXLY_CORRECT` changes here: it silences the
@@ -188,10 +200,25 @@ fn main() -> ExitCode {
 
     // Upstream flushes through `atexit (close_stdout)`, so output written
     // before a fatal diagnostic still reaches the stream — `printf 'a%z'`
-    // prints `a` and *then* complains. Flushing here, before reporting,
-    // reproduces that.
-    let flushed = printer.out.flush();
-    let status = printer.status;
+    // prints `a` and *then* complains. Draining here, before reporting,
+    // reproduces that; and, being the drain, it is also where a closed or
+    // unwritable standard output is finally discovered.
+    let Printer {
+        out,
+        status,
+        stream_failed,
+        ..
+    } = printer;
+    // `close_stdout` is not usable here: the verdict has to be in hand *before*
+    // the outcome is worded, because a write error outranks a `%z` diagnostic
+    // and a `\c` that asks to exit 0. The one thing folded in is the reader
+    // having gone away, which GNU answers by dying of `SIGPIPE` in silence —
+    // see `coreutils::stdfd::reader_gone` — so it counts as a flush that
+    // succeeded and leaves the run its earned status.
+    let flushed = match out.finish() {
+        Err(e) if stdfd::reader_gone(&e) => Ok(()),
+        verdict => verdict,
+    };
 
     // A field too wide to render is reported the way `close_stdout` reports
     // one: after everything else has been written, with no `strerror` clause
@@ -199,31 +226,41 @@ fn main() -> ExitCode {
     // including `\c`, which asks to exit 0. Upstream reaches the same place by
     // a different road: `exit (EXIT_SUCCESS)` still runs the `atexit` handler,
     // which finds the stream's error indicator set and `_exit`s with failure.
-    if printer.stream_failed {
-        if let Err(e) = flushed {
-            eprintln!("printf: write error: {}", strerror(&e));
-        } else {
-            eprintln!("printf: write error");
+    if stream_failed {
+        match flushed {
+            Err(e) => stdfd::write_error("printf", &e),
+            Ok(()) => diag!("printf: write error"),
         }
         return ExitCode::FAILURE;
     }
 
     match (outcome, flushed) {
         (Err(Stop::Write(e)), _) | (_, Err(e)) => {
-            eprintln!("printf: write error: {}", strerror(&e));
+            stdfd::write_error("printf", &e);
             ExitCode::FAILURE
         }
         (Ok(()), Ok(())) => ExitCode::from(u8::try_from(status).unwrap_or(1)),
         (Err(Stop::Cancel), Ok(())) => ExitCode::SUCCESS,
         (Err(Stop::Fatal(message)), Ok(())) => {
-            eprintln!("printf: {message}");
+            diag!("printf: {message}");
             ExitCode::FAILURE
         }
         (Err(Stop::Usage(e)), Ok(())) => {
-            eprintln!("printf: {}", e.message());
+            diag!("printf: {}", e.message());
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }
+}
+
+/// Say one thing and stop — `--help` and `--version`.
+///
+/// Both are ordinary writes to standard output, so both fail when there is no
+/// standard output to write to: measured, `printf --help >&-` is
+/// `printf: write error: Bad file descriptor` and exits 1.
+fn say(bytes: &[u8]) -> ExitCode {
+    let mut out = Stream::stdout();
+    let _ = out.write_all(bytes);
+    stdfd::close_stdout("printf", out, ExitCode::SUCCESS)
 }
 
 /// The program's state: where output goes, what it will exit with, and the one
@@ -296,7 +333,7 @@ impl<W: Write> Printer<W> {
     /// there is nowhere left to report them, and the exit status already says
     /// something went wrong.
     fn warn(&self, message: &str) {
-        eprintln!("printf: {message}");
+        diag!("printf: {message}");
     }
 
     // ------------------------------------------------------------- the format

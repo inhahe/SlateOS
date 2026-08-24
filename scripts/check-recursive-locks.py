@@ -60,16 +60,103 @@ CALL = re.compile(r"(?<![\w:.])([a-z_][a-z0-9_]*)\s*\(")
 DROP = re.compile(r"\bdrop\s*\(\s*([a-z_][a-z0-9_]*)\s*\)")
 
 
+def _raw_string_start(src: str, i: int) -> tuple[int, int] | None:
+    """If a raw string literal starts at `i`, return `(hash_count, quote_index)`.
+
+    Recognises `r"`, `r#"`, `r##"` and the byte forms `br"`, `br#"`. A raw
+    string has no escapes, so `r"C:\\"` ends at its own quote -- scanning it
+    with the ordinary `\\`-aware string rule would swallow the closing quote and
+    run on into the rest of the file.
+    """
+    n = len(src)
+    j = i
+    if src[j] == "b":
+        j += 1
+    if j >= n or src[j] != "r":
+        return None
+    j += 1
+    hashes = 0
+    while j < n and src[j] == "#":
+        hashes += 1
+        j += 1
+    return (hashes, j) if j < n and src[j] == '"' else None
+
+
+def _char_literal_end(src: str, i: int) -> int | None:
+    """If a char literal starts at the quote `i`, return the offset just past it.
+
+    Rust spends `'` on three different things: a literal (`'x'`), a lifetime
+    (`&'a T`) and a loop label (`'outer: loop`). Only the first has a closing
+    quote, so a scanner that assumes one desynchronises on every lifetime it
+    meets. They are told apart the way the grammar does it -- a literal is
+    `'\\<escape>'` or `'<single char>'`, and any other `'` opens nothing.
+
+    Returns `None` for a lifetime or label, whose quote must be stepped over
+    rather than treated as an opening delimiter.
+    """
+    n = len(src)
+    if i + 1 >= n:
+        return None
+    if src[i + 1] == "\\":
+        # Skip the backslash *and* the character it escapes, so that the
+        # closing quote of `'\''` is not mistaken for the escaped one.
+        j = i + 3
+        while j < n and src[j] not in ("'", "\n"):
+            j += 1
+        return j + 1 if j < n and src[j] == "'" else None
+    # `src` is a `str`, so a multi-byte character such as `'e'` is one element
+    # here and this stays a single-character test.
+    if i + 2 < n and src[i + 2] == "'":
+        return i + 3
+    return None
+
+
 def strip_noise(src: str) -> str:
     """Blank out comments and string/char literals, preserving byte offsets.
 
     Offsets must be preserved because every later step reports and slices by
     index; replacing rather than deleting keeps line numbers exact.
+
+    Char literals matter as much as strings here, and for a reason that is easy
+    to miss: a `'"'` in the source opens a string as far as a quote-only scanner
+    is concerned, and that phantom string then runs to the next `"` in the file,
+    blanking every brace in between. `find_bodies` loses its nesting and returns
+    a fraction of the file -- silently, because a gate that finds nothing looks
+    exactly like a gate that found nothing wrong. That is not hypothetical: it
+    hid a real lock-order inversion in `kshell.rs`, where this function saw 43
+    of the file's 984 function bodies.
     """
     out = list(src)
     i, n = 0, len(src)
     while i < n:
         c = src[i]
+        if c == "'":
+            end = _char_literal_end(src, i)
+            if end is None:
+                i += 1  # a lifetime or a loop label, not a literal
+                continue
+            while i < min(end, n):
+                if src[i] != "\n":
+                    out[i] = " "
+                i += 1
+            continue
+        if (
+            c in ("r", "b")
+            and (i == 0 or not (src[i - 1].isalnum() or src[i - 1] == "_"))
+            and (raw := _raw_string_start(src, i)) is not None
+        ):
+            hashes, quote = raw
+            for k in range(i, quote + 1):
+                out[k] = " "
+            i = quote + 1
+            close = '"' + "#" * hashes
+            end = src.find(close, i)
+            stop = n if end == -1 else min(end + len(close), n)
+            while i < stop:
+                if src[i] != "\n":
+                    out[i] = " "
+                i += 1
+            continue
         if c == "/" and i + 1 < n and src[i + 1] == "/":
             while i < n and src[i] != "\n":
                 out[i] = " "
@@ -241,7 +328,74 @@ def analyse(path: Path) -> list[str]:
     return findings
 
 
+# Each case is (name, source, expected function names). Every one of them is a
+# form that made the pre-2026-08-24 `strip_noise` return *nothing* for the whole
+# file, or would have. They are kept as a runnable test rather than a comment
+# because the failure they guard against is silent: a parser that loses its
+# nesting reports zero findings, which is indistinguishable from a clean tree.
+# `fn b` is the control in every case -- it is what a desynchronised scan drops.
+_PARSER_CASES: tuple[tuple[str, str, list[str]], ...] = (
+    # A quote *inside a char literal* opened a phantom string that ran to the
+    # next `"` in the file, blanking every brace in between. This is the one
+    # that hid a real lock-order inversion in kshell.rs.
+    ("quote char literal", """fn a() { if c == '"' { g(); } } fn b() { h(); }""", ["a", "b"]),
+    (
+        "byte quote literal",
+        """fn a() { match c { b'"' => g(), _ => (), } } fn b() { h(); }""",
+        ["a", "b"],
+    ),
+    ("escaped quote", r"""fn a() { p('\''); } fn b() { h(); }""", ["a", "b"]),
+    ("escaped backslash", r"""fn a() { p('\\'); } fn b() { h(); }""", ["a", "b"]),
+    ("unicode escape", r"""fn a() { p('\u{1F600}'); } fn b() { h(); }""", ["a", "b"]),
+    ("multi-byte char", """fn a() { p('\u00e9'); } fn b() { h(); }""", ["a", "b"]),
+    # Lifetimes and labels are `'` with no closing quote; treating them as
+    # literals desynchronises just as badly in the other direction.
+    ("lifetime", """fn a<'x>(v: &'x u8) { g(); } fn b() { h(); }""", ["a", "b"]),
+    ("loop label", """fn a() { 'outer: loop { break 'outer; } } fn b() { h(); }""", ["a", "b"]),
+    # A raw string has no escapes, so `r"C:\"` ends at its own quote.
+    ("raw string ending in backslash", r'''fn a() { p(r"C:\"); } fn b() { h(); }''', ["a", "b"]),
+    ("hashed raw string", '''fn a() { p(r#"a"b{"#); } fn b() { h(); }''', ["a", "b"]),
+    ("byte raw string", '''fn a() { p(br#"x"y"#); } fn b() { h(); }''', ["a", "b"]),
+    ("brace inside string", '''fn a() { p("}{"); } fn b() { h(); }''', ["a", "b"]),
+    ("brace inside char literal", """fn a() { p('}'); } fn b() { h(); }""", ["a", "b"]),
+    ("apostrophe in block comment", '''fn a() { /* don't */ g(); } fn b() { h(); }''', ["a", "b"]),
+    ("apostrophe in line comment", '''fn a() { // don't\n g(); } fn b() { h(); }''', ["a", "b"]),
+)
+
+
+def self_test() -> int:
+    """Check the source scanner against the literal forms that have broken it.
+
+    Run with `--self-test`; the boot test runs it before the gate itself, so a
+    parser regression is reported as a parser regression rather than as a
+    suspiciously clean tree.
+    """
+    failures = 0
+    for name, src, want in _PARSER_CASES:
+        stripped = strip_noise(src)
+        got = sorted(find_bodies(stripped))
+        if got != want:
+            failures += 1
+            print(f"FAIL {name}: expected {want}, got {got}")
+        # Every later step reports and slices by index, so blanking must never
+        # move a byte or a line.
+        if len(stripped) != len(src):
+            failures += 1
+            print(f"FAIL {name}: offsets not preserved ({len(stripped)} vs {len(src)})")
+        if stripped.count("\n") != src.count("\n"):
+            failures += 1
+            print(f"FAIL {name}: line count not preserved")
+    total = len(_PARSER_CASES)
+    if failures:
+        print(f"\n[parser self-test] {failures} failure(s) across {total} case(s)", file=sys.stderr)
+        return 1
+    print(f"[parser self-test] {total} case(s) OK", file=sys.stderr)
+    return 0
+
+
 def main() -> int:
+    if "--self-test" in sys.argv[1:]:
+        return self_test()
     root = Path(__file__).resolve().parent.parent / "kernel" / "src"
     if not root.is_dir():
         print(f"error: no such directory: {root}", file=sys.stderr)

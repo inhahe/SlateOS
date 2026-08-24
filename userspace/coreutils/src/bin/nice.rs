@@ -194,10 +194,11 @@ fn close_streams(out: Stream, err: Stream, status: u8) -> ExitCode {
         stdfd::write_error(NICE_NAME, &e);
         return ExitCode::from(NICE_FAILURE);
     }
-    if err.finish().is_err() {
-        return ExitCode::from(NICE_FAILURE);
-    }
-    ExitCode::from(status)
+    // `finish` on a stderr stream also sets the crate-wide lost-diagnostic
+    // flag, so the verdict is asked for in one place -- here -- whether the
+    // complaint went through this `Stream` or through `diag!`.
+    let _ = err.finish();
+    stdfd::close_stderr(ExitCode::from(status), NICE_FAILURE)
 }
 
 /// Everything between the two stream lifetimes: on success this does not
@@ -278,7 +279,7 @@ fn run(args: &[OsString], out: &mut Stream, err: &mut Stream) -> u8 {
 
 /// Print `nice: MESSAGE` and hand back the status to exit with.
 ///
-/// Through the caller's [`Stream`] rather than `eprintln!`, because whether the
+/// Through the caller's [`Stream`] rather than `diag!`, because whether the
 /// message arrived is part of this program's answer — see the module docs.
 fn report(err: &mut Stream, message: &str, status: u8) -> u8 {
     let _ = writeln!(err, "{NICE_NAME}: {message}");

@@ -203,6 +203,46 @@ pub unsafe fn init() {
 #[doc(hidden)]
 pub fn _print(args: core::fmt::Arguments<'_>) {
     use core::fmt::Write;
+
+    // If the write fails, silently drop the output rather than panicking
+    // inside a print path.
+    with_serial(|port| {
+        let _ = port.write_fmt(args);
+    });
+}
+
+/// Write raw bytes to the serial port, with no UTF-8 interpretation.
+///
+/// The byte-clean counterpart of [`_print`]. A filename may contain any byte
+/// but `/` and NUL, so the path that mirrors shell output to the serial log
+/// cannot require `&str` without either refusing such a name or rewriting it
+/// as U+FFFD — and a log that silently disagrees with the filesystem is worse
+/// than no log. Shares [`with_serial`]'s reentrancy protocol rather than
+/// reimplementing it; see that function for why that matters.
+///
+/// `\n` is expanded to `\r\n` to match [`SerialPort`]'s `fmt::Write`, so the
+/// two paths cannot produce differently-terminated lines in one log. That is
+/// the *only* transformation applied — every other byte goes out verbatim.
+pub fn _print_bytes(bytes: &[u8]) {
+    with_serial(|port| {
+        for &byte in bytes {
+            if byte == b'\n' {
+                port.write_byte(b'\r');
+            }
+            port.write_byte(byte);
+        }
+    });
+}
+
+/// Run `emit` against the serial port under the deadlock-escape protocol.
+///
+/// Extracted so that [`_print`] and [`_print_bytes`] share one copy of this
+/// logic. It is subtle enough that two copies would be a liability: the
+/// ordering of the flag store against the lock acquisition below is load-
+/// bearing, and a second copy that drifted from it would deadlock only under
+/// a nested exception — the case that is hardest to reproduce and most
+/// urgent to survive. `reentrancy_self_test` covers this path.
+fn with_serial(emit: impl FnOnce(&mut SerialPort)) {
     use core::sync::atomic::Ordering;
 
     OUTPUT_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -214,7 +254,7 @@ pub fn _print(args: core::fmt::Arguments<'_>) {
         let Some(busy) = IN_PRINT.get(cpu) else {
             // No slot for this CPU — take the always-safe route rather than
             // risking the lock.
-            let _ = SerialPort::emergency().write_fmt(args);
+            emit(&mut SerialPort::emergency());
             return;
         };
 
@@ -222,7 +262,7 @@ pub fn _print(args: core::fmt::Arguments<'_>) {
             // Re-entered from an exception that interrupted this CPU's own
             // print. The lock is held by a frame below us and will not be
             // released until we return, so taking it would wedge forever.
-            let _ = SerialPort::emergency().write_fmt(args);
+            emit(&mut SerialPort::emergency());
             return;
         }
 
@@ -236,10 +276,8 @@ pub fn _print(args: core::fmt::Arguments<'_>) {
         // flag is per-CPU, so another CPU's concurrent print is unaffected.
         busy.store(true, Ordering::Relaxed);
         {
-            // If the write fails, silently drop the output rather than
-            // panicking inside a print path.
             let mut guard = SERIAL.lock();
-            let _ = guard.write_fmt(args);
+            emit(&mut guard);
             // Clear before the guard drops, so the flag is never observably
             // stale while another CPU could already hold the lock.
             busy.store(false, Ordering::Relaxed);

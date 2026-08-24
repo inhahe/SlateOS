@@ -41,90 +41,26 @@
 # still discriminates: it should report every xfail as XPASS and nothing else.
 set -u
 
-export MSYS2_ARG_CONV_EXCL='*'
-
-# --- get ourselves into WSL --------------------------------------------------
-if ! command -v wslpath >/dev/null 2>&1; then
-  if ! command -v wsl >/dev/null 2>&1; then
-    echo "nohup-diff: no WSL on this host; skipping (ours is a unix-only binary)"
-    exit 0
-  fi
-  here=$(cd "$(dirname "$0")" && pwd)
-  if command -v cygpath >/dev/null 2>&1; then here=$(cygpath -m "$here"); fi
-  inside=$(wsl wslpath -u "$here" 2>/dev/null) || {
-    echo "nohup-diff: could not map $here into WSL; skipping"
-    exit 0
-  }
-  exec wsl -e env "OURS=${OURS:-}" "VERBOSE=${VERBOSE:-}" \
-    bash "$inside/nohup-diff.sh"
-fi
-
-root=$(cd "$(dirname "$0")/.." && pwd) || exit 1
-
-# --- the reference -----------------------------------------------------------
-if ! command -v nohup >/dev/null 2>&1; then
-  echo "nohup-diff: no GNU nohup inside WSL; skipping"
-  exit 0
-fi
-if ! command -v script >/dev/null 2>&1; then
-  echo "nohup-diff: no util-linux 'script' inside WSL; skipping"
-  echo "  every isatty-guarded branch needs it; a run without it would be"
-  echo "  green and meaningless."
-  exit 0
-fi
-
-# --- the subject -------------------------------------------------------------
-OURS=${OURS:-}
-if [ -z "$OURS" ]; then
-  # shellcheck disable=SC1091
-  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "nohup-diff: no cargo inside WSL; skipping"
-    echo "  install one with:  wsl -e sh -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal'"
-    exit 0
-  fi
-  target_dir=$HOME/.cache/slateos-diff-target
-  ( cd "$root" && cargo build -p coreutils --bin nohup \
-      --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || exit 1
-  OURS=$target_dir/x86_64-unknown-linux-gnu/debug/nohup
-fi
-if [ ! -x "$OURS" ]; then
-  echo "nohup-diff: $OURS is not executable" >&2
-  exit 1
-fi
-case $OURS in
-  /*) ;;
-  *) OURS=$(cd "$(dirname "$OURS")" && pwd)/$(basename "$OURS") ;;
-esac
-
-# Diagnostics are referenced under a UTF-8 locale, as everywhere since §351:
-# getopt renders an unknown or ambiguous option with directional single quotes
-# under a UTF-8 locale and ASCII apostrophes under `C`, so the whole
-# option-error family would disagree for a reason unrelated to this program.
-export LC_ALL=C.UTF-8
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `nohup` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+#
+# `$bindir/$side` is *prepended* to `PATH` below rather than replacing it,
+# because unlike most harnesses this one runs real commands (`true`, `sh`,
+# `cat`) through the program under test, and they have to be findable.
+# `argv[0]` is the bare word `nohup` on both sides either way, so the `nohup: `
+# prefix matches.
+#
+# util-linux's `script` is required rather than optional: every isatty-guarded
+# branch needs it, and a run without it would be green and meaningless.
+DIFF_PROG=nohup
+DIFF_NEED=script
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-# --- one name for both sides -------------------------------------------------
-# Each binary is reached through a symlink called `nohup`, in a directory
-# *prepended* to `PATH` — prepended rather than replacing it, because unlike
-# the other harnesses this one runs real commands (`true`, `sh`, `cat`) through
-# the program under test, and they have to be findable. `argv[0]` is the bare
-# word `nohup` on both sides either way, so the `nohup: ` prefix matches.
-gnu_real=$(command -v nohup)
-bindir=$(mktemp -d)
-mkdir -p "$bindir/ours" "$bindir/gnu"
-ln -s "$OURS" "$bindir/ours/nohup"
-ln -s "$gnu_real" "$bindir/gnu/nohup"
-
-work=$(mktemp -d)
-cleanup() {
-  # A case that made a directory unwritable on purpose has already restored it,
-  # but a case that died in the middle may not have.
-  chmod -R u+rwX "$work" 2>/dev/null
-  rm -rf "$bindir" "$work"
-}
-trap cleanup EXIT
+work=$DIFF_TMP/work
+mkdir -p "$work"
 
 case_no=0
 

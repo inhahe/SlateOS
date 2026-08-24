@@ -69,56 +69,31 @@ if [ -n "${OURS:-}" ] && [ -z "${PROG:-}" ]; then
   exit 2
 fi
 
-# --- get ourselves into WSL --------------------------------------------------
-if ! command -v wslpath >/dev/null 2>&1; then
-  if ! command -v wsl >/dev/null 2>&1; then
-    echo "digest-diff: no WSL on this host; skipping (ours is a unix-only binary)"
-    exit 0
-  fi
-  here=$(cd "$(dirname "$0")" && pwd)
-  if command -v cygpath >/dev/null 2>&1; then here=$(cygpath -m "$here"); fi
-  inside=$(wsl wslpath -u "$here" 2>/dev/null) || {
-    echo "digest-diff: could not map $here into WSL; skipping"
-    exit 0
-  }
-  exec wsl -e env "OURS=${OURS:-}" "VERBOSE=${VERBOSE:-}" "PROG=${PROG:-}" \
-    bash "$inside/digest-diff.sh"
-fi
+# Into WSL and build the family for Linux. See `scripts/diff-wsl.sh`.
+#
+# `DIFF_NO_REF` and `DIFF_NO_BINDIR`: this harness compares a *family*, so the
+# reference and the one-name-for-both-sides symlinks are per program and are
+# made inside the loop below rather than once up front. The one `cargo build`
+# covers every program in the run, rather than one per program: a second
+# invocation would be a no-op, but it would still print its own `Finished` line
+# and make the output read as though something were rebuilt between the two
+# halves of the run.
+#
+# The fixed UTF-8 locale is load-bearing: getopt renders an unknown or
+# ambiguous option with directional single quotes under a UTF-8 locale and
+# ASCII apostrophes under `C`, so the whole option-error family would disagree
+# for a reason that has nothing to do with this program.
+DIFF_PROG=digest
+DIFF_BINS=$PROGS
+DIFF_FORWARD=PROG
+DIFF_NO_REF=1
+DIFF_NO_BINDIR=1
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
-root=$(cd "$(dirname "$0")/.." && pwd) || exit 1
-
-# Diagnostics are referenced under a UTF-8 locale, as everywhere since §351.
-# It is load-bearing here: getopt renders an unknown or ambiguous option with
-# directional single quotes under a UTF-8 locale and ASCII apostrophes under
-# `C`, so the whole option-error family would disagree for a reason that has
-# nothing to do with this program.
-export LC_ALL=C.UTF-8
-
-# --- the subject -------------------------------------------------------------
-# One `cargo build` for every program in the run, rather than one per program:
-# the second invocation would be a no-op, but it would still print its own
-# `Finished` line and make the output read as though something were rebuilt
-# between the two halves of the run.
-OURS=${OURS:-}
-target_dir=$HOME/.cache/slateos-diff-target
-if [ -z "$OURS" ]; then
-  # shellcheck disable=SC1091
-  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "digest-diff: no cargo inside WSL; skipping"
-    echo "  install one with:  wsl -e sh -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal'"
-    exit 0
-  fi
-  bins=
-  for p in $PROGS; do bins="$bins --bin $p"; done
-  # shellcheck disable=SC2086
-  ( cd "$root" && cargo build -p coreutils $bins \
-      --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || exit 1
-fi
-
-scratch=$(mktemp -d)
-bindir=$(mktemp -d)
-trap 'chmod -R u+rwx "$scratch" 2>/dev/null; rm -rf "$scratch" "$bindir"' EXIT
+scratch=$DIFF_TMP/scratch
+bindir=$DIFF_TMP/bin
+mkdir -p "$scratch" "$bindir"
 
 total_pass=0; total_fail=0; total_xfail=0; total_xpass=0
 ran=
@@ -271,7 +246,7 @@ run_program() {
     return 0
   fi
 
-  ours=${OURS:-$target_dir/x86_64-unknown-linux-gnu/debug/$PROG}
+  ours=${OURS:-$(diff_ours "$PROG")}
   if [ ! -x "$ours" ]; then
     echo "digest-diff: $ours is not executable" >&2
     return 1

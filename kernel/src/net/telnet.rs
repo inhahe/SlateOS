@@ -560,9 +560,9 @@ fn process_sessions(state: &mut TelnetState) {
             // Convert LF to CR+LF for telnet.
             let telnet_output = lf_to_crlf(&output);
 
-            let mut n = send_bytes(tcp_handle, telnet_output.as_bytes());
+            let mut n = send_bytes(tcp_handle, &telnet_output);
             // Ensure output ends with newline.
-            if !telnet_output.ends_with("\r\n") && !telnet_output.is_empty() {
+            if !telnet_output.ends_with(CRLF) && !telnet_output.is_empty() {
                 n = n.saturating_add(send_bytes(tcp_handle, CRLF));
             }
             // Send prompt.
@@ -623,18 +623,24 @@ fn send_line(tcp_handle: usize, text: &str) -> usize {
 }
 
 /// Convert LF line endings to CR+LF for telnet protocol.
-fn lf_to_crlf(input: &str) -> String {
-    let mut out = String::with_capacity(input.len().saturating_add(input.len() / 10));
+///
+/// Operates on bytes rather than `char`s. That is behaviour-identical for
+/// valid UTF-8 — only `\n` and `\r` are special-cased, and both are ASCII, so
+/// neither can occur as a UTF-8 continuation byte — and it is the only form
+/// that can carry a filename the filesystem accepts but Unicode does not onto
+/// the wire, now that kshell's capture buffer is byte-clean.
+fn lf_to_crlf(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len().saturating_add(input.len() / 10));
     let mut prev_cr = false;
 
-    for ch in input.chars() {
-        if ch == '\n' && !prev_cr {
-            out.push('\r');
-            out.push('\n');
+    for &byte in input {
+        if byte == b'\n' && !prev_cr {
+            out.push(b'\r');
+            out.push(b'\n');
         } else {
-            out.push(ch);
+            out.push(byte);
         }
-        prev_cr = ch == '\r';
+        prev_cr = byte == b'\r';
     }
 
     out
@@ -846,14 +852,28 @@ fn self_test_inner() -> KernelResult<()> {
 
     // --- Test 1: LF to CRLF conversion ---
     {
-        let input = "hello\nworld\n";
+        let input = b"hello\nworld\n";
         let output = lf_to_crlf(input);
-        assert!(output == "hello\r\nworld\r\n", "LF→CRLF basic");
+        assert!(
+            output.as_slice() == &b"hello\r\nworld\r\n"[..],
+            "LF→CRLF basic"
+        );
 
         // Already-CRLF input should not be doubled.
-        let input2 = "hello\r\nworld\r\n";
+        let input2 = b"hello\r\nworld\r\n";
         let output2 = lf_to_crlf(input2);
-        assert!(output2 == "hello\r\nworld\r\n", "LF→CRLF no double");
+        assert!(
+            output2.as_slice() == &b"hello\r\nworld\r\n"[..],
+            "LF→CRLF no double"
+        );
+
+        // Byte-clean: a filename the filesystem accepts but Unicode does not
+        // passes through untouched rather than becoming U+FFFD.
+        let odd = lf_to_crlf(b"re\xffport\n");
+        assert!(
+            odd.as_slice() == &b"re\xffport\r\n"[..],
+            "LF→CRLF byte-clean"
+        );
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[telnet]   test 1 (LF→CRLF conversion) PASSED");
@@ -861,7 +881,7 @@ fn self_test_inner() -> KernelResult<()> {
 
     // --- Test 2: Empty input ---
     {
-        let output = lf_to_crlf("");
+        let output = lf_to_crlf(b"");
         assert!(output.is_empty(), "empty input");
 
         passed = passed.saturating_add(1);
@@ -870,8 +890,8 @@ fn self_test_inner() -> KernelResult<()> {
 
     // --- Test 3: No LF in input ---
     {
-        let output = lf_to_crlf("hello world");
-        assert!(output == "hello world", "no LF");
+        let output = lf_to_crlf(b"hello world");
+        assert!(output.as_slice() == &b"hello world"[..], "no LF");
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[telnet]   test 3 (no-LF passthrough) PASSED");
@@ -932,10 +952,10 @@ fn self_test_inner() -> KernelResult<()> {
 
     // --- Test 7: Mixed CRLF and LF ---
     {
-        let input = "line1\r\nline2\nline3\r\nline4\n";
+        let input = b"line1\r\nline2\nline3\r\nline4\n";
         let output = lf_to_crlf(input);
         assert!(
-            output == "line1\r\nline2\r\nline3\r\nline4\r\n",
+            output.as_slice() == &b"line1\r\nline2\r\nline3\r\nline4\r\n"[..],
             "mixed CRLF/LF normalization"
         );
 
@@ -945,9 +965,9 @@ fn self_test_inner() -> KernelResult<()> {
 
     // --- Test 8: Consecutive LFs ---
     {
-        let input = "\n\n\n";
+        let input = b"\n\n\n";
         let output = lf_to_crlf(input);
-        assert!(output == "\r\n\r\n\r\n", "consecutive LFs");
+        assert!(output.as_slice() == &b"\r\n\r\n\r\n"[..], "consecutive LFs");
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[telnet]   test 8 (consecutive LFs) PASSED");

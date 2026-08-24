@@ -60,78 +60,21 @@
 # discriminates: it should report every xfail as XPASS and nothing else.
 set -u
 
-export MSYS2_ARG_CONV_EXCL='*'
-
-# --- get ourselves into WSL --------------------------------------------------
-if ! command -v wslpath >/dev/null 2>&1; then
-  if ! command -v wsl >/dev/null 2>&1; then
-    echo "tee-diff: no WSL on this host; skipping (our tee is a unix-only binary)"
-    exit 0
-  fi
-  here=$(cd "$(dirname "$0")" && pwd)
-  if command -v cygpath >/dev/null 2>&1; then here=$(cygpath -m "$here"); fi
-  inside=$(wsl wslpath -u "$here" 2>/dev/null) || {
-    echo "tee-diff: could not map $here into WSL; skipping"
-    exit 0
-  }
-  exec wsl -e env "OURS=${OURS:-}" "VERBOSE=${VERBOSE:-}" \
-    bash "$inside/tee-diff.sh"
-fi
-
-root=$(cd "$(dirname "$0")/.." && pwd) || exit 1
-
-# --- the reference -----------------------------------------------------------
-if ! command -v tee >/dev/null 2>&1; then
-  echo "tee-diff: no GNU tee inside WSL; skipping"
-  exit 0
-fi
-
-# --- the subject -------------------------------------------------------------
-OURS=${OURS:-}
-if [ -z "$OURS" ]; then
-  # shellcheck disable=SC1091
-  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "tee-diff: no cargo inside WSL; skipping"
-    echo "  install one with:  wsl -e sh -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal'"
-    exit 0
-  fi
-  target_dir=$HOME/.cache/slateos-diff-target
-  ( cd "$root" && cargo build -p coreutils --bin tee \
-      --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || exit 1
-  OURS=$target_dir/x86_64-unknown-linux-gnu/debug/tee
-fi
-if [ ! -x "$OURS" ]; then
-  echo "tee-diff: $OURS is not executable" >&2
-  exit 1
-fi
-case $OURS in
-  /*) ;;
-  *) OURS=$(cd "$(dirname "$OURS")" && pwd)/$(basename "$OURS") ;;
-esac
-
-# Diagnostics are referenced under a UTF-8 locale, as everywhere since §351.
-# It is load-bearing for one family of cases here: `--output-error=bogus` is
-# rejected by gnulib's `argmatch`, which renders the offending word with
-# `quote()` — directional single quotes under a UTF-8 locale, ASCII apostrophes
-# under `C`. Getting the locale wrong would make every argmatch case disagree
-# for a reason that has nothing to do with tee.
-export LC_ALL=C.UTF-8
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `tee` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+#
+# The fixed UTF-8 locale it sets is load-bearing for one family of cases here:
+# `--output-error=bogus` is rejected by gnulib's `argmatch`, which renders the
+# offending word with `quote()` — directional single quotes under a UTF-8
+# locale, ASCII apostrophes under `C`.
+DIFF_PROG=tee
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-# --- one name for both sides -------------------------------------------------
-# Each binary is reached through a symlink called `tee`, in a directory that is
-# the whole of `PATH` for that one invocation, so `argv[0]` is the bare word
-# `tee` on both sides and the `tee: ` prefix on every diagnostic matches.
-gnu_real=$(command -v tee)
-bindir=$(mktemp -d)
-mkdir -p "$bindir/ours" "$bindir/gnu"
-ln -s "$OURS" "$bindir/ours/tee"
-ln -s "$gnu_real" "$bindir/gnu/tee"
-
-scratch=$(mktemp -d)
-trap 'chmod -R u+rwx "$scratch" 2>/dev/null; rm -rf "$scratch" "$bindir"' EXIT
+scratch=$DIFF_TMP/scratch
+mkdir -p "$scratch"
 
 # --- knobs, reset before every case ------------------------------------------
 # `SETUP` is shell run inside the case directory on each side before tee.

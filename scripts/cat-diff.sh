@@ -15,108 +15,35 @@
 #
 # ## Why both sides run inside WSL
 #
-# This harness used to build a *native Windows* binary and compare it against
-# MSYS2's coreutils, and that arrangement was wrong twice over.
+# `scripts/diff-wsl.sh` gives the general reasons. The particular one that
+# forced this harness across — it used to build a *native Windows* binary and
+# compare it against MSYS2's coreutils — is that `coreutils::stdfd`, the module
+# that makes `cat >&-` behave as GNU's does, is `#[cfg(target_os = "linux")]`.
+# A Windows build cannot exercise a line of it, so the closed-descriptor cases
+# at the foot of this file could not have been written at all, let alone caught
+# a regression.
 #
-# It was wrong about the reference. MSYS2 is a Cygwin derivative: it links
-# `msys-2.0.dll` rather than glibc, and its getopt is not glibc's. The two
-# disagree on every option diagnostic — `unknown option -- x` against
-# `invalid option -- 'x'` — so a harness pointed at it certifies wording that
-# no GNU/Linux system prints. The old script worked around that with a *second*
-# reference reached through WSL, used for one section only; now that both sides
-# run inside WSL the whole file compares against glibc and the workaround is
-# gone.
-#
-# It was also wrong about the subject, and that is what forced this migration.
-# `coreutils::stdfd` — the module that makes `cat >&-` behave as GNU's does —
-# is `#[cfg(target_os = "linux")]`, because the two lies it undoes (the Rust
-# runtime reopening a closed standard descriptor on /dev/null before `main`,
-# and its `Write` impls mapping `EBADF` to a completed write) are Unix
-# behaviours undone with `.init_array` and raw `write(2)`. A Windows build
-# cannot exercise any of it, so a Windows-hosted harness could not have caught
-# a regression in it.
-#
-# So: both sides run in WSL, ours built for `x86_64-unknown-linux-gnu` into
-# `$HOME/.cache/slateos-diff-target`, which is shared with the other harnesses
-# that made this move (`design-decisions.md` §374) and kept out of the
-# repository's `target/` so the Linux and Windows builds do not invalidate each
-# other.
-#
-# Each binary is reached through a symlink named `cat` in a directory that is
-# the whole of `PATH` for that one invocation, so `argv[0]` is the bare word
-# `cat` on both sides and the `cat: ` prefix on every diagnostic matches.
+# The move also removed a workaround. The option-diagnostics section used to
+# need a *second*, WSL-hosted reference of its own, because MSYS2's getopt is
+# not glibc's and disagrees with it on every sentence. Both sides are glibc
+# now, so those are ordinary cases — and stderr is compared as text throughout
+# rather than merely for presence, which is what caught the one real difference
+# this migration turned up.
 #
 # Run `OURS=/usr/bin/cat ./scripts/cat-diff.sh` to confirm the harness still
 # discriminates: it should report every xfail as XPASS and nothing else.
 set -u
 
-export MSYS2_ARG_CONV_EXCL='*'
-
-# --- get ourselves into WSL --------------------------------------------------
-if ! command -v wslpath >/dev/null 2>&1; then
-  if ! command -v wsl >/dev/null 2>&1; then
-    echo "cat-diff: no WSL on this host; skipping (ours is a unix-only binary)"
-    exit 0
-  fi
-  here=$(cd "$(dirname "$0")" && pwd)
-  if command -v cygpath >/dev/null 2>&1; then here=$(cygpath -m "$here"); fi
-  inside=$(wsl wslpath -u "$here" 2>/dev/null) || {
-    echo "cat-diff: could not map $here into WSL; skipping"
-    exit 0
-  }
-  exec wsl -e env "OURS=${OURS:-}" "VERBOSE=${VERBOSE:-}" \
-    bash "$inside/cat-diff.sh"
-fi
-
-root=$(cd "$(dirname "$0")/.." && pwd) || exit 1
-
-# --- the reference -----------------------------------------------------------
-if ! command -v cat >/dev/null 2>&1; then
-  echo "cat-diff: no GNU cat inside WSL; skipping"
-  exit 0
-fi
-gnu_real=$(command -v cat)
-
-# --- the subject -------------------------------------------------------------
-OURS=${OURS:-}
-if [ -z "$OURS" ]; then
-  # shellcheck disable=SC1091
-  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "cat-diff: no cargo inside WSL; skipping"
-    echo "  install one with:  wsl -e sh -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal'"
-    exit 0
-  fi
-  target_dir=$HOME/.cache/slateos-diff-target
-  ( cd "$root" && cargo build -p coreutils --bin cat \
-      --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || exit 1
-  OURS=$target_dir/x86_64-unknown-linux-gnu/debug/cat
-fi
-if [ ! -x "$OURS" ]; then
-  echo "cat-diff: $OURS is not executable" >&2
-  exit 1
-fi
-case $OURS in
-  /*) ;;
-  *) OURS=$(cd "$(dirname "$OURS")" && pwd)/$(basename "$OURS") ;;
-esac
-
-# Diagnostics are referenced under a UTF-8 locale, as everywhere since §351:
-# getopt renders an unknown or ambiguous option with directional single quotes
-# under a UTF-8 locale and ASCII apostrophes under `C`, so the whole
-# option-error family would disagree for a reason unrelated to this program.
-export LC_ALL=C.UTF-8
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `cat` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+DIFF_PROG=cat
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-# --- one name for both sides -------------------------------------------------
-bindir=$(mktemp -d)
-mkdir -p "$bindir/ours" "$bindir/gnu"
-ln -s "$OURS" "$bindir/ours/cat"
-ln -s "$gnu_real" "$bindir/gnu/cat"
-
-fixtures=$(mktemp -d)
-trap 'rm -rf "$bindir" "$fixtures"' EXIT
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
 cd "$fixtures" >/dev/null || exit 1
 
 printf 'alpha\tbeta\ngamma\n\n\n\ndelta\n'      > plain.txt

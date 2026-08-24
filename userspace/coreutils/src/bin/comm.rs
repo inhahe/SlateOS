@@ -130,15 +130,21 @@
 //! exit status. `scripts/comm-probe.py` is the ad-hoc measurement the rows
 //! quoted above came from.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::{quote, quotef_os};
+use coreutils::stdfd::{self, Stream};
 use std::cmp::Ordering;
 use std::env;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::ExitCode;
+
+// Before `main`, so that `stdfd::restore` still sees a caller's
+// `comm >&-` as the closed descriptor it is. See `coreutils::stdfd`.
+coreutils::guard_std_fds!();
 
 const COMM: Program = Program::new("comm", 1);
 
@@ -261,39 +267,45 @@ enum Trouble {
 impl Trouble {
     fn report(&self) -> ExitCode {
         match self {
-            Self::Input(name, e) => eprintln!("comm: {}: {}", quotef_os(name), strerror(e)),
-            Self::Write(e) => eprintln!("comm: write error: {}", strerror(e)),
-            Self::Unsorted(which) => eprintln!("comm: file {which} is not in sorted order"),
+            Self::Input(name, e) => diag!("comm: {}: {}", quotef_os(name), strerror(e)),
+            Self::Write(e) => stdfd::write_error("comm", e),
+            Self::Unsorted(which) => diag!("comm: file {which} is not in sorted order"),
         }
         ExitCode::FAILURE
     }
 }
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
         Ok(request) => request,
         Err(e) => {
-            eprintln!("comm: {}", e.message());
+            diag!("comm: {}", e.message());
             return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
     };
 
+    // `--help` and `--version` are writes like any other, so they fail like
+    // any other: measured, `comm --help >&-` is
+    // `comm: write error: Bad file descriptor` and exits 1.
+    let mut out = Stream::stdout();
     let (settings, first, second) = match request {
-        Request::Help => {
-            println!("{USAGE}");
-            return ExitCode::SUCCESS;
-        }
-        Request::Version => {
-            println!("comm (SlateOS coreutils)");
-            return ExitCode::SUCCESS;
-        }
+        Request::Help => return say(out, format!("{USAGE}\n").as_bytes()),
+        Request::Version => return say(out, b"comm (SlateOS coreutils)\n"),
         Request::Run(settings, first, second) => (settings, first, second),
     };
 
     let mut stdin = io::stdin().lock();
-    let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
 
     let outcome = compare_files(&first, &second, &mut stdin, &settings, &mut out);
 
@@ -301,20 +313,46 @@ fn main() -> ExitCode {
     // ones ending in a diagnostic: upstream gets that from
     // `atexit (close_stdout)`, and `--check-order`'s fatal exit is exactly the
     // case where the lines already written must not be lost.
-    let flushed = out.flush();
+    // The reader having gone away is the one write failure not reported: GNU
+    // dies of `SIGPIPE` there and says nothing, and this system has no signal
+    // to die of -- see `coreutils::stdfd::reader_gone`. It therefore counts as
+    // a flush that succeeded, and the run keeps the status it had earned.
+    let flushed = match out.finish() {
+        Err(e) if stdfd::reader_gone(&e) => Ok(()),
+        verdict => verdict,
+    };
 
     let disordered = match outcome {
         Ok(disordered) => disordered,
-        Err(trouble) => return trouble.report(),
+        // `close_stdout` runs *after* the diagnostic and overrides its status,
+        // so a run that failed for its own reason still reports a standard
+        // output that could not take what it had written.
+        Err(trouble) => {
+            let code = trouble.report();
+            return match flushed {
+                Ok(()) => code,
+                Err(e) => Trouble::Write(e).report(),
+            };
+        }
     };
     if let Err(e) = flushed {
         return Trouble::Write(e).report();
     }
     if disordered {
-        eprintln!("comm: input is not in sorted order");
+        diag!("comm: input is not in sorted order");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Say one thing and stop -- `--help` and `--version`.
+///
+/// The stream is closed here rather than at the end of `main`, because these
+/// two return without reaching it -- and closing it is what discovers that
+/// there was nowhere to say it.
+fn say(mut out: Stream, bytes: &[u8]) -> ExitCode {
+    let _ = out.write_all(bytes);
+    stdfd::close_stdout("comm", out, ExitCode::SUCCESS)
 }
 
 // ---------------------------------------------------------------------- input
@@ -469,7 +507,7 @@ impl Column {
         if settings.check == OrderCheck::Enabled {
             return Err(Trouble::Unsorted(which));
         }
-        eprintln!("comm: file {which} is not in sorted order");
+        diag!("comm: file {which} is not in sorted order");
         self.warned = true;
         Ok(())
     }

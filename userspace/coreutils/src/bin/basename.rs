@@ -47,12 +47,16 @@
 //!   `basename -s .h a.h b.h` is two names, not a name and an extra operand.
 //! - With `-a` and no `-s` there is no suffix at all, however many operands.
 
+use coreutils::diag;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::pathname::{base_name, is_relative};
 use coreutils::quote::{os_bytes, quote};
+use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::Write;
 use std::process::ExitCode;
+
+coreutils::guard_std_fds!();
 
 /// `basename`'s usage status is 1 — measured: `basename; echo $?` prints 1.
 const BASENAME: Program = Program::new("basename", 1);
@@ -92,33 +96,47 @@ enum Request {
 }
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match parse_args(&args) {
-        Ok(Request::Help) => {
-            print!("{}", help_text());
-            ExitCode::SUCCESS
-        }
-        Ok(Request::Version) => {
-            println!("basename (SlateOS coreutils) 0.1.0");
-            ExitCode::SUCCESS
-        }
-        Ok(Request::Run(flags, names)) => {
-            let mut out = io::stdout().lock();
-            run(&flags, &names, &mut out);
-            // A closed stdout must not be reported as success: `-z` output is
-            // usually piped into `xargs -0`, and a pipe that went away mid-list
-            // would otherwise look like a complete list.
-            if out.flush().is_ok() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            }
-        }
+
+    // The usage error is decided before the stream exists, because upstream's
+    // `usage (EXIT_FAILURE)` reaches `atexit (close_stdout)` with nothing
+    // buffered on stdout: measured, `basename >&-` prints only
+    // `basename: missing operand` and exits 1, with no write error after it.
+    let request = match parse_args(&args) {
+        Ok(request) => request,
         Err(e) => {
-            eprintln!("basename: {e}");
-            ExitCode::from(u8::try_from(e.status).unwrap_or(1))
+            diag!("basename: {e}");
+            return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
+    };
+
+    // `--help` and `--version` are writes like any other, so they fail like any
+    // other: `basename --help >&-` is `basename: write error: Bad file
+    // descriptor` and exits 1.
+    let mut out = Stream::stdout();
+    match request {
+        Request::Help => {
+            let _ = out.write_all(help_text().as_bytes());
+        }
+        Request::Version => {
+            let _ = out.write_all(b"basename (SlateOS coreutils) 0.1.0\n");
+        }
+        // A closed stdout must not be reported as success: `-z` output is
+        // usually piped into `xargs -0`, and a pipe that went away mid-list
+        // would otherwise look like a complete list.
+        Request::Run(flags, names) => run(&flags, &names, &mut out),
     }
+    stdfd::close_stdout("basename", out, ExitCode::SUCCESS)
 }
 
 fn help_text() -> String {

@@ -40786,6 +40786,193 @@ errno != EBADF))`, and that distinction is observable: measured,
 number was). A writer that flushed eagerly could not tell those apart, and one
 that treated any `EBADF` as failure would report the first as an error too.
 
+## §376 — The WSL differential harnesses share one sourced preamble, not a copy of it apiece
+
+**Date:** 2026-08-24
+**Decided by:** Claude (autonomous)
+
+**In short:** Each script under `scripts/` that compares one of our utilities
+against the real GNU one has to do the same half-dozen chores before it can
+compare anything: get itself inside WSL, find the repository, find the GNU
+binary, build ours for Linux, fix the locale, and arrange for both binaries to
+be reachable under one name. That was about fifty-five lines, written out
+nine times, and roughly twenty-nine more harnesses are due to be moved onto the
+same footing. The nine copies are now one file, `scripts/diff-wsl.sh`, which a
+harness sources on its first line after setting a few named knobs.
+
+### Why the chores exist at all
+
+Two of them are load-bearing rather than tidiness, and both were learned from a
+harness that was green while measuring the wrong thing.
+
+**The reference has to be glibc's.** MSYS2 is a Cygwin derivative and its
+`getopt` is not glibc's — `unknown option -- x` where glibc says
+`invalid option -- 'x'`. A harness that compares against whatever `getopt` MSYS2
+ships certifies wording that no GNU/Linux system prints. `sort-diff.sh` did
+exactly that for eight cases and passed the whole time
+(`known-issues.md` → TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE).
+
+**The subject has to be a Linux binary.** Some of what these utilities do
+exists only there. `coreutils::stdfd` — the module that makes `prog >&-`
+behave (§375) — is `#[cfg(target_os = "linux")]`, because the two runtime
+behaviours it undoes are undone with an `.init_array` constructor and raw
+`write(2)`. A Windows build cannot execute a line of it, so a Windows-hosted
+harness cannot catch a regression in it — which is the sweep currently in
+progress.
+
+So the chores are not incidental setup that a harness could reasonably skip or
+approximate; each one is the difference between a measurement and a
+green-looking non-measurement. That is the argument for having exactly one copy
+of them.
+
+### Options
+
+| | *What changes* |
+|---|---|
+| **A. Leave each harness with its own copy** | Nothing today; a correction to the setup has to be made — correctly — in thirty-eight files, and a harness written next month starts from whichever copy was pasted |
+| **B. A wrapper script that runs the harness as its child** | The setup runs once, but the harness is no longer a program you can run: it is a fragment invoked as `diff-wsl.sh cat-body.sh`, and everything the setup computed has to cross a process boundary as environment variables |
+| **C. (chosen) A sourced preamble with named knobs** | The harness is still `sh scripts/cat-diff.sh`; its first two lines say `DIFF_PROG=cat` and `. "$(dirname "$0")/diff-wsl.sh"`, and the variables it needs are simply in scope afterwards |
+| **D. Rewrite the family as one test binary** | The cases stop being shell and become Rust or Python — which loses the thing that makes them trustworthy |
+
+### Why C
+
+Against B: a harness needs *values* back from the setup — the repository root,
+the built binary's path, the scratch directory, a helper function that maps a
+binary name to its path. A child process can only return an exit status, so B
+would have to serialise all of that into the environment and the harness would
+have to trust it was set. Sourcing puts it in scope, which is what the harness
+actually wants, and leaves each harness runnable on its own — which matters
+because `all-diff.sh` runs them individually and because a failing one is
+debugged by running just it.
+
+Against D: these harnesses are trustworthy *because* they are shell. A case is
+written the way a user would type it, with the shell's own quoting,
+redirection and `$?` — including the cases whose entire subject is a
+redirection (`>&-`, `>/dev/full`). Re-expressing `cat missing f >&-` as a
+`Command` builder would be re-expressing the thing under test.
+
+Against A, beyond the arithmetic: the copies had already drifted. Some
+harnesses compared stderr as text and some only for presence; some built into
+the shared Linux target directory of §374 and some did not; one had grown a
+bespoke case runner for `getopt` diagnostics that skipped the stdout
+comparison every other case performed. Drift is what a copied preamble does,
+and none of those differences were decisions — they were the residue of which
+harness was written when.
+
+### The cost
+
+The preamble is sourced, so it can set traps, and it sets one: an `EXIT` trap
+that removes its scratch directory. A harness that sets its own `EXIT` trap
+*replaces* that one rather than adding to it, and leaks the directory on every
+run. There is no way to make shell warn about this, so the file's own
+documentation states it and offers the alternative (extend `diff_cleanup`),
+and every harness's fixtures were moved under the shared `$DIFF_TMP` so that
+none of them wants a second trap in the first place.
+
+---
+
+## §377 — A broken pipe stays quiet in `stdfd`, and `SIGPIPE` stays masked, because the target has no signal to restore
+
+**Date:** 2026-08-24
+**Decided by:** Claude (autonomous)
+
+**In short:** When you run `seq 1 100000 | head -1`, `head` stops reading after
+one line and the pipe it was reading from breaks. On Linux, GNU's `seq` is
+then killed outright by a signal called `SIGPIPE`, prints nothing, and the
+shell records exit status 141. SlateOS deliberately has no signals at all, so
+that death has no equivalent here — our `seq` instead gets an ordinary "broken
+pipe" error back from its write. The choice was whether to switch the signal
+back on for the Linux builds so we match GNU exactly, or to keep answering the
+error quietly. We kept it quiet, and moved the rule into one shared place
+(`coreutils::stdfd::reader_gone`) so that the ~80 utilities being converted
+right now all inherit it instead of each re-deriving it.
+
+### What forced the question now
+
+`coreutils::stdfd::write_error` prints gnulib's line verbatim:
+
+```text
+seq: write error: Bad file descriptor
+```
+
+That is right for a closed descriptor and right for a full disk. It is *wrong*
+for a broken pipe, where GNU prints nothing at all. Measured against the real
+binaries inside WSL:
+
+```text
+seq | head (stderr)                []
+cat->fifo-closed status = 141
+status=141 stderr=[]
+```
+
+Every binary converted in the `stdfd` sweep routes its final flush through
+`write_error`, so without a carve-out the sweep would install
+`prog: write error: Broken pipe` on ~80 utilities that are silent today.
+
+### Options
+
+| | approach | *What changes* |
+|---|---|---|
+| **A** | Restore `SIGPIPE` to `SIG_DFL` in `stdfd::restore()` | `seq \| head -1` exits 141 and prints nothing, exactly as GNU does |
+| **B** *(chosen)* | Recognise `EPIPE` and stay quiet, keeping the run's earned status | `seq \| head -1` exits 0 and prints nothing |
+| **C** | Print the diagnostic and let it differ | `seq \| head -1` prints `seq: write error: Broken pipe` |
+
+### Why B
+
+C is not a real option; it is the bug this entry exists to prevent.
+
+A is tempting because it is *upstream's own arrangement* and it deletes code:
+Rust masks `SIGPIPE` before `main`, unmasking it is three lines, and the
+fourteen files that currently hand-roll an `ErrorKind::BrokenPipe` branch
+(`cmp.rs`, `cut.rs`, `env.rs`, `head.rs`, `hostname.rs`, `kill.rs`, `sed.rs`,
+`sort/main.rs`, `stat.rs`, `tail.rs`, `tar.rs`, `tee.rs`, `uname.rs`,
+`uniq.rs`) would all lose that branch and get status 141 for free.
+
+It was rejected because it is **correct only on the host we test on**.
+`design.txt` says plainly that SlateOS does not use Unix signals for process
+control; there is no `SIGPIPE` on the target to restore. A restored signal
+would make the Linux differential harnesses greener while making the *shipped*
+binaries — the ones that run on SlateOS, where the write simply returns
+`EPIPE` — behave in a way no test exercises. That is the exact failure mode
+§374 was written to avoid, pointed the other way: a harness measuring a
+configuration the product is never in.
+
+Note also that A only *looks* like it deletes the fourteen branches. `tee`'s
+`--output-error` modes and `cmp`, `sed` and `tar` all need the `EPIPE` value
+in hand to decide what to do next; under A each would have to re-mask the
+signal around its own writes, which is more machinery than the branch it
+replaced, not less.
+
+So the divergence is accepted and named. `stdfd::reader_gone` is the predicate,
+and its doc comment carries the reasoning so the next converter does not have
+to find this entry.
+
+### The shape of the shared tail
+
+Alongside it, `stdfd::close_stdout(program, out, earned)` is gnulib's
+`atexit (close_stdout)` written as a return value: flush, return `earned` if
+the flush arrived *or* if nobody was left to read it, otherwise print
+`prog: write error: …` and return 1. `earned` is discarded on a real failure
+because upstream's handler genuinely does override whatever status the run had
+reached.
+
+An earlier pass through this sweep rejected such a helper on the grounds that
+it would hide the per-program failure status. That objection is answered by
+carving the exceptions out explicitly rather than by refusing the helper:
+`env` exits 125 on a write failure, `ls` and `sort` exit 2, `tty` exits 3, and
+those four spell their tails out with `reader_gone` and `write_error`
+directly. So do the utilities that must know the flush's verdict *before* they
+finish deciding what to print — `printf`, whose write error outranks both a
+`%z` diagnostic and a `\c` that asks for status 0, and `comm`/`join`/`tsort`,
+which report a disordered input only if the output survived.
+
+### The cost
+
+Two ways to spell one thing, which is the usual price of a helper with
+exceptions. It is bounded by the doc comment on `close_stdout` naming exactly
+which utilities may not use it, and by the fact that the exceptions are
+seven known binaries out of roughly eighty rather than an open-ended judgement
+call at each site.
 
 ---
 

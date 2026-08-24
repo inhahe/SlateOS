@@ -406,7 +406,7 @@ pub fn select_invert(set_id: u64, listing: &[&Path]) -> KernelResult<()> {
 
     // Add items that were NOT selected before.
     for item in items {
-        if !was_selected.iter().any(|s| *s == item.path) {
+        if !was_selected.contains(&item.path) {
             set.add(item);
         }
     }

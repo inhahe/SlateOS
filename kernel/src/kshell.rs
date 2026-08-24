@@ -21277,7 +21277,7 @@ fn cmd_fcomment(args: &str) {
                 shell_println!("Usage: fcomment search <text> [root]");
                 return;
             }
-            let results = fcomment::search(needle, root.as_ref().map(|r| Path::new(r)));
+            let results = fcomment::search(needle, root.as_deref().map(Path::new));
             if results.is_empty() {
                 shell_println!("No matches");
             } else {
@@ -21291,7 +21291,7 @@ fn cmd_fcomment(args: &str) {
         }
         "list" | "" => {
             let root = parts.get(1).map(|p| resolve_path(p));
-            let all = fcomment::list(root.as_ref().map(|r| Path::new(r)));
+            let all = fcomment::list(root.as_deref().map(Path::new));
             if all.is_empty() {
                 shell_println!("No commented files");
             } else {
@@ -60710,7 +60710,7 @@ fn cmd_pinnedapps(args: &str) {
                 return;
             }
             let dname = if display.is_empty() { app } else { &display };
-            match pinnedapps::pin(loc, app, dname, &format!("/usr/bin/{}", app)) {
+            match pinnedapps::pin(loc, app, dname, format!("/usr/bin/{app}")) {
                 Ok(()) => shell_println!("'{}' pinned to {}.", app, loc.label()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }

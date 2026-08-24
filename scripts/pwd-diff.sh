@@ -52,8 +52,9 @@
 #
 # ## Cases that differ on purpose
 #
-# Two, both recorded as `xfail`: `--help` omits the GNU project's ancillary
-# block, as every converted utility here does, and `--version` names SlateOS.
+# Two kinds, every one recorded as `xfail`: `--help` omits the GNU project's
+# ancillary block, as every converted utility here does, and `--version` names
+# SlateOS.
 #
 # Run `OURS=/usr/bin/pwd ./scripts/pwd-diff.sh` to confirm the harness still
 # discriminates: it should report every xfail as XPASS and nothing else.
@@ -282,7 +283,6 @@ SETUP="cd \"$DIFF_TMP/link\""; run_case -L foo
 # No leading `+` in upstream's getopt string, so an option after an operand is
 # still an option.
 SETUP="cd \"$DIFF_TMP/link\""; run_case foo -L
-run_case foo --help
 
 # --- the option errors -------------------------------------------------------
 run_case -x
@@ -300,6 +300,9 @@ xfail_case 'our --version names SlateOS' --version
 # They win over an operand rather than being one, and over each other by order.
 xfail_case 'our --help omits the GNU project ancillary block' -L --help
 xfail_case 'our --version names SlateOS' --version --help
+# And over an operand that precedes them, so this is a help case and not an
+# operand case however it reads.
+xfail_case 'our --help omits the GNU project ancillary block' foo --help
 
 # --- getcwd failing ----------------------------------------------------------
 # The only route into `robust_getcwd`. A working directory that has been
@@ -316,12 +319,24 @@ run_case -L
 # One level deeper, so the walk has a component to prepend before it fails.
 SETUP="mkdir -p \"$DIFF_TMP/g2/inner\" && cd \"$DIFF_TMP/g2/inner\" && rmdir \"$DIFF_TMP/g2/inner\""
 run_case
-# An unsearchable parent, which is the walk's `cannot open directory '..'`
-# branch. (As root there is no such thing, and then both sides simply succeed —
-# the comparison still holds, it just stops testing this branch.)
-SETUP="mkdir -p \"$DIFF_TMP/np/in\" && cd \"$DIFF_TMP/np/in\" && chmod 000 \"$DIFF_TMP/np\""
+# An unsearchable parent on its own does *not* reach the walk: `getcwd(2)` is
+# answered by the kernel from the dentry rather than by reading directories, so
+# it still succeeds and the answer is the ordinary one. Kept because it is the
+# obvious guess about what breaks, and a case that documents a non-break is
+# worth as much as one that documents a break.
+#
+# Each of these restores the mode first: the two sides run the same setup in
+# turn, and the `ours` side leaves the directory unusable for the `gnu` one.
+SETUP="chmod 700 \"$DIFF_TMP/np\"; mkdir -p \"$DIFF_TMP/np/in\" && cd \"$DIFF_TMP/np/in\" && chmod 000 \"$DIFF_TMP/np\""
 run_case
 chmod -R u+rwx "$DIFF_TMP/np" 2>/dev/null
+# Removed *and* unsearchable is the walk's `cannot open directory '..'` branch:
+# `getcwd` fails with ENOENT, the walk starts, and its `opendir("..")` is
+# refused. (As root there is no such thing, and then both sides simply agree on
+# some other outcome — the comparison still holds, it just stops testing this.)
+SETUP="chmod 700 \"$DIFF_TMP/nq\"; mkdir -p \"$DIFF_TMP/nq/in\" && cd \"$DIFF_TMP/nq/in\" && rmdir \"$DIFF_TMP/nq/in\" && chmod 000 \"$DIFF_TMP/nq\""
+run_case
+chmod -R u+rwx "$DIFF_TMP/nq" 2>/dev/null
 
 # --- standard output closed, and full ----------------------------------------
 # Both were a silent exit 0 before `coreutils::stdfd`.

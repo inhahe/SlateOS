@@ -54866,3 +54866,38 @@ TRIGGER
   Implementing block-device discard behind `fstrim::issue_trim`.  Do the
   `FileSystem::extents` work first; do not wire discard to the existing
   callers on the assumption they pass device offsets.
+
+## A process started with a closed standard descriptor has no protection (lane B, 2026-08-24)
+
+Found while explaining why `tee out <&-` differs from GNU: it differs because
+Rust's std reopens any closed standard descriptor onto /dev/null before main is
+entered, so on Linux our tee never sees the closed fd at all.  SlateOS has no
+equivalent -- a grep of posix/ and the userspace runtime finds no
+`sanitize_standard_fds`, no POLLNVAL sweep of fds 0/1/2, and no /dev/null
+fallback in the spawn path.
+
+Why it matters, and it is not about tee: if descriptor 1 is closed at exec, the
+first file the program opens gets descriptor 1 and *becomes* its standard
+output.  Everything the program prints -- diagnostics, prompts, secrets it
+happens to echo -- is then written into that file, silently, and whatever the
+file was for is corrupted.  The same trick on descriptor 0 makes an output file
+double as the program's input.  This is a well-known privilege-escalation
+shape against setuid binaries, and the reason both glibc (for setuid programs)
+and Rust's std (for every program) close it off.
+
+The correct fix belongs in the process-spawn path, not in any individual
+utility: after the new address space is built and before control reaches the
+entry point, check descriptors 0, 1 and 2 and open /dev/null (read-only for 0,
+write-only for 1 and 2) for any that is absent.  Doing it in the child rather
+than in the parent's spawn arguments is what makes it unconditional -- a parent
+that deliberately closes a descriptor should not be able to opt the child out
+of it.  See known-issues.md -> "`tee` was five options short ..." for the
+measurement that turned this up (`tee /proc/self/fd/0 <&-` reads the
+descriptor table from inside the process and is the direct test).
+
+TRIGGER
+  Any setuid-equivalent or privilege-crossing exec (the current spawn path has
+  no privilege transition, which is why this is a latent hole rather than a
+  live one), or the first SlateOS-native run of a utility under a shell that
+  can write `<&-`.  Do it before either; it is a dozen lines and cannot break
+  a caller that was already passing three open descriptors.

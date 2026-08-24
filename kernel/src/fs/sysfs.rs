@@ -1181,6 +1181,7 @@ pub fn self_test() -> KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[sysfs] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
 
     let mut fs = SysFs::new();
 
@@ -1681,7 +1682,15 @@ pub fn self_test() -> KernelResult<()> {
     // including this one, already locked by the VFS on our behalf. It is safe
     // only because the mount table now caches `fs_type` and locks nothing to
     // read it. This block is what notices if that regresses.
-    if crate::fs::Vfs::stat("/sys").is_ok() {
+    //
+    // The precondition comes from the mount table rather than
+    // `stat("/sys").is_ok()`, which reads as "is /sys mounted" but means "did
+    // stat fail for any reason at all" -- a form that would have disabled this
+    // very deadlock check on the day the deadlock came back.
+    let sys_mounted = crate::fs::Vfs::mounts()
+        .iter()
+        .any(|(p, _)| p.as_path() == crate::fs::path::Path::new("/sys"));
+    if sys_mounted {
         let entries = crate::fs::Vfs::readdir("/sys/fs")?;
         let mount_count = crate::fs::Vfs::read_file("/sys/fs/mount_count")?;
         let osrelease = crate::fs::Vfs::read_file("/sys/kernel/osrelease")?;
@@ -1701,9 +1710,11 @@ pub fn self_test() -> KernelResult<()> {
             osrelease.len()
         );
     } else {
+        skips.record("through-the-mount readdir", "/sys is not mounted");
         serial_println!("[sysfs]   through-the-mount: /sys not mounted, skipped");
     }
 
-    serial_println!("[sysfs] Self-test passed.");
+    skips.report("[sysfs]");
+    serial_println!("[sysfs] Self-test passed{}.", skips.suffix());
     Ok(())
 }

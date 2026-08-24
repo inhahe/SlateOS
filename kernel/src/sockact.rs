@@ -2,8 +2,12 @@
 //!
 //! When a client connects to a socket whose service is not running, the kernel
 //! holds the connection and starts the corresponding service.  Once the service
-//! signals ready (via [`crate::svcstart::signal_ready`]), the held connections
-//! are passed to the service through its file descriptor table.
+//! claims its sockets (via [`claim`]), the held connections are passed to it
+//! through its file descriptor table.
+//!
+//! The handoff is driven by the service calling `claim`, *not* by
+//! [`crate::svcstart::signal_ready`] — this text used to name the latter, which
+//! neither this module nor `svcstart` wires to the queued connections.
 //!
 //! ## Architecture
 //!

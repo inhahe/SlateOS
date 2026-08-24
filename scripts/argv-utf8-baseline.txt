@@ -18,7 +18,6 @@ userspace/coreutils/src/bin/cal.rs:argv-as-string
 userspace/coreutils/src/bin/dd.rs:argv-as-string
 userspace/coreutils/src/bin/df.rs:argv-as-string
 userspace/coreutils/src/bin/diff.rs:argv-as-string
-userspace/coreutils/src/bin/echo.rs:argv-as-string
 userspace/coreutils/src/bin/ed.rs:argv-as-string
 userspace/coreutils/src/bin/fetch.rs:argv-as-string
 userspace/coreutils/src/bin/free.rs:argv-as-string
@@ -38,7 +37,6 @@ userspace/coreutils/src/bin/sha256sum.rs:argv-as-string
 userspace/coreutils/src/bin/sleep.rs:argv-as-string
 userspace/coreutils/src/bin/strings.rs:argv-as-string
 userspace/coreutils/src/bin/tar.rs:argv-as-string
-userspace/coreutils/src/bin/tee.rs:argv-as-string
 userspace/coreutils/src/bin/time_cmd.rs:argv-as-string
 userspace/coreutils/src/bin/tty.rs:argv-as-string
 userspace/coreutils/src/bin/which.rs:argv-as-string

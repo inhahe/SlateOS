@@ -510,6 +510,7 @@ pub fn self_test() -> KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[devfs] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
 
     let mut fs = DevFs::new();
 
@@ -731,7 +732,14 @@ pub fn self_test() -> KernelResult<()> {
     // backed by a VFS query (a `/dev/disk/by-uuid` symlink farm is the obvious
     // one) would deadlock here, in a suite, rather than in whatever first ran
     // `ls /dev`.
-    if crate::fs::Vfs::stat("/dev").is_ok() {
+    // Ask the mount table, not `stat("/dev").is_ok()`. The latter reads as "is
+    // /dev mounted" but means "did stat fail for any reason at all" -- so a
+    // permission gate wrongly denying `/dev`, or a lookup bug, would have
+    // switched off precisely the block that exists to notice it.
+    let dev_mounted = crate::fs::Vfs::mounts()
+        .iter()
+        .any(|(p, _)| p.as_path() == Path::new("/dev"));
+    if dev_mounted {
         let entries = crate::fs::Vfs::readdir("/dev")?;
         // /dev/null reads as EOF. Going through the VFS exercises the mount
         // lookup and the per-mount lock, which the direct calls above do not.
@@ -745,9 +753,11 @@ pub fn self_test() -> KernelResult<()> {
             entries.len()
         );
     } else {
+        skips.record("through-the-mount readdir", "/dev is not mounted");
         serial_println!("[devfs]   through-the-mount: /dev not mounted, skipped");
     }
 
-    serial_println!("[devfs] Self-test PASSED");
+    skips.report("[devfs]");
+    serial_println!("[devfs] Self-test PASSED{}", skips.suffix());
     Ok(())
 }

@@ -38971,6 +38971,113 @@ rather than delivering it). **Zero is exact in every case**, which is the
 property that makes an upper bound usable — the majority caller is testing for
 emptiness, and is never told there is something to read when there is not.
 
+## §289 — A tick that must not hold its own lock keeps its self-exclusion in a flag, and `net/ssh` checks the session *out* of the table rather than borrowing it in place
+
+**Date:** 2026-08-23
+**Decided by:** Claude (autonomous)
+
+**In short:** two network servers (SSH and TFTP) had a once-a-tick housekeeping
+function that grabbed one big lock at the top and let go at the bottom. That
+lock was doing two different jobs at once: protecting the server's data, and
+making sure two CPUs never ran the housekeeping at the same time. It also had
+to be let go before the function reads a file from disk — holding it across a
+file read is the deadlock this whole sweep was about. So the second job had to
+move somewhere else, and for SSH the data could not simply be copied out and
+copied back, because the protocol code needs to *keep writing to* one session
+for the whole time. The decision is where each job went.
+
+### The problem
+
+`net/tftp.rs::server_tick` and `net/ssh.rs::tick` both opened with a single
+`SERVER_STATE`/`STATE` lock and held it for their whole body. Underneath that
+guard they reached the VFS — TFTP serves and stores files, SSH reads
+`~/.ssh/authorized_keys` for public-key auth — which inverts the kernel's live
+`filesystem lock -> module state` order (see `known-issues.md`,
+`FIXED-A-THE-OPEN-FILE-TABLE-WAS-HELD-ACROSS-EVERY-FILE-READ`).
+
+Releasing the lock around the VFS calls is the standard fix and is what the
+other nine files in the sweep did. But it removes something neither tick was
+getting deliberately: **mutual exclusion against another CPU running the same
+tick**. Both have a rate limiter above the lock, and it looks like it provides
+this, but it does not — `load`, compare, `store` is three operations, so two
+CPUs can both read the same `last` and both proceed.
+
+### Decision 1 — the self-exclusion moves to an explicit flag
+
+A `SERVER_TICKING` / `TICKING` `AtomicBool`, claimed with
+`compare_exchange(false, true)` and released by an RAII `TickGuard`, at the top
+of the tick. A CPU that loses the race returns immediately rather than
+spinning: the tick is periodic housekeeping, and the winner is about to do the
+work anyway.
+
+*Alternatives considered.*
+
+- **Rely on the rate limiter.** Rejected: it is not atomic, as above. Making it
+  atomic (a `compare_exchange` on `LAST_TICK`) would work, but it conflates
+  "how often" with "how many at once", and reads as a rate limit to everyone
+  who meets it later.
+- **A second mutex covering the tick.** Works, but a mutex that is only ever
+  `try_lock`ed is a flag with extra machinery, and it adds a lock to the order
+  graph that lockdep then has to reason about.
+- **Leave it unserialised.** Rejected. Two concurrent ticks would both drain
+  the same socket and both drive the same session's state machine. It has
+  probably never happened — the tick is called from one place — but the
+  property was being provided, and silently dropping a property while fixing
+  something else is how the *next* bug gets written.
+
+*Cost.* The flag is a second thing to be right about, and a panic inside the
+tick would leave it set forever if the guard were forgotten — which is why it
+is an RAII `Drop`, not a manual store at the end.
+
+### Decision 2 — SSH checks the session out of the table
+
+TFTP's tick needed nothing more: its per-transfer work is a sequence of short
+field updates, so it takes the lock in bursts and collects finished uploads
+into a `Vec` to write after the guard drops.
+
+SSH's does not fit that shape. `process_session` drives a protocol state
+machine that holds one `&mut Session` across TCP reads, key exchange, decrypt,
+`process_message`, and the response sends — with the VFS call in the middle of
+it. There is no point where the borrow can be given up without unpicking the
+state machine.
+
+So the session is **moved out of its slot** with `mem::replace` and processed
+on the tick's stack, then moved back. What is left behind is an empty
+`Session` with `active: true` and a new `checked_out: true` flag.
+
+*Why the placeholder, rather than just leaving the slot empty:* `active` is
+what the accept path tests to find a free slot, so an empty slot would be
+handed to a new connection and the write-back would then clobber it.
+
+*Why `checked_out` on top of `active`:* `shutdown` walks the table and sends a
+disconnect to each active session's `tcp_handle`. The placeholder's handle is
+`0`, and `0` is a perfectly valid handle — belonging to somebody else. Without
+the flag, shutting down during a tick would write an SSH disconnect packet into
+an unrelated connection. `shutdown` skips checked-out slots and leaves them to
+the tick, which sees `ENABLED` false on write-back and closes the real
+connection itself.
+
+*Alternatives considered.*
+
+- **Per-session locks.** The cleanest answer in the abstract, and the one to
+  reach for if sessions ever need to be processed concurrently. Rejected for
+  now: it multiplies the lock-order graph by four for a table with four slots
+  and one writer, and the checkout gives the same exclusion with no new lock.
+- **Split `process_message` so the VFS work happens in the caller.** The
+  authorization read depends on a username and public key that are only known
+  once the message is parsed, so this means returning a "needs authorization"
+  state and re-entering — a state machine on top of a state machine, in the
+  one part of the code where being wrong is an authentication bypass.
+- **Cache `authorized_keys` in memory.** Rejected outright: a revoked key would
+  keep working until the cache expired.
+
+*Cost.* A checked-out session is invisible to anything that inspects the table
+by handle, and `stats()` can now observe the table mid-tick rather than only
+between ticks. Both are acceptable — nothing looks a session up by handle, and
+`active_session_count` still counts the placeholder — but they are the kind of
+thing that stops being acceptable quietly, so the flag is named for what it is
+rather than for what it is used for.
+
 ## §366 — `ls` is reproduced against coreutils **9.5**, not the 9.4 that ships in WSL, because 9.5 changed every width measurement and both binaries are on hand
 
 **Date:** 2026-08-22
@@ -39301,6 +39408,146 @@ no configuration of GNU behaves this way, so it goes in a document. Confusing
 the two — treating a genuine omission as "just another build configuration" —
 is how a port acquires undocumented divergence.
 
+---
+
+## §290 — Access control lives in one gate that every path operation must pass, and a build-time checker holds the door rather than a code review
+**Date:** 2026-08-23
+**Decided by:** Claude (autonomous)
+
+**In short:** The kernel had two separate permission checks on files. One of
+them — POSIX ACLs, the thing `setfacl` edits — was never actually consulted by
+anything, so telling the system "user 1001 may not read this file" appeared to
+work and did nothing. The other — capability tags — was consulted, but only in
+the ~17 places somebody had remembered to write it, out of ~37 places that need
+it. Both are now decided in a single function that every file operation calls,
+and a script run before each build fails the build if a new file operation is
+added without it. The decision recorded here is the *single gate plus checker*
+shape, and the choice to exempt metadata operations from ACLs.
+
+### What was there
+
+`fs::acl::check_access` implements the full POSIX 1003.1e algorithm — owner,
+named user, owning group, named group, mask, other, with mask intersection at
+each named step. It is 11-self-test correct and had **zero production callers**.
+`cap::file_tags::check_access` (mandatory access control by capability group)
+had seventeen, hand-written one at a time at the top of seventeen `Vfs` methods,
+with a copy in `fs/handle.rs`.
+
+The two failures look opposite but are the same failure. A check that must be
+re-typed at each entry point will be present at the entry points that existed
+when someone last swept, and absent from every one added since; run that process
+long enough with no forcing function and you get both seventeen copies *and*
+twenty omissions *and* one check that nobody ever started.
+
+### Why nothing noticed
+
+Both checks **fail open**: `acl::check_access` returns `Ok(())` when the path
+has no ACL, `file_tags::check_access` returns `Ok(())` when it has no tags. That
+is correct — they are hooks on every path and must defer to traditional
+permissions — but it means a missing call site has *no runtime symptom*. Files
+open, read and write exactly as they did. Any test that exercises permitted
+access passes identically whether the gate is there or not.
+
+This is the property that decides the design. A defect with no symptom cannot be
+caught by testing behaviour; it can only be caught by asserting something about
+the *source*. Hence:
+
+### The decision
+
+1. **One gate.** `vfs::check_path_access(path, PathAccess)` runs both checks.
+   Nothing else in the kernel may call either underlying `check_access`.
+2. **The intent is passed in, not inferred.** `PathAccess::{Read, Write,
+   Execute, Metadata}` — because the two checks disagree about granularity
+   (a tag is all-or-nothing on a path; an ACL grants r, w and x independently),
+   and the call site is the only place that knows which it means.
+3. **The decision half is separated from the credential half.**
+   `path_access_verdict(path, uid, gid, supplementary_gids, want)` takes
+   credentials explicitly; `check_path_access` looks them up from the current
+   process and calls it. This exists so the logic is testable at all — see below.
+4. **A pre-build checker enforces 1 and the completeness of the call sites.**
+   `scripts/check-vfs-permission-gate.py`, wired into `boot-test.sh`.
+
+### The alternative, and why it lost
+
+The obvious alternative was to put the ACL check inside the existing traditional
+permission check and leave the sprinkled tag checks alone — smaller diff, no new
+script, no new enum. It fails on the evidence already in the tree: the sprinkled
+arrangement had *already* decayed to 17-of-37 with nobody noticing, so adding an
+eighteenth sprinkle predicts its own future. The second alternative — one gate
+but no checker — is better and still insufficient, because the property that
+makes the bug invisible at runtime (failing open) is unaffected by how tidy the
+code is today. Only something that reads the source each build keeps it tidy.
+
+The cost is real and worth stating: the checker is a textual within-file
+heuristic (like its siblings `check-vfs-under-lock.py` and
+`check-recursive-locks.py`), it keys rule 3 off `resolve_mount` as the marker
+for "reaches a real filesystem", and so it has false negatives by construction.
+It is a ratchet, not a proof. A ratchet that catches the *next* forgotten entry
+point is worth more than a proof nobody can run.
+
+### The exemption that is not an oversight: `PathAccess::Metadata`
+
+Metadata operations — `stat`, `readlink`, `lstat`, and also `chmod`, `chown`,
+`utimes`, attribute flags — pass the tag check but require **no ACL permission
+in either direction**. Both halves match POSIX and neither is obvious:
+
+- *Reading:* POSIX makes `stat` depend on search permission along the path, not
+  on read permission of the target. Requiring `r` would make a file that an ACL
+  deliberately left visible-but-unreadable also un-`stat`-able, which no Unix
+  does.
+- *Writing:* POSIX ACLs govern a file's **data**; who may change the inode's
+  mode and ownership is decided by ownership and privilege. Requiring `w` would
+  make a mode-`444` file un-`chmod`-able by its own owner.
+
+Capability tags still apply to metadata, because they are mandatory access
+control: a tag denies reaching the object at all, however innocuous the intent.
+
+The exemption list in the checker (`statvfs`, `trim`, `set_volume_label`, the
+mount-table methods) is the same idea at the other end — those act on the
+*filesystem*, with the path serving only to select which mount. Each entry
+carries prose rather than a bare name specifically so the claim can be re-argued
+if the method changes role, instead of being inherited silently.
+
+### Why the self-test drives `path_access_verdict` and not a real VFS call
+
+Kernel self-tests run as a kernel task with no owning process, and
+`check_path_access` bypasses when it cannot find one — before any check runs. A
+test driven through `Vfs::read_file` could therefore only ever observe
+"allowed", and would go on passing if the ACL half were deleted again. That is
+the same non-symptom as the original bug, reproduced inside the thing meant to
+detect it.
+
+So the test calls the pure verdict function with synthetic credentials, and
+asserts the **deny** direction first. That ordering is not stylistic: because
+`check_access` fails open, a test that only confirms ordinary access still works
+passes just as well against a gate that was never wired in. The call sites,
+which a unit test cannot reach, are the checker's job. The two halves are
+complementary and neither alone would have caught the original state.
+
+### A consequence worth recording: the fast path had to get cheaper
+
+The gate's first act is `acl::count()` and `file_tags::count()`, to skip
+everything when no ACLs or tags exist — the normal case. `file_tags::count()`
+took a global mutex and scanned the whole table. At seventeen call sites that
+was tolerable; at thirty-five, on a lookup path budgeted at 200–500 ns per
+component, it would have made every unrelated file operation in the kernel
+contend for one lock. Both counts are now relaxed atomic loads.
+
+A relaxed load is sound because the count is only ever a *filter*, never the
+answer: a stale non-zero costs one redundant scan under the lock, and a stale
+zero can only be read by a thread whose operation was already racing the
+`tag_path` that would have denied it — the same race the lock would have had.
+
+The residual risk is that a future mutator forgets to refresh the cache, and a
+stale zero there is not a slow answer but a wrong one: the gate reads it as "no
+tags exist" and skips mandatory access control entirely. `file_tags` self-test 7
+therefore asserts the cache against a fresh scan of the table after every kind
+of mutation the module offers. The cache is recomputed absolutely rather than
+incremented, because a missed decrement drifts silently while a recompute
+cannot.
+
+---
+
 ## §369 — A diagnostic that names a byte the terminal cannot decode prints it as `\377`, not raw, and never as U+FFFD
 
 **Date:** 2026-08-23
@@ -39470,6 +39717,226 @@ been amended to say so: "moving a tool out of `coreutils/src/bin` costs it the
 only mechanical name-quoting check it has" was true when written and is now
 only half true, since gate 8 holds every crate at *no worse than today* even
 though only `coreutils/src/bin` is held at *zero*.
+
+---
+
+## 270. A self-test may skip, but only on a fact it looked up -- and it must say so in the line a reader believes
+
+**Date:** 2026-08-23
+**Decided by:** Claude (autonomous)
+
+**In short:** Lots of our self-tests contain a section that cannot run
+everywhere -- there is no second CPU to take offline on a one-CPU machine, no
+`/tmp` to write to before the filesystem is mounted. Skipping those is fine and
+always was. What was not fine is *how* the skips were written. Two habits had
+spread through the tree: the test worked out whether to skip by trying the
+operation and seeing if it failed, and then it printed `Self-test PASSED`
+anyway. Together those mean a suite that quietly runs less and less of itself
+as the code under test gets worse, while its output stays identical to a full,
+clean run. This entry records the rule that replaces both habits, the helpers
+that make the rule cheap to follow, and the build gate that keeps it true.
+
+**The reported half.** A skipped section printed a line of its own and then
+fell through to the summary, which said `PASSED` unconditionally. The last line
+is the one a reader believes -- and the one a grep in CI matches -- so a
+half-run was *byte-indistinguishable* from a full one. This is not a
+hypothetical: 26 `pathz` rungs no-op'd unnoticed for weeks behind exactly that
+green line (`known-issues.md` -> `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`), and
+the fix at the time -- `report_pathz_skips()` in `scripts/boot-test.sh` -- was
+written for that one suite only.
+
+**The decided half, which is the larger defect.** Far more common was:
+
+```rust
+if Vfs::mkdir(dir).is_ok() {
+    /* ..the actual test.. */
+} else {
+    serial_println!("  skipped (read-only root)");
+}
+```
+
+Read aloud, that says "skip when this filesystem has no directories." What it
+*means* is "skip on **any** failure" -- including the exact regression the
+section exists to catch. The property that makes it dangerous is its direction:
+**the worse the code under test gets, the more sections switch themselves off,
+and the suite goes green precisely when it should be loudest.** A test whose
+gate is the code under test is not a test; it is a description of what
+currently works.
+
+**The rule adopted.**
+
+> A self-test may skip, but it must skip for a reason it *looked up*, and it
+> must say so in the line a reader believes.
+
+"Looked up" means a fact obtained from something other than the operation being
+tested: the mount table, `CPUID`, a feature query, a capability lookup. When an
+error genuinely must be classified -- some preconditions are only observable by
+attempting them -- only `NotSupported`, `ReadOnlyFilesystem` and `NoSuchDevice`
+mean "this system cannot." Every other error means the system was asked and
+refused, which is a defect and must fail the suite.
+
+**What was built to make it cheap.** Three pieces, all in
+`kernel/src/fs/selftest.rs` unless noted:
+
+| Piece | Role |
+|---|---|
+| `Skips` (`record(section, why)`, `report(tag)`, `suffix()`) | The ledger. `suffix()` renders ` -- N section(s) SKIPPED` onto the summary line, so the believed line stops lying. |
+| `classify(KernelResult<T>) -> Setup` (`Ready`/`Unsupported`/`Failed`) | The three-way split above, in one place, so the "which errors mean *cannot*" judgement is made once rather than at 40 call sites. |
+| `is_mounted(p)` / `is_mounted_rw(p)` | The commonest looked-up fact. Replaces the open-coded `Vfs::mounts().iter().any(..)` fold that every converted site was growing its own copy of. |
+| `scripts/check-selftest-skips.py` | Finds both shapes; gated in `scripts/boot-test.sh` before the build. |
+
+**The alternative that was rejected: keep the checker advisory.** The cheaper
+path was to run the script by hand now and then. It was rejected for the reason
+the count itself argues: the sweep ended at **0 findings across 802 files**, and
+a count at zero with nothing holding it there is a count on its way back up. The
+`.is_ok()` gate is not an exotic mistake -- it is the *shortest* way to write a
+conditional section, so it is what gets written by default. Only a gate that
+fails the build makes the honest form the path of least resistance. Placing it
+before the build costs milliseconds against a ten-minute build, and exit 2
+(could not run at all) counts as failure, so a check that cannot fire is never
+mistaken for one that passed.
+
+**The cost, stated plainly.** The checker is textual. It matches three
+spellings of the decision -- `.is_ok()`/`.is_err()`, `if let Ok(..)`/`if let
+Err(..)`, and a `match` arm whose pattern is a catch-all `Err(_)`/`Err(e)`
+(an arm naming *specific* errors is the approved form and stays exempt) -- and
+it examines not only functions whose *name* looks like a self-test but
+everything reachable from one by a same-file call, because a large suite is
+mostly helpers. Both of those started as narrowings, and each hid real
+instances: the name-only rule missed `io_ring`'s two file-handle sections,
+which skipped on a failed `/tmp` write and were caught by reading a boot log
+rather than by the gate.
+
+What remains invisible is a skip decided from an **integer errno** rather than
+a `Result` -- `if write_result.value < 0 { ..SKIPPED.. }`, in a test that drives
+the syscall dispatch table directly. Catching that needs dataflow, not a
+pattern: `x.value < 0` is ordinary code, and what makes it a defect is only
+that the value came from the code under test. The checker also cannot tell a
+precondition probe from a genuine assertion about a `Result`, which is why
+`ALLOW` exists -- currently empty, and it should stay a list with reasons rather
+than a habit. A false positive costs one entry in that map; a false *negative*
+costs a section that stops running and never says so, which is the failure this
+whole entry is about. That asymmetry is why the rule is enforced on the shape
+rather than on a judgement about intent.
+
+**Scope of the sweep that this settled.** 19 files converted across five
+commits: `fs/handle`, `fs/certmgr`, `fs/devfs`, `fs/history`, `fs/mime`,
+`fs/index`, `fs/procfs`, `fs/sysfs`, `fs/trash`, `fs/vfs`, `fs/zip`, `mm/pcid`,
+`mm/compact`, `mm/frame_owner`, `mm/kasan`, `mm/kasan_rt`, `mm/oom`,
+`cpu_hotplug`, `smep_smap`, `vmguest`, `watchpoint`, `proc/spawn`,
+`syscall/linux`. Three went further than reporting, because the honest form
+made the weakness obvious once the skip was gone: `fs/mime` now fails when
+`detect()` errors instead of warning, `fs/zip` fails when deflate does not
+compress instead of noting it, and `watchpoint` deleted its skip entirely by
+introducing a dedicated 8-byte-aligned `AtomicU64` -- turning a precondition the
+test had to check into one the type system guarantees.
+
+---
+
+## 271. The self-test skip ledger is fixed-capacity and allocation-free, because the suite that most needs it runs before the heap
+
+**Date:** 2026-08-24
+**Decided by:** Claude (autonomous)
+
+**In short:** SlateOS's self-tests can decline to run a section — "no AC97
+device", "/tmp isn't mounted" — and §270 added a small bookkeeping object, the
+*skip ledger*, so the suite's final line says how many sections were skipped
+instead of a bare "PASSED". That object stored its notes in a growable list,
+which means asking the kernel's memory allocator for space. One of its users,
+the physical-memory self-test, runs *before the allocator exists*. The very
+first note it tried to file killed the boot. The ledger is now a fixed-size
+array that never asks for memory, and a new test proves it, by watching the
+allocator's own counters while the ledger is exercised.
+
+### What happened
+
+Boot test batch39 died 120 lines in:
+
+```
+[mm]   Double-free detection: OK
+!!! KERNEL PANIC !!!
+panicked at library/alloc/src/alloc.rs:553:9:
+memory allocation of 128 bytes failed
+  Heap: slab=0/0 allocs/frees, large=0/0, refills=0, failures=0
+```
+
+The panic report is self-explaining if you read the last line: the heap has
+served **zero** allocations, ever. `mm::frame::self_test()` runs between
+`[mm] Physical frame allocator initialized` and `[mm] Kernel heap allocator
+initialized`. The §270 sweep had replaced its `SKIP (HHDM not ready)` print
+with `skips.record(…)`, and `record` was `Vec::push` — the first `Vec::push`
+of the boot, against an allocator that does not yet exist.
+
+The line it replaced had printed fine for months, because a `serial_println!`
+of a `&'static str` allocates nothing.
+
+### The decision
+
+Make the ledger structurally incapable of allocating: entries live in an
+inline `[(&'static str, &'static str); 16]`, and `suffix()` returns a
+`Display` adaptor instead of a `String`.
+
+The type's own doc comment had **already made this argument** and then failed
+to act on it — it justified `&'static str` entries on the grounds that "a skip
+reason is a property of the code, not of the run, so there is … no allocation
+to fail in a suite that may be diagnosing the allocator", while the `Vec`
+holding them allocated on every push. That is the interesting part of this
+entry: the invariant was known, written down, and violated by the same
+declaration that stated it. A comment is not an enforcement mechanism.
+
+### Alternatives considered
+
+| Option | Why not |
+|---|---|
+| Leave `Vec`; have `mm::frame` keep printing raw `SKIP` lines | Re-opens §270's failure #1 for the *one* suite where a wrong answer is worst — the memory subsystem. A skip that does not reach the summary gets believed. |
+| Leave `Vec`; make `record` fall back to printing when the heap is down | Needs a "is the heap up?" predicate on a path that must not be wrong, and makes the *reporting* behaviour depend on boot phase — so the same skip renders two different ways and only one of them reaches the count. |
+| `heapless::Vec` or a similar crate | An inline array plus a length is the whole of what that would buy, in a type with three methods. Not worth a kernel dependency. |
+| Fixed capacity (chosen) | Bounded, `const`-constructible, 256 bytes on a stack that has room for it. Costs a capacity limit — addressed below. |
+
+### The capacity limit, and why overflow is counted rather than dropped
+
+Sixteen is generous: the largest suite in the tree records six. But a cap that
+silently drops the 17th skip would reintroduce **exactly** the silence §270
+exists to prevent, in the least visible way possible — the suite would still
+print a number, and the number would be wrong.
+
+So overflow is counted, not dropped. `record` past capacity increments a
+separate counter; `report` prints `SKIP: N further section(s) (ledger holds
+16)`; and `suffix()` counts named and unnamed together, so the closing line's
+total is right even when the ledger cannot name every entry. Degrading from
+"named" to "counted" is acceptable. Degrading to "silent" is not.
+
+### Why it is pinned by a runtime test rather than left to structure
+
+The invariant is structural, and structure is one convenient field away from
+regressing — the `Vec` version was itself structurally obvious to whoever wrote
+it. What makes this worth a test is the *failure mode*: a panic inside
+`alloc.rs`, in a suite whose name does not appear in the backtrace, 120 lines
+into a boot, with the cause (`slab=0/0`) visible only to a reader who already
+suspects it. Nothing about that panic points at this module.
+
+So `fs::selftest::self_test()` snapshots `mm::heap::stats()`, exercises
+`record`/`report`/`suffix` — including the overflow arm and `report`'s serial
+output, because a reporting path that allocates fails precisely when there is
+something to report — and asserts the slab and large-allocation counters did
+not move. It runs from `main.rs` immediately after `heap::init`, which is the
+earliest point in boot where `heap::stats()` could observe an allocation at
+all; the code it guards runs earlier still.
+
+Interrupts are masked across the measurement, because `heap::stats()`
+aggregates per-CPU counters and an interrupt handler that allocated inside the
+window would be attributed to this code and fail the test spuriously.
+
+### The general lesson
+
+§270's rule was "a self-test may skip, but it must skip for a reason it looked
+up, and it must say so in the line a reader believes." This adds a corollary
+about the machinery that carries the message: **the reporting path of a
+self-test must be weaker in its requirements than anything it reports on.** A
+ledger that needs the heap cannot report on the heap; a ledger that needs the
+frame allocator cannot report on the frame allocator. `&'static str` in an
+inline array needs nothing but a stack, which is why it is the right shape here
+and not merely a convenient one.
 
 ---
 
@@ -39796,3 +40263,85 @@ Each script's header says how to delete the cache.
 again is a harness that needs a *different profile* — a release build, or one
 with a feature flag the others do not set. At that point give that one script
 its own directory and say so in its header, rather than un-sharing all four.
+
+---
+
+## 272. A Path-Z fixture that is present but unreadable fails the rung; only a fixture that is genuinely absent may skip it
+
+**Date:** 2026-08-24
+**Decided by:** Claude (autonomous)
+
+**In short:** The kernel's boot self-tests include ~84 "rungs" that each run a
+small program off a test disk. Any of them may legitimately be missing — the
+disk is a build artifact, and a fresh checkout has no disk at all — so a rung
+whose program is missing is allowed to sit out. Until now it sat out for *any*
+reason the file failed to load, including "the filesystem returned an I/O
+error". That is the wrong grouping: a broken filesystem would have switched
+off every rung that could have detected it, and the boot would have finished
+looking clean. This entry records the split — absent means skip, unreadable
+means fail — and the cost of getting it wrong in the other direction.
+
+### The code that made the decision necessary
+
+```rust
+match crate::fs::Vfs::read_file(&path) {
+    Ok(v) if !v.is_empty() => Some(v),
+    _ => None,
+}
+```
+
+Four outcomes collapse onto that `_`:
+
+| Read outcome | What it means |
+|---|---|
+| `Err(NotFound)`, nothing mounted at `/mnt` | lean build, no test disk |
+| `Err(NotFound)`, `/mnt` mounted | image built without this fixture |
+| `Err(_)` — EIO, permission, corrupt directory | **the VFS or ext4 is broken** |
+| `Ok(v)` with `v.is_empty()` | the image build produced a truncated file |
+
+Every caller then read `None` as "absent" and returned `Ok(())`. The first two
+rows are environment facts and skipping is right. The last two are defects,
+and they are defects *in the subsystems these very rungs exercise*.
+
+### The decision
+
+`pathz_test_elf` / `pathz_command` return `KernelResult<Option<Vec<u8>>>`:
+`Ok(Some(v))` run, `Ok(None)` absent-and-counted, `Err(_)` fail the rung.
+Absence is established by asking whether the mount point exists *first*, and
+then only by `NotFound`; every other error is a defect and reddens the boot.
+
+### The tradeoff, stated honestly
+
+**Against:** this converts a class of transient environment problem into a
+failed boot test. A flaky host disk, a half-written `rootfs.ext4`, an ext4
+quirk under memory pressure — any of these now fails a run that would
+previously have gone green with a few extra SKIP lines. Boot tests take
+8–25 minutes, so a false red is not free.
+
+**For:** the alternative is a suite that goes quiet exactly when it has
+something to say. That is not a hypothetical failure mode here; it is the
+recorded history of this file. `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT` is the
+same shape (26 tcc rungs no-op'd unnoticed when `/bin/tcc` left the image),
+and the fix for it — `pathz_skip` and the end-of-boot verdict — was itself
+bypassed by these 84 sites, which printed their own SKIP line in a format the
+verdict does not parse and incremented nothing. So a boot that lost 29 rungs
+could still print `Path-Z prerequisites: complete — 0 rungs skipped`.
+
+The asymmetry decides it. A false red costs one re-run and is
+self-announcing. A false green costs however long it takes someone to notice
+that a subsystem has had no test coverage — and by construction, nothing will
+announce it. §270's rule ("a skip must be at least as loud as a failure")
+already implies this; §272 is what it looks like when the skip decision is a
+*read error* rather than a capability check.
+
+### What was explicitly not done
+
+- **Retrying the read.** Tempting for the transient case, but it converts a
+  deterministic failure into a flaky one and hides the very signal being
+  bought. If reads are unreliable, that is the finding.
+- **A "lenient" mode for lean builds.** The mount-point check already covers
+  the only legitimate lean case, and a mode flag would be a switch someone
+  eventually leaves on.
+- **Skipping on `Ok(v)` with `v.is_empty()`.** A zero-byte fixture is not an
+  absent one; it is a build that produced a file and got it wrong, which is
+  worth a red line rather than a quiet one.

@@ -540,14 +540,17 @@ fn hash_to_hex(hash: &[u8; 32]) -> String {
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[undelete] Running self-test...");
 
+    let mut skips = crate::fs::selftest::Skips::new();
+
     test_scan_empty();
     test_trash_recovery();
-    test_history_recovery();
+    test_history_recovery(&mut skips);
     test_filter();
     test_scan_combined();
     test_stats();
 
-    serial_println!("[undelete] Self-test passed (6 tests).");
+    skips.report("[undelete]");
+    serial_println!("[undelete] Self-test passed (6 tests).{}", skips.suffix());
     Ok(())
 }
 
@@ -587,34 +590,58 @@ fn test_trash_recovery() {
     serial_println!("[undelete]   trash recovery: ok");
 }
 
-fn test_history_recovery() {
+fn test_history_recovery(skips: &mut crate::fs::selftest::Skips) {
     use crate::fs::{Vfs, history};
 
     // Create a file and record its version.
     Vfs::write_file("/tmp/und_hist.txt", b"history version").expect("write");
-    let _ = history::record_version("/tmp/und_hist.txt");
+
+    // `record_version` reports the one fact that may legitimately switch this
+    // section off, and it reports it as a *value*, not as an error: `Ok(None)`
+    // means version history is turned off in this configuration, so there is
+    // no history entry for `recover` to find.  `Err` is the opposite — history
+    // was on, was asked, and failed — which is precisely the bug this section
+    // exists to catch, so it must not be allowed to disable the section.
+    let recorded = match history::record_version("/tmp/und_hist.txt") {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(e) => {
+            serial_println!("[undelete]   FAIL: history recovery: record_version failed: {e:?}");
+            panic!("undelete self-test: history::record_version failed with {e:?}");
+        }
+    };
+    if !recorded {
+        // `Ok(None)` with history *enabled* would mean the file we just wrote
+        // was not found, which is a defect rather than a configuration.
+        assert!(
+            !history::is_enabled(),
+            "record_version stored nothing while history is enabled"
+        );
+        let _ = Vfs::remove("/tmp/und_hist.txt");
+        skips.record("history recovery", "version history is disabled");
+        return;
+    }
 
     // Delete the file.
     let _ = Vfs::remove("/tmp/und_hist.txt");
 
-    // Should be recoverable from history.
-    let result = recover(
+    // A version was definitely recorded above, so recovery must now succeed.
+    let r = match recover(
         "/tmp/und_hist.txt",
         Some(Path::new("/tmp/und_hist_recovered.txt")),
-    );
-    match result {
-        Ok(r) => {
-            assert_eq!(r.source, RecoverySource::History);
-            let data = Vfs::read_file("/tmp/und_hist_recovered.txt").expect("read");
-            assert_eq!(&data, b"history version");
-            let _ = Vfs::remove("/tmp/und_hist_recovered.txt");
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[undelete]   FAIL: history recovery: a version was recorded but recover() failed: {e:?}"
+            );
+            panic!("undelete self-test: recover() from history failed with {e:?}");
         }
-        Err(_) => {
-            // History might not have CAS enabled or working — acceptable.
-            serial_println!("[undelete]   history recovery: skipped (CAS not available)");
-            return;
-        }
-    }
+    };
+    assert_eq!(r.source, RecoverySource::History);
+    let data = Vfs::read_file("/tmp/und_hist_recovered.txt").expect("read");
+    assert_eq!(&data, b"history version");
+    let _ = Vfs::remove("/tmp/und_hist_recovered.txt");
 
     serial_println!("[undelete]   history recovery: ok");
 }

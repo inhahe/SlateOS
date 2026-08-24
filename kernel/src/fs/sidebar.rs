@@ -166,8 +166,19 @@ static EXPANDED_STATE: Mutex<Vec<(SectionKind, bool)>> = Mutex::new(Vec::new());
 pub fn build() -> Sidebar {
     BUILD_COUNT.fetch_add(1, Ordering::Relaxed);
 
-    let hidden = HIDDEN_SECTIONS.lock();
-    let expanded = EXPANDED_STATE.lock();
+    // Copy both preference tables and hold neither lock while building. The
+    // section builders reach the VFS (`build_recent` stats the recent-files
+    // list, `build_this_pc` looks at mount points), and the VFS takes the
+    // filesystem's lock and holds it across content generation, which for
+    // procfs reaches back into arbitrary module-global state. Holding either
+    // of these across that runs `module state -> filesystem lock`, the inverse
+    // of the live order. `scripts/check-vfs-under-lock.py` enforces this.
+    //
+    // Copied one at a time rather than under both guards at once, so the two
+    // are never held simultaneously and no order between them exists to get
+    // wrong later. They are small `Vec`s of `Copy` values.
+    let hidden = HIDDEN_SECTIONS.lock().clone();
+    let expanded = EXPANDED_STATE.lock().clone();
     let mut sections = Vec::new();
 
     // Quick Access section.

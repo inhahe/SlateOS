@@ -362,8 +362,7 @@ fn from_hex_digit(ch: u8) -> Option<u8> {
 /// put back afterwards; `crate::fs::selftest` records why this shape rather
 /// than the alternatives.
 pub fn self_test() -> KernelResult<()> {
-    let result = crate::fs::selftest::with_pristine(&CAS, CasInner::new(), self_test_inner);
-    result
+    crate::fs::selftest::with_pristine(&CAS, CasInner::new(), self_test_inner)
 }
 
 fn self_test_inner() -> KernelResult<()> {

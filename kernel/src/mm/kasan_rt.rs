@@ -368,6 +368,10 @@ pub unsafe extern "C" fn __asan_unregister_globals(_globals: *mut u8, _n: usize)
 /// toolchain.
 pub fn self_test() {
     serial_println!("[kasan-rt] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
+    // Set inside the closure below; a `&mut Skips` capture would work too, but
+    // a plain flag keeps the closure's captures trivially `FnMut`.
+    let mut no_shadowed_address = false;
 
     // A freed heap object: `mm::kasan` marks the whole slot 0xFA, so the
     // outlined check must reject it and the report path must run.
@@ -415,12 +419,19 @@ pub fn self_test() {
             serial_println!("[kasan-rt]   report path on freed heap: OK");
         }
         None => {
+            no_shadowed_address = true;
             serial_println!(
                 "[kasan-rt]   SKIPPED: no shadowed heap address available \
                  (KASAN shadow window not backed)"
             );
         }
     });
+    if no_shadowed_address {
+        skips.record(
+            "outlined check and report path on a freed slot",
+            "the KASAN shadow window is not backed",
+        );
+    }
 
     // The bookkeeping entry points must be callable.
     // SAFETY: all three are no-ops that touch nothing.
@@ -431,5 +442,6 @@ pub fn self_test() {
     }
     serial_println!("[kasan-rt]   bookkeeping entry points: OK");
 
-    serial_println!("[kasan-rt] Self-test PASSED");
+    skips.report("[kasan-rt]");
+    serial_println!("[kasan-rt] Self-test PASSED{}", skips.suffix());
 }

@@ -1915,6 +1915,7 @@ pub fn self_test() {
         return;
     }
     serial_println!("[kasan] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
 
     let was_enabled = is_enabled();
     enable();
@@ -2063,14 +2064,32 @@ pub fn self_test() {
     {
         let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
         match (hhdm, crate::mm::frame::alloc_frame()) {
-            (0, _) => serial_println!("[kasan]   frame poison-on-free SKIPPED: no HHDM"),
+            (0, _) => {
+                skips.record("frame poison-on-free", "no HHDM");
+                serial_println!("[kasan]   frame poison-on-free SKIPPED: no HHDM");
+            }
+            // A machine with no free frame is a reason not to run this; any
+            // other allocator error is a defect, and reading it as "no frame
+            // available" would let the allocator silence its own test.
+            (_, Err(crate::error::KernelError::OutOfMemory)) => {
+                skips.record("frame poison-on-free", "no free frame on this machine");
+                serial_println!("[kasan]   frame poison-on-free SKIPPED: no free frame");
+            }
             (_, Err(e)) => {
-                serial_println!("[kasan]   frame poison-on-free SKIPPED: alloc failed ({e:?})");
+                serial_println!(
+                    "[kasan]   FAIL: frame poison-on-free: alloc_frame returned {e:?}, which \
+                     is not a statement about how much memory is free"
+                );
+                panic!("kasan self-test: alloc_frame failed with {e:?}");
             }
             (hhdm, Ok(f)) => {
                 let va = f.addr().wrapping_add(hhdm);
                 let fsz = FRAME_SIZE as u64;
                 if shadow_of(va).is_none() || shadow_of(va.wrapping_add(fsz - 1)).is_none() {
+                    skips.record(
+                        "frame poison-on-free",
+                        "the allocated frame is outside the shadow-covered window",
+                    );
                     serial_println!(
                         "[kasan]   frame poison-on-free SKIPPED: frame {:#x} outside the \
                          covered window",
@@ -2130,6 +2149,10 @@ pub fn self_test() {
                             let _ = unsafe { crate::mm::frame::free_frame(f2) };
                         }
                         Ok(f2) => {
+                            skips.record(
+                                "frame unpoison-on-alloc",
+                                "the per-CPU LIFO cache returned a different frame",
+                            );
                             serial_println!(
                                 "[kasan]   frame unpoison-on-alloc SKIPPED: allocator \
                                  returned a different frame"
@@ -2137,9 +2160,20 @@ pub fn self_test() {
                             // SAFETY: as above.
                             let _ = unsafe { crate::mm::frame::free_frame(f2) };
                         }
-                        Err(e) => serial_println!(
-                            "[kasan]   frame unpoison-on-alloc SKIPPED: realloc failed ({e:?})"
-                        ),
+                        Err(crate::error::KernelError::OutOfMemory) => {
+                            skips
+                                .record("frame unpoison-on-alloc", "no free frame on this machine");
+                            serial_println!(
+                                "[kasan]   frame unpoison-on-alloc SKIPPED: no free frame"
+                            );
+                        }
+                        Err(e) => {
+                            serial_println!(
+                                "[kasan]   FAIL: frame unpoison-on-alloc: re-allocating \
+                                 returned {e:?}, which is not a statement about free memory"
+                            );
+                            panic!("kasan self-test: frame realloc failed with {e:?}");
+                        }
                     }
                 }
             }
@@ -2221,6 +2255,10 @@ pub fn self_test() {
             enable();
         }
     } else {
+        skips.record(
+            "disable() wipes stale poison",
+            "the test slot is outside the shadow-covered window",
+        );
         serial_println!(
             "[kasan]   disable() wipe test SKIPPED: slot {:#x} outside the covered window",
             a4
@@ -2230,5 +2268,6 @@ pub fn self_test() {
         }
     }
 
-    serial_println!("[kasan] Self-test PASSED");
+    skips.report("[kasan]");
+    serial_println!("[kasan] Self-test PASSED{}", skips.suffix());
 }

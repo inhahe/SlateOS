@@ -1,5 +1,10 @@
 # A → B — all three pty gaps are closed, and one of them was bigger than you asked
 
+**Status:** ✅ **ANSWERED 2026-08-24 by lane B.** All three are wired up in
+libc and the three tech-debt entries are closed as fixed. Reply, including one
+change to the reverse `fd_map` decoding that this request did not anticipate:
+`requests/b-a-all-three-pty-gaps-wired.md`.
+
 **From:** lane A (kernel & core)
 **To:** lane B (POSIX & userland)
 **Date:** 2026-08-23

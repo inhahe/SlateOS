@@ -209,27 +209,40 @@ const MAX_OPEN_FILES: usize = 1024;
 // Capability tag enforcement
 // ---------------------------------------------------------------------------
 
-/// Check file/directory capability tag access for the current process.
+/// Check capability tags and POSIX ACLs for an open of `path` under `flags`.
 ///
-/// Same logic as `vfs::check_file_tags` but for the handle module.
-/// Called at open time — the handle is proof of access after that.
-fn check_file_tags_for_handle(path: &Path) -> KernelResult<()> {
-    if crate::cap::file_tags::count() == 0 {
-        return Ok(());
+/// This module used to carry its own transcription of the VFS's tag check —
+/// the same six lines, separately maintained — which is why the ACL half
+/// could have been added to the VFS and silently not applied to `open`, the
+/// one entry point through which essentially all userspace file access
+/// arrives. It now defers to the single gate in `vfs`.
+///
+/// Called at open time only; subsequent reads and writes on the handle are
+/// allowed without re-checking, because the handle is proof of access (Unix
+/// file-descriptor semantics — an fd survives a later `chmod`/`setfacl`).
+fn check_open_access(path: &Path, flags: OpenFlags) -> KernelResult<()> {
+    use crate::fs::vfs::PathAccess;
+
+    // A create, truncate or append modifies the file even when the caller did
+    // not set the write access bit, so the write intent is taken from the
+    // effect rather than from the access-mode bits alone.
+    let writes = flags.contains(OpenFlags::WRITE)
+        || flags.contains(OpenFlags::CREATE)
+        || flags.contains(OpenFlags::TRUNCATE)
+        || flags.contains(OpenFlags::APPEND);
+
+    if flags.contains(OpenFlags::READ) {
+        crate::fs::vfs::check_path_access(path, PathAccess::Read)?;
     }
-
-    let task_id = crate::sched::current_task_id();
-    let pid = match crate::proc::thread::owner_process(task_id) {
-        Some(pid) if pid != 0 => pid,
-        _ => return Ok(()),
-    };
-
-    let creds = match crate::proc::pcb::get_credentials(pid) {
-        Some(c) => c,
-        None => return Ok(()),
-    };
-
-    crate::cap::file_tags::check_access(creds.uid, creds.gid, &creds.groups, path)
+    if writes {
+        crate::fs::vfs::check_path_access(path, PathAccess::Write)?;
+    }
+    // An open asking for neither still has to clear capability tags, which are
+    // not access-mode-specific; `Metadata` requests no ACL permission.
+    if !flags.contains(OpenFlags::READ) && !writes {
+        crate::fs::vfs::check_path_access(path, PathAccess::Metadata)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -327,17 +340,18 @@ pub fn open_with_mode(
         crate::fs::Vfs::resolve_path(path)?
     };
 
-    // Check file capability tags — the process must be a member of
-    // all required groups for this path (or any ancestor with tags).
-    // This is checked at open time; subsequent reads/writes on the
-    // handle are allowed without re-checking (the handle is proof
-    // of access, like a file descriptor).
-    check_file_tags_for_handle(&norm)?;
+    // Check capability tags and POSIX ACLs — the process must be a member of
+    // all groups required for this path (or any ancestor with tags), and the
+    // path's ACL, if it has one, must grant the access this open asks for.
+    // Checked at open time; subsequent reads/writes on the handle are allowed
+    // without re-checking (the handle is proof of access, like a file
+    // descriptor).
+    check_open_access(&norm, flags)?;
 
     // Check if the file exists.
-    // Note: Vfs::stat() also checks file tags internally, but our
-    // explicit check above handles the CREATE case (file doesn't
-    // exist yet, so stat is never called — we still need the check).
+    // Note: Vfs::stat() runs the same gate internally, but our explicit check
+    // above handles the CREATE case (file doesn't exist yet, so stat is never
+    // called — we still need the check).
     let stat_result = crate::fs::Vfs::stat_resolved(&norm);
 
     match stat_result {
@@ -493,28 +507,32 @@ pub fn close(handle: u64) -> KernelResult<()> {
 /// number of bytes actually read (may be less than `buf_len` if
 /// near end-of-file; 0 means already at EOF).
 pub fn read(handle: u64, buf: &mut [u8]) -> KernelResult<usize> {
-    // We need to look up the file, read data via VFS, then update
-    // the offset.  We hold the lock across the VFS call — acceptable
-    // for early dev but should be improved.
-    let mut table = OPEN_FILES.lock();
-    let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
+    // Snapshot what the VFS call needs, then drop the table lock before
+    // making it. See `advance_offset` for why holding it across the call is
+    // a deadlock and not merely a bottleneck.
+    let (path, start) = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
 
-    if file.is_directory {
-        return Err(KernelError::IsADirectory);
-    }
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
 
-    if !file.flags.is_readable() {
-        return Err(KernelError::PermissionDenied);
-    }
+        if !file.flags.is_readable() {
+            return Err(KernelError::PermissionDenied);
+        }
 
-    // Nothing to read if at or past EOF.
-    if file.offset >= file.size {
-        return Ok(0);
-    }
+        // Nothing to read if at or past EOF.
+        if file.offset >= file.size {
+            return Ok(0);
+        }
+
+        (file.path.clone(), file.offset)
+    };
 
     // Read via VFS.  Currently reads the whole file — the default
     // `read_at` in the FileSystem trait slices the result.
-    let data = crate::fs::Vfs::read_at_resolved(&file.path, file.offset, buf.len())?;
+    let data = crate::fs::Vfs::read_at_resolved(&path, start, buf.len())?;
     let copy_len = data.len().min(buf.len());
 
     if let Some(dest) = buf.get_mut(..copy_len) {
@@ -523,10 +541,41 @@ pub fn read(handle: u64, buf: &mut [u8]) -> KernelResult<usize> {
         }
     }
 
-    // Advance offset.
-    file.offset = file.offset.saturating_add(copy_len as u64);
+    advance_offset(handle, start, copy_len as u64);
 
     Ok(copy_len)
+}
+
+/// Move an open handle's cursor to `start + delta`, but never backwards.
+///
+/// Called after the VFS I/O has completed and the table lock has been
+/// released and retaken, so it must re-look-up the handle rather than hold a
+/// reference across the call: the map may have been rebalanced, and the
+/// handle may have been closed outright. A vanished handle is not an error —
+/// the bytes really were transferred — so the bookkeeping is simply skipped.
+///
+/// The advance is `max`, not `+=`, for the case where another thread sharing
+/// the handle completed its own transfer while this one was in the VFS: adding
+/// would count that thread's progress twice. Two threads reading one handle
+/// get an arbitrary interleaving either way — Linux guards only the position
+/// update itself, with `f_pos_lock`, and offers no more — but a monotone
+/// cursor never re-reads bytes it has already returned, which is the property
+/// callers actually depend on.
+///
+/// ## Why the lock is dropped at all
+///
+/// Holding `OPEN_FILES` across a VFS call inverts the kernel's lock order.
+/// `Vfs::readdir` takes the *filesystem's* lock and calls `readdir` under it;
+/// for procfs that generates content, which reaches `list_handles`, which
+/// takes `OPEN_FILES`. So one path runs FS → `OPEN_FILES` while the old
+/// `read`/`write` ran `OPEN_FILES` → FS. Lockdep observed both orders in a
+/// single boot (batch 32). Dropping the lock also stops every file read in
+/// the system from serialising behind one global mutex, which the original
+/// comment here acknowledged as "acceptable for early dev".
+fn advance_offset(handle: u64, start: u64, delta: u64) {
+    if let Some(file) = OPEN_FILES.lock().get_mut(&handle) {
+        file.offset = file.offset.max(start.saturating_add(delta));
+    }
 }
 
 /// Return the file offset at which the next byte written via
@@ -591,38 +640,47 @@ pub fn current_offset(handle: u64) -> KernelResult<u64> {
 /// Advances the offset by the number of bytes written.  Grows the
 /// file if writing past the current end.  Returns bytes written.
 pub fn write(handle: u64, data: &[u8]) -> KernelResult<usize> {
-    let mut table = OPEN_FILES.lock();
-    let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
+    // Snapshot, then release: see `advance_offset` for why the table lock
+    // must not span the VFS call.
+    let (path, write_offset) = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
 
-    if file.is_directory {
-        return Err(KernelError::IsADirectory);
-    }
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
 
-    if !file.flags.is_writable() {
-        return Err(KernelError::PermissionDenied);
-    }
+        if !file.flags.is_writable() {
+            return Err(KernelError::PermissionDenied);
+        }
 
-    let write_offset = if file.flags.contains(OpenFlags::APPEND) {
-        file.size
-    } else {
-        file.offset
+        // APPEND writes land at the cached end of file. This was never
+        // atomic against another process writing the same file through a
+        // different handle — `OPEN_FILES` does not serialise the filesystem
+        // — so releasing the lock here loses no guarantee that existed.
+        // Real append atomicity has to come from the filesystem.
+        let write_offset = if file.flags.contains(OpenFlags::APPEND) {
+            file.size
+        } else {
+            file.offset
+        };
+
+        (file.path.clone(), write_offset)
     };
 
     // Write via VFS.
-    crate::fs::Vfs::write_at_resolved(&file.path, write_offset, data)?;
+    crate::fs::Vfs::write_at_resolved(&path, write_offset, data)?;
 
     let written = data.len();
 
-    // Update offset and cached size.
+    // Update offset and cached size. Both APPEND and non-APPEND leave the
+    // cursor at the end of what was just written.
     let new_end = write_offset.saturating_add(written as u64);
-    if !file.flags.contains(OpenFlags::APPEND) {
-        file.offset = new_end;
-    } else {
-        // APPEND: offset tracks end of file.
-        file.offset = new_end;
-    }
-    if new_end > file.size {
-        file.size = new_end;
+    if let Some(file) = OPEN_FILES.lock().get_mut(&handle) {
+        file.offset = file.offset.max(new_end);
+        if new_end > file.size {
+            file.size = new_end;
+        }
     }
 
     Ok(written)
@@ -644,21 +702,27 @@ pub fn write(handle: u64, data: &[u8]) -> KernelResult<usize> {
 ///   reading.
 /// - VFS errors propagated unchanged.
 pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> {
-    let table = OPEN_FILES.lock();
-    let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
-    if file.is_directory {
-        return Err(KernelError::IsADirectory);
-    }
-    if !file.flags.is_readable() {
-        return Err(KernelError::PermissionDenied);
-    }
-    if buf.is_empty() {
-        return Ok(0);
-    }
-    if offset >= file.size {
-        return Ok(0);
-    }
-    let data = crate::fs::Vfs::read_at_resolved(&file.path, offset, buf.len())?;
+    // Snapshot, then release: see `advance_offset` for why the table lock
+    // must not span the VFS call. `pread` touches no cursor, so unlike
+    // `read` there is nothing to write back afterwards.
+    let path = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
+        if !file.flags.is_readable() {
+            return Err(KernelError::PermissionDenied);
+        }
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if offset >= file.size {
+            return Ok(0);
+        }
+        file.path.clone()
+    };
+    let data = crate::fs::Vfs::read_at_resolved(&path, offset, buf.len())?;
     let copy_len = data.len().min(buf.len());
     if let Some(dest) = buf.get_mut(..copy_len) {
         if let Some(src) = data.get(..copy_len) {
@@ -724,22 +788,29 @@ pub fn read_at_uncached(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResul
 ///   writing.
 /// - VFS errors propagated unchanged.
 pub fn write_at(handle: u64, offset: u64, data: &[u8]) -> KernelResult<usize> {
-    let mut table = OPEN_FILES.lock();
-    let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
-    if file.is_directory {
-        return Err(KernelError::IsADirectory);
-    }
-    if !file.flags.is_writable() {
-        return Err(KernelError::PermissionDenied);
-    }
-    if data.is_empty() {
-        return Ok(0);
-    }
-    crate::fs::Vfs::write_at_resolved(&file.path, offset, data)?;
+    // Snapshot, then release: see `advance_offset` for why the table lock
+    // must not span the VFS call.
+    let path = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
+        if !file.flags.is_writable() {
+            return Err(KernelError::PermissionDenied);
+        }
+        if data.is_empty() {
+            return Ok(0);
+        }
+        file.path.clone()
+    };
+    crate::fs::Vfs::write_at_resolved(&path, offset, data)?;
     let written = data.len();
     let new_end = offset.saturating_add(written as u64);
-    if new_end > file.size {
-        file.size = new_end;
+    if let Some(file) = OPEN_FILES.lock().get_mut(&handle) {
+        if new_end > file.size {
+            file.size = new_end;
+        }
     }
     Ok(written)
 }
@@ -876,12 +947,17 @@ pub fn seek(handle: u64, from: SeekFrom) -> KernelResult<u64> {
 /// link count, block count).  Avoids a redundant user-side path
 /// lookup; the kernel already holds the resolved path for the handle.
 pub fn fstat(handle: u64) -> KernelResult<crate::fs::FileMeta> {
-    let table = OPEN_FILES.lock();
-    let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+    // Snapshot, then release: see `advance_offset` for why the table lock
+    // must not span the VFS call.
+    let path = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        file.path.clone()
+    };
 
     // metadata() follows symlinks, but an open handle already refers to
     // the resolved target, so this returns the correct underlying object.
-    crate::fs::Vfs::metadata_resolved(&file.path)
+    crate::fs::Vfs::metadata_resolved(&path)
 }
 
 /// Returns whether an open handle refers to a directory.
@@ -905,23 +981,31 @@ pub fn is_directory(handle: u64) -> bool {
 /// Updates the cached size and clamps the offset if it was
 /// beyond the new end-of-file.
 pub fn ftruncate(handle: u64, size: u64) -> KernelResult<()> {
-    let mut table = OPEN_FILES.lock();
-    let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
+    // Snapshot, then release: see `advance_offset` for why the table lock
+    // must not span the VFS call.
+    let path = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
 
-    if file.is_directory {
-        return Err(KernelError::IsADirectory);
-    }
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
 
-    if !file.flags.is_writable() {
-        return Err(KernelError::PermissionDenied);
-    }
+        if !file.flags.is_writable() {
+            return Err(KernelError::PermissionDenied);
+        }
 
-    crate::fs::Vfs::truncate_resolved(&file.path, size)?;
+        file.path.clone()
+    };
 
-    file.size = size;
-    // Clamp offset: if the cursor was beyond the new EOF, move it back.
-    if file.offset > size {
-        file.offset = size;
+    crate::fs::Vfs::truncate_resolved(&path, size)?;
+
+    if let Some(file) = OPEN_FILES.lock().get_mut(&handle) {
+        file.size = size;
+        // Clamp offset: if the cursor was beyond the new EOF, move it back.
+        if file.offset > size {
+            file.offset = size;
+        }
     }
 
     Ok(())
@@ -1122,13 +1206,31 @@ fn allocate_dir_handle(path: PathBuf, flags: OpenFlags) -> KernelResult<u64> {
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[fs::handle] Running self-test...");
 
-    // Try to create a test file.  If no FS is mounted, skip.
+    // Sections that could not run, reported next to the closing line rather
+    // than only where they happen — see `selftest::Skips`.
+    let mut skips = crate::fs::selftest::Skips::new();
+
     let test_path = "/handle_test.txt";
     let test_data = b"Hello from handle test!";
 
-    if crate::fs::Vfs::write_file(test_path, test_data).is_err() {
-        crate::serial_println!("[fs::handle] Self-test SKIPPED (no FS mounted)");
+    // A suite may decline to run when its environment lacks a precondition,
+    // but the precondition has to be something it looked up.  This was
+    // `if write_file(..).is_err() { SKIPPED; return Ok(()) }`, which reads as
+    // "no filesystem is mounted" and means "the write failed for any reason
+    // whatsoever" — a permission gate refusing it, a full disk, a bug in the
+    // write path.  Every one of those silently deleted all twenty-one
+    // sections below and returned success.
+    if crate::fs::Vfs::mounts().is_empty() {
+        crate::serial_println!("[fs::handle] Self-test SKIPPED (no filesystem mounted)");
         return Ok(());
+    }
+    if let Err(e) = crate::fs::Vfs::write_file(test_path, test_data) {
+        crate::serial_println!(
+            "[fs::handle]   FAIL: a filesystem is mounted but writing {} failed: {:?}",
+            test_path,
+            e
+        );
+        return Err(KernelError::InternalError);
     }
 
     // 1. Open for reading.
@@ -1420,7 +1522,14 @@ pub fn self_test() -> KernelResult<()> {
     crate::fs::Vfs::remove(dir_path).ok();
     crate::fs::Vfs::remove(file_outside).ok();
 
-    if crate::fs::Vfs::mkdir(dir_path).is_ok() {
+    let dir_ready = crate::selftest_setup!(
+        skips,
+        "[fs::handle]",
+        "directory handle ops",
+        "no directory support",
+        crate::fs::Vfs::mkdir(dir_path),
+    );
+    if dir_ready {
         crate::fs::Vfs::write_file(file_a, b"a")?;
         crate::fs::Vfs::write_file(file_b, b"b")?;
         crate::fs::Vfs::write_file(file_outside, b"o")?;
@@ -1555,8 +1664,6 @@ pub fn self_test() -> KernelResult<()> {
         crate::fs::Vfs::remove(file_outside).ok();
 
         crate::serial_println!("[fs::handle]   directory handle ops: OK");
-    } else {
-        crate::serial_println!("[fs::handle]   directory handle test SKIPPED (mkdir failed)");
     }
 
     // 16. O_EXCL — exclusive create semantics.
@@ -1637,7 +1744,14 @@ pub fn self_test() -> KernelResult<()> {
     crate::fs::Vfs::remove(nf_link).ok();
     crate::fs::Vfs::remove(nf_target).ok();
     crate::fs::Vfs::write_file(nf_target, b"nofollow target")?;
-    if crate::fs::Vfs::symlink(nf_link, nf_target).is_ok() {
+    let nf_ready = crate::selftest_setup!(
+        skips,
+        "[fs::handle]",
+        "O_NOFOLLOW final-symlink guard",
+        "no symlink support",
+        crate::fs::Vfs::symlink(nf_link, nf_target),
+    );
+    if nf_ready {
         // (a) without NOFOLLOW the symlink resolves to the target.
         let hnf = open(nf_link, OpenFlags::READ)?;
         close(hnf)?;
@@ -1665,7 +1779,6 @@ pub fn self_test() -> KernelResult<()> {
         crate::serial_println!("[fs::handle]   O_NOFOLLOW final-symlink guard: OK");
     } else {
         crate::fs::Vfs::remove(nf_target).ok();
-        crate::serial_println!("[fs::handle]   O_NOFOLLOW test SKIPPED (no symlink support)");
     }
 
     // 18. NO_SYMLINKS (openat2 RESOLVE_NO_SYMLINKS) — refuse a symlink in ANY
@@ -1690,10 +1803,16 @@ pub fn self_test() -> KernelResult<()> {
     crate::fs::Vfs::remove(ns_dirlink).ok();
     crate::fs::Vfs::remove(ns_file).ok();
     crate::fs::Vfs::rmdir(ns_dir).ok();
-    let ns_ready = crate::fs::Vfs::mkdir(ns_dir).is_ok()
-        && crate::fs::Vfs::write_file(ns_file, b"nsym").is_ok()
-        && crate::fs::Vfs::symlink(ns_dirlink, ns_dir).is_ok()
-        && crate::fs::Vfs::symlink(ns_flink, ns_file).is_ok();
+    let ns_ready = crate::selftest_setup!(
+        skips,
+        "[fs::handle]",
+        "NO_SYMLINKS any-component guard",
+        "no mkdir/symlink support",
+        crate::fs::Vfs::mkdir(ns_dir),
+        crate::fs::Vfs::write_file(ns_file, b"nsym"),
+        crate::fs::Vfs::symlink(ns_dirlink, ns_dir),
+        crate::fs::Vfs::symlink(ns_flink, ns_file),
+    );
     if ns_ready {
         // Local cleanup helper for the early-return failure paths.
         let cleanup = || {
@@ -1769,9 +1888,6 @@ pub fn self_test() -> KernelResult<()> {
         crate::fs::Vfs::remove(ns_dirlink).ok();
         crate::fs::Vfs::remove(ns_file).ok();
         crate::fs::Vfs::rmdir(ns_dir).ok();
-        crate::serial_println!(
-            "[fs::handle]   NO_SYMLINKS test SKIPPED (no mkdir/symlink support)"
-        );
     }
 
     // -- §19: no-follow chown/times operate on the LINK inode, not target --
@@ -1785,11 +1901,21 @@ pub fn self_test() -> KernelResult<()> {
     let nfo_link = "/handle_nfo_link";
     crate::fs::Vfs::remove(nfo_link).ok();
     crate::fs::Vfs::remove(nfo_target).ok();
-    let nfo_ready = crate::fs::Vfs::write_file(nfo_target, b"nfo").is_ok()
-        && crate::fs::Vfs::symlink(nfo_link, nfo_target).is_ok()
+    // `set_owner` and `set_owner_no_follow` here are both entry points that
+    // `vfs::check_path_access` gates.  Under the old `.is_ok()` chain, a gate
+    // that started refusing them would have switched off precisely the test
+    // that noticed, and the suite would still have printed PASSED.
+    let nfo_ready = crate::selftest_setup!(
+        skips,
+        "[fs::handle]",
+        "no-follow chown targets link inode",
+        "no symlink/chown support",
+        crate::fs::Vfs::write_file(nfo_target, b"nfo"),
+        crate::fs::Vfs::symlink(nfo_link, nfo_target),
         // Seed distinct baseline owners so a mistaken follow is detectable.
-        && crate::fs::Vfs::set_owner(nfo_target, 1000, 1000).is_ok()
-        && crate::fs::Vfs::set_owner_no_follow(nfo_link, 1000, 1000).is_ok();
+        crate::fs::Vfs::set_owner(nfo_target, 1000, 1000),
+        crate::fs::Vfs::set_owner_no_follow(nfo_link, 1000, 1000),
+    );
     if nfo_ready {
         let nfo_cleanup = || {
             crate::fs::Vfs::remove(nfo_link).ok();
@@ -1845,9 +1971,6 @@ pub fn self_test() -> KernelResult<()> {
     } else {
         crate::fs::Vfs::remove(nfo_link).ok();
         crate::fs::Vfs::remove(nfo_target).ok();
-        crate::serial_println!(
-            "[fs::handle]   no-follow chown test SKIPPED (no symlink/chown support)"
-        );
     }
 
     // -- §20: no-follow xattr operate on the LINK inode, not target --
@@ -1865,10 +1988,16 @@ pub fn self_test() -> KernelResult<()> {
     let nfx_key = "user.nfx";
     crate::fs::Vfs::remove(nfx_link).ok();
     crate::fs::Vfs::remove(nfx_target).ok();
-    let nfx_ready = crate::fs::Vfs::write_file(nfx_target, b"nfx").is_ok()
-        && crate::fs::Vfs::symlink(nfx_link, nfx_target).is_ok()
+    let nfx_ready = crate::selftest_setup!(
+        skips,
+        "[fs::handle]",
+        "no-follow xattr targets link inode",
+        "no symlink/xattr support",
+        crate::fs::Vfs::write_file(nfx_target, b"nfx"),
+        crate::fs::Vfs::symlink(nfx_link, nfx_target),
         // Probe xattr support on the link itself; skip if unsupported.
-        && crate::fs::Vfs::set_xattr_no_follow(nfx_link, nfx_key, b"link").is_ok();
+        crate::fs::Vfs::set_xattr_no_follow(nfx_link, nfx_key, b"link"),
+    );
     if nfx_ready {
         let nfx_cleanup = || {
             crate::fs::Vfs::remove(nfx_link).ok();
@@ -1957,9 +2086,6 @@ pub fn self_test() -> KernelResult<()> {
     } else {
         crate::fs::Vfs::remove(nfx_link).ok();
         crate::fs::Vfs::remove(nfx_target).ok();
-        crate::serial_println!(
-            "[fs::handle]   no-follow xattr test SKIPPED (no symlink/xattr support)"
-        );
     }
 
     // -- §21: no-follow chmod operates on the LINK inode, not target --
@@ -1973,11 +2099,17 @@ pub fn self_test() -> KernelResult<()> {
     let nfp_link = "/handle_nfp_link";
     crate::fs::Vfs::remove(nfp_link).ok();
     crate::fs::Vfs::remove(nfp_target).ok();
-    let nfp_ready = crate::fs::Vfs::write_file(nfp_target, b"nfp").is_ok()
-        && crate::fs::Vfs::symlink(nfp_link, nfp_target).is_ok()
+    let nfp_ready = crate::selftest_setup!(
+        skips,
+        "[fs::handle]",
+        "no-follow chmod targets link inode",
+        "no symlink/chmod support",
+        crate::fs::Vfs::write_file(nfp_target, b"nfp"),
+        crate::fs::Vfs::symlink(nfp_link, nfp_target),
         // Seed distinct baseline modes so a mistaken follow is detectable.
-        && crate::fs::Vfs::set_permissions(nfp_target, 0o644).is_ok()
-        && crate::fs::Vfs::set_permissions_no_follow(nfp_link, 0o644).is_ok();
+        crate::fs::Vfs::set_permissions(nfp_target, 0o644),
+        crate::fs::Vfs::set_permissions_no_follow(nfp_link, 0o644),
+    );
     if nfp_ready {
         let nfp_cleanup = || {
             crate::fs::Vfs::remove(nfp_link).ok();
@@ -2029,9 +2161,6 @@ pub fn self_test() -> KernelResult<()> {
     } else {
         crate::fs::Vfs::remove(nfp_link).ok();
         crate::fs::Vfs::remove(nfp_target).ok();
-        crate::serial_println!(
-            "[fs::handle]   no-follow chmod test SKIPPED (no symlink/chmod support)"
-        );
     }
 
     // Cleanup test files.
@@ -2039,6 +2168,7 @@ pub fn self_test() -> KernelResult<()> {
     crate::fs::Vfs::remove(test_path).ok();
     crate::fs::Vfs::remove("/handle_write_test.txt").ok();
 
-    crate::serial_println!("[fs::handle] Self-test PASSED");
+    skips.report("[fs::handle]");
+    crate::serial_println!("[fs::handle] Self-test PASSED{}", skips.suffix());
     Ok(())
 }

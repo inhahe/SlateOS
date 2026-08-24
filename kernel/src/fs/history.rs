@@ -528,6 +528,7 @@ pub fn list_tracked(prefix: Option<&Path>, max: usize) -> Vec<(PathBuf, usize)> 
 /// Self-test for the file version history module.
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[history] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // --- Test 1: record and retrieve version ---
     {
@@ -536,10 +537,26 @@ pub fn self_test() -> KernelResult<()> {
         let test_path = "/tmp/_history_test_1";
         let original = b"Original content v1";
 
-        if let Err(e) = Vfs::write_file(test_path, original) {
-            serial_println!("[history]   SKIP: cannot write test file: {:?}", e);
-            serial_println!("[history] Self-test skipped (no writable filesystem).");
+        // Ask the mount table whether /tmp exists, rather than inferring it
+        // from a failed write. "The write failed" is true of a missing mount,
+        // but it is equally true of a permission gate wrongly denying us, a
+        // full disk, or the versioning bug this suite exists to catch -- and
+        // under the old form every one of those skipped all eight tests and
+        // returned success.
+        if !Vfs::mounts()
+            .iter()
+            .any(|(p, _)| p.as_path() == crate::fs::path::Path::new("/tmp"))
+        {
+            serial_println!("[history] Self-test skipped (/tmp not mounted).");
             return Ok(());
+        }
+        if let Err(e) = Vfs::write_file(test_path, original) {
+            serial_println!(
+                "[history]   FAIL: /tmp is mounted but writing {} failed: {:?}",
+                test_path,
+                e
+            );
+            return Err(KernelError::InternalError);
         }
 
         // Record the version.
@@ -740,14 +757,27 @@ pub fn self_test() -> KernelResult<()> {
         // Clear any prior history for this path.
         clear_file(test_path);
 
-        // Write v1 — first write, no prior file to version.
-        if let Err(e) = Vfs::write_file(test_path, v1) {
-            serial_println!(
-                "[history]   SKIP auto-version test: cannot write to root: {:?}",
-                e
-            );
+        // Whether `/` is mounted read-write is a fact the mount table holds;
+        // a failed write is not that fact. The old form skipped this section
+        // on any error at all, which included the auto-version bug it tests.
+        let root_rw = Vfs::mounts_full()
+            .iter()
+            .any(|(p, _, opts)| p.as_path() == crate::fs::path::Path::new("/") && !opts.read_only);
+        if !root_rw {
+            skips.record("auto-version on write", "/ is not mounted read-write");
+            serial_println!("[history]   SKIP auto-version test: / not mounted read-write");
             set_auto_version(old_auto);
         } else {
+            // Write v1 — first write, no prior file to version.
+            if let Err(e) = Vfs::write_file(test_path, v1) {
+                serial_println!(
+                    "[history]   FAIL: / is mounted read-write but writing {} failed: {:?}",
+                    test_path,
+                    e
+                );
+                set_auto_version(old_auto);
+                return Err(KernelError::InternalError);
+            }
             // History should be empty (no prior content to save).
             let h1 = get_history(test_path);
             // Write v2 — this should auto-record v1 before overwriting.
@@ -838,6 +868,7 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[history]   path filter OK");
     }
 
-    serial_println!("[history] Self-test passed (8 tests).");
+    skips.report("[history]");
+    serial_println!("[history] Self-test passed (8 tests){}.", skips.suffix());
     Ok(())
 }

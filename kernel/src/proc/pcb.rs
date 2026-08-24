@@ -4622,6 +4622,15 @@ impl ExitInfo {
     }
 }
 
+/// What [`try_reap`] carries out of the `PROCESS_TABLE` lock: the exit status
+/// to hand back, the address-space root to tear down, and the capabilities to
+/// release.
+///
+/// Named rather than written inline because the teardown must happen *outside*
+/// the lock — the tuple exists only to cross that boundary, and a three-element
+/// nested tuple written at the `let` gives no hint which element is which.
+type ReapedProcess = (ExitInfo, u64, Vec<(crate::cap::ResourceType, u64)>);
+
 /// Try to reap (wait for) a zombie child process.
 ///
 /// If the child process `child_pid` is a zombie:
@@ -4640,7 +4649,7 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
     // Phase 1: Under PROCESS_TABLE lock — verify state, extract
     // process info, and remove from table.  We must extract all
     // fields needed for cleanup before dropping the lock.
-    let reaped: Option<(ExitInfo, u64, Vec<(crate::cap::ResourceType, u64)>)>;
+    let reaped: Option<ReapedProcess>;
 
     {
         let mut table = PROCESS_TABLE.lock();

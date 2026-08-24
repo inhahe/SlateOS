@@ -66462,7 +66462,7 @@ level. Noted rather than changed, so a future reader who spots it knows it was
 seen and judged, not missed.
 
 
-## Four limitations left behind by wiring libc's pty family to syscalls 544-556 (lane B, 2026-08-23)
+## Four limitations left behind by wiring libc's pty family to syscalls 544-556 (lane B, 2026-08-23) -- three FIXED 2026-08-24
 
 All four were found while landing
 `requests/a-b-pty-the-tty-layer-is-now-n-devices-and-a-pty-object-exists.md`
@@ -66472,7 +66472,14 @@ libc had to pick the least-wrong answer. Three are filed to lane A as
 `requests/b-a-pty-gaps-master-inheritance-and-readable-bytes.md`; the
 fourth is ours and is a non-issue by design.
 
-### TD-B-PTY-MASTER-CANNOT-BE-INHERITED-ACROSS-SPAWN -- OPEN, blocking for one shape of program
+**All three filed gaps were closed by lane A on 2026-08-24**
+(`requests/a-b-all-three-pty-gaps-closed.md`) and wired up in libc the same
+day. The entries below are kept in full rather than deleted: each one records
+*why* the least-wrong answer was chosen, and the fix notes appended to them
+record why the obvious fix was in two of the three cases not the one that
+landed. The fourth entry remains open and is expected to stay that way.
+
+### TD-B-PTY-MASTER-CANNOT-BE-INHERITED-ACROSS-SPAWN -- FIXED 2026-08-24
 
 **Where:** `posix/src/spawn.rs`, `build_fd_map`.
 
@@ -66501,7 +66508,32 @@ refcount bump in `SYS_PROCESS_SPAWN`. Note for whoever implements it that
 this must *not* be spelled as a blind `SYS_PTY_DUP` -- see the next entry
 but one for why libc's own `dup` does not call it either.
 
-### TD-B-PTY-FIONREAD-IS-A-BOOLEAN -- OPEN, degrades but does not break
+**Fixed 2026-08-24**, exactly as described. Lane A added
+`fd_handle_type::PTY = 7` -- one constant for both ends, because `PtyHandle`
+is `(tty_id << 1) | end` and a second constant would only create a place for
+the two encodings to disagree -- and spawn dups through `pty::dup()`, which
+refcounts the end. libc's side: the filter in `build_fd_map` is gone,
+`kind_to_handle_type` maps `PtyMaster` to `PTY`, and the reverse direction
+grew `handle_type_to_kind_for(handle_type, handle)`.
+
+**The reverse direction was the part that could have been got wrong.** One
+wire type names either end, so `handle_type_to_kind` -- which sees only the
+type byte -- cannot decode it. Left as it was, a child would have rebuilt an
+inherited master as a `File` and the file layer would have misread the handle
+number, which is the precise hazard this entry warned about, merely relocated
+from the parent to the child. It now reads the handle's low bit. Rebuilding a
+master as a *slave* would have been worse still: the emulator's own keystrokes
+would come back to it.
+
+Three things did not change and are pinned by tests so they do not look like
+oversights: `PtySlave` still travels as `CONSOLE` (exact, not approximate --
+`login_tty` has already made it the child's controlling terminal); nothing on
+this path calls `SYS_PTY_DUP`, and `dup` must keep not calling it, because
+spawn takes one reference per `fd_map` entry; and the entry is ownership-gated
+kernel-side, so a hand-built `fd_map` naming a master the caller does not hold
+fails the whole spawn rather than being silently dropped.
+
+### TD-B-PTY-FIONREAD-IS-A-BOOLEAN -- FIXED 2026-08-24
 
 **Where:** `posix/src/ioctl.rs`, `handle_fionread`, the
 `PtyMaster | PtySlave` arm.
@@ -66526,7 +66558,53 @@ using `FIONREAD` only to test emptiness -- the common case, and what
 count. If it does not, this entry should be closed "won't fix" rather than
 left open forever; that is stated in the request to lane A.
 
-### TD-B-PTY-MASTER-HAS-NO-FOREGROUND-GROUP -- OPEN, narrow
+**Fixed 2026-08-24 -- and not as the "won't fix" that was offered.** The ring
+keeps `len` as a field, maintained by every write and read regardless, so the
+count is O(1) and was free to expose. `SYS_PTY_READABLE_BYTES` = 869.
+
+How exact the answer is depends on the end, and libc states it rather than
+leaving callers to assume:
+
+| End | Mode | Answer |
+|---|---|---|
+| master | -- | exact |
+| slave | raw | exact |
+| slave | canonical | upper bound |
+| either | anything | **zero is exact** |
+
+The master's count is of *post*-discipline bytes, i.e. after `ONLCR`, so a
+four-byte slave write containing one newline reports 5 -- which is the number a
+reader must size by to avoid stranding the `\r` to be misread as the start of
+the next line. The canonical slave's is of *pre*-discipline bytes: the line
+editor has not run, so an erase will consume a byte rather than deliver one,
+and an unterminated line delivers nothing until its newline arrives. Counting
+exactly would mean running the editor twice, and the second run would see
+different input.
+
+Only the upper bound is ever wrong and it is harmless, for the same reason the
+old boolean was: `read()` returns what is actually there regardless. The
+property that made the boolean merely degraded rather than broken -- **zero is
+exact** -- survives intact.
+
+A hung-up end with an empty buffer answers 0 rather than failing, which
+deliberately differs from `SYS_PTY_POLL`, where hangup sets the readable bit:
+"would a read return immediately" is yes there, but "how many bytes are there"
+is none, and `FIONREAD`'s caller believes the number.
+
+libc clamps a negative return to 0 rather than propagating it. `FIONREAD` has
+no way to say "unknown", and a negative stored into a caller's unsigned length
+is an enormous positive -- the one way this call could do real damage.
+
+**Lane A also found and fixed a live hang while implementing it**, which is
+worth knowing because it explains a class of symptom: a canonical line is
+delivered as a unit, so a reader whose buffer is smaller than the line leaves
+the remainder in the *device's* pending buffer rather than any ring, and
+`pty::readable()` consulted only the ring. A slave holding four undelivered
+bytes of `"hello\n"` reported not readable, and went on doing so forever if
+the master sent nothing further. Any libc test that did a short `read` on a
+slave and then polled was racing this. Nothing in libc needed to change.
+
+### TD-B-PTY-MASTER-HAS-NO-FOREGROUND-GROUP -- FIXED 2026-08-24
 
 **Where:** `posix/src/ioctl.rs`, `is_pgrp_terminal`.
 
@@ -66546,6 +66624,54 @@ of an omission someone later "fixes".
 
 **Proper fix:** 537/538 take a terminal under the same convention as
 539/553-556.
+
+**Fixed 2026-08-24 -- but not by that fix, which turns out to be
+unimplementable.** New numbers instead: `SYS_PTY_GET_PGRP` = 870,
+`SYS_PTY_SET_PGRP` = 871.
+
+The reason the requested shape could not work is worth recording, because it is
+not a reason either lane guessed and it generalises to every other syscall
+somebody proposes widening:
+
+> **libc invokes 537 as `syscall0`, which never writes `rdi`.**
+
+Giving `arg0` a meaning would therefore not read a zero. It would read whatever
+the caller happened to leave in `rdi` -- under the naming convention that is
+`0` ("my terminal") sometimes, `1` (reserved, refused) sometimes, and a live
+pty handle naming an unrelated terminal the rest of the time. A compatibility
+break that fails *nondeterministically*, varying with the caller's register
+allocation, is one nobody would ever have diagnosed. 538 has the same problem
+one argument along: its `arg0` is the pgid, so the terminal would have to move
+to `arg1`, which `syscall1` likewise never writes.
+
+So 537/538 are unchanged and remain correct for the console and the slave, and
+`is_pgrp_terminal` still names exactly those two -- its meaning narrowed from
+"may the process-group ioctls act on this" to "may they reach it *via
+537/538*". A master now takes the other route.
+
+Three properties of the new pair that libc depends on and states at the
+constants:
+
+* **`arg0 == 0` is `ENOTTY`, not the console.** Unlike 553-556, "my terminal"
+  is not a useful reading: a daemon has no foreground process group, and
+  answering with the console's would report a group it has no relationship to
+  as its own.
+* **A named terminal nobody has claimed is also `ENOTTY`.** A pty whose slave
+  has not yet run `TIOCSCTTY` genuinely has no foreground group, and a title-bar
+  caller must read that as "nothing is running in there yet" rather than
+  receive a `0` it might try to signal.
+* **The group is validated against the terminal's session, not the caller's**,
+  and `SIGTTOU` follows the terminal rather than the caller. For a master those
+  sessions differ by construction, so validating against the caller would be
+  simultaneously too strict and too lax -- rejecting every group actually
+  running on the pty, and accepting groups from the emulator's own unrelated
+  session, which is the terminal-theft case the POSIX rule exists to prevent,
+  merely pointed the other way.
+
+Note the argument order differs between the two pairs: 538 takes the pgid as
+`arg0`, while 871 takes the terminal as `arg0` and the pgid as `arg1`. libc
+rejects a non-positive pgid before the call, since the value is widened into a
+`u64` and a negative would sign-extend into an enormous group id.
 
 ### The slave cannot be reopened by name after its first claim -- WORKS AS DESIGNED, recorded so it is not mistaken for a bug
 
@@ -66899,8 +67025,11 @@ without doing step 1 and 2 first.
 
 ## TD-A-ACL-NEVER-ENFORCED — POSIX ACLs are stored, listed and formatted, but no VFS operation ever consults them (lane A, 2026-08-23)
 
-**Status:** open. Discovered while converting `kernel/src/fs/acl.rs` to
-byte-clean paths (design-decisions.md §261).
+**Status: RESOLVED 2026-08-23** in `f838b82cb` (the gate),
+`f69f16638` (the checker that keeps it complete) and `befd76f9e` (making
+the gate's fast path affordable). Discovered while converting
+`kernel/src/fs/acl.rs` to byte-clean paths (design-decisions.md §261).
+The original report is kept below, followed by what was actually built.
 
 `fs::acl::check_access` — the function that implements the whole POSIX
 1003.1e evaluation algorithm, all five steps of it — **has no production
@@ -66958,6 +67087,64 @@ operation uses:
 permission checking, or any task that claims POSIX ACL support is done.
 Until then, `getfacl`/`setfacl` should be understood as a database editor
 for a database nothing reads.
+
+### Resolution (2026-08-23)
+
+All four numbered steps above were followed, and step 1's parenthetical
+turned out to be the larger half of the work.
+
+**There was no single point, and the reason there wasn't is instructive.**
+`cap::file_tags::check_access` — the *other* path check, mandatory access
+control by capability tag — was called from sixteen hand-written sites in
+`fs/vfs.rs` plus a seventeenth hand-copied into `fs/handle.rs`. It was also
+*missing* from roughly twenty more entry points: every xattr getter and
+setter, `chmod`/`chown`/`utimes` and their `no_follow` twins, `symlink`,
+`readlink`, `lstat`, `lmetadata`, `truncate_resolved`, `fallocate`,
+`file_identity_resolved` and `readdir_at_resolved`. So the sprinkled hook
+had already decayed exactly the way step 1 predicted a new one would, and
+adding an eighteenth sprinkle would have decayed the same way. Both checks
+now live in one function:
+
+```rust
+check_path_access(path, PathAccess::{Read, Write, Execute, Metadata})
+```
+
+**`PathAccess::Metadata` requires no ACL permission in either direction.**
+That is a deliberate deviation from "gate everything", and both halves of
+it match POSIX: `stat` depends on search permission along the path rather
+than read permission of the target, so requiring `r` would make a file an
+ACL had deliberately left visible-but-unreadable also un-`stat`-able; and
+POSIX ACLs govern a file's *data*, not its inode attributes, so requiring
+`w` would make a mode-`444` file un-`chmod`-able by its own owner.
+Capability tags still apply to metadata operations, since those are
+mandatory access control and deny reaching the object at all.
+
+**The recursion hazard step 2 implies.** The ACL check needs the file's
+owning uid/gid, which means the gate reads metadata — so it must use
+`Vfs::metadata_resolved` (ungated) and never `Vfs::metadata` (gated). The
+checker asserts this as a named rule rather than leaving it to memory.
+
+**Step 4 could not be done as written, and what replaced it is stronger.**
+An end-to-end `kshell` test is impossible from inside the kernel: self-tests
+run as a kernel task with no owning process, so `check_path_access` bypasses
+before any check runs, and a test driven through `Vfs::read_file` could only
+ever observe "allowed" — it would keep passing if the ACL half were deleted
+again. The decision logic was therefore split into a pure
+`path_access_verdict(path, uid, gid, supplementary_gids, want)` that takes
+credentials explicitly, and `vfs::acl_gate_self_test` asserts the **deny**
+direction against it first, exactly as the report demanded. The *call sites*
+— which a unit test cannot cover — are held by
+`scripts/check-vfs-permission-gate.py`, run as a pre-build gate in
+`boot-test.sh`. It is the right tool for this specific failure precisely
+because both checks fail open: a forgotten gate produces no symptom at all
+at runtime, so only a source-level invariant can see it.
+
+**Fast path.** The gate asks `acl::count()` and `file_tags::count()` before
+doing anything, and on a normal system both are zero. `acl.rs` gained an
+atomic count for this; `file_tags::count()` was a mutex plus an O(n) scan of
+the whole table, which was affordable at seventeen call sites and is not at
+thirty-five on a lookup path budgeted at 200–500 ns per component, so it
+gained the same treatment (`befd76f9e`). See design-decisions.md §290.
 
 ---
 
@@ -68313,6 +68500,315 @@ actually applied, and so on. `estimated_bytes` should become the result
 of a dry-run walk rather than a constant, so that estimate and result can
 disagree — which is the whole point of having both.
 
+## FIXED-A-THE-OPEN-FILE-TABLE-WAS-HELD-ACROSS-EVERY-FILE-READ — and 31 more places do the same thing
+
+**In short:** two parts of the kernel took the same two locks in opposite
+orders, which is the textbook way to freeze a machine solid: CPU 1 holds lock
+A and waits for B, CPU 2 holds B and waits for A, and neither ever moves
+again. One of the two orders was on the path of *every single file read and
+write* in the system. It is fixed; a new checker found 31 more places with
+the same shape, and those are now fixed too. The checker is a build gate, so
+the 32nd will be caught before it ships rather than after.
+
+**Lane A. Found 2026-08-23, by lockdep, during boot batch 32.**
+
+### What the two locks are
+
+- **The filesystem lock** — one per mounted filesystem. `Vfs::readdir` takes
+  it and then asks the filesystem to list a directory *while still holding
+  it*. For `/proc` that listing is not a lookup, it is a *computation*:
+  procfs makes its content up on demand, and doing so reaches into
+  half the kernel — the open-file table, the process list, network state.
+  So the order that really happens is **filesystem lock, then some
+  module's own lock**.
+
+- **`OPEN_FILES`** — the table of every open file handle, in
+  `kernel/src/fs/handle.rs`. `read`, `write`, `read_at`, `write_at`,
+  `fstat` and `ftruncate` all locked it and *kept it locked* while calling
+  into the VFS, which takes the filesystem lock. That is **module's own
+  lock, then filesystem lock** — the same two locks, backwards.
+
+### Why it went unnoticed
+
+The bug is older than the tooling that found it. Lockdep — the kernel's
+lock-order validator — had been reporting this exact inversion for some
+time, but it could only say *which types* were locked, because both sites
+resolved to `kernel::sync::Mutex<T>::lock`, the generic function every lock
+goes through. Commit `38f1d738e` taught it to walk one stack frame further
+and print the *caller*, and the very next boot named both sides outright:
+
+```
+[lockdep]     held taken at:  ...Mutex<T>::lock+0x6f
+[lockdep]                via: ...fs::vfs::Vfs::readdir+0x2ec
+[lockdep]     acquiring at:   ...Mutex<T>::lock+0x6f
+[lockdep]                via: ...fs::handle::list_handles+0x2c
+```
+
+`read`'s own comment had admitted the problem in the meantime: *"we hold the
+lock across the VFS call — acceptable for early dev but should be improved."*
+And three functions in the same file — `close`, `read_at_uncached`,
+`read_dir_at` — already did it correctly. Six wrong, three right, in one
+file, is what a rule with nothing enforcing it looks like after a while.
+
+### The fix, and its shape
+
+Commit `2b06e1070`. Snapshot what the VFS call needs (the path) under the
+lock, drop the guard, make the call, then retake the lock and look the handle
+up *again* by its number to write back the cursor and cached size. Never keep
+a reference into the map across the call — the map may have been rebalanced,
+and the handle may have been closed outright, which is not an error, since
+the bytes really were transferred.
+
+One deliberate semantic change: the cursor now advances with `max` rather
+than `+=`. Two threads sharing one handle get an arbitrary interleaving
+either way — Linux guards only the position update itself, with `f_pos_lock`,
+and offers no more — but `max` keeps the cursor monotone, so a reader never
+re-reads bytes it has already returned and a concurrent thread's progress is
+never counted twice.
+
+A side effect worth naming: file I/O no longer serialises the whole system
+behind one global mutex.
+
+### The other 31 — Status: FIXED, and now gated
+
+`scripts/check-vfs-under-lock.py` (commit `7bc19a853`) enforces the rule
+statically: *do not enter the VFS while holding a module-global lock.* It
+shares `check-recursive-locks.py`'s parser, and it reported 31 further sites
+when it was written. All 31 are fixed:
+
+| File | Locks that were held across a VFS call | Fixed in |
+|---|---|---|
+| `fs/changetrack.rs` | `STATE` × 7 (`init`, and six via `ensure_init`) | `568306227` |
+| `fs/fileselect.rs` | `SETS` × 6 (via `make_item`) | `caaa2dcb3` |
+| `fs/filepicker.rs` | `PICKER` × 4 (via `build_listing`) | `6ac16124d` |
+| `fs/tags.rs` | `INDEX` × 2 (via `read_tags`) | `97f63de75` |
+| `logpersist.rs` | `STATE` × 3 (`flush`, `init_with_config`, `prune`) | `eb843d19d` |
+| `fs/journal.rs`, `fs/mount_ns.rs`, `fs/rundialog.rs` | `JOURNAL`, `NAMESPACES`, `STATE` | `5606ba9bc` |
+| `fs/overlay.rs` | `OVERLAYS` × 2 (`copy_up`, `which_layer`) | `3c157b9be` |
+| `fs/sidebar.rs` | `HIDDEN_SECTIONS`, `EXPANDED_STATE` (`build`) | `ec9c5ff54` |
+| `net/tftp.rs` | `SERVER_STATE` (via `handle_rrq`, and two more) | `d750e2d28` |
+| `net/ssh.rs` | `STATE` (via `process_message`) | `48acb081f` |
+
+Not all were equally live — several were `init` paths that run once at boot
+with nothing racing them — but each was a standing invitation for the next
+caller to be a live one, and the checker cannot tell the difference.
+
+Most took the shape `fs::handle`'s fix did: snapshot under the lock, release,
+call, retake and re-look-up by key. Three did not fit that mould and are
+worth knowing about:
+
+- **`logpersist.rs`** — its `STATE` was doing two jobs, guarding bookkeeping
+  *and* serialising flushes against each other. Only the first survives being
+  released across the writes, so the second moved to a `flushing` flag with an
+  RAII `FlushGuard`.
+- **`net/tftp.rs`** and **`net/ssh.rs`** — both tick functions held their
+  state lock top to bottom, which was also what stopped two CPUs ticking at
+  once. Same remedy: a `SERVER_TICKING` / `TICKING` flag with an RAII guard.
+  (The rate limiter above each one is *not* a substitute — its
+  load/compare/store is not atomic, so two CPUs can both pass it. That was
+  already true before these changes.)
+- **`net/ssh.rs`** additionally could not take its lock in bursts, because the
+  protocol state machine works through one `&mut Session` for its whole
+  duration. The session is *checked out* instead: `mem::replace`d out of its
+  slot, processed on the tick's stack, then moved back, with a placeholder
+  left behind flagged `checked_out` so `shutdown` does not send a disconnect
+  to its zeroed `tcp_handle` — which is a valid handle belonging to somebody
+  else.
+
+**Now a boot-test gate** (commit `a57da9164`), next to `check_recursive_locks`.
+It was deliberately not one during the sweep, because a gate then would have
+failed every build for a backlog rather than for a regression.
+
+One sharp edge for whoever trips it: the checker reports only the **first**
+VFS call under a given guard. `net/tftp.rs` was named once and had three.
+
+### Two unrelated bugs found in passing
+
+- **`logpersist::prune` deleted the newest log first.** It sorted paths
+  descending and popped, which takes the lexicographically *smallest* — and
+  for `combined.jsonl` plus its rotations that order is
+  `combined.1 < combined.2 < … < combined.jsonl`. So over the storage cap the
+  kernel discarded the most recent rotation and kept the stalest, and the gap
+  it left was the window immediately before the live file: the part anyone
+  diagnosing a crash reads first. String order was wrong a second way, too —
+  `.10` sorts between `.1` and `.2`. Fixed in `4de424aee` by carrying rotation
+  age as an explicit `u32` rather than recovering it from the filename. The
+  pre-existing `Test 6: Prune (empty)` passed just as happily with the order
+  reversed, so `Test 7` was added to actually pin it.
+- **TFTP counted a failed upload as a success.** `server_tick` wrote the
+  received file with `let _ =` and incremented `SERVER_COMPLETED` regardless,
+  so a full disk was indistinguishable from a completed transfer in both the
+  log and the stats. Fixed in `d750e2d28`. The same commit replaced the WRQ
+  existence probe — a full `read_file` whose result was dropped, i.e. a
+  file's worth of kernel heap per *rejected* request — with `Vfs::exists`.
+
+## TD-A-ASSERTIONS-THAT-A-CONSTANT-WOULD-PASS — the weak-proxy sweep (lane A, 2026-08-23)
+
+**Status:** all four known instances FIXED. Shape 3 (a test that skips itself
+and reports success) is now **CLOSED as a class** — swept tree-wide and held
+shut by a build gate; see the closing note at the end of this entry. Shapes 1,
+2 and 4 remain open as a class: their instances are fixed, but nothing stops a
+new one, because no mechanical check for them exists yet.
+
+A self-test assertion is only worth its line if there is a plausible way for
+the code under test to be wrong and still fail it. Four shapes recur here
+and none of them clear that bar:
+
+1. **`assert!(timestamp > 0)`.** Passes for a non-zero constant, for a value
+   stamped once at construction and never updated again, and for a reading
+   taken from a different clock. It fails only if the field is left at
+   exactly zero — which is the one wrong value a `hpet::elapsed_ns()` reading
+   is least likely to be. The fix is to bracket: read the clock either side
+   of the operation and require the stored value to fall inside the window.
+   - `kernel/src/fs/certmgr.rs` — `last_renewal_ns` (self-test 5). Fixed in
+     `33c40109a`; also now checks `not_before_ns`, stamped from the same
+     reading, and that `not_after_ns` follows it.
+   - `kernel/src/fs/sysrq.rs` — `last_triggered_ns` (self-test 3). Fixed in
+     the same commit.
+
+2. **A field written and never read.** `svcstart`'s `crash_history` collected
+   a ten-entry ring of crash timestamps on every crash report and no code
+   path — not `CrashInfo`, not `/proc/svcstart`, not `svcstart crashes`, not
+   a test — ever read it back. Write-only state cannot be wrong, so nothing
+   can notice when it stops being written. Fixed in `d4dff8c2a` by carrying
+   it on `CrashInfo`, rendering it, and asserting it in self-tests 4 and 5.
+
+3. **A test that skips itself and reports success.** `kernel/src/fs/index.rs`
+   printed `"[index]   (skipped VFS tests: /tmp not mounted)"` mid-run and
+   then `"[index] Self-test passed"` at the end. The last line is the one a
+   reader believes, so the suite went green having tested nothing. It was
+   dormant rather than harmless — `/tmp` *is* mounted today (see
+   `build/serial-batch32.txt` line 2190, `/tmp -> memfs`), so the branch was
+   not taken.
+
+   Fixed 2026-08-23. Two changes, and the second is the larger one:
+
+   - **The skip is now carried to the summary.** `self_test` collects the
+     names of sections it could not run and, if that list is non-empty,
+     prints `"Self-test passed with N section(s) SKIPPED"` followed by one
+     `SKIP:` line each — the shape `report_pathz_skips` in
+     `scripts/boot-test.sh` already uses. Test 5's zero-entry rebuild joined
+     the list for the same reason: its bookkeeping assertions ran, but the
+     thing the test is *for* — that a walk finds files and files them — did
+     not happen, and "rebuild OK (0 entries)" read as a pass.
+   - **The precondition is now asked, not inferred.** The gate was
+     `if Vfs::write_file(..).is_ok()`, which classifies *every* failure as
+     "/tmp is not mounted": a permission gate wrongly denying the write, a
+     full filesystem, a memfs bug. It would have skipped the very test that
+     caught them. It now consults the mount table — a fact — and once /tmp is
+     known mounted, a failing write is a reported failure with the error in
+     it, not a skip.
+
+   The general lesson for this class: a self-skipping test has *two* defects,
+   and fixing only the reporting leaves the worse one. The condition that
+   decides to skip must be a statement about the environment, never a
+   swallowed error from the code under test.
+
+4. **A sentinel that two different states share, guarded by an `if` with no
+   `else`.** `svcstart`'s `boot_start_ns`/`boot_end_ns` were bare `u64`s
+   initialised to `0` and compared only behind
+   `if st.boot_end_ns > st.boot_start_ns` at both display sites
+   (`svcstart.rs`, `kshell.rs:45849`). "Never booted", "boot still running"
+   and "boot died before its end stamp" all rendered identically: as the
+   absence of a line. Nothing asserted either field, so they could have
+   stopped being written entirely and no view and no test would have said so.
+
+   Fixed 2026-08-23. Both fields became `Option<u64>` — the encoding
+   `StartNode::started_at_ns` in the same file already used, and for the same
+   stated reason ("never started" and "started at uptime 0" are different
+   answers). A `BootDuration` enum (`NotStarted` / `InProgress` /
+   `Complete`) classifies the pair, `StartupStats::boot_duration()` returns
+   it, and `BootDuration::label()` renders *every* variant, so
+   `/proc/svcstart` and `svcstart stats` now always carry a `Boot time:`
+   line. `boot_services` also clears the end stamp on entry, so a second run
+   that dies partway can no longer pair its fresh start against the previous
+   run's end.
+
+   Self-test 11 asserts all three states, and asserts the completed one by
+   **bracketing**: it reads the clock either side of `boot_services()` and
+   requires both stamps to land inside that window. `stamp > 0` would have
+   passed for a constant, for a value written once at init, and for a reading
+   from another clock; only the window shows the stamps came from that call.
+
+**How to find more:** grep the self-tests for `> 0)` and for `is_some()` on a
+field whose *value* is the thing under test. The pattern to look for is an
+assertion whose truth follows from the code compiling rather than from the code
+working. (Shape 3 no longer needs a grep — see below.)
+
+---
+
+**Closing note, 2026-08-23 — shape 3 is swept and gated.**
+
+Shape 3 was the only one of the four with a mechanically checkable form, so it
+was swept to zero rather than left to grep. `scripts/check-selftest-skips.py`
+implements the two rules this entry states — *the precondition must be a fact
+the test looked up, and the skip must reach the line a reader believes* — and
+`scripts/boot-test.sh` now refuses to build on a finding. The final count is
+**802 files, 0 findings**.
+
+The sweep touched 23 files across five commits (`7c28d2395`, `d5b534e1a`,
+`ca7e96f59`, `4a38f346c`, `17a043a8a`/`256e11b30`/`8e873946f`/`9a8b1a817`).
+Three shared helpers now carry the pattern so it is not re-derived per call
+site, all in `kernel/src/fs/selftest.rs`: `Skips` (the ledger, whose `suffix()`
+appends ` — N section(s) SKIPPED` to the summary line), `classify()` (the
+`Ready`/`Unsupported`/`Failed` split — only `NotSupported`,
+`ReadOnlyFilesystem` and `NoSuchDevice` mean "this system cannot"), and
+`is_mounted()`/`is_mounted_rw()` (the commonest looked-up fact). The rationale
+is written up in `design-decisions.md` §270.
+
+Three sites were more than reporting fixes, because removing the skip exposed
+what the skip had been hiding: `fs/mime` now fails when `detect()` errors
+rather than warning, `fs/zip` fails when deflate does not compress rather than
+noting it, and `kernel/src/watchpoint.rs` deleted its skip outright by giving
+the test its own 8-byte-aligned `AtomicU64` — turning a precondition the test
+had to check into one the type system guarantees. `syscall/linux`'s
+`self_test_fallocate_range` had the worst instance found: a second staging step
+that returned `Ok(())` on failure and silently abandoned the remaining
+sub-tests without printing anything at all.
+
+**Addendum, 2026-08-23 — the checker was too narrow twice over, and both
+narrowings hid real instances.**
+
+It originally matched only `.is_ok()`/`.is_err()`, and it only examined
+functions whose *name* looked like a self-test. Fixing each of those turned up
+sites the first sweep had declared clean:
+
+| Narrowing | What it hid | Found |
+|---|---|---|
+| Only `.is_ok()`/`.is_err()` | `if let Ok(cg_id) = cgroup::create(..)` and `match alloc_frame() { .. Err(_) => SKIP }` | 142 sites, incl. all 6 cgroup sections of `mm/frame.rs` |
+| Only name-matched functions | a suite split across helpers — `io_ring`'s `test_fh_read_write` / `test_fh_positioned_io_leaves_the_cursor_alone`, both called from `self_test`, both skipping on a failed `/tmp` write | 2 sites, seen first in a boot log, not by the checker |
+
+The checker now also matches `if let Ok(..)`/`if let Err(..)` and a `match`
+arm whose pattern is a catch-all `Err(_)`/`Err(e)`; an arm naming *specific*
+errors stays exempt, since that is the approved form. And it takes the
+transitive closure over same-file calls out of every name-matched self-test,
+so a helper is checked exactly when a self-test can reach it — which also
+keeps `#[cfg(test)]` unit tests out, as nothing calls them. (That closure was
+first written pairwise and made the gate take 200 s, long enough that a boot
+test looked hung; extracting each body's callee names in one scan brought it
+to 22 s.)
+
+**Remaining blind spot: the skip decided from an integer errno.** Both rules
+key on a `Result`, so a syscall-level test that reads a negative return value
+is invisible:
+
+    // syscall/dispatch.rs, before the fix
+    let write_result = dispatch(SYS_FS_WRITE_FILE, &write_args);
+    if write_result.value < 0 {
+        serial_println!("[syscall]   Dispatch FS roundtrip: SKIPPED (no FS, err={})", ..);
+        return Ok(());
+    }
+
+That one is fixed (it asks `is_mounted_rw("/")` and now fails when a mounted
+`/` rejects the write), but a new one would not be caught. Detecting it
+textually is not obviously possible: `if x.value < 0` is ordinary code, and
+the thing that makes it a defect is that the value came from the code under
+test — which needs dataflow, not a pattern. The practical mitigation is that
+this spelling only arises where a test drives the syscall dispatch table
+directly, which is a handful of files; they were reviewed by hand.
+
+---
+
 ### TD-B-ID-AND-STAT-STILL-CLAIM-ACCOUNT-NAME-LOOKUP-IS-UNBUILT -- ✅ FIXED 2026-08-23 (`id` and `stat` both done), user-visible (lane B, 2026-08-23)
 
 **What.** `id -n` and `stat`'s `%U`/`%G` print numbers where every other system
@@ -68442,6 +68938,127 @@ GNU does on this machine anyway. Both need the getopt conversion for
 **Not in the argv-utf8 backlog** -- both take no arguments today, so neither
 will be opened by that sweep. This entry is the only thing that will surface
 them.
+---
+
+### B-SKIP-LEDGER-ALLOCATES-BEFORE-THE-HEAP-EXISTS — kernel panic 120 lines into boot — FIXED 2026-08-24 (lane A, `5fbbd539b`)
+
+**Symptom.** Boot test batch39 never reached userspace:
+
+```
+[mm]   Double-free detection: OK
+!!! KERNEL PANIC !!!
+panicked at library/alloc/src/alloc.rs:553:9:
+memory allocation of 128 bytes failed
+  Task: 0 (""), priority 0, cpu 0
+  Heap: slab=0/0 allocs/frees, large=0/0, refills=0, failures=0
+```
+
+**Root cause.** `fs::selftest::Skips` — the ledger that §270 introduced so a
+self-test's closing line can say how many sections it skipped — stored its
+entries in an `alloc::vec::Vec`, and `Skips::suffix()` returned an
+`alloc::string::String` built with `alloc::format!`. `mm::frame::self_test()`
+runs *between* `[mm] Physical frame allocator initialized` and `[mm] Kernel
+heap allocator initialized`, so its first `skips.record(…)` was the first
+`Vec::push` of the boot, against an allocator that did not exist yet. The
+panic report says so outright — `slab=0/0 allocs/frees, refills=0` — but only
+to a reader who already suspects it; nothing in the message or the backtrace
+names `fs/selftest.rs`.
+
+The line the sweep replaced (`serial_println!("[mm]   Zeroed frame
+allocation: SKIP (HHDM not ready)")`) had worked for months precisely because
+printing a `&'static str` allocates nothing.
+
+**Why it was not caught earlier.** Everything that would have caught it was
+looking elsewhere:
+
+| Check | Why it was silent |
+|---|---|
+| `cargo check` / `cargo clippy` | The code is type-correct. "Allocates" is not a type. |
+| `scripts/check-selftest-skips.py` | Enforces *how a skip is decided and reported*. It has no notion of boot phase. |
+| The previous boot test (batch37) | Predates the change; that boot printed the raw `SKIP` line. |
+| Review | The type's own doc comment argued the entries must not allocate — and the `Vec` holding them was on the next line. A comment is not an enforcement mechanism. |
+
+**Fix.** The ledger is now structurally allocation-free: an inline
+`[(&'static str, &'static str); MAX_SKIPS]` with a length, and `suffix()`
+returns a `Display` adaptor (`SkipSuffix`) instead of a `String`, so all ~26
+`serial_println!("… PASSED{}", skips.suffix())` call sites are unchanged.
+Overflow past `MAX_SKIPS` (16) is **counted, not dropped** — a dropped skip
+would restore exactly the silence §270 exists to prevent, while still printing
+a number, and the number would be wrong. See `design-decisions.md` §271.
+
+**Regression test.** `fs::selftest::self_test()`, called from `main.rs`
+immediately after `mm::heap::init` — the earliest point in boot where
+`heap::stats()` can observe an allocation at all. It snapshots the slab and
+large-allocation counters, exercises `record`/`report`/`suffix` (including the
+overflow arm, and `report`'s serial output, because a reporting path that
+allocates fails exactly when there is something to report) with interrupts
+masked, and fails if either counter moved. It also asserts the rendered
+suffixes for the 0 / 1 / overflow cases and that the overflowed skip is still
+counted.
+
+**Generalisation worth remembering.** The reporting path of a self-test must
+have *weaker* requirements than anything it reports on. A ledger that needs the
+heap cannot report on the heap. Anything added to `fs::selftest` in future has
+to hold to that, which is what the new self-test is there to enforce.
+
+---
+
+### TD-KERNEL-CLIPPY-HAS-8-DENY-LEVEL-ERRORS — `cargo clippy -p kernel` does not pass — ✅ FIXED 2026-08-24 (lane A, `7465db994`)
+
+**What.** `CLAUDE.md` → "When You Finish a Task" requires `cargo clippy`
+clean. The kernel is not: `cargo clippy -p kernel --release` ends with
+
+```
+error: could not compile `kernel` (bin "kernel") due to 8 previous errors;
+       18142 warnings emitted
+```
+
+The 18142 warnings are the known `pedantic` / `indexing_slicing` /
+`arithmetic_side_effects` backlog (same shape as the `apps/` backlog recorded
+earlier in this file) and are `warn`-level. The **8 errors** are `clippy::all`
+at `deny` and are a different matter — they mean the command exits non-zero, so
+nobody can use "clippy is green" as a gate on this crate at all.
+
+| Site | Lint |
+|---|---|
+| `kernel/src/fs/cas.rs:366` | returning the result of a `let` binding from a block |
+| `kernel/src/fs/fileselect.rs:409` | `contains()` instead of `iter().any()` |
+| `kernel/src/fs/prefetch.rs:418` | needless borrow — `&format!(…)` |
+| `kernel/src/kshell.rs:21280` | redundant closure — use `Path::new` |
+| `kernel/src/kshell.rs:21294` | redundant closure — use `Path::new` |
+| `kernel/src/kshell.rs:60713` | needless borrow — `&format!(…)` |
+| `kernel/src/ksyms.rs:480` | `let…else` that should be `?` |
+| `kernel/src/proc/pcb.rs:4643` | very complex type; factor into a `type` alias |
+
+**Reproduce.** `cargo clippy -p kernel --release --message-format=short 2>&1 |
+grep "^error"` from `os-lane-a`.
+
+**Proper fix.** Seven are one-line rewrites that clippy dictates verbatim; the
+eighth (`pcb.rs:4643`) wants a `type` alias for a nested generic. Fix all eight
+rather than `#[allow]` them — none is a case where the lint is wrong. Then
+consider whether `scripts/boot-test.sh` should gate on
+`cargo clippy -p kernel` exiting 0, which is the thing that would stop this
+recurring; today it runs no clippy at all, which is why eight `deny`-level
+errors accumulated unnoticed.
+
+**Fixed** in `7465db994`, exactly as clippy dictated in all eight cases. The
+`pcb.rs` one gained a named `ReapedProcess` alias, which is an improvement on
+its own terms: the tuple exists only to carry state *out* of the
+`PROCESS_TABLE` lock so the teardown can run unlocked, and the name now says
+so where a bare `Option<(ExitInfo, u64, Vec<(ResourceType, u64)>)>` did not.
+
+**The gate is still not built, and that is the part that matters.**
+`boot-test.sh` runs no clippy, so nothing stops a ninth error appearing
+tomorrow — the eight above accumulated precisely because the crate declares
+`#![deny(clippy::all, clippy::pedantic)]` and nothing ever ran it. Gating on
+`cargo clippy -p kernel` exiting 0 is cheap now that it *does* exit 0; the
+open question is where to put it, since a clippy run and a `cargo check` run
+invalidate each other's fingerprints in a shared `target/`, so naïvely adding
+one to `boot-test.sh` doubles every boot's build time. Tracked as the
+remaining half of this entry rather than closed outright.
+
+---
+
 
 ## `cmp` was a 60-line stub with six options missing, and nothing that could have caught it (lane B, 2026-08-23)
 
@@ -68605,3 +69222,370 @@ property of the system, not a defect in either program: generating the locale
 (`localedef -i en_US -f UTF-8 ~/locales/en_US.UTF-8`, `LOCPATH=~/locales`, no
 root needed) makes the two agree exactly. Worth knowing because the same
 approximation is in every utility here that consults `hard_locale`.
+
+---
+
+### TD-A-BOOT-TEST-IS-NOT-ISOLATED-FROM-HOST-LOAD — a concurrent `cargo` run can fail an otherwise-clean boot — OPEN 2026-08-24 (lane A)
+
+**In short:** the boot test runs the kernel inside QEMU, which is a program on
+this machine competing for the same CPUs as everything else. If you start a
+Rust build while a boot test is running, the emulated machine runs about half
+as fast — and the kernel has a watchdog that gives up when the boot takes too
+long. So the boot test can report a hang that never happened. It did, on
+2026-08-24, and the cause was me: I ran `cargo check` and `cargo clippy` to
+fill the wait.
+
+**Observed.** Boot test batch40 (`5fbbd539b`) reached `BOOT_OK` and every
+self-test passed, but the harness returned FAIL:
+
+```
+BOOT_OK detected after 665s!
+LIVENESS WATCHDOG failure detected in serial log:
+[liveness] BOOT DEADLINE EXCEEDED: still armed 805s after arming (no BOOT_OK).
+=== Boot test FAILED (BOOT_OK reached but the liveness watchdog reported) ===
+```
+
+The armed window is logged at disarm, so the two runs can be compared directly:
+
+| Boot | armed window | deadline | host activity during QEMU |
+|---|---|---|---|
+| batch37 | **420.5 s** | 826 s | idle |
+| batch40 | **839.6 s** | 805 s | `cargo check --release` + `cargo clippy --release` |
+
+Same battery, 2.0× the guest time, and the only variable was two release-mode
+`rustc` invocations on the host. The kernel diff between the two builds is a
+~40-line self-test that runs once, right after heap init.
+
+**Why it fails rather than merely running slow.** `liveness_arm` derives its
+deadline as `harness_timeout − 45 s margin − (now at arm)` — deliberately, so
+that growing the self-test battery can never desynchronise the watchdog from
+the harness's kill (see `sched/mod.rs` and the `BUG-LIVENESS-DEADLINE-FALSE-FIRE`
+history). That derivation is sound, but it assumes the *rate* at which guest
+time is consumed is roughly a property of the battery. Host contention breaks
+the assumption: the battery did not grow, the machine got slower, and the
+watchdog cannot tell those apart from inside the guest.
+
+**What to do meanwhile — this is the actionable part.** Do not run `cargo`
+(or anything else expensive) while a boot test is running. It is tempting,
+because a boot is ~8–25 minutes of apparent idleness, but the cost is a
+false FAIL that then costs a full re-run to disprove — strictly worse than
+having waited. Read code, edit documentation, or edit sources *without
+building* instead.
+
+**Proper fix, unresolved.** Three candidates, none obviously right:
+
+1. **Make the harness serialise against local builds** the way it already
+   serialises QEMU across lanes (`scripts/boot-test.sh` takes a boot lock).
+   A build lock would have to be taken by every `cargo` invocation to work,
+   which means wrapping cargo, which is invasive and easy to forget.
+2. **Have the watchdog measure progress rather than time** for the boot
+   deadline — e.g. deadline in "self-tests completed" rather than seconds.
+   Robust against host load by construction, but it stops being a backstop
+   for the hang modes that *do* keep completing self-tests.
+3. **Let the harness pass a slack multiplier** when it knows the host is
+   loaded. Requires the harness to know, which it does not.
+
+Candidate 2 is the most principled and the least compatible with the
+watchdog's stated purpose ("catches *any* hang mode"). Recorded rather than
+decided; the failure is cheap to avoid by hand today.
+
+## `tee` was five options short and dropped the log the moment the pipeline's reader left (lane B, 2026-08-24)
+
+**In short:** `tee` copies what it reads to standard output *and* to every file
+you name — that is why `build 2>&1 | tee build.log` both shows you the build and
+keeps a copy. The entry above
+(`B-tee-REPORTS-SUCCESS-AFTER-LOSING-THE-DATA`, two days earlier) stopped it
+reporting success after a failed copy. This entry is the rest of the program.
+It still accepted only `-a` and file names: `-p` and `--output-error` — the two
+options that exist precisely to say what should happen when a copy fails —
+were not implemented, `-i` was rejected outright, and `--help`/`--version` did
+not exist. It still panicked on a file name holding a byte that is not valid
+UTF-8, which this OS allows everywhere but `/` and NUL. And worst of the three:
+when the program reading its standard output went away, it stopped copying **to
+the files as well**, leaving the log truncated at the last 8 KiB boundary, and
+exited 0 — the same "durable copy that is not there, reported as success" that
+the earlier entry was written about. Rewritten as a port of GNU coreutils
+9.4's `src/tee.c`, read rather than recalled, with `scripts/tee-diff.sh`
+running it against the real GNU binary case by case inside WSL.
+
+### Why the earlier fix could not have found these
+
+That fix repaired the code that was there. It never opened `tee.c`, and its own
+closing paragraph shows the cost: *"The one thing deliberately left as success:
+`BrokenPipe` on stdout"* is upstream's reasoning for its default mode applied to
+half the program. Upstream decides on the **errno**, and then drops that one
+output and **keeps copying to the others**. Ours reached the same verdict about
+the status and then called `process::exit`, which ends the copy to every file
+too. The right conclusion, drawn from the wrong place, still lost the data.
+
+The unit tests could not help either: twelve of them, all on `parse_args`, all
+agreeing with each other about an option set that was five options short. A
+test written against the implementation can only find disagreements *inside*
+it.
+
+### The defects the rewrite fixed
+
+1. **A broken stdout abandoned the files.** `process::exit(status)` sat inside
+   the stdout-write error branch, above the loop over `files`. `yes | tee log |
+   head -1` left `log` holding one 8 KiB block of a stream that had not ended,
+   and exited 0. Upstream drops the failed output and copies to whatever is
+   left until the input is exhausted; only when *every* output has been dropped
+   is there nothing more to do.
+2. **A read error skipped the flushes.** `process::exit(1)` in the read arm,
+   above the `out.flush()` at the bottom of `main`. Up to 8 KiB of input that
+   had already been copied was sitting in stdout's `LineWriter` and went
+   nowhere — a read failure turned into a *write* loss.
+3. **stdout was buffered; upstream makes every output unbuffered.** `tee.c:255`
+   is `setvbuf (stdout, NULL, _IONBF, 0)`, and `tee.c:275` does the same for
+   each opened file. Two things follow, and both matter: a `tee` that returns
+   from a write before the byte has reached the descriptor can report success
+   for data still in memory, and a buffered `tee` breaks the reason it is in
+   the pipeline at all — `cmd | tee log | grep -q x` should see each block as
+   it arrives, not at the next 8 KiB boundary. Now every chunk is flushed to
+   stdout before the next output is written.
+4. **`-p` and `--output-error` were missing entirely.** Five modes upstream
+   (`warn`, `warn-nopipe`, `exit`, `exit-nopipe`, and the default), and the
+   whole of the decision is three lines of `fail_output`:
+   `errno != EPIPE || output_error == exit || output_error == warn`. Note what
+   that tests — the **errno**, not the file. `nopipe` does not mean "this
+   output is a pipe"; a unix socket whose peer has gone reports `EPIPE` and is
+   treated identically. Without these options there was no way to ask `tee` to
+   stop at the first failed write (`--output-error=exit`, which is what a
+   backup script wants) and no way to ask it to stay quiet about a reader that
+   left (`-p`, which is what an interactive pipeline wants).
+5. **`-i`/`--ignore-interrupts` was rejected, on a rationale that was
+   backwards.** The module doc argued that there is no `SIGINT` here, so the
+   option should not exist. But the option asks for `SIGINT` to be *ignored*,
+   and a system with no `SIGINT` has already granted the request. Rejecting it
+   failed the whole pipeline over something that was already true. It is now
+   accepted and does nothing, which is the accurate translation.
+6. **`--help` and `--version` were missing**, and the failure path invented a
+   `Usage:` line GNU does not print.
+7. **A bad option was diagnosed in wording nothing matches.** `unknown option:
+   -Z` where GNU says `tee: invalid option -- 'Z'` followed by
+   `Try 'tee --help' for more information.`, and `unknown option: --zzz` where
+   GNU says `tee: unrecognized option '--zzz'`.
+8. **No long-option abbreviation, and `--append=x` was mis-diagnosed.** GNU
+   accepts `--app`, and rejects `--append=x` with `option '--append' doesn't
+   allow an argument`; ours took the whole string as one unknown option. Table
+   order is observable too — `scripts/getopt-ambiguity-check.py tee` now checks
+   ours against GNU's as a *sequence*, because glibc names `pfound` (the first
+   table entry an ambiguous prefix matched) before the rest.
+9. **Errors were rendered with `Display`.** `tee: 'log': No such file or
+   directory (os error 2)` instead of `strerror`'s bare text.
+10. **argv was `Vec<String>`.** `env::args()` panics on the first byte that is
+    not valid UTF-8, so `tee $'\xff'` aborted before any of the above could
+    matter. Removed from `scripts/argv-utf8-baseline.txt`; 30 findings remain.
+11. **A short-circuited read was fatal.** No `ErrorKind::Interrupted` retry, so
+    a read the kernel cut short ended the copy and truncated it. Upstream's
+    `errno == EINTR` loop; there are no signals here, but a kernel is still
+    free to return early.
+12. **"Every flush is checked" was true and vacuous for the files.** Rust's
+    `File::flush` is `Ok(())` — the write *is* the syscall, there is no buffer
+    to empty — so the check the earlier entry added could not fail. What
+    actually catches a full disk is the error from `write_all`, which that fix
+    had also added; the flush was doing nothing. The only real buffer was
+    stdout's, and #3 is what removes it.
+
+### What the differential harness found: nothing, and that is the result
+
+`scripts/tee-diff.sh` reports **71 passed, 0 differed, 6 differ on purpose** in
+about 85 seconds. `OURS=$(command -v tee) scripts/tee-diff.sh` flips exactly
+the six to XPASS and nothing else, which is what shows it discriminates. It is
+the fifth harness of this shape (`du`, `find`, `ls`, `cmp`) and builds the
+subject *for Linux inside WSL*, sharing `$HOME/.cache/slateos-diff-target`
+with the others (`design-decisions.md` §374). Unique to `tee`: each case gets a
+fresh directory per side, snapshotted and compared afterwards, because `tee`'s
+side effects *are* its output.
+
+Unlike `cmp` — where building the harness turned up three defects that
+thirty-three unit tests had missed — every difference this one reported was a
+defect in **itself**. They are worth listing because they generalise to the
+next harness:
+
+* **A case whose runtime depends on the program's own output is not a case.**
+  `tee -a self < self` is unbounded on both sides; the first run spent twelve
+  minutes at 100% CPU producing 188 MB (ours) and 166 MB (GNU) before `timeout`
+  stepped in.
+* **`od -An -c` on an unbounded capture** turns 188 MB into a gigabyte of octal
+  inside a shell variable. Everything is now rendered through one `render()`
+  helper that prints a size, then `od` only under 512 bytes and `md5sum` above.
+* **A `/dev/urandom` fixture built once per side** hands the two programs
+  different input, so the comparison is meaningless — and it fails *randomly*,
+  which is the worst way for a harness to be wrong. Found by inspection, not by
+  a failure. Now a deterministic `seq` stream.
+* **`$?` is clobbered by the next command, including a `[ ... ]` test.**
+  `if [ "$side" = ours ]; then o_rc=$?; else g_rc=$?; fi` records the status of
+  the *test*: 0 for one side and 1 for the other, every time, agreeing with the
+  truth exactly when the truth happened to be 0 and 1. It reported 59 of 68
+  cases as differing and cost a full run. `rc=$?` goes on the very next line.
+* **A wrong `xfail` is a claim nobody rechecks.** Four cases about how a file
+  name is rendered were written as `xfail` on the assumption carried over from
+  `cmp-diff.sh` that GNU emits raw bytes where we quote (§373). That is true of
+  diffutils, which interpolates with a bare `%s`. It is **not** true of
+  coreutils' `tee`, whose three `error` calls all spell the name
+  `quotef (files[i])` — which is exactly what our `quotef_os` is. The harness
+  said XPASS on the first clean run; they are ordinary passes now, and the
+  header says so, because deleting a wrong xfail silently would leave the next
+  reader to make the same assumption.
+
+### `tee out <&-` diverges, and the reason is our runtime, not our `tee`
+
+With stdin closed, GNU prints `tee: read error: Bad file descriptor` and then
+`tee: standard input: Bad file descriptor` (the second from gnulib's
+`close_stdin` atexit hook) and exits 1. Ours prints nothing and exits 0.
+
+The first explanation written into the harness was that we lack `close_stdin`
+because `coreutils` links no libc — and it was wrong, because it did not
+account for the *missing first line* or for the status. The real cause is that
+**Rust's std reopens any closed standard descriptor onto `/dev/null` before
+`main` is entered**, so our `main` is handed an empty stdin, copies zero bytes,
+and is right to call that a success. Nothing in `tee.rs` can see the
+difference.
+
+Measured rather than argued: `tee /proc/self/fd/0 <&-` asks the process about
+its own descriptor table, since that symlink exists only while the descriptor
+is open. It opens successfully for us and is `No such file or directory` for
+GNU.
+
+**What that leaves open, and it is not about `tee`:** the reason Rust does this
+is a real hardening — if descriptor 1 is closed at `exec`, the first file the
+program opens *becomes* its standard output, and everything it prints is
+written into that file. A grep of `posix/` and the userspace runtime finds no
+equivalent (`sanitize_standard_fds`, a `POLLNVAL` sweep of 0/1/2, or a
+`/dev/null` fallback at spawn), so on SlateOS proper a program started with a
+closed standard descriptor gets whatever the descriptor allocator hands it.
+Logged in `todo.txt`; it belongs in the process-spawn path, not in any
+individual utility.
+
+### Deliberate divergences, all recorded as `xfail` in the harness
+
+* `--help` omits the GNU project's `Report bugs to:` block; `--version` names
+  SlateOS.
+* **A broken stdout under the default mode.** Upstream's default leaves
+  `SIGPIPE` fatal, so GNU is killed by it (status 141, no diagnostic). SlateOS
+  does not use Unix signals for process control and Rust masks `SIGPIPE`
+  anyway, so "die from `SIGPIPE`" has no translation. The faithful reading is
+  that the default then becomes its own `EPIPE` path, which is `fail = false` —
+  drop that output, stay quiet, keep copying to the rest. That is upstream's
+  own code for the case, not an invention, and it is what `cut`, `head`, `tail`
+  and `uniq` in this tree already do with a broken stdout. Visible consequence:
+  `yes | tee log | head -1` keeps writing `log` until the input ends, where
+  GNU's `tee` dies with the pipeline.
+* `tee FILE <&-` — the closed-stdin case above.
+
+### One thing deliberately not implemented
+
+**`iopoll`.** Upstream watches the first live output *while blocked on the
+read*, so a `nopipe` run whose outputs have all become broken pipes ends at
+once rather than at the next read. That needs `poll(2)`, and `coreutils` links
+no libc. The bytes copied are identical either way; what differs is the moment
+a doomed run gives up, and only while stdin is idle.
+
+---
+
+## `echo` interpreted eight escapes out of nineteen, and could not print a filename (lane B, 2026-08-24)
+
+**In short:** `echo` is the smallest utility we ship and it was missing more
+rules than any of the big ones. It knew `-n` and `-e` but not `-E`; it knew
+eight backslash escapes but not the other eleven; it had no `--help` and no
+`--version`; and handing it an argument containing a byte that is not valid
+UTF-8 — a perfectly legal filename on this OS, and `echo` is the tool you would
+reach for to print one — made it panic before it printed anything. It also
+threw away the result of its own write, so `echo hi > /dev/full` on a full disk
+said nothing and exited 0, telling any script that asked that the write had
+happened. Rewritten from GNU coreutils 9.4's `src/echo.c`, and checked against
+the real GNU binary case by case.
+
+### Why "it's just echo" was exactly the problem
+
+Every earlier port here started from a bug report. This one started from
+`scripts/argv-utf8.py`, which lists the binaries whose `main` collects argv into
+a `Vec<String>`. That collection panics on a non-UTF-8 byte, so its presence is
+a reliable marker for a program nobody ever exercised against real input. `echo`
+was on that list. It is 285 lines and looks self-evidently finished, which is
+precisely why nothing had ever been checked against upstream — and the count
+came out at eleven missing escapes, three missing options, and a discarded
+`Result`.
+
+### What was missing
+
+1. **`-E`** — the option that turns escapes back off. Absent entirely, so
+   `echo -e -E 'a\tb'` printed a tab where GNU prints `a\tb`. The last of
+   `-e`/`-E` wins, within a bundle and across words, which is the only thing
+   that distinguishes those two command lines.
+2. **`\c`** — ends the *program*: no trailing newline, and every later argument
+   dropped. Upstream is literally `case 'c': return EXIT_SUCCESS;`. We printed
+   `\c`.
+3. **`\e`** (escape, 0x1B) and **`\v`** (vertical tab) — both absent.
+4. **`\xHH`** — the entire hexadecimal family. One or two digits; with no hex
+   digit following, upstream `goto not_an_escape` and prints `\x` literally,
+   which is not the same as printing nothing.
+5. **Octal beyond one digit.** We handled `\0` as a NUL and stopped. Upstream
+   takes up to three octal digits, and — not documented in its own `--help` —
+   has switch arms for `'1'` through `'7'` as well as `'0'`, so `\101` is `A`.
+   The arithmetic is `unsigned char`, so it wraps: `\0777` is `\xFF`, not a
+   clamp and not an error.
+6. **`--help` and `--version`** — neither existed. Upstream recognises them only
+   when they are the *entire* command line (`allow_options && argc == 2`) and
+   never abbreviated; it declines `parse_long_options` and says why in a
+   comment: *"in order to avoid accepting abbreviations."* So `echo --help x`
+   prints `--help x`, and `echo --hel` prints `--hel`.
+7. **`POSIXLY_CORRECT`.** Unread. It changes `echo` more than any option does:
+   the printing loop is entered on `do_v9 || posixly_correct`, so escapes are
+   decoded with no `-e` at all and `-E` cannot switch them back off; and
+   `allow_options` goes false, so `-e` stops being an option and becomes a word
+   to print. The single exception is a first argument of exactly `-n`, which
+   keeps option parsing alive for the whole command line.
+8. **A bare `-`, and any word with a character outside `{e,E,n}`,** are text and
+   stop the option scan for good. We had no such rule, so `echo -en1 'a\tb'`
+   was parsed as options where GNU prints `-en1 a\tb`.
+9. **Non-UTF-8 argv** — `Vec<String>` panicked. Now `OsString` throughout, with
+   the bytes carried to the syscall unchanged.
+10. **`let _ = out.write_all(...)` and `let _ = out.flush()`** — both discarded.
+    GNU registers `close_stdout` with `atexit`, so a failed write is diagnosed
+    once and the status is 1. We now write the whole output in one call and
+    report `echo: write error: <strerror>` with status 1, which is byte-identical
+    on the four `/dev/full` cases in the harness.
+
+### The one structural difference from upstream, and why it is safe
+
+Upstream `putchar`s into a buffered stream and lets `atexit(close_stdout)`
+notice the failure. We build the output bytes first and write them once. The two
+observable properties that matter — exactly one diagnostic, and exit status 1 —
+are the same, and the harness checks them. The rearrangement also makes `\c`
+need no special case: by the time it ends the program it has already contributed
+everything it was going to contribute.
+
+### How it was checked: 93 cases, and two controls
+
+`scripts/echo-diff.sh` builds this binary for Linux inside WSL and runs it
+against the real `/usr/bin/echo`, comparing stdout as bytes (`od -An -c`, so
+`\xff` survives the comparison), stderr, and exit status. **93 passed, 0
+differed, 2 differ on purpose.**
+
+Zero differences on a first run is the kind of result that is more often a
+broken harness than a correct program, so it was not taken on trust. Two
+controls:
+
+- **`OURS=/usr/bin/echo`** — point the harness at the reference itself. Result:
+  93 pass and exactly the two `xfail`s flip to `XPASS`. That proves no case is
+  *wrong about GNU*; a case encoding a mistaken expectation would show up here
+  as a diff against GNU itself.
+- **`OURS=` a dash-builtin wrapper** — point it at an `echo` known to be
+  different. Result: **59 of the 93 cases caught it.** That proves the cases
+  discriminate rather than all agreeing vacuously.
+
+Both were necessary. The first alone would pass against a harness that compared
+nothing; the second alone would pass against a harness full of wrong
+expectations.
+
+### Deliberate divergences, both recorded as `xfail`
+
+| Case | Why |
+|---|---|
+| `--help` | Omits the GNU project's ancillary block (bug-report address, home page, `info` reference), as every converted utility here does. The two upstream NOTEs are kept — the first is the only warning a user gets that the `echo` they typed was almost certainly their shell's builtin. |
+| `--version` | Names SlateOS rather than GNU coreutils. |
+
+Nothing else. In particular the closed-descriptor divergence that `tee` has does
+not arise for `echo`, which never reads.

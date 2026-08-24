@@ -763,6 +763,16 @@ pub fn on_file_renamed(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) {
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[index] Running self-test...");
 
+    // Sections that could not run because a precondition (a mounted
+    // filesystem) was absent.  They are named here and reported at the end
+    // rather than being announced mid-run and forgotten, because the last
+    // line is the one a reader believes: "[index] Self-test passed" printed
+    // after a silently-skipped half is a claim of coverage that was never
+    // taken.  A skip that is reported gets acted on; a silent one gets
+    // believed — the same lesson `report_pathz_skips` in `scripts/boot-test.sh`
+    // was written for after 26 tcc rungs no-op'd unnoticed for weeks.
+    let mut skipped = crate::fs::selftest::Skips::new();
+
     // --- Test 1: extension extraction (pure logic, no FS needed) ---
     {
         if extract_extension(Path::new("file.txt")).as_slice() != b"txt" {
@@ -1008,8 +1018,12 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         if st.total_entries == 0 {
-            // No filesystem mounted — not an error, just limited test.
-            serial_println!("[index]   rebuild OK (0 entries — no filesystem mounted)");
+            // The rebuild machinery ran and its bookkeeping was checked above,
+            // but it walked nothing, so the part of this test that matters —
+            // that a walk *finds* files and files them into the index — did
+            // not happen.  That is a skip, not a pass.
+            skipped.record("rebuild walk finds files", "no filesystem mounted");
+            serial_println!("[index]   rebuild bookkeeping OK, but walk found 0 entries");
         } else {
             serial_println!(
                 "[index]   rebuild OK ({} entries, {} bytes, {} extensions)",
@@ -1020,11 +1034,30 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
 
-    // --- Test 6: VFS add/search (only if /tmp is available) ---
+    // --- Test 6: VFS add/search (requires /tmp) ---
+    //
+    // The precondition is asked of the mount table, which is a fact, rather
+    // than inferred from whether a write happened to succeed.  Those are not
+    // the same question: `if write_file(..).is_ok()` classifies *every*
+    // failure as "/tmp is not mounted" — a permission gate wrongly denying
+    // the write, a full filesystem, a memfs bug — and then skips the very
+    // test that would have caught it.  With /tmp mounted, every step below
+    // propagates its error instead.
     {
-        let test_path = "/tmp/_idx_test_file.txt";
-        let test_data = b"index self-test data";
-        if super::Vfs::write_file(test_path, test_data).is_ok() {
+        let tmp_mounted = super::Vfs::mounts()
+            .iter()
+            .any(|(p, _)| p.as_path() == Path::new("/tmp"));
+        if tmp_mounted {
+            let test_path = "/tmp/_idx_test_file.txt";
+            let test_data = b"index self-test data";
+            if let Err(e) = super::Vfs::write_file(test_path, test_data) {
+                serial_println!(
+                    "[index]   ERROR: /tmp is mounted but writing {} failed: {:?}",
+                    test_path,
+                    e
+                );
+                return Err(KernelError::InternalError);
+            }
             add_entry(test_path)?;
             let results = search_name("_idx_test");
             let found = results
@@ -1051,15 +1084,18 @@ pub fn self_test() -> KernelResult<()> {
             let _ = super::Vfs::remove(test_path);
             serial_println!("[index]   VFS add/search/remove OK");
         } else {
-            serial_println!("[index]   (skipped VFS tests: /tmp not mounted)");
+            skipped.record("VFS add/search/remove", "/tmp not mounted");
+            serial_println!("[index]   VFS add/search/remove: SKIPPED (/tmp not mounted)");
         }
     }
 
     let final_stats = stats();
+    skipped.report("[index]");
     serial_println!(
-        "[index] Self-test passed ({} entries, {} rebuilds).",
+        "[index] Self-test passed ({} entries, {} rebuilds){}.",
         final_stats.total_entries,
         final_stats.rebuild_count,
+        skipped.suffix(),
     );
 
     Ok(())

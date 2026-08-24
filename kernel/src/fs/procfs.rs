@@ -15125,6 +15125,7 @@ pub fn self_test() -> KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[procfs] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
 
     let mut fs = ProcFs::new();
 
@@ -17691,7 +17692,16 @@ pub fn self_test() -> KernelResult<()> {
     // not return. So the per-pid path is asserted to return *something*, and
     // the specific something is pinned to the same `NotFound` the bare-task
     // cases document, which also catches it silently starting to succeed.
-    if crate::fs::Vfs::stat("/proc").is_ok() {
+    //
+    // The precondition is read from the mount table, not from
+    // `stat("/proc").is_ok()`. The latter reads as "is /proc mounted" but
+    // means "did stat fail for any reason", so a lookup bug or a permission
+    // gate wrongly refusing `/proc` would have switched off the deadlock
+    // check and still printed PASSED.
+    let proc_mounted = crate::fs::Vfs::mounts()
+        .iter()
+        .any(|(p, _)| p.as_path() == crate::fs::path::Path::new("/proc"));
+    if proc_mounted {
         let entries = crate::fs::Vfs::readdir("/proc")?;
         // `readdir` sizes each root file by generating it, so this one call
         // runs every generator with the procfs mount lock held.
@@ -17715,9 +17725,11 @@ pub fn self_test() -> KernelResult<()> {
             self_mounts_desc,
         );
     } else {
+        skips.record("through-the-mount readdir", "/proc is not mounted");
         serial_println!("[procfs]   through-the-mount: /proc not mounted, skipped");
     }
 
-    serial_println!("[procfs] Self-test PASSED");
+    skips.report("[procfs]");
+    serial_println!("[procfs] Self-test PASSED{}", skips.suffix());
     Ok(())
 }

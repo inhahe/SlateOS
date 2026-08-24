@@ -876,6 +876,8 @@ pub fn verify_dispatch_under_filtering() -> KernelResult<()> {
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[syscall] Running dispatch self-test...");
 
+    let mut skips = crate::fs::selftest::Skips::new();
+
     test_dispatch_yield()?;
     test_dispatch_task_id()?;
     test_dispatch_unimplemented()?;
@@ -887,7 +889,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_clock_settime()?;
     test_dispatch_clock_adjtime()?;
     test_dispatch_console_write()?;
-    test_dispatch_fs_roundtrip()?;
+    test_dispatch_fs_roundtrip(&mut skips)?;
     test_io_dir_classification()?;
     test_dispatch_mprotect_native()?;
     test_dispatch_process_group_syscalls()?;
@@ -905,7 +907,8 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_rusage_info_layout()?;
     test_dispatch_set_credentials_gate()?;
 
-    serial_println!("[syscall] Dispatch self-test PASSED");
+    skips.report("[syscall]");
+    serial_println!("[syscall] Dispatch self-test PASSED{}", skips.suffix());
     Ok(())
 }
 
@@ -3514,12 +3517,29 @@ fn test_dispatch_console_write() -> KernelResult<()> {
 
 /// Test filesystem syscalls: write, read, stat, mkdir, list, delete, rmdir.
 ///
-/// Exercises the full VFS path through the dispatch table.  Only runs if
-/// the VFS has a mounted filesystem (otherwise the write will fail and
-/// we skip gracefully).
-fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
+/// Exercises the full VFS path through the dispatch table.  Only runs once
+/// `/` is mounted read-write; the dispatch self-test also runs earlier in
+/// boot, before any filesystem exists.
+fn test_dispatch_fs_roundtrip(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
     let test_path = b"/syscall_test.txt";
     let test_data = b"Hello from syscall self-test!";
+
+    // The mount table is the environment question; a negative return from
+    // SYS_FS_WRITE_FILE is not.  This section exists to prove the filesystem
+    // syscalls work, so treating "the write syscall returned an error" as
+    // "there is no filesystem" let the section switch itself off in exactly
+    // the case it was written to catch — and the suite still printed PASSED.
+    //
+    // (This is the same defect as the `.is_err()` form the boot-time skip
+    // checker rejects, spelled with an integer errno instead of a `Result`,
+    // which is why the checker cannot see it.  See design-decisions.md §270.)
+    if !crate::fs::selftest::is_mounted_rw("/") {
+        skips.record(
+            "Dispatch FS roundtrip",
+            "/ is not mounted read-write yet (running before filesystem init)",
+        );
+        return Ok(());
+    }
 
     // 1. Write a test file.
     let write_args = SyscallArgs {
@@ -3532,12 +3552,11 @@ fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
     };
     let write_result = dispatch(SYS_FS_WRITE_FILE, &write_args);
     if write_result.value < 0 {
-        // No filesystem mounted — skip FS tests gracefully.
         serial_println!(
-            "[syscall]   Dispatch FS roundtrip: SKIPPED (no FS, err={})",
+            "[syscall]   FAIL: Dispatch FS roundtrip: / is mounted rw but SYS_FS_WRITE_FILE returned {}",
             write_result.value
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
 
     // 2. Read it back.

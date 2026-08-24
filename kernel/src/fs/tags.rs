@@ -141,6 +141,16 @@ impl TagIndex {
     }
 }
 
+/// The tag index.
+///
+/// **Never enter the VFS while holding this.** `read_tags`/`write_tags` call
+/// `Vfs::get_xattr`/`Vfs::set_xattr`, which resolve through the filesystem's
+/// own lock -- and the VFS holds that lock across content generation, which
+/// for procfs reaches back into arbitrary module-global state. The live order
+/// is `filesystem lock -> module state`, so `INDEX -> filesystem lock` is an
+/// AB/BA inversion that wedges two CPUs. Collect the paths under the lock,
+/// release it, then read the xattrs.
+/// `scripts/check-vfs-under-lock.py` enforces this.
 static INDEX: Mutex<TagIndex> = Mutex::new(TagIndex::new());
 
 // ---------------------------------------------------------------------------
@@ -436,37 +446,44 @@ pub fn search<R: AsRef<Path> + ?Sized>(tag: &str, root: &R) -> KernelResult<Vec<
     let norm = normalize_tag(tag);
     SEARCHES.fetch_add(1, Ordering::Relaxed);
 
-    let idx = INDEX.lock();
-    if idx.built {
-        // Fast path: use index.
-        let paths = idx.by_tag.get(&norm);
-        match paths {
-            Some(set) => {
-                let mut results = Vec::new();
-                for path in set {
+    // Fast path: take the candidate paths out of the index and release it.
+    // The xattr reads below go through the VFS and so may not run under
+    // `INDEX` -- see the static's doc comment.
+    let candidates: Option<Vec<PathBuf>> = {
+        let idx = INDEX.lock();
+        if idx.built {
+            Some(idx.by_tag.get(&norm).map_or_else(Vec::new, |set| {
+                set.iter()
                     // Component-boundary subtree test, not a byte prefix: a
                     // byte prefix would let a search rooted at `/dev` also
                     // return everything under `/devices`.
-                    if path_in_subtree(path, root) {
-                        // Re-read tags from xattr for accuracy.
-                        let tags = read_tags(path).unwrap_or_default();
-                        results.push(TaggedFile {
-                            path: path.clone(),
-                            tags,
-                        });
-                    }
-                }
-                Ok(results)
-            }
-            None => Ok(Vec::new()),
+                    .filter(|path| path_in_subtree(path, root))
+                    .cloned()
+                    .collect()
+            }))
+        } else {
+            None
         }
-    } else {
-        // Slow path: walk the filesystem.
-        drop(idx); // Release lock before I/O.
+    };
+
+    let Some(candidates) = candidates else {
+        // Slow path: walk the filesystem, also with nothing held.
         let mut results = Vec::new();
         search_walk(root, &norm, &mut results, 0);
-        Ok(results)
-    }
+        return Ok(results);
+    };
+
+    Ok(candidates
+        .into_iter()
+        .map(|path| {
+            // Re-read tags from xattr for accuracy. A file whose xattrs became
+            // unreadable since the index was built reports no tags rather than
+            // failing the whole search -- the index entry is then merely stale,
+            // which `rebuild` corrects.
+            let tags = read_tags(&path).unwrap_or_default();
+            TaggedFile { path, tags }
+        })
+        .collect())
 }
 
 /// Find all files that have ALL of the specified tags (intersection).
@@ -486,52 +503,65 @@ pub fn search_multi<R: AsRef<Path> + ?Sized>(
 
     let norms: Vec<String> = tags.iter().map(|t| normalize_tag(t)).collect();
 
-    let idx = INDEX.lock();
-    if idx.built {
-        // Start with the smallest tag set for efficiency.
-        let mut sets: Vec<&BTreeSet<PathBuf>> = Vec::new();
-        for norm in &norms {
-            match idx.by_tag.get(norm) {
-                Some(set) => sets.push(set),
-                None => return Ok(Vec::new()), // If any tag has no files, result is empty.
+    // Fast path: the whole intersection happens under the lock, but the xattr
+    // reads it feeds must not -- see `INDEX`'s doc comment. So the critical
+    // section ends with a plain list of paths.
+    let candidates: Option<Vec<PathBuf>> = {
+        let idx = INDEX.lock();
+        if idx.built {
+            // Start with the smallest tag set for efficiency.
+            let mut sets: Vec<&BTreeSet<PathBuf>> = Vec::new();
+            for norm in &norms {
+                match idx.by_tag.get(norm) {
+                    Some(set) => sets.push(set),
+                    None => return Ok(Vec::new()), // If any tag has no files, result is empty.
+                }
             }
-        }
 
-        // Sort by size (smallest first).
-        sets.sort_by_key(|s| s.len());
+            // Sort by size (smallest first).
+            sets.sort_by_key(|s| s.len());
 
-        // Intersect iteratively.  `split_first` rather than `sets[0]`/`sets[1..]`:
-        // `tags` is non-empty so `sets` is too, but indexing to prove that would
-        // be a panic path the compiler cannot check.
-        let Some((first, rest)) = sets.split_first() else {
-            return Ok(Vec::new());
-        };
-        let mut candidates: BTreeSet<PathBuf> = (*first).clone();
-        for set in rest {
-            candidates = candidates.intersection(set).cloned().collect();
-            if candidates.is_empty() {
+            // Intersect iteratively.  `split_first` rather than `sets[0]`/`sets[1..]`:
+            // `tags` is non-empty so `sets` is too, but indexing to prove that would
+            // be a panic path the compiler cannot check.
+            let Some((first, rest)) = sets.split_first() else {
                 return Ok(Vec::new());
+            };
+            let mut inter: BTreeSet<PathBuf> = (*first).clone();
+            for set in rest {
+                inter = inter.intersection(set).cloned().collect();
+                if inter.is_empty() {
+                    return Ok(Vec::new());
+                }
             }
-        }
 
-        let mut results = Vec::new();
-        for path in &candidates {
-            if path_in_subtree(path, root) {
-                let file_tags = read_tags(path).unwrap_or_default();
-                results.push(TaggedFile {
-                    path: path.clone(),
-                    tags: file_tags,
-                });
-            }
+            Some(
+                inter
+                    .into_iter()
+                    .filter(|path| path_in_subtree(path, root))
+                    .collect(),
+            )
+        } else {
+            None
         }
-        Ok(results)
-    } else {
-        // Slow path: walk the filesystem.
-        drop(idx);
+    };
+
+    let Some(candidates) = candidates else {
+        // Slow path: walk the filesystem, also with nothing held.
         let mut results = Vec::new();
         search_walk_multi(root, &norms, &mut results, 0);
-        Ok(results)
-    }
+        return Ok(results);
+    };
+
+    Ok(candidates
+        .into_iter()
+        .map(|path| {
+            // As in `search`: an unreadable xattr yields no tags rather than
+            // failing every other match alongside it.
+            let tags = read_tags(&path).unwrap_or_default();
+            TaggedFile { path, tags }
+        })
+        .collect())
 }
 
 /// Virtual filesystems carry no persistent xattrs, so walking them can only

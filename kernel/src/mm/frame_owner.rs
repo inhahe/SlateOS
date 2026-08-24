@@ -661,6 +661,7 @@ pub fn self_test() {
     use crate::mm::frame;
 
     serial_println!("[frame_owner] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // Test 1: storage was published by frame::init and covers ALL installed
     // RAM.  This is the regression test for TD-FRAME-OWNER-1GIB: the array
@@ -703,6 +704,10 @@ pub fn self_test() {
             OLD_CEILING
         );
     } else {
+        skips.record(
+            "frame index above the old 1 GiB ceiling",
+            "this machine tracks <= 65536 frames",
+        );
         serial_println!(
             "[frame_owner]   High-frame test skipped ({tracked} frames <= {OLD_CEILING})"
         );
@@ -843,5 +848,6 @@ pub fn self_test() {
         s2.total_clears
     );
 
-    serial_println!("[frame_owner] Self-test PASSED");
+    skips.report("[frame_owner]");
+    serial_println!("[frame_owner] Self-test PASSED{}", skips.suffix());
 }

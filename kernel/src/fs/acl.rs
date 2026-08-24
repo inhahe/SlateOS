@@ -43,6 +43,7 @@ use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::path::{Path, PathBuf};
 use crate::error::{KernelError, KernelResult};
@@ -213,6 +214,30 @@ static ACLS: Mutex<AclInner> = Mutex::new(AclInner {
     denials: 0,
 });
 
+/// `ACLS.acls.len()`, readable without taking the lock.
+///
+/// The VFS consults ACLs on every path operation, and path lookup is on the
+/// hot path of every open (target: a few hundred nanoseconds). Answering "are
+/// there any ACLs at all?" with a mutex acquisition plus a `BTreeMap` walk
+/// would put a lock on that path for the overwhelmingly common case of a
+/// system with no ACLs set. A relaxed load costs nothing.
+///
+/// Kept in step with the map by [`set_acl`], [`remove_acl`] and [`clear`] —
+/// the only three functions that change its size. Relaxed is sufficient: a
+/// reader that misses a just-inserted ACL by a few cycles behaves exactly
+/// like a reader that ran a moment earlier, and `check_access` re-reads the
+/// map under the lock anyway, so the count is a filter and never the answer.
+static ACL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of paths that currently carry an ACL, without taking the lock.
+///
+/// Callers use this to skip ACL evaluation entirely; see [`ACL_COUNT`].
+#[inline]
+#[must_use]
+pub fn count() -> usize {
+    ACL_COUNT.load(Ordering::Relaxed)
+}
+
 // ---------------------------------------------------------------------------
 // Public API — ACL management
 // ---------------------------------------------------------------------------
@@ -247,7 +272,11 @@ pub fn set_acl(path: impl AsRef<Path>, acl: Acl) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
 
-    ACLS.lock().acls.insert(path.to_path_buf(), acl);
+    let mut inner = ACLS.lock();
+    inner.acls.insert(path.to_path_buf(), acl);
+    // Published under the lock so a concurrent `remove_acl` cannot interleave
+    // its decrement between this insert and this store.
+    ACL_COUNT.store(inner.acls.len(), Ordering::Relaxed);
     Ok(())
 }
 
@@ -262,7 +291,10 @@ pub fn get_acl(path: impl AsRef<Path>) -> Option<Acl> {
 ///
 /// After removal, the file uses only traditional permissions.
 pub fn remove_acl(path: impl AsRef<Path>) -> bool {
-    ACLS.lock().acls.remove(path.as_ref()).is_some()
+    let mut inner = ACLS.lock();
+    let removed = inner.acls.remove(path.as_ref()).is_some();
+    ACL_COUNT.store(inner.acls.len(), Ordering::Relaxed);
+    removed
 }
 
 /// Check whether a specific access request is permitted by the ACL.
@@ -387,6 +419,7 @@ pub fn clear() {
     inner.acls.clear();
     inner.checks_performed = 0;
     inner.denials = 0;
+    ACL_COUNT.store(0, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------

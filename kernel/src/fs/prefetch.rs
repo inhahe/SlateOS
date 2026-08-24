@@ -415,7 +415,7 @@ fn test_lru_eviction() {
     let to_add = MAX_ENTRIES.saturating_sub(initial_active) + 1;
 
     for i in 0..to_add {
-        advise(&format!("/lru_test/{}", i), AccessAdvice::Sequential);
+        advise(format!("/lru_test/{i}"), AccessAdvice::Sequential);
     }
 
     // Table should not exceed MAX_ENTRIES.

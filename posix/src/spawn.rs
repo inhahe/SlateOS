@@ -313,6 +313,27 @@ pub mod fd_handle_type {
     /// dups the endpoint into the child via `stream_socket::dup()`,
     /// which bumps the endpoint refcount.
     pub const STREAM_SOCKET: u8 = 6;
+    /// Either end of a pty.  One constant covers both because `PtyHandle` is
+    /// `(tty_id << 1) | end` — the low bit already distinguishes them, and a
+    /// second constant would only create a place for the two encodings to
+    /// disagree.  The kernel dups through `pty::dup()`, which refcounts the
+    /// *end*.
+    ///
+    /// **This entry is ownership-gated, uniquely in this table.**  Naming a pty
+    /// handle the calling process does not hold fails the whole spawn with
+    /// `InvalidHandle` — not silently dropped, not partially applied.  The
+    /// asymmetry is deliberate on the kernel's part: a `PtyHandle` is guessable
+    /// by construction, unlike every other handle family here, and a master is
+    /// the authority to type arbitrary bytes into a stranger's shell.  Since
+    /// this loop maps only the *parent's own* open descriptors, the gate never
+    /// fires for a spawn built here; it exists for a hand-built `fd_map`.
+    ///
+    /// Nothing on this path calls `SYS_PTY_DUP` on the caller's behalf, and
+    /// `dup` must keep not calling it: spawn takes exactly one reference per
+    /// `fd_map` entry — deliberately *not* deduped the way `linux_fd_redirects`
+    /// dedups aliases, since that path moves one handle into several
+    /// descriptors and so registers once, while this one dups per entry.
+    pub const PTY: u8 = 7;
 }
 
 /// A file descriptor mapping entry for `SYS_PROCESS_SPAWN_EX`.
@@ -1273,22 +1294,18 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
         // pty-aware" note in
         // `requests/a-b-pty-the-tty-layer-is-now-n-devices-and-a-pty-object-exists.md`.
         HandleKind::PtySlave => fd_handle_type::CONSOLE,
+        // A pty *master* crosses as itself now that `fd_handle_type::PTY`
+        // exists.  It used to be filtered out of `build_fd_map` entirely, for
+        // want of any value that named a pty end — which meant the child
+        // silently lost the master rather than being told it could not have
+        // one, and which is what stopped `script -f`-shaped programs (where the
+        // *child* is the master holder) from working at all.
+        HandleKind::PtyMaster => fd_handle_type::PTY,
         // Epoll, Timerfd, and Inotify fds are per-process userspace
         // state and cannot be meaningfully transferred to a child.  Map
         // to FILE so the function is total; build_fd_map filters these
         // entries out before they reach this conversion.
-        //
-        // A pty *master* is filtered for a different reason: it is a real
-        // kernel handle that could be inherited, but there is no
-        // `fd_handle_type` for it, so the kernel has no way to dup it into
-        // the child's PCB.  Passing it as `FILE` would hand the child a
-        // handle number the file layer would misread.  Filed with lane A
-        // as `requests/b-a-spawn-cannot-inherit-a-pty-master.md`; until
-        // that lands, a child that needs a master must be given one over
-        // a channel rather than at spawn.
-        HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::PtyMaster => {
-            fd_handle_type::FILE
-        }
+        HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => fd_handle_type::FILE,
     }
 }
 
@@ -1309,7 +1326,23 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
 /// Note the round trip is exact for every *transferable* kind except
 /// `TcpListener`, which shares the `TCP_SOCKET` wire type with `TcpStream`
 /// and therefore comes back as `TcpStream`.
+///
+/// `handle` is needed only for `PTY`, whose single wire type covers both ends —
+/// see [`handle_type_to_kind_for`].
 pub fn handle_type_to_kind(handle_type: u8) -> crate::fdtable::HandleKind {
+    handle_type_to_kind_for(handle_type, 0)
+}
+
+/// [`handle_type_to_kind`] with the handle available, which is what the child's
+/// crt0 actually has.
+///
+/// One wire type, `PTY`, cannot be decoded from the type byte alone: it names
+/// *either* end, because `PtyHandle` is `(tty_id << 1) | end` and so already
+/// carries the distinction in its low bit.  Rebuilding both ends as one kind
+/// would be worse than the `TcpListener` collapse — a master reconstructed as a
+/// slave would send the emulator's own keystrokes back to itself — so the bit
+/// is read rather than guessed.
+pub fn handle_type_to_kind_for(handle_type: u8, handle: u64) -> crate::fdtable::HandleKind {
     use crate::fdtable::HandleKind;
     match handle_type {
         fd_handle_type::FILE => HandleKind::File,
@@ -1322,6 +1355,13 @@ pub fn handle_type_to_kind(handle_type: u8) -> crate::fdtable::HandleKind {
         // as `File` would route the child's read/write/recv through the
         // file path with the wrong semantics (EBADF or silent misbehaviour).
         fd_handle_type::STREAM_SOCKET => HandleKind::UnixStream,
+        fd_handle_type::PTY => {
+            if handle & 1 == 0 {
+                HandleKind::PtyMaster
+            } else {
+                HandleKind::PtySlave
+            }
+        }
         _ => HandleKind::File,
     }
 }
@@ -1412,28 +1452,22 @@ fn build_fd_map(
             // to the child.  For those three the filter is honest: there
             // is no kernel object to hand over.
             //
-            // `PtyMaster` is in the same list for a different and worse
-            // reason: it *does* have a kernel identity, but
-            // `SYS_PROCESS_SPAWN`'s `fd_handle_type` has no value that
-            // names a pty end, so there is no way to pass it.  Dropping
-            // it is a lie of convenience — the child silently loses the
-            // master rather than being told it cannot have it — and it
-            // is what stops `script -f`-shaped programs (where the
-            // *child* is the master holder) from working at all.  Tracked
-            // as `TD-B-PTY-MASTER-CANNOT-BE-INHERITED-ACROSS-SPAWN` and
-            // filed to lane A as
-            // `requests/b-a-pty-gaps-master-inheritance-and-readable-bytes.md`.
+            // `PtyMaster` used to be in the same list for a different and worse
+            // reason — it *does* have a kernel identity, but no
+            // `fd_handle_type` named a pty end, so dropping it was a lie of
+            // convenience.  `fd_handle_type::PTY` closed that gap, so a master
+            // is inherited like anything else now and
+            // `TD-B-PTY-MASTER-CANNOT-BE-INHERITED-ACROSS-SPAWN` is fixed.
             //
-            // `PtySlave` deliberately is *not* skipped: `kind_to_handle_type`
-            // maps it to `CONSOLE`, which the kernel resolves through
-            // `current_tty()`, and `login_tty` has already made the pty the
-            // child's controlling terminal — so that mapping is exact
-            // rather than approximate.
+            // `PtySlave` deliberately is *not* skipped and deliberately does
+            // *not* travel as `PTY`: `kind_to_handle_type` maps it to
+            // `CONSOLE`, which the kernel resolves through `current_tty()`, and
+            // `login_tty` has already made the pty the child's controlling
+            // terminal — so that mapping is exact rather than approximate.
             if entry.flags & fdtable::FD_CLOEXEC == 0
                 && entry.kind != fdtable::HandleKind::Epoll
                 && entry.kind != fdtable::HandleKind::Timerfd
                 && entry.kind != fdtable::HandleKind::Inotify
-                && entry.kind != fdtable::HandleKind::PtyMaster
             {
                 virt[idx] = Some((kind_to_handle_type(entry.kind), entry.handle));
             }
@@ -2840,6 +2874,53 @@ mod tests {
         assert_eq!(handle_type_to_kind(u8::MAX), HandleKind::File);
     }
 
+    /// `fd_handle_type::PTY` must equal the kernel's constant, which is the one
+    /// number in this table that cannot be checked by a round trip: both sides
+    /// of the round trip live here, while the value that matters lives in
+    /// `kernel/src/proc/spawn.rs`.
+    #[test]
+    fn pty_wire_type_matches_the_kernel() {
+        assert_eq!(fd_handle_type::PTY, 7);
+    }
+
+    /// A master inherited across a spawn must come back a *master*.
+    ///
+    /// One wire type covers both ends, so the end can only come from the
+    /// handle's low bit — `PtyHandle` is `(id << 1) | end`, `Master` being 0.
+    /// Rebuilding a master as a slave would be worse than any other confusion
+    /// in this table: the emulator's own keystrokes would come back to it.
+    #[test]
+    fn both_pty_ends_survive_the_round_trip() {
+        use crate::fdtable::HandleKind;
+        assert_eq!(
+            kind_to_handle_type(HandleKind::PtyMaster),
+            fd_handle_type::PTY
+        );
+        // (id 3, master) and (id 3, slave).
+        assert_eq!(
+            handle_type_to_kind_for(fd_handle_type::PTY, 3 << 1),
+            HandleKind::PtyMaster
+        );
+        assert_eq!(
+            handle_type_to_kind_for(fd_handle_type::PTY, (3 << 1) | 1),
+            HandleKind::PtySlave
+        );
+    }
+
+    /// A pty *slave* deliberately does not travel as `PTY`: it goes as
+    /// `CONSOLE`, which the kernel resolves through `current_tty()`, and
+    /// `login_tty` has already made it the child's controlling terminal.
+    /// Pinned so the asymmetry stays deliberate rather than looking like an
+    /// oversight next to the master's new arm.
+    #[test]
+    fn pty_slave_still_travels_as_console() {
+        use crate::fdtable::HandleKind;
+        assert_eq!(
+            kind_to_handle_type(HandleKind::PtySlave),
+            fd_handle_type::CONSOLE
+        );
+    }
+
     // -- FileActionSlot --
 
     #[test]
@@ -3485,6 +3566,11 @@ mod tests {
         assert_eq!(fd_handle_type::UDP_SOCKET, 3);
         assert_eq!(fd_handle_type::CONSOLE, 4);
         assert_eq!(fd_handle_type::EVENTFD, 5);
+        // The last two were added after this test was written and were not
+        // added to it, which is how a wire constant drifts from the kernel's
+        // unnoticed. Every value in the module belongs here.
+        assert_eq!(fd_handle_type::STREAM_SOCKET, 6);
+        assert_eq!(fd_handle_type::PTY, 7);
     }
 
     #[test]
@@ -3496,6 +3582,8 @@ mod tests {
             fd_handle_type::UDP_SOCKET,
             fd_handle_type::CONSOLE,
             fd_handle_type::EVENTFD,
+            fd_handle_type::STREAM_SOCKET,
+            fd_handle_type::PTY,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {
@@ -3596,6 +3684,53 @@ mod tests {
         assert_eq!(out[1].handle_type, fd_handle_type::CONSOLE);
         assert_eq!(out[2].fd, 2);
         assert_eq!(out[2].handle_type, fd_handle_type::CONSOLE);
+    }
+
+    /// The regression this whole change exists for: a pty master open in the
+    /// parent must appear in the child's `fd_map`.
+    ///
+    /// It used to be filtered out silently, so a `script -f`-shaped program —
+    /// where the *child* is the master holder — got a child with no master and
+    /// no error to explain it.
+    #[test]
+    fn a_pty_master_is_no_longer_dropped_from_the_fd_map() {
+        use crate::fdtable::{HandleKind, install_fd};
+        ensure_std_fds();
+        // (id 9, master): low bit clear.
+        let handle: u64 = 9 << 1;
+        let fd = 7;
+        let _ = install_fd(fd, HandleKind::PtyMaster, handle);
+
+        let mut out = [FdMapEntry {
+            fd: 0,
+            handle_type: 0,
+            _pad: [0; 3],
+            handle: 0,
+        }; MAX_FD_MAP];
+        let mut opened = OpenedHandles::new();
+        let count = build_fd_map(core::ptr::null(), &mut out, &mut opened);
+
+        let found = out
+            .get(..count)
+            .unwrap_or(&[])
+            .iter()
+            .find(|e| e.fd == fd)
+            .copied();
+        let _ = crate::fdtable::close_fd(fd);
+
+        let entry = found.expect("the pty master was dropped from the fd_map");
+        assert_eq!(
+            entry.handle_type,
+            fd_handle_type::PTY,
+            "a master must cross as PTY, not as FILE — the file layer would \
+             misread the handle number"
+        );
+        assert_eq!(entry.handle, handle);
+        // And the child must rebuild it as a master, not a slave.
+        assert_eq!(
+            handle_type_to_kind_for(entry.handle_type, entry.handle),
+            HandleKind::PtyMaster
+        );
     }
 
     #[test]

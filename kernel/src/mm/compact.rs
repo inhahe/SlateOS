@@ -555,6 +555,7 @@ pub unsafe fn try_migrate_one(old_phys: u64) -> bool {
 /// with user-space mappings).
 pub fn self_test() {
     serial_println!("[compact] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // Test 1: analyze() returns a report (even if fragmentation is low).
     let report = analyze();
@@ -575,6 +576,10 @@ pub fn self_test() {
             r.largest_free_block
         );
     } else {
+        skips.record(
+            "analyze() report checks",
+            "frame allocator stats unavailable",
+        );
         serial_println!("[compact]   analyze: skipped (frame stats unavailable)");
     }
 
@@ -651,5 +656,6 @@ pub fn self_test() {
     assert!(!migrated_one, "non-rmap frame should not migrate");
     serial_println!("[compact]   try_migrate_one (non-rmap): OK");
 
-    serial_println!("[compact] Self-test PASSED");
+    skips.report("[compact]");
+    serial_println!("[compact] Self-test PASSED{}", skips.suffix());
 }

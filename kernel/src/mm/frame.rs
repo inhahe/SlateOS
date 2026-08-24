@@ -2852,6 +2852,8 @@ pub unsafe fn ref_dec(frame: PhysFrame) -> KernelResult<u16> {
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[mm] Running frame allocator self-test...");
 
+    let mut skips = crate::fs::selftest::Skips::new();
+
     let initial = stats().ok_or(KernelError::NotSupported)?;
     serial_println!("[mm]   Initial: {} free frames", initial.free_frames);
 
@@ -2966,15 +2968,16 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[mm]   Double-free detection: OK");
 
     // -- Test 5: Zeroed frame allocation (every byte zero) ------------------
-    test_zeroed_alloc()?;
+    test_zeroed_alloc(&mut skips)?;
 
     // -- Test 6: Per-CPU cache (alloc/free pattern after enabling) ----------
     test_pcpu_cache()?;
 
     // -- Test 7: Zero-on-free mode (sysctl mm.zero_on_alloc=1) -------------
-    test_zero_on_free()?;
+    test_zero_on_free_inner(&mut skips)?;
 
-    serial_println!("[mm] Frame allocator self-test PASSED");
+    skips.report("[mm]");
+    serial_println!("[mm] Frame allocator self-test PASSED{}", skips.suffix());
     Ok(())
 }
 
@@ -2982,14 +2985,17 @@ pub fn self_test() -> KernelResult<()> {
 ///
 /// Requires page_table::hhdm() to be available (page_table::init must
 /// have been called).  Skips gracefully if called too early in boot.
-fn test_zeroed_alloc() -> KernelResult<()> {
+fn test_zeroed_alloc(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
     let hhdm = match crate::mm::page_table::hhdm() {
         Some(h) => h,
         None => {
             // Page table module not initialized yet — alloc_frame_zeroed
             // won't work either.  Skip this test at early boot; it will
             // be exercised indirectly by the demand paging self-test.
-            serial_println!("[mm]   Zeroed frame allocation: SKIP (HHDM not ready)");
+            skips.record(
+                "Zeroed frame allocation",
+                "HHDM is not mapped yet (running before page_table::init)",
+            );
             return Ok(());
         }
     };
@@ -3073,6 +3079,23 @@ fn test_pcpu_cache() -> KernelResult<()> {
     Ok(())
 }
 
+/// Create the scratch cgroup a self-test section needs, or fail the test.
+///
+/// `cgroup::create` has exactly two failure modes, and neither is a fact about
+/// the machine this kernel booted on.  `InvalidArgument` cannot happen here —
+/// the parent is the root cgroup, which is active for the whole life of the
+/// kernel.  `ResourceExhausted` means all `MAX_CGROUPS` slots are in use, but
+/// at self-test time the table holds root and nothing else, and every section
+/// below deletes the cgroup it created.  So exhaustion here means a cgroup
+/// *leak* — precisely the defect a self-test exists to catch, and precisely
+/// what the old `else { SKIP (no cgroup slots) }` would have hidden by
+/// switching the section off and still printing PASSED.
+fn selftest_cgroup(section: &str) -> KernelResult<crate::cgroup::CgroupId> {
+    crate::cgroup::create(crate::cgroup::ROOT_CGROUP).inspect_err(|e| {
+        serial_println!("[mm]   FAIL: {section}: cgroup::create(ROOT) failed: {e:?}");
+    })
+}
+
 /// Test zero-on-free mode: frames zeroed during free are correctly
 /// pre-zeroed when allocated via `alloc_frame_zeroed()`.
 ///
@@ -3086,11 +3109,27 @@ fn test_pcpu_cache() -> KernelResult<()> {
 /// Requires HHDM and per-CPU caches to be available.  Called both from
 /// `self_test()` (skips if too early) and from main.rs after full
 /// memory subsystem initialization.
+///
+/// The standalone entry point owns its own [`Skips`] and reports it, so the
+/// main.rs call site still cannot print a bare success line over a skipped
+/// section.
+///
+/// [`Skips`]: crate::fs::selftest::Skips
 pub fn test_zero_on_free() -> KernelResult<()> {
+    let mut skips = crate::fs::selftest::Skips::new();
+    let r = test_zero_on_free_inner(&mut skips);
+    skips.report("[mm]");
+    r
+}
+
+fn test_zero_on_free_inner(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
     let hhdm = match crate::mm::page_table::hhdm() {
         Some(h) => h,
         None => {
-            serial_println!("[mm]   Zero-on-free: SKIP (HHDM not ready)");
+            skips.record(
+                "Zero-on-free",
+                "HHDM is not mapped yet (running before page_table::init)",
+            );
             return Ok(());
         }
     };
@@ -3198,8 +3237,8 @@ pub fn test_zero_on_free() -> KernelResult<()> {
 
     // Create a test cgroup with a memory limit, verify frames are
     // charged/uncharged correctly.
-    let test_cg_id = crate::cgroup::create(crate::cgroup::ROOT_CGROUP);
-    if let Ok(cg_id) = test_cg_id {
+    let cg_id = selftest_cgroup("Cgroup charge/uncharge")?;
+    {
         // Set a generous limit so allocations succeed.
         let _ = crate::cgroup::set_mem_limit(cg_id, crate::cgroup::MemLimit { max_frames: 1000 });
 
@@ -3233,16 +3272,14 @@ pub fn test_zero_on_free() -> KernelResult<()> {
         // Clean up test cgroup.
         let _ = crate::cgroup::delete(cg_id);
         serial_println!("[mm]   Cgroup charge/uncharge: OK");
-    } else {
-        serial_println!("[mm]   Cgroup charge/uncharge: SKIP (no cgroup slots)");
     }
 
     // -----------------------------------------------------------------------
     // Test 11: Cgroup limit enforcement (alloc should fail when over limit)
     // -----------------------------------------------------------------------
 
-    let test_cg_id2 = crate::cgroup::create(crate::cgroup::ROOT_CGROUP);
-    if let Ok(cg_id) = test_cg_id2 {
+    let cg_id = selftest_cgroup("Cgroup limit enforcement")?;
+    {
         // Set a limit of 2 frames.
         let _ = crate::cgroup::set_mem_limit(cg_id, crate::cgroup::MemLimit { max_frames: 2 });
 
@@ -3257,8 +3294,6 @@ pub fn test_zero_on_free() -> KernelResult<()> {
         crate::cgroup::mem_uncharge(cg_id, 2);
         let _ = crate::cgroup::delete(cg_id);
         serial_println!("[mm]   Cgroup limit enforcement: OK");
-    } else {
-        serial_println!("[mm]   Cgroup limit enforcement: SKIP (no cgroup slots)");
     }
 
     // -----------------------------------------------------------------------
@@ -3281,13 +3316,18 @@ pub fn test_zero_on_free() -> KernelResult<()> {
     // always resolves to root and every allocator charge would no-op.  The
     // explicit-cgroup helper runs the identical charge+record /
     // uncharge+clear code the live alloc/free paths use.
-    let test_cg_id3 = crate::cgroup::create(crate::cgroup::ROOT_CGROUP);
-    if let Ok(cg_id) = test_cg_id3 {
+    let cg_id = selftest_cgroup("Cgroup charge/uncharge round-trip")?;
+    {
         let _ = crate::cgroup::set_mem_limit(cg_id, crate::cgroup::MemLimit { max_frames: 1000 });
 
         // A real, owned frame whose physical index lies within the
         // per-frame cgroup tracking array.  (alloc_frame charges the
         // *current* cgroup, which is root here, so it adds nothing to cg_id.)
+        //
+        // `OutOfMemory` is the only allocator error that describes the
+        // machine rather than the allocator; every other error means the
+        // allocator was asked for one frame and answered wrongly, which is
+        // the class of bug this whole file tests for.
         match alloc_frame() {
             Ok(fr) => {
                 #[allow(clippy::arithmetic_side_effects)]
@@ -3332,14 +3372,22 @@ pub fn test_zero_on_free() -> KernelResult<()> {
                 );
                 serial_println!("[mm]   Cgroup charge/uncharge round-trip (no double-charge): OK");
             }
-            Err(_) => {
-                serial_println!("[mm]   Cgroup charge/uncharge round-trip: SKIP (alloc failed)");
+            Err(KernelError::OutOfMemory) => {
+                skips.record(
+                    "Cgroup charge/uncharge round-trip",
+                    "no free frame left on this machine",
+                );
+            }
+            Err(e) => {
+                serial_println!(
+                    "[mm]   FAIL: Cgroup charge/uncharge round-trip: alloc_frame failed: {e:?}"
+                );
+                let _ = crate::cgroup::delete(cg_id);
+                return Err(e);
             }
         }
 
         let _ = crate::cgroup::delete(cg_id);
-    } else {
-        serial_println!("[mm]   Cgroup charge/uncharge round-trip: SKIP (no cgroup slots)");
     }
 
     // -----------------------------------------------------------------------
@@ -3350,13 +3398,25 @@ pub fn test_zero_on_free() -> KernelResult<()> {
     // on the charge error), so the matching free performs no spurious
     // uncharge.  Otherwise an over-limit demand fault would corrupt
     // accounting.
-    let test_cg_id4 = crate::cgroup::create(crate::cgroup::ROOT_CGROUP);
-    if let Ok(cg_id) = test_cg_id4 {
+    let cg_id = selftest_cgroup("Cgroup over-limit charge")?;
+    {
         let _ = crate::cgroup::set_mem_limit(cg_id, crate::cgroup::MemLimit { max_frames: 1 });
         // Consume the entire limit directly (independent of any frame).
-        let filled = crate::cgroup::mem_charge(cg_id, 1).is_ok();
+        //
+        // This charge is *setup*, and it cannot legitimately fail: the group
+        // was created a line ago with a limit of one frame and a usage of
+        // zero.  If it fails, `mem_charge` is broken — and the old
+        // `let filled = ….is_ok()` turned exactly that bug into a SKIP of
+        // the section that would have caught it.
+        if let Err(e) = crate::cgroup::mem_charge(cg_id, 1) {
+            serial_println!(
+                "[mm]   FAIL: Cgroup over-limit charge: charging 1 frame against a fresh limit of 1 failed: {e:?}"
+            );
+            let _ = crate::cgroup::delete(cg_id);
+            return Err(e);
+        }
         match alloc_frame() {
-            Ok(fr) if filled => {
+            Ok(fr) => {
                 #[allow(clippy::arithmetic_side_effects)]
                 let idx = (fr.addr() / FRAME_SIZE as u64) as usize;
                 let tag_before = get_frame_cgroup(idx);
@@ -3375,21 +3435,21 @@ pub fn test_zero_on_free() -> KernelResult<()> {
                 );
                 serial_println!("[mm]   Cgroup over-limit charge leaves no record: OK");
             }
-            Ok(fr) => {
-                // SAFETY: frame was just allocated and is not mapped.
-                let _ = unsafe { free_frame(fr) };
-                serial_println!("[mm]   Cgroup over-limit charge: SKIP (limit charge failed)");
+            Err(KernelError::OutOfMemory) => {
+                crate::cgroup::mem_uncharge(cg_id, 1);
+                skips.record(
+                    "Cgroup over-limit charge",
+                    "no free frame left on this machine",
+                );
             }
-            Err(_) => {
-                if filled {
-                    crate::cgroup::mem_uncharge(cg_id, 1);
-                }
-                serial_println!("[mm]   Cgroup over-limit charge: SKIP (alloc failed)");
+            Err(e) => {
+                serial_println!("[mm]   FAIL: Cgroup over-limit charge: alloc_frame failed: {e:?}");
+                crate::cgroup::mem_uncharge(cg_id, 1);
+                let _ = crate::cgroup::delete(cg_id);
+                return Err(e);
             }
         }
         let _ = crate::cgroup::delete(cg_id);
-    } else {
-        serial_println!("[mm]   Cgroup over-limit charge: SKIP (no cgroup slots)");
     }
 
     // Restore original state.

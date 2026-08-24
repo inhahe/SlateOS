@@ -1332,6 +1332,7 @@ pub fn self_test() {
 
 fn self_test_inner() {
     crate::serial_println!("[vmguest] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // Test 1: Feature enum labels are non-empty.
     for &f in GuestFeature::ALL {
@@ -1373,6 +1374,14 @@ fn self_test_inner() {
     } else {
         assert!(!initialized, "init() is a no-op on bare metal");
         assert_eq!(active, 0, "and activates nothing");
+        // Tests 7-9 below are gated on `initialized` and on feature support,
+        // both of which are false on bare metal.  Naming them here is what
+        // stops "Self-test PASSED (15 tests)" from claiming 15 on a machine
+        // that ran 12.
+        skips.record(
+            "guest info and display resize (tests 7-9)",
+            "not running under a hypervisor",
+        );
         crate::serial_println!("[vmguest]   Init state: OK (bare metal — skipped)");
     }
     crate::serial_println!("[vmguest]   Supported: {}, Active: {}", supported, active);
@@ -1430,6 +1439,15 @@ fn self_test_inner() {
         assert!(w >= 640 && w <= 7680, "Width should be in valid range");
         assert!(h >= 480 && h <= 4320, "Height should be in valid range");
         crate::serial_println!("[vmguest]   Display resize: {}x{}", w, h);
+    } else if initialized {
+        // Under a hypervisor that simply lacks the feature; on bare metal the
+        // skip is already recorded above, and recording it twice would suggest
+        // two independent gaps where there is one.
+        skips.record(
+            "display resize (tests 8-9)",
+            "this hypervisor does not support it",
+        );
+        crate::serial_println!("[vmguest]   Display resize: not supported (skipped)");
     } else {
         crate::serial_println!("[vmguest]   Display resize: not supported (skipped)");
     }
@@ -1530,5 +1548,6 @@ fn self_test_inner() {
     );
     crate::serial_println!("[vmguest]   Tick processing: OK");
 
-    crate::serial_println!("[vmguest] Self-test PASSED (15 tests)");
+    skips.report("[vmguest]");
+    crate::serial_println!("[vmguest] Self-test PASSED (15 tests){}", skips.suffix());
 }

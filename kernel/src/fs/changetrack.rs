@@ -174,26 +174,13 @@ static STATE: Mutex<ChangeTrackInner> = Mutex::new(ChangeTrackInner {
 ///
 /// Should be called after the journal and VFS are initialized.
 pub fn init() {
-    let mut state = STATE.lock();
-    if state.initialized {
-        return;
-    }
-
-    // Try to load cursors from disk.
-    if let Ok(data) = crate::fs::Vfs::read_file(CURSOR_FILE) {
-        if let Ok(text) = core::str::from_utf8(&data) {
-            for line in text.lines() {
-                if let Some(cursor) = parse_cursor_line(line) {
-                    state.cursors.insert(cursor.name.clone(), cursor);
-                }
-            }
-        }
-    }
-
-    state.initialized = true;
+    // Eager init is the same operation as the lazy one, so it is the same
+    // code: a second copy of the load would be a second place to get the
+    // lock discipline wrong, and this one already had it wrong.
+    ensure_init();
     serial_println!(
         "[changetrack] Initialized with {} cursors",
-        state.cursors.len()
+        STATE.lock().cursors.len()
     );
 }
 
@@ -209,8 +196,8 @@ pub fn register(name: &str) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
 
+    ensure_init();
     let mut state = STATE.lock();
-    ensure_init(&mut state);
 
     if state.cursors.contains_key(name) {
         return Ok(()); // Already registered.
@@ -260,8 +247,8 @@ pub fn peek(name: &str, filter: &ChangeFilter) -> KernelResult<ChangeResult> {
 
 /// Reset a cursor to the current journal position (skip all pending changes).
 pub fn reset(name: &str) -> KernelResult<()> {
+    ensure_init();
     let mut state = STATE.lock();
-    ensure_init(&mut state);
 
     let cursor = state.cursors.get_mut(name).ok_or(KernelError::NotFound)?;
 
@@ -277,8 +264,8 @@ pub fn reset(name: &str) -> KernelResult<()> {
 
 /// Unregister a cursor, removing it permanently.
 pub fn unregister(name: &str) -> KernelResult<()> {
+    ensure_init();
     let mut state = STATE.lock();
-    ensure_init(&mut state);
 
     if state.cursors.remove(name).is_none() {
         return Err(KernelError::NotFound);
@@ -293,8 +280,8 @@ pub fn unregister(name: &str) -> KernelResult<()> {
 
 /// List all registered cursors.
 pub fn list() -> Vec<CursorInfo> {
-    let mut state = STATE.lock();
-    ensure_init(&mut state);
+    ensure_init();
+    let state = STATE.lock();
 
     state
         .cursors
@@ -311,8 +298,8 @@ pub fn list() -> Vec<CursorInfo> {
 
 /// Get info about a specific cursor.
 pub fn info(name: &str) -> KernelResult<CursorInfo> {
-    let mut state = STATE.lock();
-    ensure_init(&mut state);
+    ensure_init();
+    let state = STATE.lock();
 
     let c = state.cursors.get(name).ok_or(KernelError::NotFound)?;
     Ok(CursorInfo {
@@ -344,27 +331,57 @@ pub fn flush() -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Ensure the subsystem is initialized (lazy init on first use).
-fn ensure_init(state: &mut ChangeTrackInner) {
-    if !state.initialized {
-        // Try to load from disk.
-        if let Ok(data) = crate::fs::Vfs::read_file(CURSOR_FILE) {
-            if let Ok(text) = core::str::from_utf8(&data) {
-                for line in text.lines() {
-                    if let Some(cursor) = parse_cursor_line(line) {
-                        state.cursors.insert(cursor.name.clone(), cursor);
-                    }
+///
+/// Takes and releases `STATE` itself; **call it before locking, not with the
+/// guard in hand.** It used to take `&mut ChangeTrackInner`, which meant every
+/// one of its seven callers ran `Vfs::read_file` with `STATE` held — the lock
+/// order the kernel does not have. `Vfs` takes the *filesystem's* lock and,
+/// for procfs, generates content under it that reaches back into module-global
+/// state; holding `STATE` across the read runs those two locks backwards from
+/// the way procfs runs them, which is an AB/BA deadlock.
+/// `scripts/check-vfs-under-lock.py` enforces the rule.
+///
+/// So the read happens with no lock held and the parse is installed under one:
+///
+/// 1. peek `initialized` under the lock, and return if it is set;
+/// 2. release, and read the file;
+/// 3. retake, and install only if this call still won the race.
+///
+/// Step 3's re-check is what makes the released window safe. Two callers can
+/// both read the file; the loser's parse is dropped, which is correct because
+/// both read the same bytes and a cursor loaded twice is the same cursor. What
+/// must not happen is the loser overwriting cursors the winner has already
+/// advanced — hence installing only while still uninitialised, rather than
+/// merging unconditionally.
+fn ensure_init() {
+    if STATE.lock().initialized {
+        return;
+    }
+
+    // Deliberately no lock held across this read.
+    let loaded = crate::fs::Vfs::read_file(CURSOR_FILE).ok();
+
+    let mut state = STATE.lock();
+    if state.initialized {
+        return;
+    }
+    if let Some(data) = loaded {
+        if let Ok(text) = core::str::from_utf8(&data) {
+            for line in text.lines() {
+                if let Some(cursor) = parse_cursor_line(line) {
+                    state.cursors.insert(cursor.name.clone(), cursor);
                 }
             }
         }
-        state.initialized = true;
     }
+    state.initialized = true;
 }
 
 /// Core query implementation shared by changes() and peek().
 fn query_impl(name: &str, filter: &ChangeFilter, advance: bool) -> KernelResult<ChangeResult> {
     let cursor_seq = {
-        let mut state = STATE.lock();
-        ensure_init(&mut state);
+        ensure_init();
+        let state = STATE.lock();
         let cursor = state.cursors.get(name).ok_or(KernelError::NotFound)?;
         cursor.last_seq
     };

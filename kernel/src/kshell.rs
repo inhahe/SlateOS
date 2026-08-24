@@ -10632,6 +10632,38 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "and resolving it is a success");
     }
 
+    serial_println!("  kshell::self_test 24: refusing to print the file is not printing it");
+    // `cat` will not push non-UTF-8 bytes through the text console -- that
+    // corrupts the terminal -- and prints a size instead. The refusal is
+    // right; reporting success for it was not. This is a *substitution*, not a
+    // failed read: `cat f > copy` writes a sentence of English where the file
+    // should have gone, and the output looks well-formed, so nothing
+    // downstream has any reason to look twice.
+    {
+        use crate::fs::vfs::Vfs;
+
+        let path = Path::new("/tmp/kshell_status_selftest_binary.bin");
+        Vfs::write_file(path, b"\xffPNG\x00\x01\x02")?;
+
+        let out = capture_command("cat /tmp/kshell_status_selftest_binary.bin");
+        assert!(
+            out.starts_with(b"(binary file,"),
+            "`cat` refused the bytes and said so"
+        );
+        assert_eq!(last_exit(), 1, "and refusing is not succeeding");
+
+        // The same command on text it *can* print, so the rung pins the
+        // difference rather than just asserting the failing side.
+        let text = Path::new("/tmp/kshell_status_selftest_binary.txt");
+        Vfs::write_file(text, b"plain\n")?;
+        let out = capture_command("cat /tmp/kshell_status_selftest_binary.txt");
+        assert_eq!(out.as_slice(), b"plain\n", "`cat` printed the text");
+        assert_eq!(last_exit(), 0, "printing the file is succeeding");
+
+        let _ = Vfs::remove(path);
+        let _ = Vfs::remove(text);
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -11828,6 +11860,27 @@ fn cmd_cat(args: &str) {
                         "(binary file, {} bytes — use blkread for hex dump)",
                         data.len()
                     );
+                    // Three commands share this convention -- `cat` here, `nc`
+                    // and `container logs` -- and all three owe a status for
+                    // it, so the reasoning lives here once and they point at
+                    // it.
+                    //
+                    // The caller asked for the file's contents and did not get
+                    // them. They got a sentence *about* the file instead, and
+                    // exiting 0 claims that sentence is what they asked for.
+                    // `cat f > copy` then writes 46 bytes of English over what
+                    // should have been the file: not a failed read reported as
+                    // success, but a *substitution* reported as success, which
+                    // is worse -- the shape of the output is right, so nothing
+                    // downstream has any reason to look twice.
+                    //
+                    // The refusal itself is deliberate and stays: forcing
+                    // non-UTF-8 through a text console corrupts the terminal
+                    // state. It is also temporary. `shell_println_bytes` already
+                    // exists, and when the byte-clean work in
+                    // `TD-KSHELL-LINE-EDITOR-IS-UTF8` lands, `cat` emits the
+                    // bytes and this arm -- and its status -- goes away.
+                    set_exit(1);
                 }
             }
         }
@@ -97750,7 +97803,15 @@ fn cmd_wget(args: &str) {
         // Print as text.
         match core::str::from_utf8(&data) {
             Ok(text) => shell_print!("{}", text),
-            Err(_) => shell_print!("(binary: {} bytes)", data.len()),
+            // Same byte-clean refusal as `cat`, and a status for the same
+            // reason -- see the long comment there. Worse here, if anything:
+            // the placeholder is spliced into the *middle* of a stream, so a
+            // caller reading `nc` output gets a plausible-looking transcript
+            // with a sentence where a chunk of the peer's data should be.
+            Err(_) => {
+                shell_print!("(binary: {} bytes)", data.len());
+                set_exit(1);
+            }
         }
     }
 
@@ -100801,7 +100862,13 @@ fn cmd_container(args: &str) {
                         }
                         // Non-UTF-8 capture: don't force bytes through the text
                         // console — report the size (matches `cat`'s convention).
-                        Err(_) => shell_println!("(binary log, {} bytes)", data.len()),
+                        // The status goes with it, for the reason spelled out at
+                        // `cat`: `$(container logs 1)` that expands to a size in
+                        // English must not also report success.
+                        Err(_) => {
+                            shell_println!("(binary log, {} bytes)", data.len());
+                            set_exit(1);
+                        }
                     },
                     Err(e) => {
                         shell_println!("Error: {:?}", e);

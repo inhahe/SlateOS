@@ -496,8 +496,39 @@ static mut IN_LOCKDEP: [bool; MAX_CPUS] = [false; MAX_CPUS];
 /// Whether lockdep checking is enabled.
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Total violations detected.
+/// Violations detected in real kernel code.
+///
+/// Deliberately excludes the ones [`self_test`] provokes on purpose — see
+/// [`SELF_TEST_VIOLATIONS`]. This is the number that answers "has this kernel
+/// ever inverted a lock order", so it must be zero on a healthy boot.
 static VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+
+/// Violations provoked on purpose by [`self_test`], tallied separately.
+///
+/// The self-test's whole job is to make the detector fire: it inverts A→B,
+/// closes an A→B→C→A cycle, and re-acquires a held lock. Counting those three
+/// in [`VIOLATIONS`] made `lockdep::violation_count()` permanently non-zero, so
+/// every consumer asking "is this kernel healthy" got "no" on a perfectly
+/// healthy boot. `syshealth`'s check 5 is that consumer, and it had been
+/// failing since the validator landed — invisibly, because the command reported
+/// exit 0 whatever it found.
+///
+/// Splitting the tally rather than resetting it after the self-test keeps both
+/// facts: a reset would also erase a genuine violation that happened to land in
+/// the same window, and would make the self-test's own assertions unverifiable.
+static SELF_TEST_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+
+/// Set for the duration of [`self_test`], routing reports to the tally above.
+static IN_SELF_TEST: AtomicBool = AtomicBool::new(false);
+
+/// Count a detected violation against whichever tally this context belongs to.
+fn count_violation() {
+    if IN_SELF_TEST.load(Ordering::Relaxed) {
+        SELF_TEST_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 /// Cap on recursive-self-acquire reports so a genuine bug can't flood serial.
 const MAX_RECURSIVE_REPORTS: u32 = 8;
@@ -741,7 +772,11 @@ pub fn lock_release(lock_addr: usize) {
     }
 }
 
-/// Return the number of violations detected so far.
+/// Number of lock-order violations detected in real kernel code.
+///
+/// Excludes the ones [`self_test`] plants on purpose, so zero means healthy and
+/// non-zero means somebody inverted a lock order. Consumers such as
+/// `syshealth`'s check 5 read this as a pass/fail verdict.
 #[allow(dead_code)]
 pub fn violation_count() -> u32 {
     VIOLATIONS.load(Ordering::Relaxed)
@@ -1168,7 +1203,7 @@ fn report_class_table_full() {
 
 /// Report a lock ordering violation.
 fn report_violation(held_class: u16, acquired_class: u16, cpu: usize) {
-    VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+    count_violation();
 
     let held_name = class_name(held_class);
     let acq_name = class_name(acquired_class);
@@ -1236,7 +1271,7 @@ fn report_violation(held_class: u16, acquired_class: u16, cpu: usize) {
 #[cold]
 #[inline(never)]
 fn report_recursive(class_idx: u16, cpu: usize) {
-    VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+    count_violation();
     let n = RECURSIVE_REPORTS.fetch_add(1, Ordering::Relaxed);
     if n >= MAX_RECURSIVE_REPORTS {
         return;
@@ -1358,7 +1393,14 @@ pub fn self_test() {
     // Save and reset state for testing.
     let prev_enabled = ENABLED.load(Ordering::Relaxed);
     ENABLED.store(true, Ordering::Relaxed);
-    let prev_violations = VIOLATIONS.load(Ordering::Relaxed);
+
+    // Everything below deliberately provokes the detector, so route its reports
+    // to the self-test's own tally: `VIOLATIONS` answers "has real kernel code
+    // inverted a lock order", and three planted inversions are not an answer to
+    // that. Cleared on the single exit path at the end.
+    IN_SELF_TEST.store(true, Ordering::Relaxed);
+    let prev_violations = SELF_TEST_VIOLATIONS.load(Ordering::Relaxed);
+    let real_violations = VIOLATIONS.load(Ordering::Relaxed);
 
     // Use fake lock addresses for testing.
     let lock_a: usize = 0xDEAD_0001;
@@ -1371,7 +1413,7 @@ pub fn self_test() {
     lock_release(lock_b);
     lock_release(lock_a);
 
-    let v1 = VIOLATIONS.load(Ordering::Relaxed);
+    let v1 = SELF_TEST_VIOLATIONS.load(Ordering::Relaxed);
     assert_eq!(v1, prev_violations, "no violation for consistent A→B order");
     serial_println!("[lockdep]   Consistent order (A→B): OK");
 
@@ -1381,7 +1423,7 @@ pub fn self_test() {
     lock_release(lock_a);
     lock_release(lock_b);
 
-    let v2 = VIOLATIONS.load(Ordering::Relaxed);
+    let v2 = SELF_TEST_VIOLATIONS.load(Ordering::Relaxed);
     assert_eq!(
         v2,
         prev_violations + 1,
@@ -1397,7 +1439,7 @@ pub fn self_test() {
     lock_release(lock_b);
     lock_release(lock_a);
 
-    let v3 = VIOLATIONS.load(Ordering::Relaxed);
+    let v3 = SELF_TEST_VIOLATIONS.load(Ordering::Relaxed);
     // A→B already exists, B→C is new (no cycle: A→B→C).
     // A→C is new (no cycle: A→C direct).
     assert_eq!(v3, v2, "no new violation for non-cyclic A→B→C");
@@ -1409,7 +1451,7 @@ pub fn self_test() {
     lock_release(lock_a);
     lock_release(lock_c);
 
-    let v4 = VIOLATIONS.load(Ordering::Relaxed);
+    let v4 = SELF_TEST_VIOLATIONS.load(Ordering::Relaxed);
     assert_eq!(
         v4,
         v3 + 1,
@@ -1447,14 +1489,14 @@ pub fn self_test() {
     // Uses fake addresses (no real spinlock), so acquiring lock_a twice while
     // held only exercises the detector — it does not actually deadlock. The
     // 'SELF-DEADLOCK' line printed below is INTENTIONAL, not a real event.
-    let v6 = VIOLATIONS.load(Ordering::Relaxed);
+    let v6 = SELF_TEST_VIOLATIONS.load(Ordering::Relaxed);
     serial_println!(
         "[lockdep]   (self-test) intentionally re-acquiring a held lock; the \
          'SELF-DEADLOCK' line below is expected and not a real event:"
     );
     lock_acquire(lock_a, b"test-A", Acquire::Blocking);
     lock_acquire(lock_a, b"test-A", Acquire::Blocking); // recursive → should report + count.
-    let v7 = VIOLATIONS.load(Ordering::Relaxed);
+    let v7 = SELF_TEST_VIOLATIONS.load(Ordering::Relaxed);
     assert_eq!(
         v7,
         v6 + 1,
@@ -1496,12 +1538,12 @@ pub fn self_test() {
 
     // Now invert it, with the second half a `try_lock`. Under the old code this
     // recorded E→D, found the cycle and printed a deadlock warning.
-    let v_try = VIOLATIONS.load(Ordering::Relaxed);
+    let v_try = SELF_TEST_VIOLATIONS.load(Ordering::Relaxed);
     let e_try = EDGE_COUNT.load(Ordering::Relaxed);
     lock_acquire(lock_e, b"test-E", Acquire::Blocking);
     lock_acquire(lock_d, b"test-D", Acquire::Try);
     assert_eq!(
-        VIOLATIONS.load(Ordering::Relaxed),
+        SELF_TEST_VIOLATIONS.load(Ordering::Relaxed),
         v_try,
         "a try_lock cannot be the blocking side of a cycle, so it is not a violation"
     );
@@ -1745,13 +1787,26 @@ pub fn self_test() {
     EDGE_COUNT.store(edges_before_chain, Ordering::Relaxed);
     serial_println!("[lockdep]   BFS completeness (chain of {CHAIN} > old bound 32): OK");
 
-    // Restore state.
+    // Restore state. The self-test routing goes off here and nowhere else:
+    // every assertion above panics on failure, so there is no early return that
+    // could leave real violations being tallied as deliberate ones.
     ENABLED.store(prev_enabled, Ordering::Relaxed);
+    IN_SELF_TEST.store(false, Ordering::Relaxed);
 
+    // Report the two tallies apart. The first is a count of tests that fired as
+    // designed; the second is the one that means something is wrong, and it
+    // must still read zero here -- if the self-test's own locks somehow
+    // provoked a report outside the routed window, that is a bug in the test.
+    assert_eq!(
+        VIOLATIONS.load(Ordering::Relaxed),
+        real_violations,
+        "the self-test must not add to the real-violation tally"
+    );
     serial_println!(
-        "[lockdep]   Stats: {} classes, {} edges, {} violations",
+        "[lockdep]   Stats: {} classes, {} edges, {} deliberate violations, {} real",
         CLASS_COUNT.load(Ordering::Relaxed),
         EDGE_COUNT.load(Ordering::Relaxed),
+        SELF_TEST_VIOLATIONS.load(Ordering::Relaxed),
         VIOLATIONS.load(Ordering::Relaxed)
     );
     serial_println!("[lockdep] Self-test PASSED");

@@ -53,6 +53,10 @@ EVDEV = "gui/compositor/src/present/evdev.rs"
 UAPI = "gui/compositor/src/present/evdev/uapi.rs"
 PRESENT = "gui/compositor/src/present.rs"
 
+# Stand-in for a test name, in the "expected to fail" slot, meaning "this one
+# is defended by a `const _: () = assert!(..)` and the catch is a build break".
+COMPILE = "<compile>"
+
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
     # -----------------------------------------------------------------------
@@ -103,8 +107,13 @@ DEFECTS = [
           "        self.height = height;\n"
           "    }")],
         ["compositor"],
-        ["shrinking_the_desktop_brings_the_pointer_back_inside_it",
-         "setting_bounds_through_the_trait_reaches_the_pointer"],
+        # Not `setting_bounds_through_the_trait_reaches_the_pointer`: that one
+        # proves the trait method is wired to the inherent one, which this
+        # defect leaves intact. It observes the pointer by moving it, and
+        # `nudge` clamps on its own, so it stays green with the clamp deleted —
+        # correctly, since it is not the claim it makes.
+        ["a_click_after_the_desktop_shrinks_lands_inside_it_without_moving_first",
+         "shrinking_the_desktop_brings_the_pointer_back_inside_it"],
     ),
     (
         "E: pointer speed is linear rather than geometric",
@@ -450,6 +459,11 @@ DEFECTS = [
     (
         "AJ: the key state is re-read before the events in the same read",
         EVDEV,
+        # A genuine *move*, not an extra call. The first version of this defect
+        # inserted `resync` before `drain` and left the after-drain pass in
+        # place, which changes nothing: on entry `needs_resync` is still false,
+        # so the early pass is inert and the real one still runs afterwards.
+        # It reported "no test failed" and the fault was in the defect.
         [("        for stream in &mut self.streams {\n"
           "            stream.drain(\n"
           "                now,\n"
@@ -468,9 +482,13 @@ DEFECTS = [
           "                &mut self.pointer,\n"
           "                &mut out,\n"
           "            );\n"
-          "        }")],
+          "        }"),
+         ("        for stream in &mut self.streams {\n"
+          "            stream.resync(&mut self.keys, &mut out);\n"
+          "        }\n",
+          "")],
         ["compositor"],
-        ["the_key_state_is_re_read_only_after_the_events_in_the_same_read"],
+        ["a_correction_lands_in_the_same_poll_as_the_events_it_corrects"],
     ),
     (
         "AK: a key released by a drop goes on repeating",
@@ -541,7 +559,11 @@ DEFECTS = [
         [("const MAX_READS_PER_TICK: usize = 8;",
           "const MAX_READS_PER_TICK: usize = 64;")],
         ["compositor"],
-        ["a_burst_larger_than_one_tick_can_take_is_left_for_the_next_one"],
+        # Not a test: `a_burst_larger_than_one_tick_can_take_is_left_for_the_next_one`
+        # feeds `MAX_READS_PER_TICK + 2` chunks and expects `MAX_READS_PER_TICK * 8`
+        # events, so it scales with the constant and stays green at any value.
+        # The ceiling is a `const _: () = assert!(..)` beside the constant.
+        [COMPILE],
     ),
     (
         "AQ: only the first device that opened is actually read",
@@ -693,9 +715,20 @@ DEFECTS = [
     ),
 ]
 
-# Defects excluded from a sweep. Empty today; kept so that a defect found to be
-# unapplyable can be parked with a reason rather than deleted and forgotten.
-NO_OP: set[str] = set()
+# Defects excluded from a sweep, with the reason, because a defect deleted for
+# being unapplyable is a defect somebody re-adds next year.
+#
+#   AH -- removing `Stream::resync`'s `is_button` skip changes nothing
+#   observable, so no test can catch it and claiming one should was wrong.
+#   Every `BTN_*` code is at or above `BTN_MISC` (0x100) and `set1_for_keycode`
+#   stops at 217, so the scancode lookup two lines below the guard already
+#   drops every button. The guard is reached and redundant, not unreached.
+#   It is kept anyway -- it states the intent where the intent applies, and it
+#   is what stops the security property ("a resync never synthesises a click")
+#   from resting on the contents of an unrelated table. The leg that *can* be
+#   checked is pinned by
+#   `uapi::no_button_has_a_scan_code_so_a_resync_can_never_synthesise_a_click`.
+NO_OP: set[str] = {"AH"}
 
 
 def letter(name):
@@ -791,8 +824,16 @@ def main():
                 all_failed |= failed
             (ROOT / path).write_bytes(snap[path])
 
+            # Some invariants cannot be defended by a test, because the test
+            # would have to restate the constant it is checking and would then
+            # scale with it. Those are asserted at compile time instead, and
+            # for them a build break *is* the catch rather than a broken run.
+            wants_build_break = expect == [COMPILE]
             if broke:
-                verdict = f"DID NOT COMPILE ({note})"
+                verdict = ("caught by the build" if wants_build_break
+                           else f"DID NOT COMPILE ({note})")
+            elif wants_build_break:
+                verdict = "*** THE BUILD ACCEPTED IT ***"
             elif not all_failed:
                 verdict = "*** NO TEST FAILED ***"
             else:
@@ -816,8 +857,9 @@ def main():
     print("\n=== summary ===")
     for name, verdict in verdicts:
         print(f"{name}\n    {verdict}")
-    unproved = [n for n, v in verdicts if "NO TEST FAILED" in v or "NOT FOUND" in v
-                or "DID NOT COMPILE" in v]
+    unproved = [n for n, v in verdicts
+                if "NO TEST FAILED" in v or "NOT FOUND" in v
+                or "DID NOT COMPILE" in v or "BUILD ACCEPTED" in v]
     print(f"\n{len(verdicts) - len(unproved)}/{len(verdicts)} defects caught")
     if unproved:
         print("unproved:")

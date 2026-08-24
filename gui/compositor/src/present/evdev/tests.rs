@@ -227,6 +227,19 @@ impl FakeDevices {
         self.slots.push((index, Err(errno)));
         self
     }
+
+    /// Add a working device at `index`.
+    ///
+    /// [`Self::one`] and [`Self::two`] put their devices at 0 and 1, which is
+    /// where the search starts — so a test built from them cannot tell
+    /// "scans every index" from "looks at the first two", nor "skips a
+    /// refusal" from "stops at the first refusal". Placing a device
+    /// deliberately out of the way is what makes those distinctions visible.
+    fn also(mut self, index: u32) -> (Self, FakeDevice) {
+        let device = FakeDevice::new();
+        self.slots.push((index, Ok(device.clone())));
+        (self, device)
+    }
 }
 
 impl DeviceSource for FakeDevices {
@@ -763,23 +776,77 @@ fn a_zero_acceleration_threshold_does_not_divide_by_zero() {
         accel_threshold: 0,
         ..MouseConfig::default()
     };
-    let (dx, dy) = accelerate(5.0, 0.0, &config);
+    // Small enough that the *guarded* curve does not itself reach
+    // `MAX_ACCELERATION`. At a magnitude of 5 it does, and then the guarded and
+    // the divide-by-zero answers are the same number and neither assertion
+    // below can tell them apart.
+    let (dx, dy) = accelerate(2.0, 0.0, &config);
     assert!(dx.is_finite() && dy.is_finite(), "got {dx}, {dy}");
+
+    // Finiteness alone does not prove the guard, which is how this test used to
+    // pass with the guard deleted: a threshold of zero divides to an *infinite*
+    // factor, which the `MAX_ACCELERATION` clamp two lines later turns back
+    // into a finite — but maximal — one. Every movement, however careful, would
+    // be multiplied by four and the pointer would be unusable, while the
+    // assertion above stayed green.
+    //
+    // What the guard actually promises is that a threshold of zero behaves as a
+    // threshold of one, so that is what is asserted.
+    let as_one = MouseConfig {
+        accel_threshold: 1,
+        ..config.clone()
+    };
+    assert_eq!(
+        (dx, dy),
+        accelerate(2.0, 0.0, &as_one),
+        "a zero threshold must behave as a threshold of one, not saturate"
+    );
 }
 
 #[test]
-fn shrinking_the_desktop_brings_the_pointer_back_inside_it() {
+fn a_click_after_the_desktop_shrinks_lands_inside_it_without_moving_first() {
     let (mut input, device) = one_device();
     device.feed(&[rel(REL_X, 100_000), rel(REL_Y, 100_000), syn()]);
     assert_eq!(moves(&input.poll_at(Instant::now())), vec![(799, 599)]);
 
+    // A monitor unplugged, and then a click with *no movement at all*.
+    //
+    // Every other test here observes the pointer only after feeding an
+    // `EV_REL`, and `Pointer::nudge` clamps on its own — so `set_bounds`'s own
+    // clamp is invisible to all of them, and deleting it leaves the suite
+    // green. A click is the one thing that reads the position without first
+    // moving it, which makes this the only test that can see the difference.
+    input.set_bounds(640, 480);
+    device.feed(&[key(BTN_LEFT, 1), syn()]);
+
+    assert_eq!(
+        buttons(&input.poll_at(Instant::now())),
+        vec![(MouseButton::Left, true, 639, 479)],
+        "the click was delivered at a coordinate the desktop no longer has"
+    );
+}
+
+#[test]
+fn shrinking_the_desktop_brings_the_pointer_back_inside_it() {
+    // Asserted on the `Pointer` itself, and *immediately*, because that is what
+    // the name claims. Driving this through `EvdevInput` would mean feeding an
+    // `EV_REL` to observe the result, and `nudge` clamps on its own — so the
+    // pointer would end up inside the new bounds whether `set_bounds` clamped
+    // or not, and the test would pass with the clamp deleted. This version
+    // reads the position with nothing in between.
+    let mut pointer = Pointer::new(800, 600);
+    pointer.nudge(100_000, 100_000, &MouseConfig::default());
+    assert_eq!(pointer.position(), (799, 599));
+
     // A monitor being unplugged. A pointer left at its old position would be
     // off-screen and unreachable, because every subsequent movement clamps back
     // to a coordinate that is not displayed.
-    input.set_bounds(640, 480);
-    device.feed(&[rel(REL_Y, 1), syn()]);
-    let events = input.poll_at(Instant::now());
-    assert_eq!(moves(&events), vec![(639, 479)]);
+    pointer.set_bounds(640, 480);
+    assert_eq!(
+        pointer.position(),
+        (639, 479),
+        "the resize itself must move the pointer, not the next thing that does"
+    );
 }
 
 #[test]
@@ -1077,6 +1144,28 @@ fn the_key_state_is_re_read_only_after_the_events_in_the_same_read() {
     assert_eq!(key_downs(&input.poll_at(Instant::now())), vec![SCAN_A]);
 }
 
+#[test]
+fn a_correction_lands_in_the_same_poll_as_the_events_it_corrects() {
+    let (mut input, device) = one_device();
+    // The other direction of the same rule, and the one that shows *when* the
+    // re-read happens rather than merely that it happens once. The bitmap holds
+    // nothing; the stream after the drop says KEY_A went down. Both facts
+    // arrive in a single read, so a single poll owes the caller both the press
+    // and the release the bitmap implies. Resyncing before the drain would emit
+    // the press alone and leave the key stuck down until the next tick — which
+    // `the_key_state_is_re_read_only_after_the_events_in_the_same_read` cannot
+    // see, because there the bitmap and the stream agree.
+    device.feed(&[dropped(), key(KEY_A, 1), syn()]);
+
+    let events = input.poll_at(Instant::now());
+    assert_eq!(key_downs(&events), vec![SCAN_A]);
+    assert_eq!(
+        key_ups(&events),
+        vec![SCAN_A],
+        "the re-read must reconcile the events from the same read, not the next one"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Reading, buffering and failure
 // ---------------------------------------------------------------------------
@@ -1099,9 +1188,17 @@ fn a_read_cut_in_the_middle_of_a_record_is_reassembled() {
 
 #[test]
 fn an_idle_device_produces_nothing_and_is_not_a_fault() {
-    let (mut input, _device) = one_device();
+    let (mut input, device) = one_device();
     assert!(input.poll_at(Instant::now()).is_empty());
     assert!(input.poll_at(Instant::now()).is_empty());
+
+    // And it still works afterwards. Producing nothing is what a quiet device
+    // and a dead one have in common, so the two assertions above pass whether
+    // `EAGAIN` is treated as "no news" or as a fault that retires the device —
+    // which is the whole difference between a keyboard that is idle between
+    // keystrokes and one that stops working after the first pause in typing.
+    device.feed(&[key(KEY_A, 1), syn()]);
+    assert_eq!(key_downs(&input.poll_at(Instant::now())), vec![SCAN_A]);
 }
 
 #[test]
@@ -1177,15 +1274,22 @@ fn a_burst_larger_than_one_tick_can_take_is_left_for_the_next_one() {
 
 #[test]
 fn every_device_that_opens_is_read_not_just_the_first_two() {
-    let (mut source, first, second) = FakeDevices::two();
+    // Three devices, and the third is deliberately at index 7 with a gap in
+    // front of it. Two devices at 0 and 1 cannot test the claim this test's
+    // name makes: `0..2` finds both of them, so the search bound could be two
+    // rather than `MAX_DEVICES` and nothing here would notice. A device out
+    // past the gap is what distinguishes scanning from assuming.
+    let (source, first, second) = FakeDevices::two();
+    let (mut source, third) = source.also(7);
     let mut input = EvdevInput::from_source(&mut source, plain(), 800, 600).unwrap();
     // No index is hardcoded and no device is assumed to be one thing or the
     // other: a keyboard with a trackpoint reports both from the same node.
     first.feed(&[key(KEY_A, 1), syn()]);
     second.feed(&[rel(REL_X, 10), syn()]);
+    third.feed(&[key(KEY_B, 1), syn()]);
 
     let events = input.poll_at(Instant::now());
-    assert_eq!(key_downs(&events), vec![SCAN_A]);
+    assert_eq!(key_downs(&events), vec![SCAN_A, SCAN_B]);
     assert_eq!(moves(&events), vec![(410, 300)]);
 }
 
@@ -1231,8 +1335,13 @@ fn a_machine_with_no_input_devices_is_not_reported_as_a_permission_problem() {
 
 #[test]
 fn a_device_that_opens_alongside_a_refused_one_is_still_used() {
-    let (source, device) = FakeDevices::one();
-    let mut source = source.refusing(1, EACCES);
+    // The refusal comes *first*, at the index the search starts from, and the
+    // usable device sits behind it. With the working device at 0 the search
+    // has already found what it needs before it meets the refusal, so it
+    // cannot tell "skip a refused index" from "stop at the first one" — and
+    // stopping is the behaviour that leaves a grantable keyboard unopened.
+    let (source, device) = FakeDevices::default().also(1);
+    let mut source = source.refusing(0, EACCES);
     let mut input = EvdevInput::from_source(&mut source, plain(), 800, 600).unwrap();
     device.feed(&[key(KEY_A, 1), syn()]);
 

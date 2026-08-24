@@ -107,6 +107,21 @@ const READ_CHUNK: usize = 32 * EVENT_SIZE;
 /// left for the next tick rather than dropped.
 const MAX_READS_PER_TICK: usize = 8;
 
+// The bound has to be small to be a bound at all, and no test can say so:
+// `a_burst_larger_than_one_tick_can_take_is_left_for_the_next_one` feeds
+// `MAX_READS_PER_TICK + 2` chunks and expects `MAX_READS_PER_TICK * 8` events,
+// so it scales with whatever this constant says and stays green at any value.
+// It proves the loop is bounded; it cannot prove the bound is a useful size.
+//
+// Writing a literal into the test instead would be the same number in two
+// places, which is the duplicate-range shape §524 records — so the ceiling is
+// asserted here, where raising it fails the build rather than a test.
+const _: () = assert!(
+    MAX_READS_PER_TICK <= 16,
+    "more than 16 chunks (512 records) per device per frame stops bounding the \
+     compositing loop, which is the only thing this constant is for"
+);
+
 /// Bytes of key bitmap asked of `EVIOCGKEY`.
 ///
 /// `KEY_MAX` is 0x2FF in the Linux ABI, so a full bitmap is 96 bytes. Asking

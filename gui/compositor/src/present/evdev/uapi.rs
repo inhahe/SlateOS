@@ -343,8 +343,8 @@ mod tests {
     )]
 
     use super::{
-        BTN_LEFT, EV_KEY, EV_REL, EVENT_SIZE, EVIOC_NR_GKEY, EVIOC_NR_GNAME, IOC_READ, REL_X,
-        Record, bit_set, ioc, is_button, set1_for_keycode,
+        BTN_LEFT, BTN_MISC, EV_KEY, EV_REL, EVENT_SIZE, EVIOC_NR_GKEY, EVIOC_NR_GNAME, IOC_READ,
+        REL_X, Record, bit_set, ioc, is_button, set1_for_keycode,
     };
     use crate::keymap::key_for_scancode;
     use guitk::event::Key;
@@ -456,6 +456,32 @@ mod tests {
                 key_for_scancode(scancode),
                 expected,
                 "keycode {keycode} -> scancode {scancode:#06X}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_button_has_a_scan_code_so_a_resync_can_never_synthesise_a_click() {
+        // `Stream::resync` skips `is_button` codes before looking one up,
+        // because pressing a button out of the `EVIOCGKEY` bitmap would deliver
+        // a click nobody made. That guard is currently *unreachable*: every
+        // `BTN_*` code is at or above `BTN_MISC` (0x100), and the table above
+        // stops at 217, so the `set1_for_keycode` lookup two lines later drops
+        // buttons anyway. Deleting the guard changes nothing observable, which
+        // is exactly why it needs a test somewhere other than where it lives.
+        //
+        // This is that test, and it guards the *other* leg: adding a `BTN_*`
+        // row to the table would silently make the guard load-bearing, and if
+        // it had been removed in the meantime the first symptom would be a
+        // phantom click after a dropped event. Keeping both legs and pinning
+        // the one that can be checked is cheaper than either alone.
+        for code in BTN_MISC..=u16::MAX {
+            assert_eq!(
+                set1_for_keycode(code),
+                None,
+                "button code {code:#06X} gained a scan code; \
+                 `Stream::resync`'s `is_button` guard is now the only thing \
+                 stopping a synthesised click, so prove it directly"
             );
         }
     }

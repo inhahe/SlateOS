@@ -92,14 +92,27 @@ MISSING
     # repository is on 9p through `/mnt/d`, where a Rust build is an order of
     # magnitude slower, and a second `target/` inside the tree would be a
     # tens-of-gigabytes surprise for whoever next runs `du -sh` on the worktree.
+    #
+    # It is *shared* with the other WSL-built harnesses -- du-diff, ls-diff,
+    # cmp-diff. They build different binaries out of the same workspace for the
+    # same triple, so their dependency artifacts are identical, and a directory
+    # each stored the same objects four times over. See design-decisions.md
+    # §374. Delete it with `wsl rm -rf ~/.cache/slateos-diff-target`.
+    #
+    # Built from the workspace *root*, not from `userspace/coreutils`. Cargo
+    # searches for config upwards from the cwd, and `userspace/.cargo/config.
+    # toml` turns on `build-std` -- which this build does not want (Linux has a
+    # prebuilt std) and which fails outright unless the `rust-src` component is
+    # installed for the active toolchain. Running from the root avoids the zone
+    # config entirely; `-p coreutils` picks the same package.
     root=$(cd "$(dirname "$0")/.." && pwd) || exit 1
-    ( cd "$root/userspace/coreutils" \
-      && CARGO_TARGET_DIR="$HOME/find-diff-target" \
-         cargo build --bin find --target x86_64-unknown-linux-gnu ) >&2 || {
+    ( cd "$root" \
+      && CARGO_TARGET_DIR="$HOME/.cache/slateos-diff-target" \
+         cargo build -p coreutils --bin find --target x86_64-unknown-linux-gnu ) >&2 || {
         echo "find-diff: the build failed"
         exit 1
     }
-    OURS="$HOME/find-diff-target/x86_64-unknown-linux-gnu/debug/find"
+    OURS="$HOME/.cache/slateos-diff-target/x86_64-unknown-linux-gnu/debug/find"
 fi
 
 if [ ! -x "$OURS" ]; then

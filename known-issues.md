@@ -50604,7 +50604,7 @@ guarantee, and on Windows the failure mode would be a sharing violation in
 whichever of the two processes lost the race. Wait for `[run-timeout] child
 exited` before running any cargo command against the same target directory.
 
-**Part 2 progress. 45 of 49 modules converted.**
+**Part 2 progress. 46 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -53807,6 +53807,146 @@ exited` before running any cargo command against the same target directory.
       it should have failed. **Five modules in, every under-declaration this
       harness has produced has been an alignment or collision artefact of a
       test locating its site indirectly.**
+- [x] `input_method.rs` — 5 constants over 7 colour sites, done 2026-08-24. 39
+  tests in the module (twelve new), harness defects Ax74–Hx75 (thirty-four).
+  - **The layout name was `MOCHA_BLUE`, which is the stock accent's value in
+    disguise.** `Palette::for_mode(false).accent` *is* `blue` unless the user
+    has chosen otherwise, so a hardcoded `#89B4FA` title is indistinguishable
+    from `p.accent` on a default install and diverges silently the moment
+    anyone picks a different accent — at which point the pop-up's heading is
+    the only thing in the shell still wearing last month's accent. This is
+    `backup_settings.rs`'s blue/accent collision seen from the other side: there
+    a role-named binding secretly meant the accent, here a literal did.
+  - **It became `p.text`, not `p.accent`, and the negative is pinned.**
+    `focus_assist::render_settings` draws its panel title `p.text` bold and
+    states the rule the shell follows: the accent is reserved for "you chose
+    this" — a selected item, an active toggle — and a heading that is merely
+    *present* has not been chosen. A layout preview is a description of the
+    keyboard, so nothing in it is a choice. `no_site_in_this_module_wears_the_accent`
+    asserts that against an off-palette accent in both modes, which makes the
+    decision a test rather than a comment.
+  - **The role-shaped return of that bug is invisible to every test except the
+    ordered one.** `N×74` sets the title to `p.accent`. On the stock palette
+    that draws the same bytes as `p.blue`, so a membership sweep sees a legal
+    role, the contrast walk sees 7.79:1 on `base` and passes, and the mode test
+    sees a value that moves correctly between Mocha and Latte. Only the ordered
+    site table, which says *this site is `text`*, can tell the difference. This
+    is lesson 9's shape (a set cannot see a permutation) applied to a single
+    site: **a membership test cannot distinguish two roles that are equal.**
+  - **Three fills that have to stay three, and contrast has nothing to say
+    about any of the pairings.** The pop-up is `base`, its border `surface1`,
+    its key caps `surface0` — three neighbouring neutrals, so a defect that
+    collapses any two produces a picture with no border, or caps that dissolve
+    into the pop-up, while every ink on top stays perfectly readable. Contrast
+    is a property of *ink on fill*; `surface0` on `base` is 1.32:1 in Mocha and
+    the design is fine, so no legibility floor can be asked about it.
+    `the_popup_its_border_and_its_key_caps_are_three_different_values` asserts
+    the construction directly — all three pairings, both modes — which is the
+    "assert the construction, not the consequence" corollary of lesson 24. It
+    was widened to cover `edge != fill` **before** the sweep rather than after,
+    on the reasoning that an invisible border is exactly the defect an ordered
+    table would catch for the wrong reason.
+  - **The §530 contrast walk now pairs an ink with the most recent fill, not
+    the adjacent command.** `file_drop`'s version used `cmds.windows(2)` and
+    paired each `FillRect` with the `Text` immediately after it. That works
+    where every fill is followed by its own label, and breaks here: the pop-up
+    draws background, then border, then title, so a naive adjacency walk would
+    check the title against the *border* colour rather than against the surface
+    it actually sits on. The walk now carries `under: Option<Color>`, updated by
+    every `FillRect` and read by every `Text`, and panics if an ink is drawn
+    before any fill. It still counts its pairs (`checked == 12`) so a site that
+    stops being drawn fails the count rather than passing an empty walk.
+  - **A real layout bug: a key label could paint 2px onto the neighbouring
+    cap.** The label starts 6px inside its cap, so its clip width has to be
+    `key_size` less *both* insets; it was `key_size - 4.0`, which is neither
+    inset subtracted properly and leaves a wide glyph overhanging. Now
+    `key_size - 12.0`, with the arithmetic spelled out in a comment.
+    `a_key_label_is_clipped_inside_its_own_cap` measures it, and — carrying
+    module 45's lesson — finds each cap by `width == KEY_SIZE` rather than by
+    its colour, which required promoting the cap size to a named constant. A
+    geometry test that locates by colour silently asserts a role.
+  - **Both `moves_with_the_mode` tests were born with the table-length pin.**
+    Module 45 found the truncating `zip` the hard way, as an under-catch; here
+    the pin was written in from the start, so `E×75` (the preview stops drawing
+    entirely) had somewhere to fail that was not the absence tests. A lesson
+    is only learned once if it is applied to the next module before the sweep,
+    not after it.
+  - **Two absence tests, because two branches exist.** `render_preview` returns
+    empty when `preview_visible` is false or when there is no active layout,
+    and `render_tray_indicator` draws `"??"` in the latter case rather than
+    nothing. `a_manager_with_no_layouts_draws_no_preview` and
+    `a_manager_with_no_layouts_still_draws_a_tray_chip` cover the branch from
+    both sides — a branch nothing renders is a branch nothing checks
+    (lesson 24), and the second half of that pair is the one that says the tray
+    does *not* silently disappear.
+  - **Sweep: 34 caught, 0 escaped, 0 never asked, 0 under-caught, 0
+    under-declared** — the first fully clean sweep in the series, on a
+    preflight of `34 build, 0 do not, 0 not applied`, ending `restored: all
+    files match their recorded SHA-256`. Six modules in, this is the first with
+    no under-declarations at all, and the reason is worth recording because it
+    is repeatable rather than lucky: every declaration was predicted from
+    *arithmetic* (all eighteen contrast figures computed before any defect was
+    written) rather than from intuition, and the module has no value-keyed
+    locators left — `a_key_label_is_clipped_inside_its_own_cap` finds its cap by
+    `width == KEY_SIZE`, which is what every previous module's stray catches
+    came from.
+  - Catcher census (34 defects, 83 catches, 2.44 per defect):
+
+    | Test | Caught | Sole catcher |
+    |---|---|---|
+    | `every_preview_site_draws_the_role_it_claims` | 20 | 4 |
+    | `every_ink_this_module_draws_is_readable_on_what_it_sits_on` | 16 | 0 |
+    | `every_tray_site_draws_the_role_it_claims` | 9 | 0 |
+    | `a_manager_with_no_layouts_still_draws_a_tray_chip` | 8 | 0 |
+    | `the_popup_its_border_and_its_key_caps_are_three_different_values` | 6 | 0 |
+    | `every_site_the_preview_draws_moves_with_the_mode` | 5 | 0 |
+    | `no_site_in_this_module_wears_the_accent` | 4 | 0 |
+    | `every_colour_the_preview_draws_comes_from_its_palette` | 4 | 0 |
+    | `a_key_label_is_clipped_inside_its_own_cap` | 4 | 3 |
+    | `every_colour_the_tray_draws_comes_from_its_palette` | 2 | 0 |
+    | `every_site_the_tray_draws_moves_with_the_mode` | 2 | 0 |
+    | `test_manager_render_preview_hidden` | 1 | 1 |
+    | `test_manager_render_preview_visible` | 1 | 0 |
+    | `test_empty_manager_tray_label` | 1 | 0 |
+
+    - **The four defects only the ordered table caught are exactly the four
+      predicted to be invisible to everything else**, which is the closest this
+      harness has come to a controlled result. `H×74` makes the pop-up `mantle`
+      — a legal role, 12.14:1 under `text`, correct in both modes. `N×74`
+      returns the title to `blue` — the accent collision this module exists to
+      fix, and on the stock palette *the same bytes* as `p.accent`. `V×74` and
+      `W×74` transpose a cap with its label and the pop-up with its caps —
+      invisible to membership (both values are members), invisible to the mode
+      test (both move), and invisible to contrast, because contrast is
+      symmetric. Module 45 learned that symmetry the hard way as an
+      under-catch; here it was declared correctly in advance, and the sweep
+      agreed.
+    - **The §530 contrast walk caught 16 of 34 (47%), against 14 of 34 (41%) in
+      `file_drop`.** Two modules of evidence now, on either side of a shape
+      change (adjacency → most-recent-fill), both roughly half the defect set —
+      versus the *zero* that four consecutive hand-written pairing tables
+      caught. The walk is never a sole catcher in either module, which is the
+      expected result rather than a disappointment: it is a floor, and a floor
+      is meant to be redundant with the design.
+    - **`no_site_in_this_module_wears_the_accent` caught 4 and was never a sole
+      catcher.** The ordered table catches all four too. It is kept anyway,
+      because the two tests fail in different vocabularies: the table says "the
+      layout name should be `text` and is `accent`", which is a fact, and the
+      accent test says "nothing here is a choice the user made", which is the
+      *reason*. A test whose only job is to make a rule falsifiable is worth
+      its runtime even at zero sole catches.
+    - **The absence test caught 8, the widest breadth of any non-table test,
+      and none of them solely.** `a_manager_with_no_layouts_still_draws_a_tray_chip`
+      renders the `"??"` fallback and then checks its colours, so it is
+      incidentally a second tray-site assertion. That is breadth acquired by
+      accident rather than design — the same shape as the previous modules'
+      under-declarations — but it produced none here, because every tray defect
+      it trips was already declared against the tray table. An accidental
+      locator is only a nuisance when it is also an *undeclared* one.
+    - **Three pre-existing tests earned catches** (`test_manager_render_preview_hidden`,
+      `test_manager_render_preview_visible`, `test_empty_manager_tray_label`),
+      one of them solely. The conversion did not make the old suite redundant;
+      it filled the gaps around it.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -54186,6 +54326,87 @@ warning that they were never saved — which is worse than the feature being
 absent, because the naming UI implies durability. The module doc actively
 misleads the next person to read it into thinking the persistence exists and
 merely needs wiring.
+---
+
+### TD-C-THE-SHELL-KEEPS-FIVE-KEYBOARD-LAYOUTS-THAT-NOTHING-TYPES-WITH — 2026-08-24 — OPEN
+
+**In short.** The shell has a keyboard-layout switcher: a tray chip reading
+`EN`, a pop-up preview of the key caps, five built-in layouts (US QWERTY,
+Dvorak, Colemak, German QWERTZ, French AZERTY), a per-application memory of
+which layout you last used, and a config file. None of it changes what any key
+produces. The thing that actually turns a key-press into a letter is a
+different, hard-coded table in a different crate, and the two have no
+connection at all — so a user who switches to AZERTY sees the tray say `FR`,
+sees the preview redraw with AZERTY caps, and then types QWERTY.
+
+**Where:** `gui/desktop/src/input_method.rs` (the switcher) and
+`gui/compositor/src/keymap.rs` (the table that is actually consulted).
+
+**The two stores, and the gap between them.**
+
+- `InputMethodManager` in `input_method.rs` owns the five `KeyboardLayout`
+  values and the active index. `grep -rn 'InputMethodManager\|input_method' gui
+  apps` finds exactly one hit outside the file: `pub mod input_method;` in
+  `gui/desktop/src/lib.rs:104`. Nothing constructs it, so today it is a
+  switcher nobody has switched.
+- `key_for_scancode` in `gui/compositor/src/keymap.rs` holds one US-QWERTY
+  scan-code table and is the only scancode→character path in the tree. It
+  takes no layout argument and reads nothing the shell owns. That table is
+  already tracked as `TD-ONLY-ONE-KEYBOARD-LAYOUT`; **this** entry is the
+  observation that a *second*, richer layout store now exists on the other side
+  of the process boundary and duplicates the same data in an incompatible
+  shape.
+
+**Which fields are pure decoration.** Four of `KeyboardLayout`'s eight fields
+are written by all five constructors and read by nothing outside the module's
+own unit tests:
+
+| Field | Set by | Read by |
+|---|---|---|
+| `rows_shifted` | all five layouts, 4 rows each | **nothing at all** — not even the preview, which draws `rows_unshifted` only (line 483) |
+| `has_dead_keys` | `true` on German and French | one assertion, `test_german_layout_has_dead_keys` (line 713) |
+| `is_rtl` | `false` on all five | one assertion (line 694) |
+| `language` | all five | nothing |
+
+`is_rtl` is the one that will bite, because it is not merely unread — it is
+unread *and* the code it would have to govern assumes the opposite.
+`render_preview` walks `rows_unshifted` left to right and places cap *n* at
+`x + n * KEY_SIZE` unconditionally (line 483 onward), so an Arabic or Hebrew
+layout would preview with its keys mirrored. Nothing catches this today
+because no RTL layout is offered, which means the field's only current effect
+is to make the module look as though it has been thought about.
+
+**The capability it would need already exists.** `gui/font` has a full bidi
+implementation — `gui/font/src/bidi.rs` resolves paragraph direction and
+`gui/font/src/shape.rs` places runs in visual order, both with their own
+`is_rtl`. So the RTL preview is not blocked on missing machinery; the desktop
+module simply never asks.
+
+**What the proper fix looks like.** Not "make the preview read `is_rtl`" —
+that would polish the decoration. The layouts belong in one place, and by
+§456's own reasoning that place is the compositor, so that one system keymap
+governs every client at once. Concretely: move the five row tables to
+`gui/compositor/src/keymap.rs` (or a crate both can depend on), give
+`key_for_scancode` a layout parameter, and reduce the desktop's
+`InputMethodManager` to a *selector* — it names the active layout and asks the
+compositor to switch, rather than holding a private copy of the data. The
+per-application memory and the config file are worth keeping and are already
+correct; it is only the row tables that must not live in two places.
+`rows_shifted` should be deleted or wired up at that point, and `is_rtl`
+either honoured by the preview or dropped along with `language`.
+
+**Trigger:** sequenced after `TD-ONLY-ONE-KEYBOARD-LAYOUT` step 1 (layout
+selection in the compositor), which is what gives the selector something to
+select. Deleting the four dead fields does not have to wait for that and can
+be done at any time.
+
+**If never fixed:** the switcher is a lie with a UI. It is worse than an
+absent feature, because a non-US user will find it, use it, watch the tray
+label change, and conclude the OS is broken in some deeper way when the
+letters stay wrong — rather than concluding, correctly, that layout switching
+was never implemented. The duplicated row tables also guarantee the two copies
+drift: a fix to the compositor's QWERTY table will not reach the preview, so
+the picture the user is shown will stop matching what they get.
 ---
 
 ### B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS, AND LIBC'S DOC COMMENTS EXPLAIN IT WITH A REASON THAT STOPPED BEING TRUE — 2026-08-21 — OPEN

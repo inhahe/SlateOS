@@ -115,6 +115,7 @@ ABOUT = "gui/desktop/src/about.rs"
 CAL = "gui/desktop/src/calendar.rs"
 SESS = "gui/desktop/src/session_mgr.rs"
 FD = "gui/desktop/src/file_drop.rs"
+IM = "gui/desktop/src/input_method.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -20799,6 +20800,516 @@ DEFECTS = [
         ["desktop"],
         [
             'only_the_card_and_the_tooltip_are_translucent',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the tray chip is mantle, so it sinks into the taskbar instead of sitting on it',
+        IM,
+        [
+            ('        let chip = p.surface0;',
+             '        let chip = p.mantle;'),
+        ],
+        ["desktop"],
+        [
+        # readable either way (12.14 / 6.57), so only the ordered table and the
+        # empty-manager pin see it
+            'every_tray_site_draws_the_role_it_claims',
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the tray chip is still the Mocha SURFACE0 constant',
+        IM,
+        [
+            ('        let chip = p.surface0;',
+             '        let chip = guitk::color::Color::from_hex(0x313244);'),
+        ],
+        ["desktop"],
+        [
+        # in dark mode the literal *is* p.surface0, so the empty-manager pin --
+        # which uses dark() -- cannot see this one. In Latte it is a near-black
+        # chip under Latte's dark ink: 1.57:1
+            'every_tray_site_draws_the_role_it_claims',
+            'every_colour_the_tray_draws_comes_from_its_palette',
+            'every_site_the_tray_draws_moves_with_the_mode',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the tray label drops a tier to subtext0',
+        IM,
+        [
+            ('        let chip_ink = p.text;',
+             '        let chip_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+        # 5.65 Mocha but 3.40 Latte
+            'every_tray_site_draws_the_role_it_claims',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the tray label is overlay0, an overlay role used as an ink',
+        IM,
+        [
+            ('        let chip_ink = p.text;',
+             '        let chip_ink = p.overlay0;'),
+        ],
+        ["desktop"],
+        [
+        # 2.57 / 1.69 -- fails in both modes
+            'every_tray_site_draws_the_role_it_claims',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the tray label is still the Mocha TEXT constant',
+        IM,
+        [
+            ('        let chip_ink = p.text;',
+             '        let chip_ink = guitk::color::Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+        # 1.07:1 on Latte's surface0; invisible to the dark-fixture pin
+            'every_tray_site_draws_the_role_it_claims',
+            'every_colour_the_tray_draws_comes_from_its_palette',
+            'every_site_the_tray_draws_moves_with_the_mode',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the tray chip and its label are transposed',
+        IM,
+        [
+            ('        let chip = p.surface0;',
+             '        let chip = p.text;'),
+            ('        let chip_ink = p.text;',
+             '        let chip_ink = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+        # NOT the contrast walk: the ratio is symmetric in its two arguments, so
+        # an exchanged fill and ink measure exactly what they measured before
+            'every_tray_site_draws_the_role_it_claims',
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the tray chip is the accent, so the taskbar gains a themed lozenge nobody chose',
+        IM,
+        [
+            ('        let chip = p.surface0;',
+             '        let chip = p.accent;'),
+        ],
+        ["desktop"],
+        [
+        # accent resolves to blue under for_mode, which the walk measures at
+        # 5.97 / 3.39 -- the Latte side fails
+            'every_tray_site_draws_the_role_it_claims',
+            'no_site_in_this_module_wears_the_accent',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the preview popup's fill is mantle",
+        IM,
+        [
+            ('        let popup_fill = p.base;',
+             '        let popup_fill = p.mantle;'),
+        ],
+        ["desktop"],
+        [
+        # 12.14 / 6.57, and still distinct from both the caps and the border, so
+        # the ordered table is the only thing that can object
+            'every_preview_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the preview popup's fill is surface0, the caps' own colour",
+        IM,
+        [
+            ('        let popup_fill = p.base;',
+             '        let popup_fill = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+        # the caps vanish into the popup
+            'every_preview_site_draws_the_role_it_claims',
+            'the_popup_its_border_and_its_key_caps_are_three_different_values',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the preview popup's fill is still the Mocha BASE constant",
+        IM,
+        [
+            ('        let popup_fill = p.base;',
+             '        let popup_fill = guitk::color::Color::from_hex(0x1E1E2E);'),
+        ],
+        ["desktop"],
+        [
+        # 2.05:1 under Latte's ink
+            'every_preview_site_draws_the_role_it_claims',
+            'every_colour_the_preview_draws_comes_from_its_palette',
+            'every_site_the_preview_draws_moves_with_the_mode',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the popup's border is surface0, the caps' own colour",
+        IM,
+        [
+            ('        let popup_edge = p.surface1;',
+             '        let popup_edge = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+        # the caps stop being framed and become holes in the frame
+            'every_preview_site_draws_the_role_it_claims',
+            'the_popup_its_border_and_its_key_caps_are_three_different_values',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the popup's border is still the Mocha SURFACE1 constant",
+        IM,
+        [
+            ('        let popup_edge = p.surface1;',
+             '        let popup_edge = guitk::color::Color::from_hex(0x45475A);'),
+        ],
+        ["desktop"],
+        [
+        # a StrokeRect, so the ink-on-fill walk never looks at it
+            'every_preview_site_draws_the_role_it_claims',
+            'every_colour_the_preview_draws_comes_from_its_palette',
+            'every_site_the_preview_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the layout name is drawn in the accent',
+        IM,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = p.accent;'),
+        ],
+        ["desktop"],
+        [
+        # the module's headline regression. It reads perfectly well (7.79 / 4.63
+        # under for_mode, where the accent is blue), which is exactly why it needs
+        # a test that objects to the *meaning* rather than the legibility
+            'every_preview_site_draws_the_role_it_claims',
+            'no_site_in_this_module_wears_the_accent',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the layout name goes back to blue',
+        IM,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = p.blue;'),
+        ],
+        ["desktop"],
+        [
+        # the defect this module was converted to remove, in its role-shaped form.
+        # Legal member, moves with the mode, clears the contrast floor at 7.79 /
+        # 4.63, and is not the off-palette accent -- the ordered site table is the
+        # only test in the file that can see it
+            'every_preview_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the layout name is still the Mocha BLUE constant',
+        IM,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = guitk::color::Color::from_hex(0x89B4FA);'),
+        ],
+        ["desktop"],
+        [
+        # 1.86:1 on Latte's base
+            'every_preview_site_draws_the_role_it_claims',
+            'every_colour_the_preview_draws_comes_from_its_palette',
+            'every_site_the_preview_draws_moves_with_the_mode',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the layout name drops to overlay0',
+        IM,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = p.overlay0;'),
+        ],
+        ["desktop"],
+        [
+        # 3.36 / 2.30
+            'every_preview_site_draws_the_role_it_claims',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the key caps are surface1, the border's own colour",
+        IM,
+        [
+            ('        let cap = p.surface0;',
+             '        let cap = p.surface1;'),
+        ],
+        ["desktop"],
+        [
+        # 6.31 Mocha but 4.39 Latte, *and* the caps collapse onto the frame
+            'every_preview_site_draws_the_role_it_claims',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+            'the_popup_its_border_and_its_key_caps_are_three_different_values',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the key caps are base, the popup's own colour",
+        IM,
+        [
+            ('        let cap = p.surface0;',
+             '        let cap = p.base;'),
+        ],
+        ["desktop"],
+        [
+        # text on base is 11.34 / 7.06, so only the three-values test objects
+            'every_preview_site_draws_the_role_it_claims',
+            'the_popup_its_border_and_its_key_caps_are_three_different_values',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the key caps are still the Mocha SURFACE0 constant',
+        IM,
+        [
+            ('        let cap = p.surface0;',
+             '        let cap = guitk::color::Color::from_hex(0x313244);'),
+        ],
+        ["desktop"],
+        [
+        # 1.57:1 under Latte's ink
+            'every_preview_site_draws_the_role_it_claims',
+            'every_colour_the_preview_draws_comes_from_its_palette',
+            'every_site_the_preview_draws_moves_with_the_mode',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the key labels drop a tier to subtext1',
+        IM,
+        [
+            ('        let cap_ink = p.text;',
+             '        let cap_ink = p.subtext1;'),
+        ],
+        ["desktop"],
+        [
+        # 7.10 Mocha but 4.05 Latte
+            'every_preview_site_draws_the_role_it_claims',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the key labels are surface2, a fill role used as an ink',
+        IM,
+        [
+            ('        let cap_ink = p.text;',
+             '        let cap_ink = p.surface2;'),
+        ],
+        ["desktop"],
+        [
+        # 1.88 / 1.40
+            'every_preview_site_draws_the_role_it_claims',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a key cap and its label are transposed',
+        IM,
+        [
+            ('        let cap = p.surface0;',
+             '        let cap = p.text;'),
+            ('        let cap_ink = p.text;',
+             '        let cap_ink = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+        # symmetric, so not the contrast walk; and p.text is distinct from both
+        # the popup and its border, so not the three-values test either
+            'every_preview_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the popup's fill and its key caps are transposed",
+        IM,
+        [
+            ('        let popup_fill = p.base;',
+             '        let popup_fill = p.surface0;'),
+            ('        let cap = p.surface0;',
+             '        let cap = p.base;'),
+        ],
+        ["desktop"],
+        [
+        # all three fills stay distinct and both pairings still clear the floor --
+        # an inside-out popup that only an ordered table can name
+            'every_preview_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: a key label is clipped 2px wider than its own cap again',
+        IM,
+        [
+            ('                    max_width: Some(key_size - 12.0),',
+             '                    max_width: Some(key_size - 4.0),'),
+        ],
+        ["desktop"],
+        [
+        # the layout bug this module fixed: a 6px inset with a 24px box on a 28px
+        # cap
+            'a_key_label_is_clipped_inside_its_own_cap',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: a key label may paint a full inset past its cap',
+        IM,
+        [
+            ('                    max_width: Some(key_size - 12.0),',
+             '                    max_width: Some(key_size),'),
+        ],
+        ["desktop"],
+        [
+            'a_key_label_is_clipped_inside_its_own_cap',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the preview popup is drawn even when it is hidden',
+        IM,
+        [
+            ('        if !self.preview_visible {',
+             '        if false {'),
+        ],
+        ["desktop"],
+        [
+        # every colour test builds its manager through previewing(), which sets
+        # the flag, so only the hidden-case test is looking
+            'test_manager_render_preview_hidden',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a key label is drawn unbounded, so a wide glyph runs across the keyboard',
+        IM,
+        [
+            ('                    max_width: Some(key_size - 12.0),',
+             '                    max_width: None,'),
+        ],
+        ["desktop"],
+        [
+            'a_key_label_is_clipped_inside_its_own_cap',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the tray falls back to an empty label instead of ??',
+        IM,
+        [
+            ('            .unwrap_or("??")',
+             '            .unwrap_or("")'),
+        ],
+        ["desktop"],
+        [
+        # a layout-less tray that draws a blank chip says nothing is wrong
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+            'test_empty_manager_tray_label',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the preview popup is never drawn at all',
+        IM,
+        [
+            ('        if !self.preview_visible {',
+             '        if true {'),
+        ],
+        ["desktop"],
+        [
+            'every_preview_site_draws_the_role_it_claims',
+            'every_site_the_preview_draws_moves_with_the_mode',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+            'the_popup_its_border_and_its_key_caps_are_three_different_values',
+            'a_key_label_is_clipped_inside_its_own_cap',
+            'test_manager_render_preview_visible',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the tray chip is crust, the reflexive darkest role',
+        IM,
+        [
+            ('        let chip = p.surface0;',
+             '        let chip = p.crust;'),
+        ],
+        ["desktop"],
+        [
+        # 12.97 / 6.04, so legible -- it is the taskbar it disappears into, which
+        # no test in this module can see, because the taskbar is another module
+            'every_tray_site_draws_the_role_it_claims',
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the key labels are crust',
+        IM,
+        [
+            ('        let cap_ink = p.text;',
+             '        let cap_ink = p.crust;'),
+        ],
+        ["desktop"],
+        [
+        # 1.49 / 1.17
+            'every_preview_site_draws_the_role_it_claims',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the popup's border is base, so the popup has no frame",
+        IM,
+        [
+            ('        let popup_edge = p.surface1;',
+             '        let popup_edge = p.base;'),
+        ],
+        ["desktop"],
+        [
+        # contrast has nothing to say about a fill-on-fill collapse
+            'every_preview_site_draws_the_role_it_claims',
+            'the_popup_its_border_and_its_key_caps_are_three_different_values',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the tray label is drawn in the accent',
+        IM,
+        [
+            ('        let chip_ink = p.text;',
+             '        let chip_ink = p.accent;'),
+        ],
+        ["desktop"],
+        [
+        # 5.97 / 3.39 under for_mode
+            'every_tray_site_draws_the_role_it_claims',
+            'no_site_in_this_module_wears_the_accent',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
+            'a_manager_with_no_layouts_still_draws_a_tray_chip',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the preview popup's fill is the accent",
+        IM,
+        [
+            ('        let popup_fill = p.base;',
+             '        let popup_fill = p.accent;'),
+        ],
+        ["desktop"],
+        [
+        # text on blue is 1.46 / 1.53 -- a themed sheet nobody can read
+            'every_preview_site_draws_the_role_it_claims',
+            'no_site_in_this_module_wears_the_accent',
+            'every_ink_this_module_draws_is_readable_on_what_it_sits_on',
         ],
     ),
 ]

@@ -1119,13 +1119,18 @@ mod tests {
         assert_eq!(checked, 12, "the pairing walk did not reach every ink");
     }
 
-    /// The key caps have to read as raised against the popup, and must not
-    /// share a value with the hairline that frames the popup — `surface1` for
-    /// the caps would put cap and border at the same tone and turn the keyboard
-    /// into a grid of holes. A by-construction claim in this module's header, so
-    /// it gets a test that asserts the construction.
+    /// Three fills that have to stay three: the popup, its hairline frame, and
+    /// the key caps.
+    ///
+    /// Contrast has nothing to say about any of these pairings — none is an ink
+    /// on a fill — so a defect that collapses two of them into one value is
+    /// invisible to every legibility check in the module while being obvious on
+    /// screen: caps at `surface1` become a grid of holes cut in the frame's own
+    /// tone, and a border at `base` is a frame that isn't there. The module's
+    /// header argues all three apart by construction, so this asserts the
+    /// construction rather than its consequence.
     #[test]
-    fn the_key_caps_stand_apart_from_the_popup_and_its_border() {
+    fn the_popup_its_border_and_its_key_caps_are_three_different_values() {
         for light in [false, true] {
             let p = Palette::for_mode(light);
             let drawn = colors(&previewing(tiny_layout()).render_preview(&p, 0.0, 0.0, 400.0));
@@ -1134,6 +1139,11 @@ mod tests {
                 format!("{cap:?}"),
                 format!("{fill:?}"),
                 "the caps vanish into the popup"
+            );
+            assert_ne!(
+                format!("{edge:?}"),
+                format!("{fill:?}"),
+                "the popup's border vanishes into the popup"
             );
             assert_ne!(
                 format!("{cap:?}"),

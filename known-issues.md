@@ -50401,7 +50401,7 @@ guarantee, and on Windows the failure mode would be a sharing violation in
 whichever of the two processes lost the race. Wait for `[run-timeout] child
 exited` before running any cargo command against the same target directory.
 
-**Part 2 progress. 43 of 49 modules converted.**
+**Part 2 progress. 44 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -53330,6 +53330,147 @@ exited` before running any cargo command against the same target directory.
       instead of values would mean deriving the site list from the renderer, and
       lesson 22 says an expectation derived from the code under test is an echo.
 
+- [x] `session_mgr.rs` — 7 constants over 13 colour sites, done 2026-08-24. 43
+  tests in the module (ten new), harness defects Ax70–Kx71 (thirty-seven).
+  - **Three of the thirteen sites were unreadable in *both* modes, not just in
+    Latte.** The window count, the shortcut hint and the empty-state line were
+    all `OVERLAY0` — an overlay role used as an ink, which measures **3.59:1**
+    on Mocha `mantle` and **2.14:1** on Latte. Every previous module's contrast
+    findings were Latte-only, because Mocha's roles are further apart than
+    Latte's and a dark-mode-only review can miss a light-mode failure but not a
+    both-modes one. This module is the exception: the review that preceded
+    these conversions looked at Mocha and still passed three sites that fail in
+    Mocha. The reason is that `overlay0` *reads* like an ink name — it is the
+    only quiet-sounding role that is not in the `subtext*` family — so it was
+    picked by name rather than by measurement. All three moved to `subtext1`
+    (9.91 / 5.14 on mantle).
+  - **The selected row moved its *fill*, and this is now a rule rather than a
+    one-off.** The conventional highlight is `surface0`, but the row carries a
+    caption: on Latte `surface0` the caption's natural ink `subtext0` reads
+    **3.40** and even `subtext1` only reaches **4.05**, so no quiet tier
+    survives there. Rather than shout the caption, the fill recedes to `mantle`
+    and the picker's own background moves `mantle` → `base` to keep the two
+    distinguishable. This is the second module to hit the identical wall — the
+    calendar's detail card was the first — so it was written up as a
+    cross-module rule in `design-decisions.md` §529 instead of a third
+    per-module note: *a selection highlight may be a raised `surface0` only if
+    everything drawn on it is full-strength `text`; otherwise it recedes to
+    `mantle`.* The remaining five modules and the ~2,258-constant app
+    conversion now have the answer without re-deriving it.
+  - **§528's parser rule applied to a *constructor*.** `Workspace::new` set
+    `color: BLUE`, baking one mode's blue into a saved workspace at the moment
+    it was created — a value that would then outlive every theme change, so a
+    workspace made in dark mode would keep wearing a pastel blue in light mode
+    forever. §528 was written about a *parser* consulting the palette; the same
+    hazard is present anywhere user data is *created* without a palette in
+    hand, which a constructor is by definition. The field became
+    `Option<Color>` and resolves at draw time via `Workspace::tag_color`. The
+    default is deliberately `p.blue` and not `p.accent`: a tag whose default
+    followed the accent would make every *untagged* workspace look like the
+    themed one, which is the opposite of what a tag is for.
+  - **One site keeps `subtext0`, and it needed a test to say *why*.** The
+    unselected row's icon is the module's only surviving `subtext0`, which is
+    legal on `base` (7.37 / 4.64) and illegal on the selected row's `mantle` in
+    Latte (4.31). It is safe purely by construction — the ink is chosen by the
+    same `if selected` that chooses the fill, so `subtext0` is only ever drawn
+    where `base` is. A premise like that is invisible to every test in the
+    suite: a membership test accepts the colour, a role pin accepts it, and a
+    contrast test that reads a hand-written pairing table would simply have the
+    correct pairing written into it. `only_the_selected_row_is_filled` pins the
+    premise directly — exactly one `mantle` fill exists in the scene, and its
+    `y` steps by a constant as the selection moves — so widening the fill to a
+    second row breaks it. **A by-construction safety argument needs a test that
+    asserts the construction, not the consequence.**
+  - **Lesson 18 was avoided by prediction rather than discovered by failure.**
+    The background/border transposition, written as two harness edits, is a
+    silent no-op: edit 1 rewrites `color: picker_bg,` to `color:
+    picker_border,`, and edit 2's first match is then that same freshly-written
+    line, so the patch undoes itself and the "defect" compiles to the original
+    program. It was written instead as one anchor spanning both `color:` lines
+    with the intervening `// Border.` block. Second module running where the
+    pre-run walk of every prediction against the test source found the trap
+    before the machine did.
+  - **Sweep: 37 caught, 0 escaped, 0 never asked, 0 under-caught, 3
+    under-declared.** The preflight was `37 build, 0 do not, 0 not applied`,
+    and both runs ended `restored: all files match their recorded SHA-256`. No
+    declaration errors were found by reading — the second module in a row.
+  - Catcher census (37 defects):
+
+    | Test | Caught | Sole catcher |
+    |---|---|---|
+    | `every_picker_site_draws_the_role_it_claims` | 33 | 10 |
+    | `every_colour_the_picker_draws_comes_from_its_palette` | 10 | 0 |
+    | `every_themed_site_the_picker_draws_moves_with_the_mode` | 10 | 0 |
+    | `only_the_selected_row_is_filled` | 8 | 0 |
+    | `the_title_wears_the_accent_only_while_searching` | 5 | 2 |
+    | `the_tag_the_picker_draws_is_the_one_the_resolver_gives` | 4 | 0 |
+    | `the_empty_state_draws_the_caption_ink` | 3 | 1 |
+    | `a_tagged_workspace_keeps_the_users_colour` | 2 | 1 |
+    | `a_new_workspace_is_born_untagged` | 1 | 0 |
+    | `every_pairing_the_picker_draws_clears_the_contrast_floor` | 0 | 0 |
+
+    - **The ordered pin catches 33 of 37 and is the sole catcher of 10**, which
+      is the highest share any single test has had in this series. That is a
+      property of the module rather than of the test: the picker is one
+      renderer with one scene, so unlike the calendar — month view, year view,
+      tray delegate, file format — there is no second surface for a general
+      check to miss. The four defects it does *not* catch are exactly the four
+      that are not in the drawn output at all: three in the resolver and the
+      constructor, one in the empty-state branch, which the populated scene
+      never renders.
+    - **The contrast test caught nothing, and again could not have.** Second
+      module in a row with a structural zero, for the same reason as the
+      calendar: it reads palette values against a hand-written pairing table
+      and never calls the renderer. Recorded so the zero is not read as a gap.
+      It is worth noting what this *does* mean, though: the three `overlay0`
+      failures this module fixed were failures of that table's *contents*, not
+      of the test — nobody had written the pairing down. A test that checks a
+      hand-written table catches a role moving underneath it; it cannot catch a
+      pairing nobody thought to list.
+    - **`the_empty_state_draws_the_caption_ink` is the sole catcher of the
+      empty-state ink, and this is the lesson-24 shape in a branch rather than
+      a function.** The populated scene never reaches the `workspaces.is_empty()`
+      arm, so every other test in the module — the ordered pin included — is
+      blind to it. **A site nothing renders is a site nothing checks**, and a
+      conditional arm is as much a separate site as a separate function is.
+    - **Two of the three under-declarations are one accidental locator, and it
+      is a new variety: positional, not value-keyed.**
+      `the_tag_the_picker_draws_is_the_one_the_resolver_gives` finds the three
+      colour tags at hard-coded indices 4, 10 and 14 of the drawn list. Any
+      defect that changes the *number* of `FillRect`s shifts every index after
+      it, so "every row is filled" and "no row is ever filled" both make the
+      test read a neighbouring site and fail — in the vocabulary of tag
+      resolution, about a defect in selection painting. The calendar's
+      accidental locator keyed on a colour value; this one keys on list
+      position. Both are real catches and both are fragile in the same way:
+      they protect a property they never meant to assert, and the protection
+      evaporates the moment someone adjusts the fixture. Left as-is for the
+      same reason as the calendar's — deriving the indices from the renderer
+      would make the expectation an echo (lesson 22).
+    - **The third under-declaration is positional too, one layer up.**
+      `every_themed_site_the_picker_draws_moves_with_the_mode` zips the 19-entry
+      label list against the drawn list, so "every row is filled" inserts two
+      commands and slides the labels out of register. The skip clause then
+      exempts the wrong site, and `USER_PINK` — legitimately identical in both
+      modes — is asserted to differ and does not. Same class as the calendar's
+      value-collision under-declaration and same direction of error: the
+      misalignment can only make the test fail where it should not have been
+      asked, never pass where it should have failed, so it cannot hide a
+      defect. **Every under-declaration these four modules have produced has
+      been an alignment or collision artefact of a test locating its site
+      indirectly** — which is the price of not deriving locators from the code
+      under test, and a price worth paying.
+    - **`B×70` is the one under-declaration I predicted and then failed to
+      carry.** The picker's background left as the literal `0x181825` is caught
+      by `only_the_selected_row_is_filled`, because in that test's dark fixture
+      the literal *is* `p.mantle`, so the background `FillRect` matches the
+      mantle locator and the test counts two filled rows. I had predicted
+      exactly this for the role-swap variant (`A×70`, background → `p.mantle`)
+      and did not carry the reasoning across to the Mocha-literal variant of
+      the same site. **A literal and the role it equals in one mode are the
+      same defect to any test that runs in that mode**; declarations for the
+      two variants of a site should be written as a pair, not independently.
+
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
 because a shell that cannot be driven cannot demonstrate a theme change
@@ -53639,6 +53780,75 @@ Nothing else blocks it.
 window edge. Every application stays dark on a light desktop, which reads as
 each application being broken rather than the theme being unimplemented — the
 same misdiagnosis the shell entry describes, multiplied by ninety.
+---
+
+### TD-C-WORKSPACES-CANNOT-SURVIVE-A-LOGOUT-AND-THE-MODULE-SAYS-THEY-CAN — 2026-08-24 — OPEN
+
+**In short.** A *workspace* here is a saved window layout — "Development" with
+an editor, a terminal and a browser at particular positions — that the user
+names once and can then restore with one keystroke. The module that implements
+them opens by promising "session persistence across logouts/reboots". It does
+not do that. Nothing in the module ever reads or writes a file, so every
+workspace the user creates exists only in the running shell's memory and is
+gone the moment the shell exits. There *is* an `export_workspaces()` that turns
+the list into a string, but nobody calls it, nothing can read the string back,
+and the string leaves out most of what a workspace is.
+
+**Where:** `gui/desktop/src/session_mgr.rs`.
+
+- The module doc (lines 1–8) claims persistence across logouts/reboots.
+- `SessionManager::export_workspaces` (line 418) is the only serialiser. It is
+  called from exactly one place — its own unit test, `export_workspaces` at
+  line 1081. `grep -rn 'session_mgr\|SessionManager\|WorkspacePicker' gui apps`
+  finds a single hit outside the file itself: `pub mod session_mgr;` in
+  `gui/desktop/src/lib.rs:131`. The type is declared and never constructed by
+  the shell.
+- There is no counterpart reader. No `import`, no `parse`, no `load`, no
+  `from_str`, no `serde` derive anywhere in the module.
+
+**What the format drops.** `Workspace` has eleven fields. The exported line
+`workspace:{id}:{name}:{icon}:{auto_launch}` carries four of them. Missing:
+`description`, `created_at`, `last_used` (which is what `sort_by_recent`
+orders on), `shortcut` (the "Super+1" the picker draws), `pinned_desktop`, and
+`color` (the user's colour tag). The whole `SessionState` — the live snapshot
+`save_session`/`restore_session` operate on — is not exported at all. So even
+if a reader were written against this format, restoring would silently discard
+the user's shortcut and colour tag and reset every workspace's recency, which
+would reorder the picker on every reboot.
+
+**The format is also ambiguous, which is why the reader cannot simply be
+written.** Fields are joined with `:` and no field is escaped or quoted, but
+`name`, `icon`, `app_id` and `title_hint` are all free-form user strings. A
+workspace named `Build: nightly` produces a line with six colon-separated
+fields where the parser expects four, and a window whose title hint contains a
+colon does the same. `state` is written with `{:?}`, i.e. the Rust `Debug`
+spelling of the enum, which is a debugging aid rather than a format — renaming
+a variant would silently change the file format. Writing a reader against this
+format would be writing a parser for a format that cannot round-trip its own
+inputs.
+
+**What the proper fix looks like.** Not "add an importer". The format has to be
+replaced first, and by the project's own configuration rule that means YAML
+(`design.txt`: YAML for configuration, with a library that preserves comments
+and formatting), covering all eleven `Workspace` fields plus `SessionState`,
+with the enum spelled explicitly rather than via `Debug`. Then a reader, then
+the shell actually calling both at the right moments — which needs the shell
+event loop, since something has to notice "the user is logging out" and "the
+shell just started". Until the shell can be driven
+(`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`), there is no moment
+to hang the save and load calls on. The honest interim step, which costs
+nothing and is not deferred, is the doc comment: it should say what the module
+does today rather than what it is intended to do.
+
+**Trigger:** the format and the reader can be done at any time; the save/load
+calls are sequenced after the shell event loop.
+
+**If never fixed:** the feature is a demo. A user who spends ten minutes
+arranging and naming three workspaces loses all three at logout, with no
+warning that they were never saved — which is worse than the feature being
+absent, because the naming UI implies durability. The module doc actively
+misleads the next person to read it into thinking the persistence exists and
+merely needs wiring.
 ---
 
 ### B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS, AND LIBC'S DOC COMMENTS EXPLAIN IT WITH A REASON THAT STOPPED BEING TRUE — 2026-08-21 — OPEN

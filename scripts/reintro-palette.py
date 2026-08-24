@@ -113,6 +113,7 @@ FOCUS = "gui/desktop/src/focus_assist.rs"
 PEEK = "gui/desktop/src/window_peek.rs"
 ABOUT = "gui/desktop/src/about.rs"
 CAL = "gui/desktop/src/calendar.rs"
+SESS = "gui/desktop/src/session_mgr.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -19787,6 +19788,509 @@ DEFECTS = [
         ["desktop"],
         [
             'an_uncoloured_event_round_trips_without_gaining_a_colour',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the picker's background is mantle again, which is also the selected row's fill",
+        SESS,
+        [
+            ('        let picker_bg = p.base;',
+             '        let picker_bg = p.mantle;'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'only_the_selected_row_is_filled',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the picker's background is still the Mocha MANTLE constant",
+        SESS,
+        [
+            ('        let picker_bg = p.base;',
+             '        let picker_bg = Color::from_hex(0x181825);'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the picker's border reads surface0 instead of surface1",
+        SESS,
+        [
+            ('        let picker_border = p.surface1;',
+             '        let picker_border = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the picker's border is still the Mocha SURFACE1 constant",
+        SESS,
+        [
+            ('        let picker_border = p.surface1;',
+             '        let picker_border = Color::from_hex(0x45475A);'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the idle title drops to subtext0',
+        SESS,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'the_title_wears_the_accent_only_while_searching',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the idle title is still the Mocha TEXT constant',
+        SESS,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+        # The accent test only renders the dark palette, where this literal *is*
+        # `p.text`, so it cannot see this one. Only the light render can.
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the search state goes back to the named blue instead of the accent',
+        SESS,
+        [
+            ('        let searching_ink = p.accent;',
+             '        let searching_ink = p.blue;'),
+        ],
+        ["desktop"],
+        [
+        # The pin test's fixture has an empty search box, so this site is not
+        # drawn there at all. A site nothing renders is a site nothing checks.
+            'the_title_wears_the_accent_only_while_searching',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the title never changes colour, so nothing marks the search as live',
+        SESS,
+        [
+            ('        let searching_ink = p.accent;',
+             '        let searching_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'the_title_wears_the_accent_only_while_searching',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the selected row goes back to surface0, which no quiet ink survives in Latte',
+        SESS,
+        [
+            ('        let selected_row = p.mantle;',
+             '        let selected_row = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'only_the_selected_row_is_filled',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the selected row is still the Mocha SURFACE0 constant',
+        SESS,
+        [
+            ('        let selected_row = p.mantle;',
+             '        let selected_row = Color::from_hex(0x313244);'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+            'only_the_selected_row_is_filled',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the selected row's icon is not lifted out of the quiet tier",
+        SESS,
+        [
+            ('        let selected_icon_ink = p.text;',
+             '        let selected_icon_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: an unselected row's icon drops to overlay0",
+        SESS,
+        [
+            ('        let icon_ink = p.subtext0;',
+             '        let icon_ink = p.overlay0;'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: an unselected row's icon is still the Mocha SUBTEXT0 constant",
+        SESS,
+        [
+            ('        let icon_ink = p.subtext0;',
+             '        let icon_ink = Color::from_hex(0xA6ADC8);'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: a workspace's name drops a tier to subtext1",
+        SESS,
+        [
+            ('        let name_ink = p.text;',
+             '        let name_ink = p.subtext1;'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a workspace's name is still the Mocha TEXT constant",
+        SESS,
+        [
+            ('        let name_ink = p.text;',
+             '        let name_ink = Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the row captions go back to overlay0, the rung below anything readable',
+        SESS,
+        [
+            ('        let caption_ink = p.subtext1;',
+             '        let caption_ink = p.overlay0;'),
+        ],
+        ["desktop"],
+        [
+        # Not the contrast test: it reads palette values and a hand-written
+        # pairing table and never calls the renderer, so it is structurally
+        # incapable of failing for anything in this file. That is a property of
+        # the test, not a weakness -- contrast is not a membership property and
+        # the sweep cannot see it either.
+            'every_picker_site_draws_the_role_it_claims',
+            'the_empty_state_draws_the_caption_ink',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the row captions are still the Mocha OVERLAY0 constant',
+        SESS,
+        [
+            ('        let caption_ink = p.subtext1;',
+             '        let caption_ink = Color::from_hex(0x6C7086);'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+            'the_empty_state_draws_the_caption_ink',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the selected and unselected icon inks are transposed',
+        SESS,
+        [
+            ('                color: if selected {\n                    selected_icon_ink\n                } else {\n                    icon_ink\n                },',
+             '                color: if selected {\n                    icon_ink\n                } else {\n                    selected_icon_ink\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the picker's background and its border are drawn in each other's colours",
+        SESS,
+        [
+            ('            color: picker_bg,\n            corner_radii: CornerRadii::all(12.0),\n        });\n\n        // Border.\n        commands.push(RenderCommand::StrokeRect {\n            x: px,\n            y: py,\n            width: picker_w,\n            height: picker_h,\n            color: picker_border,',
+             '            color: picker_border,\n            corner_radii: CornerRadii::all(12.0),\n        });\n\n        // Border.\n        commands.push(RenderCommand::StrokeRect {\n            x: px,\n            y: py,\n            width: picker_w,\n            height: picker_h,\n            color: picker_bg,'),
+        ],
+        ["desktop"],
+        [
+        # One edit spanning both sites, not two edits. Two would undo each
+        # other: the harness replaces the first match, so the second edit would
+        # find the line the first one had just rewritten. See lesson 18.
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the drop shadow is tinted, so it is a colour rather than an absence of light',
+        SESS,
+        [
+            ('            color: Color::rgba(0, 0, 0, 120),',
+             '            color: Color::rgba(0, 0, 40, 120),'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the colour tag ignores the user's choice and always draws the theme's blue",
+        SESS,
+        [
+            ('                color: ws.tag_color(p),',
+             '                color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'the_tag_the_picker_draws_is_the_one_the_resolver_gives',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the colour tag follows the accent, so every workspace wears the same tag',
+        SESS,
+        [
+            ('                color: ws.tag_color(p),',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'the_tag_the_picker_draws_is_the_one_the_resolver_gives',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: an untagged workspace's default tag follows the accent instead of blue",
+        SESS,
+        [
+            ('        self.color.unwrap_or(p.blue)',
+             '        self.color.unwrap_or(p.accent)'),
+        ],
+        ["desktop"],
+        [
+        # Not the resolver test: it compares what the renderer drew against what
+        # `tag_color` answers, and both move together here. An expectation taken
+        # from the code under test is an echo -- lesson 22. The pin test holds
+        # because it names `p.blue` itself.
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: an untagged workspace's default tag is still the Mocha BLUE constant",
+        SESS,
+        [
+            ('        self.color.unwrap_or(p.blue)',
+             '        self.color.unwrap_or(Color::from_hex(0x89B4FA))'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the resolver drops the user's choice on the floor",
+        SESS,
+        [
+            ('        self.color.unwrap_or(p.blue)',
+             '        {\n            let _ = self.color;\n            p.blue\n        }'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'a_tagged_workspace_keeps_the_users_colour',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: a new workspace is born carrying a resolved dark-mode blue',
+        SESS,
+        [
+            ('            pinned_desktop: None,\n            color: None,',
+             '            pinned_desktop: None,\n            color: Some(Color::from_hex(0x89B4FA)),'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+            'a_new_workspace_is_born_untagged',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: duplicating a workspace throws its colour tag away',
+        SESS,
+        [
+            ('            new_ws.color = source.color;',
+             '            new_ws.color = None;'),
+        ],
+        ["desktop"],
+        [
+            'a_tagged_workspace_keeps_the_users_colour',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the window count is drawn in the icon's ink",
+        SESS,
+        [
+            ('                font_size: 11.0,\n                color: caption_ink,',
+             '                font_size: 11.0,\n                color: icon_ink,'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the shortcut hint alone goes back to overlay0',
+        SESS,
+        [
+            ('                    font_size: 10.0,\n                    color: caption_ink,',
+             '                    font_size: 10.0,\n                    color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the empty-state line alone goes back to overlay0',
+        SESS,
+        [
+            ('                font_size: 13.0,\n                color: caption_ink,',
+             '                font_size: 13.0,\n                color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+        # The pin test's fixture always matches at least one workspace, so the
+        # empty branch never runs there. This is the whole reason the empty state
+        # got a fixture of its own.
+            'the_empty_state_draws_the_caption_ink',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a workspace's name is drawn in the caption ink at its site",
+        SESS,
+        [
+            ('                font_size: 14.0,\n                color: name_ink,',
+             '                font_size: 14.0,\n                color: caption_ink,'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the selection is filled in the picker's own background, so it is invisible",
+        SESS,
+        [
+            ('                    color: selected_row,\n                    corner_radii: CornerRadii::all(8.0),',
+             '                    color: picker_bg,\n                    corner_radii: CornerRadii::all(8.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'only_the_selected_row_is_filled',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: every row is filled, not just the selected one',
+        SESS,
+        [
+            ('            if selected {\n                commands.push(RenderCommand::FillRect {',
+             '            if true {\n                commands.push(RenderCommand::FillRect {'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'only_the_selected_row_is_filled',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: no row is ever filled, so the selection is not shown at all',
+        SESS,
+        [
+            ('            if selected {\n                commands.push(RenderCommand::FillRect {',
+             '            if false {\n                commands.push(RenderCommand::FillRect {'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'only_the_selected_row_is_filled',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the picker's background and the selected row's fill are transposed",
+        SESS,
+        [
+            ('        let picker_bg = p.base;',
+             '        let picker_bg = p.mantle;'),
+            ('        let selected_row = p.mantle;',
+             '        let selected_row = p.base;'),
+        ],
+        ["desktop"],
+        [
+        # Two edits are safe here where they were not for the background/border
+        # transposition above: the second anchor still reads `p.mantle` on the
+        # *binding* line, which the first edit did not create a duplicate of.
+            'every_picker_site_draws_the_role_it_claims',
+            'only_the_selected_row_is_filled',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the title always draws the search ink, so the idle state looks live',
+        SESS,
+        [
+            ('            color: if self.search_text.is_empty() {\n                title_ink\n            } else {\n                searching_ink\n            },',
+             '            color: searching_ink,'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'the_title_wears_the_accent_only_while_searching',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the title's two states are transposed",
+        SESS,
+        [
+            ('            color: if self.search_text.is_empty() {\n                title_ink\n            } else {\n                searching_ink\n            },',
+             '            color: if self.search_text.is_empty() {\n                searching_ink\n            } else {\n                title_ink\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'the_title_wears_the_accent_only_while_searching',
         ],
     ),
 ]

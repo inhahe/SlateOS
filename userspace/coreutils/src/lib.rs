@@ -246,6 +246,29 @@
 //!   status distinguishes four failure kinds that a hand-written second copy
 //!   would flatten into one.
 //!
+//! The seventeenth is [`filekind`]'s argument taken one step further out. That
+//! module is here because the *host* lies about one property of an open file;
+//! this one because the **runtime** lies about the three files every utility is
+//! handed, and lies to all of them identically:
+//!
+//! - [`stdfd`] — descriptors 0, 1 and 2 as the process actually received them.
+//!   Rust's start-up reopens any *closed* standard descriptor on `/dev/null`,
+//!   and `StdoutRaw`/`StderrRaw` then turn `EBADF` into a successful write. So
+//!   `prog >&-` reaches `main` indistinguishable from `prog >/dev/null` and
+//!   exits 0, where GNU prints `write error: Bad file descriptor` and exits
+//!   nonzero — measured, that was every binary in this crate at once, which is
+//!   what makes it a shared module rather than a bug in one of them.
+//!
+//!   Neither lie can be answered from inside a utility after the fact. The
+//!   first is told before `main` runs and needs an `.init_array` constructor to
+//!   catch it in the one window where `fcntl` still tells the truth; the second
+//!   needs `write(2)` in place of `std::io`. The [`Stream`] built on that
+//!   reproduces stdio's buffering — by line to a terminal, by block to a file,
+//!   not at all on stderr — so that noticing the failure does not also change
+//!   the order the output comes out in.
+//!
+//! [`Stream`]: stdfd::Stream
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -269,6 +292,7 @@ pub mod pathname;
 /// that crate's docs and `design-decisions.md` §370.
 pub use quoting as quote;
 pub mod shell;
+pub mod stdfd;
 pub mod tabstops;
 pub mod userspec;
 pub mod vercmp;

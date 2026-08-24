@@ -126,6 +126,12 @@ SLIDER = "gui/desktop/src/slider.rs"
 # down here so there would be one copy of it; a defect patched into this file
 # is therefore visible to `appearance` and `desktop` as well as to `guitk`.
 THEME = "gui/toolkit/src/theme.rs"
+# The three toolkit text fields §541 switched to visual caret motion. Like
+# THEME these sit below `appearance` and `desktop`, so a defect patched here is
+# compiled by all three crates -- but only `guitk` has the tests that name it.
+WIDG = "gui/toolkit/src/widget.rs"
+MODAL = "gui/toolkit/src/modal.rs"
+PBAR = "gui/toolkit/src/pathbar.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -22808,6 +22814,304 @@ DEFECTS = [
             # catches this compares the two as function items rather than
             # comparing their answers.
             'the_ratio_is_the_toolkits_own_and_not_a_second_copy_of_it',
+        ],
+    ),
+    # ---------------------------------------------------------------- 53
+    # 541 / C-Q2: the arrow keys move the caret by the *screen* rather than
+    # through the string. The operator chose visual motion; five text fields
+    # implement it -- three in the toolkit, two in the desktop shell.
+    #
+    # This module exists because the change has a trap in it that a careless
+    # "simplification" walks straight into, and because half of it is invisible
+    # to any test that only reads `cursor`.
+    #
+    # The trap: on `ab` + two Hebrew letters + `cd`, drawn `a b <bet> <aleph>
+    # c d`, the two gaps where the directions meet each answer to *both* byte
+    # offsets 2 and 6. Walking left reports 6 at both, walking right reports 2
+    # at both, and only the affinity inside `TextCursor` separates them. A
+    # field that stores the byte and rebuilds the rest each keypress reads the
+    # second 6 as the first and skips the entire Hebrew word in one press --
+    # worse than the logical motion it replaced. Defect J is exactly that.
+    #
+    # The invisible half: moving correctly is not enough, the caret must also
+    # be *drawn* where it moved to, and a prefix-width measurement is only
+    # right while the line runs in one direction. O and Q are that, and their
+    # catchers are the only two tests in the tree that look at the drawn caret.
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the toolkit text field's arrows go back to stepping through the string",
+        WIDG,
+        [
+            ('                        if let Some(prev) = crate::text::caret_left(\n'
+             '                            value,\n'
+             '                            *cursor,\n'
+             '                            font_size,\n'
+             '                            FontWeightHint::Regular,\n'
+             '                        ) {\n',
+             '                        if let Some(prev) = cursor.prev_in(value) {\n'),
+            ('                        if let Some(next) = crate::text::caret_right(\n'
+             '                            value,\n'
+             '                            *cursor,\n'
+             '                            font_size,\n'
+             '                            FontWeightHint::Regular,\n'
+             '                        ) {\n',
+             '                        if let Some(next) = cursor.next_in(value) {\n'),
+        ],
+        ["guitk"],
+        [
+            # Exactly the code 541 replaced. Every ASCII test of this widget
+            # passes throughout, because on a line that runs one way the two
+            # motions are the same motion.
+            'the_arrows_move_by_the_screen_and_keep_the_side_they_are_on',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the field keeps the caret's byte and throws away which side of the boundary it is on",
+        WIDG,
+        [
+            # The `FontWeightHint` line is carried along only to disambiguate:
+            # Backspace three arms up also ends `*cursor = prev;`, and patching
+            # *that* would be a different defect about editing, not movement.
+            ('                            FontWeightHint::Regular,\n'
+             '                        ) {\n'
+             '                            *cursor = prev;\n',
+             '                            FontWeightHint::Regular,\n'
+             '                        ) {\n'
+             '                            *cursor = crate::text::TextCursor::from(prev.byte());\n'),
+            ('                            *cursor = next;\n',
+             '                            *cursor = crate::text::TextCursor::from(next.byte());\n'),
+        ],
+        ["guitk"],
+        [
+            # 541's measured trap, and the reason the widget stores a
+            # `TextCursor` rather than a `usize`. `From<usize>` resets the
+            # affinity to `Downstream`, so the second visit to byte 6 is
+            # indistinguishable from the first and the walk jumps the whole
+            # Hebrew word. The failure shows a *shorter* sequence than the six
+            # stops the six letters have -- which is what the catcher's doc
+            # comment tells its reader to look for.
+            'the_arrows_move_by_the_screen_and_keep_the_side_they_are_on',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the plain input dialog is given the password field's logical motion",
+        MODAL,
+        [
+            ('        } else if right {\n'
+             '            crate::text::caret_right(\n'
+             '                &self.input_text,\n'
+             '                self.cursor,\n'
+             '                FONT_SIZE,\n'
+             '                FontWeightHint::Regular,\n'
+             '            )\n'
+             '        } else {\n'
+             '            crate::text::caret_left(\n'
+             '                &self.input_text,\n'
+             '                self.cursor,\n'
+             '                FONT_SIZE,\n'
+             '                FontWeightHint::Regular,\n'
+             '            )\n'
+             '        };\n',
+             '        } else if right {\n'
+             '            self.cursor.next_in(&self.input_text)\n'
+             '        } else {\n'
+             '            self.cursor.prev_in(&self.input_text)\n'
+             '        };\n'),
+        ],
+        ["guitk"],
+        [
+            # The password exception spreading to the field it is an exception
+            # *from*. Note the password test next door still passes: it asserts
+            # the logical sequence, which is now what both branches do.
+            'a_plain_input_dialog_moves_its_caret_by_the_screen',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the password field loses its exception and moves by the layout of the hidden text",
+        MODAL,
+        [
+            ('        let stepped = if self.password_mode {\n'
+             '            if right {\n'
+             '                self.cursor.next_in(&self.input_text)\n'
+             '            } else {\n'
+             '                self.cursor.prev_in(&self.input_text)\n'
+             '            }\n'
+             '        } else if right {\n',
+             '        let stepped = if right {\n'),
+        ],
+        ["guitk"],
+        [
+            # The one documented exception to 541, deleted. What the field
+            # draws is a row of identical asterisks in string order, so moving
+            # by the layout of the secret scatters the caret among marks that
+            # cannot explain the jumps -- and the jumps themselves disclose the
+            # shape of the secret to anyone watching, which is the single thing
+            # masking exists to prevent.
+            'a_password_field_steps_through_its_mask_not_its_secret',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the path bar's arrows jump across a right-to-left directory name instead of entering it",
+        PBAR,
+        [
+            ('        if let Some(prev) = crate::text::caret_left(\n'
+             '            &self.edit_text,\n'
+             '            self.cursor,\n'
+             '            FONT_SIZE,\n'
+             '            FontWeightHint::Regular,\n'
+             '        ) {\n',
+             '        if let Some(prev) = self.cursor.prev_in(&self.edit_text) {\n'),
+            ('        if let Some(next) = crate::text::caret_right(\n'
+             '            &self.edit_text,\n'
+             '            self.cursor,\n'
+             '            FONT_SIZE,\n'
+             '            FontWeightHint::Regular,\n'
+             '        ) {\n',
+             '        if let Some(next) = self.cursor.next_in(&self.edit_text) {\n'),
+        ],
+        ["guitk"],
+        [
+            # The path bar was switched with the other two but shipped no test
+            # of its own until 78a7c5102 -- which is the whole reason this
+            # defect can be written down as a question the suite answers.
+            'the_path_bars_arrows_cross_a_right_to_left_directory_name_letter_by_letter',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the launcher's search box is the one field left stepping through the string",
+        LAUN,
+        [
+            ('                if let Some(prev) = text::caret_left(\n'
+             '                    &self.query,\n'
+             '                    self.cursor,\n'
+             '                    INPUT_FONT_SIZE,\n'
+             '                    FontWeightHint::Regular,\n'
+             '                ) {\n',
+             '                if let Some(prev) = self.cursor.prev_in(&self.query) {\n'),
+            ('                if let Some(next) = text::caret_right(\n'
+             '                    &self.query,\n'
+             '                    self.cursor,\n'
+             '                    INPUT_FONT_SIZE,\n'
+             '                    FontWeightHint::Regular,\n'
+             '                ) {\n',
+             '                if let Some(next) = self.cursor.next_in(&self.query) {\n'),
+        ],
+        ["desktop"],
+        [
+            # A half-switched desktop, which 541 records as the failure mode
+            # worth naming: the caret then obeys two different rules depending
+            # on which box has focus, and neither one is wrong on its own.
+            'the_arrows_walk_the_query_by_the_screen_not_by_the_string',
+            # Found by the sweep of 2026-08-24, not predicted, and worth
+            # keeping: the drawn-caret test catches the *movement* defect too,
+            # because a logical Right on this text moves the offset 2 -> 6 and
+            # the shaper then draws that offset to the left of where it was.
+            # So the drawn caret goes backwards under a Right press for a
+            # reason that has nothing to do with how it is placed. The two
+            # halves of 541 are not independently observable after all.
+            'the_drawn_caret_moves_rightwards_every_time_the_right_arrow_does',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the launcher draws its caret at the width of the text before it again",
+        LAUN,
+        [
+            ('        let cursor_x = 12.0\n'
+             '            + text::caret_x(\n'
+             '                &self.query,\n'
+             '                self.cursor,\n'
+             '                INPUT_FONT_SIZE,\n'
+             '                FontWeightHint::Regular,\n'
+             '            );\n',
+             '        let cursor_x = 12.0\n'
+             '            + text::measure(\n'
+             '                self.query.get(..self.cursor.byte()).unwrap_or_default(),\n'
+             '                INPUT_FONT_SIZE,\n'
+             '                FontWeightHint::Regular,\n'
+             '            );\n'),
+        ],
+        ["desktop"],
+        [
+            # The half of 541 that no cursor-only test can see. A prefix width
+            # is the caret's place only while the line runs one way, so with
+            # the arrows walking 2, 4, 2 through the Hebrew the drawn caret
+            # goes *backwards* twice while the user presses Right. Note this
+            # reintroduction is the non-panicking form -- `.get(..)` rather
+            # than a slice -- so what fails is the position, not a crash.
+            'the_drawn_caret_moves_rightwards_every_time_the_right_arrow_does',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the Run dialog's arrows go back to stepping through the string",
+        RUN,
+        [
+            ('        if let Some(prev) = text::caret_left(\n'
+             '            &self.text,\n'
+             '            self.cursor,\n'
+             '            INPUT_FONT_SIZE,\n'
+             '            FontWeightHint::Regular,\n'
+             '        ) {\n',
+             '        if let Some(prev) = self.cursor.prev_in(&self.text) {\n'),
+            ('        if let Some(next) = text::caret_right(\n'
+             '            &self.text,\n'
+             '            self.cursor,\n'
+             '            INPUT_FONT_SIZE,\n'
+             '            FontWeightHint::Regular,\n'
+             '        ) {\n',
+             '        if let Some(next) = self.cursor.next_in(&self.text) {\n'),
+        ],
+        ["desktop"],
+        [
+            'the_run_dialogs_arrows_walk_the_line_by_the_screen_not_by_the_string',
+            # Undeclared until the sweep of 2026-08-24, for the same reason as
+            # N above: a logical Right moves the offset from 2 to 6, and the
+            # shaper draws 6 to the *left* of 2, so the drawn-caret test sees
+            # a movement defect even though nothing about the drawing changed.
+            'the_run_dialogs_drawn_caret_only_ever_moves_rightwards_under_the_right_arrow',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the Run dialog goes back to slicing its text at the caret's raw byte offset",
+        RUN,
+        [
+            ('        let cursor_px = text::caret_x(\n'
+             '            &self.input.text,\n'
+             '            self.input.cursor,\n'
+             '            INPUT_FONT_SIZE,\n'
+             '            FontWeightHint::Regular,\n'
+             '        );\n',
+             '        let cursor_px = text::measure(\n'
+             '            &self.input.text[..self.input.cursor.byte()],\n'
+             '            INPUT_FONT_SIZE,\n'
+             '            FontWeightHint::Regular,\n'
+             '        );\n'),
+        ],
+        ["desktop"],
+        [
+            # Two faults in one line, so two catchers. The prefix width puts
+            # the caret in the wrong place on a bidirectional line, and the
+            # *slice* panics outright on an offset inside a character -- inside
+            # `render`, so a drifted cursor took the whole shell down while
+            # merely painting the dialog.
+            'the_run_dialogs_drawn_caret_only_ever_moves_rightwards_under_the_right_arrow',
+            'a_run_dialog_caret_off_a_character_boundary_draws_rather_than_panicking',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a password is masked with one asterisk per byte again",
+        MODAL,
+        [
+            ('            "*".repeat(self.input_text.chars().count())\n',
+             '            "*".repeat(self.input_text.len())\n'),
+        ],
+        ["guitk"],
+        [
+            # Found while implementing 541 next door. An eight-character
+            # password of sixteen bytes drew sixteen marks: the row stops
+            # lining up with the places the caret can be, and its width
+            # discloses the secret's *encoding* rather than its length, which
+            # for a non-Latin password narrows it far more than a character
+            # count does.
+            'the_mask_has_one_mark_per_character_not_per_byte',
         ],
     ),
 ]

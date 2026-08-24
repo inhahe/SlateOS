@@ -16,5 +16,12 @@ yamldoc = { path = "../../yamldoc" }
 # widget toolkit into a crate the compositor reads on every reload.
 settingsfile = { path = "../settingsfile" }
 
+# `settingsfile::testing` -- reached here as `config::testing` -- for the tests that
+# run against a scratch configuration directory instead of the developer's
+# own. Cargo unifies this with the ordinary dependency when building tests,
+# so the module exists for `cargo test` and nowhere else.
+[dev-dependencies]
+settingsfile = { path = "../settingsfile", features = ["testing"] }
+
 [lints]
 workspace = true

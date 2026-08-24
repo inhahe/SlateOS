@@ -9,5 +9,26 @@ description = "Where SlateOS settings files live, and how they are replaced with
 # with the comments intact. See yamldoc/src/lib.rs.
 yamldoc = { path = "../../yamldoc" }
 
+# A private on-disk directory per test, for the `testing` module below.
+# Optional, and off by default: `scratchdir` exists to be a dev-dependency that
+# never reaches a target build, and `pub mod testing` is compiled into ordinary
+# builds, so leaving this unconditional would link a test fixture into the
+# shipped compositor.
+scratchdir = { path = "../../userspace/scratchdir", optional = true }
+
+[features]
+# Compiles `settingsfile::testing`, the scratch-configuration-directory helper
+# that dependent crates' tests use. A dependent turns it on in its own
+# `[dev-dependencies]` -- the same shape `safeio`'s `audit` counters use -- so
+# the helper and its `scratchdir` dependency exist for `cargo test` and nowhere
+# else. It cannot be `#[cfg(test)]`: that is only set when *this* crate is
+# under test, not when a dependent is.
+testing = ["dep:scratchdir"]
+
+# This crate's own tests use `ScratchDir` directly, without going through the
+# `testing` module.
+[dev-dependencies]
+scratchdir = { path = "../../userspace/scratchdir" }
+
 [lints]
 workspace = true

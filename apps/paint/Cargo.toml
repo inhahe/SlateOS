@@ -15,6 +15,7 @@ byteread = { path = "../../byteread" }
 # tests, so the counters cost nothing in the shipped binary.
 [dev-dependencies]
 safeio = { path = "../safeio", features = ["audit"] }
+scratchdir = { path = "../../userspace/scratchdir" }
 
 [lints]
 workspace = true

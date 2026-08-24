@@ -209,27 +209,40 @@ const MAX_OPEN_FILES: usize = 1024;
 // Capability tag enforcement
 // ---------------------------------------------------------------------------
 
-/// Check file/directory capability tag access for the current process.
+/// Check capability tags and POSIX ACLs for an open of `path` under `flags`.
 ///
-/// Same logic as `vfs::check_file_tags` but for the handle module.
-/// Called at open time — the handle is proof of access after that.
-fn check_file_tags_for_handle(path: &Path) -> KernelResult<()> {
-    if crate::cap::file_tags::count() == 0 {
-        return Ok(());
+/// This module used to carry its own transcription of the VFS's tag check —
+/// the same six lines, separately maintained — which is why the ACL half
+/// could have been added to the VFS and silently not applied to `open`, the
+/// one entry point through which essentially all userspace file access
+/// arrives. It now defers to the single gate in `vfs`.
+///
+/// Called at open time only; subsequent reads and writes on the handle are
+/// allowed without re-checking, because the handle is proof of access (Unix
+/// file-descriptor semantics — an fd survives a later `chmod`/`setfacl`).
+fn check_open_access(path: &Path, flags: OpenFlags) -> KernelResult<()> {
+    use crate::fs::vfs::PathAccess;
+
+    // A create, truncate or append modifies the file even when the caller did
+    // not set the write access bit, so the write intent is taken from the
+    // effect rather than from the access-mode bits alone.
+    let writes = flags.contains(OpenFlags::WRITE)
+        || flags.contains(OpenFlags::CREATE)
+        || flags.contains(OpenFlags::TRUNCATE)
+        || flags.contains(OpenFlags::APPEND);
+
+    if flags.contains(OpenFlags::READ) {
+        crate::fs::vfs::check_path_access(path, PathAccess::Read)?;
     }
-
-    let task_id = crate::sched::current_task_id();
-    let pid = match crate::proc::thread::owner_process(task_id) {
-        Some(pid) if pid != 0 => pid,
-        _ => return Ok(()),
-    };
-
-    let creds = match crate::proc::pcb::get_credentials(pid) {
-        Some(c) => c,
-        None => return Ok(()),
-    };
-
-    crate::cap::file_tags::check_access(creds.uid, creds.gid, &creds.groups, path)
+    if writes {
+        crate::fs::vfs::check_path_access(path, PathAccess::Write)?;
+    }
+    // An open asking for neither still has to clear capability tags, which are
+    // not access-mode-specific; `Metadata` requests no ACL permission.
+    if !flags.contains(OpenFlags::READ) && !writes {
+        crate::fs::vfs::check_path_access(path, PathAccess::Metadata)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -327,17 +340,18 @@ pub fn open_with_mode(
         crate::fs::Vfs::resolve_path(path)?
     };
 
-    // Check file capability tags — the process must be a member of
-    // all required groups for this path (or any ancestor with tags).
-    // This is checked at open time; subsequent reads/writes on the
-    // handle are allowed without re-checking (the handle is proof
-    // of access, like a file descriptor).
-    check_file_tags_for_handle(&norm)?;
+    // Check capability tags and POSIX ACLs — the process must be a member of
+    // all groups required for this path (or any ancestor with tags), and the
+    // path's ACL, if it has one, must grant the access this open asks for.
+    // Checked at open time; subsequent reads/writes on the handle are allowed
+    // without re-checking (the handle is proof of access, like a file
+    // descriptor).
+    check_open_access(&norm, flags)?;
 
     // Check if the file exists.
-    // Note: Vfs::stat() also checks file tags internally, but our
-    // explicit check above handles the CREATE case (file doesn't
-    // exist yet, so stat is never called — we still need the check).
+    // Note: Vfs::stat() runs the same gate internally, but our explicit check
+    // above handles the CREATE case (file doesn't exist yet, so stat is never
+    // called — we still need the check).
     let stat_result = crate::fs::Vfs::stat_resolved(&norm);
 
     match stat_result {

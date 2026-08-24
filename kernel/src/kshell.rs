@@ -9707,9 +9707,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // Through an output redirect.
         run("grep alpha /tmp/kshell_status_selftest.txt > /tmp/kshell_status_selftest.out");
         assert_eq!(last_exit(), 0);
+        // `1:alpha`, not `alpha`: this shell's grep defaults `-n` on (and `-i`
+        // too). That is a deliberate interactive-convenience default rather
+        // than POSIX behaviour -- see `open-questions.md`
+        // -> "kshell's grep defaults differ from POSIX". What is asserted here
+        // is only that the redirect wrote *grep's* bytes, whatever they are.
         assert_eq!(
             Vfs::read_file(out)?.as_slice(),
-            &b"alpha\n"[..],
+            &b"1:alpha\n"[..],
             "the redirect must still have written the output"
         );
         run("grep zeta /tmp/kshell_status_selftest.txt > /tmp/kshell_status_selftest.out");
@@ -95063,7 +95068,14 @@ fn cmd_grep_input(args: &str, input: &str) {
 
             if !flags.count_only {
                 if flags.show_line_numbers {
-                    shell_println!("{}: {}", line_num.saturating_add(1), line);
+                    // `{}:{}`, not `{}: {}`. The file-reading half (`grep_file`)
+                    // has always emitted the un-spaced form, which is also what
+                    // POSIX grep -n emits, so the space here meant `grep p f`
+                    // and `cat f | grep p` returned *different bytes* for the
+                    // same match. Anything downstream that splits on `:` and
+                    // takes the text got a leading space from one form and not
+                    // the other, and the two could not be compared.
+                    shell_println!("{}:{}", line_num.saturating_add(1), line);
                 } else {
                     shell_println!("{}", line);
                 }

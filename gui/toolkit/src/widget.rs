@@ -1649,6 +1649,45 @@ mod tests {
         assert_eq!(tree.focused_id(), Some(last));
     }
 
+    /// Focus given by id is the path Tab and the mouse do not take, and it is
+    /// the one that can be handed an id the caller looked up before the widget
+    /// was disabled. Both halves of `WidgetTree::focus`'s promise are tested
+    /// here because the dangerous failure is the second: a caller told `false`
+    /// while the focus quietly stayed where it was would send the next
+    /// keystroke to a field it believes nothing is focused in.
+    #[test]
+    fn focusing_by_id_refuses_what_tab_would_have_skipped_and_still_lets_go() {
+        let root = Widget::container()
+            .with_flex_direction(FlexDirection::Column)
+            .with_child(Widget::text_input("", "typed-in"))
+            .with_child(Widget::label("just a label"))
+            .with_child(Widget::text_input("", "off").disabled())
+            .with_child(Widget::text_input("", "gone").hidden());
+        let mut tree = WidgetTree::new(root, 300.0, 400.0);
+        tree.layout();
+
+        let field = tree.root.children[0].id;
+        let refused = [
+            ("a label", tree.root.children[1].id),
+            ("a disabled field", tree.root.children[2].id),
+            ("a hidden field", tree.root.children[3].id),
+        ];
+
+        for (what, id) in refused {
+            assert!(tree.focus(Some(field)), "the field itself must take focus");
+            assert_eq!(tree.focused_id(), Some(field));
+
+            assert!(!tree.focus(Some(id)), "focus must refuse {what}");
+            assert_eq!(
+                tree.focused_id(),
+                None,
+                "a refused focus ({what}) must still let go of the widget that \
+                 had it — otherwise the caller is told the focus did not move \
+                 while the next keystroke goes to the field it was on"
+            );
+        }
+    }
+
     /// Clicking the background is how a user says "not that field any more". A
     /// caret still blinking in a field that has been clicked away from is a
     /// caret that lies about where the next keystroke will go.
@@ -1987,6 +2026,55 @@ mod tests {
             state(&w).1,
             6,
             "and one past the last glyph lands after all of it"
+        );
+    }
+
+    /// The test above uses a string that fits, so the field's scroll offset is
+    /// zero and a click that forgot to add it still lands in the right place.
+    /// This one uses a string that does not fit. A text input opens with its
+    /// caret at the end, so a long value opens scrolled to its tail: the glyph
+    /// under the left edge of the box is somewhere in the middle of the string,
+    /// not its first character.
+    ///
+    /// The two clicks are made on separate widgets on purpose. The scroll
+    /// offset is recomputed from the caret on every frame, so the first click
+    /// changes where the second one would land.
+    #[test]
+    fn clicking_in_a_scrolled_field_accounts_for_what_has_scrolled_off() {
+        let long = "the quick brown fox jumps over the lazy dog, twice over";
+
+        let mut at_left = laid_out(Widget::text_input(long, ""), 80.0);
+        at_left.focused = true;
+        assert_eq!(
+            state(&at_left).1,
+            long.len(),
+            "a field opens with its caret at the end, which is what scrolls it"
+        );
+
+        at_left.handle_mouse(&MouseEvent {
+            x: content_left(&at_left) + 0.5,
+            y: at_left.layout.y + 4.0,
+            kind: MouseEventKind::Press(crate::event::MouseButton::Left),
+        });
+        assert!(
+            state(&at_left).1 > long.len() / 2,
+            "the left edge of a field scrolled to its tail shows the far end of \
+             the string, so a click there must land there — a click that ignores \
+             the scroll offset lands at byte 0 instead, got {}",
+            state(&at_left).1
+        );
+
+        let mut at_right = laid_out(Widget::text_input(long, ""), 80.0);
+        at_right.focused = true;
+        at_right.handle_mouse(&MouseEvent {
+            x: content_left(&at_right) + at_right.layout.width,
+            y: at_right.layout.y + 4.0,
+            kind: MouseEventKind::Press(crate::event::MouseButton::Left),
+        });
+        assert_eq!(
+            state(&at_right).1,
+            long.len(),
+            "and the right edge shows the last character, not one a box-width in"
         );
     }
 

@@ -37,10 +37,30 @@ For every function whose name marks it a self-test (``self_test``,
 ``self_test_inner``, ``*_self_test``, ``self_test_*``):
 
 1. **A skip must not be decided by a discarded `Result`.**  If a branch whose
-   body announces a skip is selected by ``.is_ok()``/``.is_err()`` on a call
-   -- directly, or through a `let` binding of such an expression -- that is a
-   finding.  Ask the environment instead (the mount table, a feature query),
-   or classify the error and treat only "unimplemented" as a reason to skip.
+   body announces a skip is selected by the *outcome* of a call, that is a
+   finding.  Three spellings of the same decision are recognised, because a
+   rule enforced on only one of them just moves the defect to the other two:
+
+   ===================================  =====================================
+   Spelling                             Example
+   ===================================  =====================================
+   ``.is_ok()`` / ``.is_err()``         ``if mkdir(d).is_ok() { .. } else { skip }``
+   (directly, or via a `let` binding)   ``let w = mkdir(d).is_ok(); if w { .. }``
+   ``if let Ok(..)`` / ``if let Err``   ``if let Err(e) = mkdir(d) { skip }``
+   ``match`` with a catch-all `Err`     ``match mkdir(d) { Ok(_) => .., Err(_) => skip }``
+   ===================================  =====================================
+
+   Ask the environment instead (the mount table, a feature query), or
+   classify the error and treat only "unimplemented" as a reason to skip.
+
+   An arm that names *specific* errors -- ``Err(KernelError::NotSupported)``,
+   ``Err(NoSuchDevice | ReadOnlyFilesystem)`` -- is exempt, because that is
+   the approved form: it is a decision about what the error *means*, not a
+   decision to ignore whatever came back.  Only a catch-all binding
+   (``Err(_)``, ``Err(e)``, ``Err(..)``) is a finding.  `selftest::classify`
+   exists so this judgement is made in one place; a match on its
+   ``Setup::Unsupported`` never trips the rule, since the pattern is not
+   ``Err(..)``.
 
 2. **A section-level skip must not be followed by an unconditional success
    claim.**  If a skip is announced inside a branch *and that branch does not
@@ -86,6 +106,13 @@ _spec.loader.exec_module(_rl)
 SELFTEST_NAME = re.compile(r"\A(?:self_test(?:_inner)?|self_test_.*|.*_self_test)\Z")
 
 IS_RESULT = re.compile(r"\.is_(?:ok|err)\s*\(\s*\)")
+IF_LET_RESULT = re.compile(r"\bif\s+let\s+(?:Ok|Err)\s*\(")
+MATCH_KW = re.compile(r"\bmatch\b")
+ERR_PATTERN = re.compile(r"\bErr\s*\(")
+# `Err(_)`, `Err(e)`, `Err(..)` -- accepts anything that came back, so the
+# branch is a decision to ignore the error rather than a decision about what
+# it means.  `Err(KernelError::NotSupported)` is not this, and is exempt.
+CATCHALL_BINDING = re.compile(r"\A\s*(?:_|\.\.|(?:mut\s+)?[a-z_][a-z0-9_]*)\s*\Z")
 PRINTLN = re.compile(r"\b(?:serial_println|shell_println|println)\s*!\s*\(")
 SKIP_WORD = re.compile(r"skip", re.IGNORECASE)
 # "passed", "PASSED", "PASS" -- a claim that the whole test succeeded.  Not
@@ -190,6 +217,102 @@ def _branch_blocks(src: str, cond_end: int, body_end: int) -> list[tuple[int, in
     return blocks
 
 
+def _paren_span(src: str, lp: int) -> int | None:
+    """Offset just past the `)` matching the `(` at `lp`."""
+    depth = 0
+    i = lp
+    while i < len(src):
+        if src[i] == "(":
+            depth += 1
+        elif src[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _scan_to_brace(src: str, i: int, limit: int) -> int | None:
+    """First `{` at or after `i`, or None if a `;` comes first."""
+    while i < limit:
+        if src[i] == ";":
+            return None
+        if src[i] == "{":
+            return i
+        i += 1
+    return None
+
+
+def _arm_body(src: str, i: int, limit: int) -> tuple[int, int]:
+    """Span of a match arm's body, starting just past its `=>`."""
+    while i < limit and src[i].isspace():
+        i += 1
+    if i < limit and src[i] == "{":
+        end = _block_span(src, i)
+        if end is not None:
+            return (i, end)
+    # A braceless arm runs to the `,` that ends it.
+    depth = 0
+    j = i
+    while j < limit:
+        c = src[j]
+        if c in "({[":
+            depth += 1
+        elif c in ")}]":
+            if depth == 0:
+                break
+            depth -= 1
+        elif c == "," and depth == 0:
+            break
+        j += 1
+    return (i, j)
+
+
+def _result_branch_sites(
+    src: str, blo: int, bhi: int
+) -> list[tuple[int, list[tuple[int, int]]]]:
+    """Branches selected by a `Result`'s outcome, as (report_pos, blocks).
+
+    Covers the `if let Ok(..)/Err(..)` and catch-all-`Err` `match` spellings.
+    The `.is_ok()`/`.is_err()` spelling is handled separately because it also
+    has to chase a `let` binding to the `if` that consumes it.
+    """
+    out: list[tuple[int, list[tuple[int, int]]]] = []
+
+    for m in IF_LET_RESULT.finditer(src, blo, bhi):
+        close = _paren_span(src, m.end() - 1)
+        if close is None:
+            continue
+        if not CATCHALL_BINDING.match(src[m.end() : close - 1]):
+            continue  # names specific errors: a judgement, not a swallow
+        blocks = _branch_blocks(src, close, bhi)
+        if blocks:
+            out.append((m.start(), blocks))
+
+    for m in MATCH_KW.finditer(src, blo, bhi):
+        brace = _scan_to_brace(src, m.end(), bhi)
+        if brace is None:
+            continue
+        end = _block_span(src, brace)
+        if end is None:
+            continue
+        for a in ERR_PATTERN.finditer(src, brace + 1, end - 1):
+            # Only arm patterns of *this* match, not of a nested one.
+            if _depth_at(src, brace, a.start()) != 1:
+                continue
+            close = _paren_span(src, a.end() - 1)
+            if close is None:
+                continue
+            if not CATCHALL_BINDING.match(src[a.end() : close - 1]):
+                continue
+            arrow = src.find("=>", close, end)
+            if arrow < 0:
+                continue
+            out.append((a.start(), [_arm_body(src, arrow + 2, end)]))
+
+    return out
+
+
 def check_file(path: Path, rel: str) -> list[str]:
     raw = path.read_text(encoding="utf-8", errors="replace")
     if "self_test" not in raw:
@@ -205,6 +328,7 @@ def check_file(path: Path, rel: str) -> list[str]:
             continue
 
         # --- Rule 1: the skip must not be decided by a discarded Result. ---
+        candidates: list[tuple[int, list[tuple[int, int]]]] = []
         for m in IS_RESULT.finditer(src, blo, bhi):
             blocks = _branch_blocks(src, m.end(), bhi)
             if not blocks:
@@ -230,15 +354,20 @@ def check_file(path: Path, rel: str) -> list[str]:
                 if use is None:
                     continue
                 blocks = _branch_blocks(src, stmt_end + use.end() - 1, bhi)
+            candidates.append((m.start(), blocks))
+
+        candidates.extend(_result_branch_sites(src, blo, bhi))
+
+        for pos, blocks in sorted(candidates):
             for lo, hi in blocks:
                 if any(SKIP_WORD.search(p[2]) for p in _prints(src, raw, lo, hi)):
                     key = f"{rel}::{name}"
                     if key in ALLOW:
                         break
-                    line = raw.count("\n", 0, m.start()) + 1
+                    line = raw.count("\n", 0, pos) + 1
                     findings.append(
                         f"{rel}:{line}: `{name}` decides to skip a section from "
-                        f"`.is_ok()`/`.is_err()` on the code under test -- any "
+                        f"the outcome of a call into the code under test -- any "
                         f"failure, including the bug the section exists to "
                         f"catch, silently disables it. Ask the environment "
                         f"(mount table, feature query), or match the error and "

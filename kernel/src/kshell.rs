@@ -10456,9 +10456,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     {
         // A command body, deep inside a `cmd_*` function.
         let listed = capture_command("cgroup");
-        assert!(
-            listed.starts_with(b"=== Resource Control Groups"),
-            "`cgroup` output reaches the capture"
+        assert_output_starts_with(
+            "`cgroup` output reaches the capture",
+            &listed,
+            b"=== Resource Control Groups",
         );
 
         // A usage line inside the same command -- the diagnostic half.
@@ -10472,9 +10473,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // The sharpest one: a typo over SSH used to print on the host console
         // and show the remote user an empty line.
         let unknown = capture_command("zzz_no_such_command");
-        assert!(
-            unknown.starts_with(b"Unknown command: 'zzz_no_such_command'"),
-            "an unknown command tells the caller, not the console"
+        assert_output_starts_with(
+            "an unknown command tells the caller, not the console",
+            &unknown,
+            b"Unknown command: 'zzz_no_such_command'",
         );
 
         // The deliberate exclusion, asserted so it cannot be "finished" by
@@ -10503,10 +10505,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // a non-zero `--help` breaks.
     {
         let helped = capture_command("zip --help");
-        assert!(
-            helped.starts_with(b"Usage: zip "),
-            "`zip --help` prints the usage"
-        );
+        assert_output_starts_with("`zip --help` prints the usage", &helped, b"Usage: zip ");
         assert_eq!(last_exit(), 0, "`--help` was granted, so it succeeded");
 
         // Same command, same output, opposite status: with no arguments at
@@ -10519,9 +10518,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "`zip` with no arguments could not run");
 
         let helped = capture_command("fsck.ext4 --help");
-        assert!(
-            helped.starts_with(b"Usage: fsck.ext4 "),
-            "`fsck.ext4 --help` prints the usage"
+        assert_output_starts_with(
+            "`fsck.ext4 --help` prints the usage",
+            &helped,
+            b"Usage: fsck.ext4 ",
         );
         assert_eq!(last_exit(), 0, "`--help` is not a failure here either");
     }

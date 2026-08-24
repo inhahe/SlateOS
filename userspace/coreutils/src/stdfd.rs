@@ -174,6 +174,18 @@ mod imp {
         unsafe { isatty(fd) == 1 }
     }
 
+    pub fn probe(fd: i32) -> io::Result<()> {
+        use std::mem::ManuallyDrop;
+        use std::os::fd::FromRawFd;
+
+        // SAFETY: `fd` is an integer the caller names, and `File::metadata` on
+        // it is `fstat(2)` — which is defined for any `int` and reports `EBADF`
+        // rather than misbehaving. `ManuallyDrop` is what makes the borrow a
+        // borrow: without it, the `File` would close the descriptor here.
+        let f = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+        f.metadata().map(|_| ())
+    }
+
     pub fn write_all(fd: i32, bytes: &[u8]) -> io::Result<()> {
         let mut written = 0usize;
         while let Some(rest) = bytes.get(written..).filter(|r| !r.is_empty()) {
@@ -216,6 +228,13 @@ mod imp {
         // No `isatty` without libc, and the answer only decides buffering. The
         // conservative choice is the one that shows output soonest.
         false
+    }
+
+    pub fn probe(_fd: i32) -> io::Result<()> {
+        // Nothing here answers the question `fstat` answers, and a wrong `Err`
+        // would stop a utility before it started. The lie this module exists to
+        // undo is the target's, so is its undoing.
+        Ok(())
     }
 
     pub fn write_all(fd: i32, bytes: &[u8]) -> io::Result<()> {
@@ -276,6 +295,33 @@ pub fn restore() {
 #[must_use]
 pub fn was_closed_at_startup(fd: i32) -> bool {
     imp::was_closed_at_startup(fd)
+}
+
+/// Ask whether a standard descriptor is usable, without writing to it.
+///
+/// `fstat(2)`, which is how several GNU utilities find out — `cat` opens with
+///
+/// ```c
+/// if (fstat (STDOUT_FILENO, &stat_buf) < 0)
+///   error (EXIT_FAILURE, errno, _("standard output"));
+/// ```
+///
+/// and so answers `cat f >&-` with one diagnostic and status 1 *before* it
+/// opens `f`, rather than by failing to write. Reproducing that needs the
+/// question asked separately from the writing, because the answers differ:
+/// `cat missing f >&-` reports only `standard output`, never `missing`.
+///
+/// The descriptor is borrowed, not owned — the `File` is wrapped in
+/// `ManuallyDrop` so that going out of scope does not close descriptor 1.
+///
+/// # Errors
+///
+/// Whatever `fstat(2)` reports, in practice [`io::ErrorKind::NotFound`]'s
+/// cousin `EBADF` for a descriptor that is not open. Always `Ok` off Unix,
+/// where there is no such thing to ask about and a utility must not start
+/// refusing to run.
+pub fn probe(fd: i32) -> io::Result<()> {
+    imp::probe(fd)
 }
 
 /// Write every byte of `bytes` to `fd`, reporting a failure honestly.
@@ -396,6 +442,20 @@ impl Stream {
     #[must_use]
     pub fn errored(&self) -> bool {
         self.error.is_some()
+    }
+
+    /// The failure behind [`Stream::errored`], for a caller that must word it
+    /// before the end of the run.
+    ///
+    /// [`Stream::finish`] is the usual way to collect this, and it is the only
+    /// way to collect a failure of the *final* flush. This exists for a utility
+    /// whose control flow turns on the answer mid-run: GNU's `cat` abandons the
+    /// remaining operands the moment a write fails, so `cat a b >/dev/full`
+    /// prints one diagnostic and never opens `b`, and reproducing that needs
+    /// the question asked between files rather than at the end.
+    #[must_use]
+    pub fn error(&self) -> Option<&io::Error> {
+        self.error.as_ref()
     }
 
     /// Push whatever is buffered at the descriptor, recording a failure.
@@ -551,6 +611,26 @@ mod tests {
     #[test]
     fn stderr_is_unbuffered() {
         assert_eq!(Stream::stderr().mode, Buffering::None);
+    }
+
+    #[test]
+    fn probing_an_open_descriptor_succeeds_and_leaves_it_open() {
+        // Both halves matter. The first is the answer; the second is that
+        // asking did not cost the caller the descriptor — `File::from_raw_fd`
+        // takes ownership, and a `probe` that let it drop would close standard
+        // error and take the rest of this suite's diagnostics with it.
+        assert!(super::probe(2).is_ok());
+        assert!(super::probe(2).is_ok(), "the first probe closed it");
+        assert!(super::write_all(2, b"").is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn probing_a_descriptor_that_is_not_open_reports_it() {
+        // 4096 is above any descriptor a test harness has open and below the
+        // usual `RLIMIT_NOFILE`, so this is `EBADF` and not a limit error.
+        let e = super::probe(4096).expect_err("an unopened descriptor probed ok");
+        assert_eq!(e.raw_os_error(), Some(9), "want EBADF, got {e}");
     }
 
     #[test]

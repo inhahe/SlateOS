@@ -1894,7 +1894,11 @@ mod tests {
             ("name: trailing\"", "trailing\""),
         ] {
             let val = YamlParser::parse(input).expect(input);
-            assert_eq!(val.get("name").unwrap().as_str(), Some(want), "on {input:?}");
+            assert_eq!(
+                val.get("name").unwrap().as_str(),
+                Some(want),
+                "on {input:?}"
+            );
         }
     }
 

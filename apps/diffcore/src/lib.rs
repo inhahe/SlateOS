@@ -1391,6 +1391,7 @@ mod tests {
     )]
 
     use super::*;
+    use scratchdir::ScratchDir;
 
     // --- Myers diff tests ---
 
@@ -1645,13 +1646,24 @@ mod tests {
 
     // --- FileSync / MergeReview tests ---
 
-    fn temp_path(tag: &str) -> std::path::PathBuf {
-        let mut p = std::env::temp_dir();
-        let nanos = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        p.push(format!("diffcore_test_{tag}_{nanos}.txt"));
-        p
+    /// A scratch file path for one test, together with the guard that owns the
+    /// directory it lives in. The file and its directory are removed when the
+    /// guard drops -- including during a panic unwind, which the manual
+    /// `let _ = fs::remove_file(...)` trailers this replaces did not do.
+    ///
+    /// The name used to carry the system clock in nanoseconds, which is not
+    /// unique. `cargo test` runs a binary's tests as threads of one process,
+    /// and the clock a thread reads is only refreshed on a timer interrupt, so
+    /// every test that starts within the same tick draws the same tag and they
+    /// fight over one file. `ScratchDir` names itself from the process id and a
+    /// per-process atomic counter, which is unique by construction.
+    ///
+    /// Bind the guard to a named local -- `let (_scratch, path) = ...` -- never
+    /// to a bare `_`, which drops it before the test's first line.
+    fn temp_path(tag: &str) -> (ScratchDir, std::path::PathBuf) {
+        let scratch = ScratchDir::new(&format!("diffcore_test_{tag}"));
+        let p = scratch.path("doc.txt");
+        (scratch, p)
     }
 
     #[test]
@@ -1663,7 +1675,7 @@ mod tests {
 
     #[test]
     fn test_filesync_detects_modify_and_delete() {
-        let path = temp_path("fs_detect");
+        let (_scratch, path) = temp_path("fs_detect");
         std::fs::write(&path, b"line1\nline2\n").expect("write");
         let mut sync = FileSync::new();
         sync.record(&path, normalize_content("line1\nline2\n"));
@@ -1694,7 +1706,7 @@ mod tests {
         // equal and the racy flag is what saves us; on one fine enough to tell
         // them apart the mtime comparison catches it. Either way the answer
         // must be Modified.
-        let path = temp_path("fs_same_tick");
+        let (_scratch, path) = temp_path("fs_same_tick");
         std::fs::write(&path, b"before\n").expect("write");
         let mut sync = FileSync::new();
         sync.record(&path, normalize_content("before\n"));
@@ -1725,7 +1737,7 @@ mod tests {
         // MTIME_SETTLE the pre-filter is sound again, so a file nobody has
         // touched is not re-read on every check. Asserted through the public
         // flag rather than by timing a read, which would be a flake.
-        let path = temp_path("fs_settled");
+        let (_scratch, path) = temp_path("fs_settled");
         std::fs::write(&path, b"stable\n").expect("write");
         let mut sync = FileSync::new();
         sync.record(&path, normalize_content("stable\n"));

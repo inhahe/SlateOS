@@ -643,31 +643,18 @@ impl BluetoothSettingsUI {
 
         // Power toggle.
         let power_x = x + w - 80.0;
-        cmds.push(RenderCommand::FillRect {
-            x: power_x,
-            y: y + 11.0,
-            width: 36.0,
-            height: 18.0,
-            color: if mgr.adapter.powered {
+        cmds.extend(crate::switch::switch(
+            power_x,
+            y + 11.0,
+            36.0,
+            18.0,
+            mgr.adapter.powered,
+            if mgr.adapter.powered {
                 p.accent
             } else {
                 p.surface1
             },
-            corner_radii: CornerRadii::all(9.0),
-        });
-        let knob_x = if mgr.adapter.powered {
-            power_x + 20.0
-        } else {
-            power_x + 2.0
-        };
-        cmds.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: y + 13.0,
-            width: 14.0,
-            height: 14.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(7.0),
-        });
+        ));
 
         if !mgr.adapter.powered {
             cmds.push(RenderCommand::Text {
@@ -1538,7 +1525,17 @@ mod tests {
                                     show_nearby,
                                 };
                                 let cmds = ui.render(&p, &mgr, 0.0, 0.0, 600.0, h);
-                                palette_check::assert_drawn_from(&p, &cmds, &[], "bluetooth");
+                                // The power switch's knob is `readable_on` its
+                                // own track, so it is one of the two extremes
+                                // rather than a role. Both tracks are named,
+                                // not the extremes themselves: that keeps the
+                                // exemption tied to the fill it sits on.
+                                palette_check::assert_drawn_from(
+                                    &p,
+                                    &cmds,
+                                    &[p.on_accent(), readable_on(p.surface1)],
+                                    "bluetooth",
+                                );
                             }
                         }
                     }

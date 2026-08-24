@@ -1351,6 +1351,7 @@ mod tests {
     )]
 
     use super::*;
+    use scratchdir::ScratchDir;
     use std::io::Write;
 
     // -- LRU cache tests ----------------------------------------------------
@@ -1512,9 +1513,8 @@ mod tests {
 
     #[test]
     fn text_preview_truncates_to_max_lines() {
-        let dir = std::env::temp_dir().join("thumbs_test_text");
-        let _ = fs::create_dir_all(&dir);
-        let file_path = dir.join("long.txt");
+        let scratch = ScratchDir::new("thumbs_test_text");
+        let file_path = scratch.path("long.txt");
 
         {
             let mut f = fs::File::create(&file_path).unwrap();
@@ -1526,9 +1526,6 @@ mod tests {
         let lines = read_text_lines(&file_path, TEXT_PREVIEW_MAX_LINES).unwrap();
         assert!(lines.len() <= TEXT_PREVIEW_MAX_LINES);
         assert!(!lines.is_empty());
-
-        let _ = fs::remove_file(&file_path);
-        let _ = fs::remove_dir(&dir);
     }
 
     /// The minimap's bars say how long each line is, so two files whose lines
@@ -1538,10 +1535,9 @@ mod tests {
     /// file into a solid block.
     #[test]
     fn a_minimap_bar_is_as_long_as_the_line_not_as_its_encoding() {
-        let dir = std::env::temp_dir().join("thumbs_test_minimap");
-        let _ = fs::create_dir_all(&dir);
-        let latin_path = dir.join("latin.txt");
-        let cjk_path = dir.join("cjk.txt");
+        let scratch = ScratchDir::new("thumbs_test_minimap");
+        let latin_path = scratch.path("latin.txt");
+        let cjk_path = scratch.path("cjk.txt");
 
         // Ten characters per line in both files, and short enough that neither
         // is capped — the cap is what hid this, by making every long-enough
@@ -1564,10 +1560,6 @@ mod tests {
             latin.pixels, cjk.pixels,
             "ten characters is ten characters in both files"
         );
-
-        let _ = fs::remove_file(&latin_path);
-        let _ = fs::remove_file(&cjk_path);
-        let _ = fs::remove_dir(&dir);
     }
 
     // -- Image downscale logic ----------------------------------------------
@@ -1940,8 +1932,8 @@ mod tests {
 
     #[test]
     fn disk_cache_save_load_roundtrip() {
-        let dir = std::env::temp_dir().join("thumbs_test_disk");
-        let cache = DiskCache::new(dir.clone());
+        let scratch = ScratchDir::new("thumbs_test_disk");
+        let cache = DiskCache::new(scratch.dir().to_path_buf());
         cache.ensure_dir().unwrap();
 
         let thumb = make_test_thumb("test_disk.png", 4);
@@ -1953,16 +1945,12 @@ mod tests {
         assert_eq!(loaded.width, thumb.width);
         assert_eq!(loaded.height, thumb.height);
         assert_eq!(loaded.pixels.len(), thumb.pixels.len());
-
-        // Clean up.
-        let _ = cache.clear();
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn disk_cache_miss_wrong_mtime() {
-        let dir = std::env::temp_dir().join("thumbs_test_disk_miss");
-        let cache = DiskCache::new(dir.clone());
+        let scratch = ScratchDir::new("thumbs_test_disk_miss");
+        let cache = DiskCache::new(scratch.dir().to_path_buf());
         cache.ensure_dir().unwrap();
 
         let thumb = make_test_thumb("miss.png", 4);
@@ -1974,9 +1962,6 @@ mod tests {
                 .load(Path::new("miss.png"), thumb.source_mtime + 1)
                 .is_none()
         );
-
-        let _ = cache.clear();
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // -- Helper -------------------------------------------------------------

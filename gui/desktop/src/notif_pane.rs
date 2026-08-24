@@ -1299,36 +1299,19 @@ impl NotificationPane {
         // Slider track.
         let track_x = PANE_WIDTH - PANE_PADDING - SLIDER_WIDTH - PANE_PADDING;
         let track_y = y + 14.0;
-        cmds.push(RenderCommand::FillRect {
+        crate::slider::Slider {
             x: track_x,
             y: track_y,
             width: SLIDER_WIDTH,
             height: SLIDER_HEIGHT,
-            color: p.surface2,
-            corner_radii: CornerRadii::all(SLIDER_HEIGHT / 2.0),
-        });
-
-        // Slider filled portion.
-        let filled_width = SLIDER_WIDTH * (value as f32 / 100.0);
-        cmds.push(RenderCommand::FillRect {
-            x: track_x,
-            y: track_y,
-            width: filled_width,
-            height: SLIDER_HEIGHT,
-            color: p.accent,
-            corner_radii: CornerRadii::all(SLIDER_HEIGHT / 2.0),
-        });
-
-        // Slider thumb.
-        let thumb_x = track_x + filled_width - 6.0;
-        cmds.push(RenderCommand::FillRect {
-            x: thumb_x,
-            y: track_y - 3.0,
-            width: 12.0,
-            height: 12.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(6.0),
-        });
+            frac: value as f32 / 100.0,
+            thumb: 12.0,
+            track: p.surface2,
+            fill: p.accent,
+            p,
+            alpha: u8::MAX,
+        }
+        .draw(cmds);
     }
 
     fn render_notifications(

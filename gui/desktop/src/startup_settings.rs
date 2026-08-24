@@ -765,23 +765,14 @@ impl StartupSettingsUI {
 
             // Enable/disable toggle
             let toggle_color = if entry.enabled { p.accent } else { p.surface2 };
-            cmds.push(RenderCommand::FillRect {
-                x: x + 8.0,
-                y: cy + 18.0,
-                width: 36.0,
-                height: 20.0,
-                color: toggle_color,
-                corner_radii: CornerRadii::all(10.0),
-            });
-            let knob_x = if entry.enabled { x + 26.0 } else { x + 10.0 };
-            cmds.push(RenderCommand::FillRect {
-                x: knob_x,
-                y: cy + 20.0,
-                width: 16.0,
-                height: 16.0,
-                color: p.text,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            cmds.extend(crate::switch::switch(
+                x + 8.0,
+                cy + 18.0,
+                36.0,
+                20.0,
+                entry.enabled,
+                toggle_color,
+            ));
 
             // Name
             cmds.push(RenderCommand::Text {
@@ -1022,23 +1013,14 @@ impl StartupSettingsUI {
             overflow: TextOverflow::Ellipsis,
         });
         let sw_x = x + width - 44.0;
-        cmds.push(RenderCommand::FillRect {
-            x: sw_x,
-            y: y + 2.0,
-            width: 40.0,
-            height: 22.0,
-            color: if enabled { p.accent } else { p.surface2 },
-            corner_radii: CornerRadii::all(11.0),
-        });
-        let knob_x = if enabled { sw_x + 20.0 } else { sw_x + 2.0 };
-        cmds.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: y + 4.0,
-            width: 18.0,
-            height: 18.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(9.0),
-        });
+        cmds.extend(crate::switch::switch(
+            sw_x,
+            y + 2.0,
+            40.0,
+            22.0,
+            enabled,
+            if enabled { p.accent } else { p.surface2 },
+        ));
     }
 
     fn render_label_value(

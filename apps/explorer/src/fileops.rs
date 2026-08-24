@@ -445,7 +445,9 @@ impl OperationJournal {
             let reader = io::BufReader::new(file);
             let mut lines = reader.lines();
             let header = lines.next().transpose()?.unwrap_or_default();
-            if header.strip_prefix("plan ").and_then(|id| id.trim().parse::<u64>().ok())
+            if header
+                .strip_prefix("plan ")
+                .and_then(|id| id.trim().parse::<u64>().ok())
                 == Some(plan_id)
             {
                 for line in lines {
@@ -1775,19 +1777,27 @@ mod tests {
     )]
 
     use super::*;
+    use scratchdir::ScratchDir;
     use std::fs;
     use std::io::Write as IoWrite;
     use std::path::PathBuf;
 
-    /// Create a temporary directory with a unique name under the system temp dir.
-    fn temp_dir(label: &str) -> PathBuf {
-        let ts = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("fileops_test_{label}_{ts}"));
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A private temporary directory for one test, removed when the returned
+    /// guard drops.
+    ///
+    /// This used to tag the directory name with the system clock in
+    /// nanoseconds. That is not unique: `cargo test` runs a binary's tests as
+    /// threads of a single process, and the clock a thread reads is only
+    /// refreshed on a timer interrupt, so every test that starts within the
+    /// same tick gets the *same* tag and they scribble on each other's files.
+    /// `ScratchDir` names itself from the process id and a per-process atomic
+    /// counter, which is unique by construction rather than by luck.
+    ///
+    /// The caller must bind the guard to a named local — `let scratch = ...` —
+    /// and not to `_`, which would drop it (and delete the directory) before
+    /// the test's first line.
+    fn temp_dir(label: &str) -> ScratchDir {
+        ScratchDir::new(&format!("fileops_test_{label}"))
     }
 
     /// Write a file with the given content.
@@ -1810,8 +1820,10 @@ mod tests {
 
     #[test]
     fn plan_copy_single_file() {
-        let src_dir = temp_dir("plan_copy_single_src");
-        let dst_dir = temp_dir("plan_copy_single_dst");
+        let src_scratch = temp_dir("plan_copy_single_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("plan_copy_single_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
 
         write_file(&src_dir.join("hello.txt"), "hello world");
 
@@ -1828,15 +1840,14 @@ mod tests {
         assert_eq!(plan.actions.len(), 1);
         assert!(!plan.actions[0].is_dir);
         assert_eq!(plan.actions[0].size, 11);
-
-        let _ = fs::remove_dir_all(&src_dir);
-        let _ = fs::remove_dir_all(&dst_dir);
     }
 
     #[test]
     fn plan_copy_directory_tree() {
-        let src_dir = temp_dir("plan_copy_tree_src");
-        let dst_dir = temp_dir("plan_copy_tree_dst");
+        let src_scratch = temp_dir("plan_copy_tree_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("plan_copy_tree_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
 
         // src/
         //   a.txt  (5 bytes)
@@ -1860,14 +1871,12 @@ mod tests {
         let file_count = plan.actions.iter().filter(|a| !a.is_dir).count();
         assert_eq!(dir_count, 2);
         assert_eq!(file_count, 2);
-
-        let _ = fs::remove_dir_all(&src_dir);
-        let _ = fs::remove_dir_all(&dst_dir);
     }
 
     #[test]
     fn plan_delete() {
-        let src_dir = temp_dir("plan_delete_src");
+        let src_scratch = temp_dir("plan_delete_src");
+        let src_dir = src_scratch.dir().to_path_buf();
 
         write_file(&src_dir.join("data").join("x.txt"), "xxxx");
         write_file(&src_dir.join("data").join("y.txt"), "yy");
@@ -1881,8 +1890,6 @@ mod tests {
         let last = plan.actions.last().unwrap();
         assert!(last.is_dir);
         assert_eq!(last.src, src_dir.join("data"));
-
-        let _ = fs::remove_dir_all(&src_dir);
     }
 
     // ----------------------------------------------------------------
@@ -1891,7 +1898,8 @@ mod tests {
 
     #[test]
     fn resolve_rename_basic() {
-        let dir = temp_dir("resolve_rename");
+        let scratch = temp_dir("resolve_rename");
+        let dir = scratch.dir().to_path_buf();
         let original = dir.join("file.txt");
         write_file(&original, "original");
 
@@ -1902,20 +1910,17 @@ mod tests {
         write_file(&renamed, "copy2");
         let renamed2 = resolve_rename(&original);
         assert_eq!(renamed2, dir.join("file (3).txt"));
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn resolve_rename_no_extension() {
-        let dir = temp_dir("resolve_rename_noext");
+        let scratch = temp_dir("resolve_rename_noext");
+        let dir = scratch.dir().to_path_buf();
         let original = dir.join("Makefile");
         write_file(&original, "data");
 
         let renamed = resolve_rename(&original);
         assert_eq!(renamed, dir.join("Makefile (2)"));
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1936,7 +1941,8 @@ mod tests {
 
     #[test]
     fn journal_write_and_read() {
-        let dir = temp_dir("journal_rw");
+        let scratch = temp_dir("journal_rw");
+        let dir = scratch.dir().to_path_buf();
 
         {
             let mut j = OperationJournal::open(&dir, 42).unwrap();
@@ -1954,15 +1960,14 @@ mod tests {
         assert!(j2.is_complete(7));
         assert!(!j2.is_complete(1));
         assert!(!j2.is_complete(999));
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A finished action records *whether it transferred data*, because that
     /// is the question a Move has to ask before deleting a source.
     #[test]
     fn journal_distinguishes_a_skip_from_a_copy() {
-        let dir = temp_dir("journal_skip_flag");
+        let scratch = temp_dir("journal_skip_flag");
+        let dir = scratch.dir().to_path_buf();
 
         {
             let mut j = OperationJournal::open(&dir, 7).unwrap();
@@ -1979,8 +1984,6 @@ mod tests {
         assert!(!j2.transferred(1));
         // An action that never ran transferred nothing either.
         assert!(!j2.transferred(2));
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A journal left behind by a *different* plan must be discarded, not read
@@ -1989,7 +1992,8 @@ mod tests {
     /// them.
     #[test]
     fn a_journal_from_another_plan_is_discarded() {
-        let dir = temp_dir("journal_stale");
+        let scratch = temp_dir("journal_stale");
+        let dir = scratch.dir().to_path_buf();
 
         {
             let mut j = OperationJournal::open(&dir, 1).unwrap();
@@ -2000,16 +2004,16 @@ mod tests {
         let j2 = OperationJournal::open(&dir, 2).unwrap();
         assert_eq!(j2.completed_count(), 0);
         assert!(!j2.is_complete(0));
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The end-to-end form of the above: a stale journal in the destination
     /// directory must not cause files to be silently left uncopied.
     #[test]
     fn a_stale_journal_does_not_swallow_a_copy() {
-        let src_dir = temp_dir("journal_stale_e2e_src");
-        let dst_dir = temp_dir("journal_stale_e2e_dst");
+        let src_scratch = temp_dir("journal_stale_e2e_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("journal_stale_e2e_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
 
         write_file(&src_dir.join("a.txt"), "aaa");
         write_file(&src_dir.join("b.txt"), "bbb");
@@ -2035,15 +2039,14 @@ mod tests {
 
         assert!(dst_dir.join("a.txt").exists(), "a.txt was never copied");
         assert!(dst_dir.join("b.txt").exists(), "b.txt was never copied");
-
-        let _ = fs::remove_dir_all(&src_dir);
-        let _ = fs::remove_dir_all(&dst_dir);
     }
 
     #[test]
     fn journal_resume_skips_completed() {
-        let src_dir = temp_dir("journal_resume_src");
-        let dst_dir = temp_dir("journal_resume_dst");
+        let src_scratch = temp_dir("journal_resume_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("journal_resume_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
 
         write_file(&src_dir.join("a.txt"), "aaa");
         write_file(&src_dir.join("b.txt"), "bbb");
@@ -2078,14 +2081,12 @@ mod tests {
             "action 0 was journalled as done and should not have been redone"
         );
         assert!(dst_dir.join("b.txt").exists());
-
-        let _ = fs::remove_dir_all(&src_dir);
-        let _ = fs::remove_dir_all(&dst_dir);
     }
 
     #[test]
     fn journal_remove_on_completion() {
-        let dir = temp_dir("journal_remove");
+        let scratch = temp_dir("journal_remove");
+        let dir = scratch.dir().to_path_buf();
 
         let mut j = OperationJournal::open(&dir, 99).unwrap();
         j.mark_complete(0).unwrap();
@@ -2094,8 +2095,6 @@ mod tests {
 
         j.remove().unwrap();
         assert!(!jpath.exists());
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ----------------------------------------------------------------
@@ -2107,8 +2106,10 @@ mod tests {
     /// at the destination is a *different*, pre-existing file.
     #[test]
     fn a_skipped_move_does_not_delete_the_source() {
-        let src_dir = temp_dir("move_skip_src");
-        let dst_dir = temp_dir("move_skip_dst");
+        let src_scratch = temp_dir("move_skip_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("move_skip_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
 
         let src = src_dir.join("a.txt");
         write_file(&src, "the original");
@@ -2136,9 +2137,6 @@ mod tests {
             fs::read_to_string(dst_dir.join("a.txt")).unwrap(),
             "something else"
         );
-
-        let _ = fs::remove_dir_all(&src_dir);
-        let _ = fs::remove_dir_all(&dst_dir);
     }
 
     /// The same guarantee when the copy *failed* rather than being skipped:
@@ -2146,8 +2144,10 @@ mod tests {
     /// failed has not been transferred anywhere.
     #[test]
     fn a_failed_move_does_not_delete_the_source() {
-        let src_dir = temp_dir("move_fail_src");
-        let dst_dir = temp_dir("move_fail_dst");
+        let src_scratch = temp_dir("move_fail_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("move_fail_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
 
         let good = src_dir.join("good.txt");
         let bad = src_dir.join("bad.txt");
@@ -2202,18 +2202,20 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .filter(|n| n.ends_with(".fileop-tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "temporaries left behind: {leftovers:?}");
-
-        let _ = fs::remove_dir_all(&src_dir);
-        let _ = fs::remove_dir_all(&dst_dir);
+        assert!(
+            leftovers.is_empty(),
+            "temporaries left behind: {leftovers:?}"
+        );
     }
 
     /// A Move that copies successfully still deletes its source — the fix must
     /// not have turned every Move into a Copy.
     #[test]
     fn a_successful_move_still_deletes_the_source() {
-        let src_dir = temp_dir("move_ok_src");
-        let dst_dir = temp_dir("move_ok_dst");
+        let src_scratch = temp_dir("move_ok_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("move_ok_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
 
         let src = src_dir.join("a.txt");
         write_file(&src, "moving day");
@@ -2234,9 +2236,6 @@ mod tests {
             fs::read_to_string(dst_dir.join("a.txt")).unwrap(),
             "moving day"
         );
-
-        let _ = fs::remove_dir_all(&src_dir);
-        let _ = fs::remove_dir_all(&dst_dir);
     }
 
     /// Moving a directory whose contents were partly skipped must leave the
@@ -2244,8 +2243,10 @@ mod tests {
     /// non-empty directory as a separate failure.
     #[test]
     fn a_partly_skipped_directory_move_keeps_what_it_did_not_copy() {
-        let root = temp_dir("move_dir_partial_src");
-        let dst_dir = temp_dir("move_dir_partial_dst");
+        let root_scratch = temp_dir("move_dir_partial_src");
+        let root = root_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("move_dir_partial_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
 
         let src_dir = root.join("folder");
         fs::create_dir_all(&src_dir).unwrap();
@@ -2290,9 +2291,6 @@ mod tests {
             "a directory left non-empty by a skip was reported as a failure: {:?}",
             summary.errors
         );
-
-        let _ = fs::remove_dir_all(&root);
-        let _ = fs::remove_dir_all(&dst_dir);
     }
 
     // ----------------------------------------------------------------
@@ -2336,7 +2334,8 @@ mod tests {
 
     #[test]
     fn recycle_and_restore() {
-        let dir = temp_dir("recycle_restore");
+        let scratch = temp_dir("recycle_restore");
+        let dir = scratch.dir().to_path_buf();
         let bin_root = dir.join("bin");
         let file_path = dir.join("important.txt");
         write_file(&file_path, "important data");
@@ -2357,8 +2356,6 @@ mod tests {
         assert_eq!(restored, file_path);
         assert!(file_path.exists());
         assert_eq!(read_file(&file_path), "important data");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Delete a file, make a new one with the same name, then restore the old
@@ -2370,7 +2367,8 @@ mod tests {
     /// understands as *recovering* a file, and it did not go to the bin either.
     #[test]
     fn restoring_over_a_newer_file_of_the_same_name_keeps_both() {
-        let dir = temp_dir("restore_conflict");
+        let scratch = temp_dir("restore_conflict");
+        let dir = scratch.dir().to_path_buf();
         let bin_root = dir.join("bin");
         let file_path = dir.join("report.docx");
         write_file(&file_path, "the old draft");
@@ -2398,15 +2396,14 @@ mod tests {
             "the old draft",
             "and the recycled contents must be what landed there"
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The unoccupied case must be untouched: a restore with nothing in the
     /// way still goes back to exactly where it came from, under its own name.
     #[test]
     fn restoring_to_a_free_path_uses_the_original_name() {
-        let dir = temp_dir("restore_free");
+        let scratch = temp_dir("restore_free");
+        let dir = scratch.dir().to_path_buf();
         let bin_root = dir.join("bin");
         let file_path = dir.join("notes.txt");
         write_file(&file_path, "notes");
@@ -2417,8 +2414,6 @@ mod tests {
 
         assert_eq!(restored, file_path, "no conflict, no renaming");
         assert_eq!(read_file(&file_path), "notes");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A directory in the way is the same hazard with more to lose: the old
@@ -2426,7 +2421,8 @@ mod tests {
     /// existing directory and overwrites the same-named files inside it.
     #[test]
     fn restoring_a_directory_does_not_merge_into_one_that_is_in_the_way() {
-        let dir = temp_dir("restore_dir_conflict");
+        let scratch = temp_dir("restore_dir_conflict");
+        let dir = scratch.dir().to_path_buf();
         let bin_root = dir.join("bin");
         let src_dir = dir.join("project");
         fs::create_dir_all(&src_dir).expect("project");
@@ -2447,8 +2443,6 @@ mod tests {
             "the directory in the way must not be merged into"
         );
         assert_eq!(read_file(&restored.join("main.rs")), "the old source");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Two files that share a name but live in different directories are an
@@ -2464,7 +2458,8 @@ mod tests {
     /// One of the two files was gone, with no error reported anywhere.
     #[test]
     fn two_same_named_files_recycled_together_both_survive() {
-        let dir = temp_dir("recycle_collide");
+        let scratch = temp_dir("recycle_collide");
+        let dir = scratch.dir().to_path_buf();
         let bin = RecycleBin::new(dir.join("bin"), Duration::from_secs(86400));
 
         // Both recycled at the *same* instant. Going through `recycle` would
@@ -2475,8 +2470,12 @@ mod tests {
         let b = dir.join("projB/README.md");
         write_file(&a, "contents of A");
         write_file(&b, "contents of B");
-        let id_a = bin.recycle_at(&a, 1_700_000_000_000_000_000).expect("recycle a");
-        let id_b = bin.recycle_at(&b, 1_700_000_000_000_000_000).expect("recycle b");
+        let id_a = bin
+            .recycle_at(&a, 1_700_000_000_000_000_000)
+            .expect("recycle a");
+        let id_b = bin
+            .recycle_at(&b, 1_700_000_000_000_000_000)
+            .expect("recycle b");
 
         assert_ne!(id_a, id_b, "two different files must not share a bin entry");
 
@@ -2490,8 +2489,6 @@ mod tests {
         assert_eq!(restored_b, b);
         assert_eq!(read_file(&a), "contents of A");
         assert_eq!(read_file(&b), "contents of B");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The same collision, but at the scale a "delete this whole folder"
@@ -2499,7 +2496,8 @@ mod tests {
     /// Uniqueness has to hold for all of them, not just for a pair.
     #[test]
     fn a_burst_of_same_named_files_keeps_every_one() {
-        let dir = temp_dir("recycle_burst");
+        let scratch = temp_dir("recycle_burst");
+        let dir = scratch.dir().to_path_buf();
         let bin = RecycleBin::new(dir.join("bin"), Duration::from_secs(86400));
 
         let mut ids = Vec::new();
@@ -2518,13 +2516,12 @@ mod tests {
             assert_eq!(restored, dir.join(format!("d{i}/notes.txt")));
             assert_eq!(read_file(&restored), format!("file {i}"));
         }
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn recycle_bin_empty() {
-        let dir = temp_dir("recycle_empty");
+        let scratch = temp_dir("recycle_empty");
+        let dir = scratch.dir().to_path_buf();
         let bin_root = dir.join("bin");
 
         let bin = RecycleBin::new(bin_root, Duration::from_secs(86400));
@@ -2540,23 +2537,21 @@ mod tests {
         let removed = bin.empty().unwrap();
         assert_eq!(removed, 2);
         assert_eq!(bin.list().unwrap().len(), 0);
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn recycle_bin_list_empty() {
-        let dir = temp_dir("recycle_list_empty");
+        let scratch = temp_dir("recycle_list_empty");
+        let dir = scratch.dir().to_path_buf();
         let bin = RecycleBin::new(dir.join("bin"), Duration::from_secs(86400));
         let entries = bin.list().unwrap();
         assert!(entries.is_empty());
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn recycle_bin_purge_old() {
-        let dir = temp_dir("recycle_purge");
+        let scratch = temp_dir("recycle_purge");
+        let dir = scratch.dir().to_path_buf();
         let bin_root = dir.join("bin");
 
         // Max age of 0 seconds means everything is "old".
@@ -2568,8 +2563,6 @@ mod tests {
         let purged = bin.purge_old().unwrap();
         assert_eq!(purged, 1);
         assert_eq!(bin.list().unwrap().len(), 0);
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ----------------------------------------------------------------
@@ -2642,7 +2635,8 @@ mod tests {
 
     #[test]
     fn a_recycled_non_ascii_name_restores_to_its_original_path() {
-        let dir = temp_dir("recycle_nonascii");
+        let scratch = temp_dir("recycle_nonascii");
+        let dir = scratch.dir().to_path_buf();
         let bin = RecycleBin::new(dir.join("bin"), Duration::from_secs(86400));
 
         let file_path = dir.join("写真 100%.txt");
@@ -2657,13 +2651,12 @@ mod tests {
             "restore must put the file back under its original name"
         );
         assert_eq!(read_file(&file_path), "keep");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_bin_written_in_the_old_format_is_still_readable() {
-        let dir = temp_dir("recycle_legacy");
+        let scratch = temp_dir("recycle_legacy");
+        let dir = scratch.dir().to_path_buf();
         let bin_root = dir.join("bin");
         let entry_dir = bin_root.join("legacy_0000000000000001");
         fs::create_dir_all(&entry_dir).expect("entry dir");
@@ -2685,8 +2678,6 @@ mod tests {
             listed.first().expect("one").original_path,
             PathBuf::from("/home/u/legacy.txt")
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ----------------------------------------------------------------
@@ -2695,7 +2686,8 @@ mod tests {
 
     #[test]
     fn a_recycle_that_could_not_move_the_data_leaves_no_entry_behind() {
-        let dir = temp_dir("recycle_orphan");
+        let scratch = temp_dir("recycle_orphan");
+        let dir = scratch.dir().to_path_buf();
         let bin = RecycleBin::new(dir.join("bin"), Duration::from_secs(86400));
 
         let err = bin
@@ -2708,13 +2700,12 @@ mod tests {
             "metadata written before a failed move must be cleaned up, or the \
              bin lists an entry whose data is not there"
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn move_path_relocates_a_whole_directory_tree() {
-        let dir = temp_dir("move_tree");
+        let scratch = temp_dir("move_tree");
+        let dir = scratch.dir().to_path_buf();
         let src = dir.join("src");
         fs::create_dir_all(src.join("nested")).expect("nested");
         write_file(&src.join("top.txt"), "top");
@@ -2726,13 +2717,12 @@ mod tests {
         assert!(!src.exists(), "the source must be gone");
         assert_eq!(read_file(&dest.join("top.txt")), "top");
         assert_eq!(read_file(&dest.join("nested/deep.txt")), "deep");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn copy_tree_reproduces_every_level() {
-        let dir = temp_dir("copy_tree");
+        let scratch = temp_dir("copy_tree");
+        let dir = scratch.dir().to_path_buf();
         let src = dir.join("src");
         fs::create_dir_all(src.join("a/b")).expect("dirs");
         write_file(&src.join("a/b/leaf.txt"), "leaf");
@@ -2742,8 +2732,6 @@ mod tests {
 
         assert_eq!(read_file(&dest.join("a/b/leaf.txt")), "leaf");
         assert!(src.exists(), "a copy must leave the source in place");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ----------------------------------------------------------------
@@ -2767,7 +2755,8 @@ mod tests {
 
     #[test]
     fn undo_copy_deletes_dest() {
-        let dir = temp_dir("undo_copy");
+        let scratch = temp_dir("undo_copy");
+        let dir = scratch.dir().to_path_buf();
         let src = dir.join("src.txt");
         let dst = dir.join("dst.txt");
         write_file(&src, "data");
@@ -2784,13 +2773,12 @@ mod tests {
         assert!(!dst.exists());
         // Source should still exist (copy undo only removes the destination).
         assert!(src.exists());
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn undo_move_restores_src() {
-        let dir = temp_dir("undo_move");
+        let scratch = temp_dir("undo_move");
+        let dir = scratch.dir().to_path_buf();
         let src = dir.join("original.txt");
         let dst = dir.join("moved.txt");
         write_file(&dst, "moved data");
@@ -2806,8 +2794,6 @@ mod tests {
         assert!(src.exists());
         assert!(!dst.exists());
         assert_eq!(read_file(&src), "moved data");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ----------------------------------------------------------------
@@ -2816,8 +2802,10 @@ mod tests {
 
     #[test]
     fn execute_copy_single_file() {
-        let src_dir = temp_dir("exec_copy_src");
-        let dst_dir = temp_dir("exec_copy_dst");
+        let src_scratch = temp_dir("exec_copy_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("exec_copy_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
         write_file(&src_dir.join("test.txt"), "test content");
 
         let plan = OperationPlan::plan_copy(
@@ -2849,15 +2837,14 @@ mod tests {
         let summary = complete.unwrap();
         assert_eq!(summary.succeeded, 1);
         assert_eq!(summary.failed, 0);
-
-        let _ = fs::remove_dir_all(&src_dir);
-        let _ = fs::remove_dir_all(&dst_dir);
     }
 
     #[test]
     fn execute_copy_with_skip_conflict() {
-        let src_dir = temp_dir("exec_copy_skip_src");
-        let dst_dir = temp_dir("exec_copy_skip_dst");
+        let src_scratch = temp_dir("exec_copy_skip_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("exec_copy_skip_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
 
         write_file(&src_dir.join("conflict.txt"), "new content");
         write_file(&dst_dir.join("conflict.txt"), "old content");
@@ -2875,15 +2862,14 @@ mod tests {
 
         // Destination should retain old content.
         assert_eq!(read_file(&dst_dir.join("conflict.txt")), "old content");
-
-        let _ = fs::remove_dir_all(&src_dir);
-        let _ = fs::remove_dir_all(&dst_dir);
     }
 
     #[test]
     fn execute_copy_with_overwrite_conflict() {
-        let src_dir = temp_dir("exec_copy_ow_src");
-        let dst_dir = temp_dir("exec_copy_ow_dst");
+        let src_scratch = temp_dir("exec_copy_ow_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("exec_copy_ow_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
 
         write_file(&src_dir.join("file.txt"), "new");
         write_file(&dst_dir.join("file.txt"), "old");
@@ -2900,15 +2886,14 @@ mod tests {
         executor.execute();
 
         assert_eq!(read_file(&dst_dir.join("file.txt")), "new");
-
-        let _ = fs::remove_dir_all(&src_dir);
-        let _ = fs::remove_dir_all(&dst_dir);
     }
 
     #[test]
     fn execute_copy_with_rename_conflict() {
-        let src_dir = temp_dir("exec_copy_rn_src");
-        let dst_dir = temp_dir("exec_copy_rn_dst");
+        let src_scratch = temp_dir("exec_copy_rn_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("exec_copy_rn_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
 
         write_file(&src_dir.join("file.txt"), "new");
         write_file(&dst_dir.join("file.txt"), "existing");
@@ -2928,15 +2913,14 @@ mod tests {
         assert_eq!(read_file(&dst_dir.join("file.txt")), "existing");
         assert!(dst_dir.join("file (2).txt").exists());
         assert_eq!(read_file(&dst_dir.join("file (2).txt")), "new");
-
-        let _ = fs::remove_dir_all(&src_dir);
-        let _ = fs::remove_dir_all(&dst_dir);
     }
 
     #[test]
     fn execute_copy_directory() {
-        let src_dir = temp_dir("exec_copy_dir_src");
-        let dst_dir = temp_dir("exec_copy_dir_dst");
+        let src_scratch = temp_dir("exec_copy_dir_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("exec_copy_dir_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
 
         write_file(&src_dir.join("mydir").join("a.txt"), "aaa");
         write_file(&src_dir.join("mydir").join("sub").join("b.txt"), "bb");
@@ -2959,15 +2943,14 @@ mod tests {
             read_file(&dst_dir.join("mydir").join("sub").join("b.txt")),
             "bb"
         );
-
-        let _ = fs::remove_dir_all(&src_dir);
-        let _ = fs::remove_dir_all(&dst_dir);
     }
 
     #[test]
     fn execute_move_removes_source() {
-        let src_dir = temp_dir("exec_move_src");
-        let dst_dir = temp_dir("exec_move_dst");
+        let src_scratch = temp_dir("exec_move_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("exec_move_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
 
         write_file(&src_dir.join("moveme.txt"), "move data");
 
@@ -2984,14 +2967,12 @@ mod tests {
 
         assert!(dst_dir.join("moveme.txt").exists());
         assert!(!src_dir.join("moveme.txt").exists());
-
-        let _ = fs::remove_dir_all(&src_dir);
-        let _ = fs::remove_dir_all(&dst_dir);
     }
 
     #[test]
     fn execute_delete() {
-        let dir = temp_dir("exec_delete");
+        let scratch = temp_dir("exec_delete");
+        let dir = scratch.dir().to_path_buf();
         write_file(&dir.join("delme").join("x.txt"), "xxx");
         write_file(&dir.join("delme").join("y.txt"), "yy");
 
@@ -3002,7 +2983,5 @@ mod tests {
         executor.execute();
 
         assert!(!dir.join("delme").exists());
-
-        let _ = fs::remove_dir_all(&dir);
     }
 }

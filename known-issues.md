@@ -54592,7 +54592,7 @@ with no test able to state that they should match because there is no single
 place where the rule lives.
 ---
 
-### TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL — 2026-08-22 — OPEN
+### TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL — 2026-08-22 — FIXED 2026-08-24 (`66ec4d983`)
 
 **In short.** Every on/off switch in the desktop settings panels draws a small
 round knob on a coloured pill. When the switch is **on**, the pill is the
@@ -54642,6 +54642,37 @@ theme and get worse on a pale accent (Yellow, Peach, Rosewater), where knob
 and pill converge further. Nothing breaks; the settings pages are just harder
 to read at a glance than they should be, and the defect is duplicated once
 more every time a new panel is written.
+
+**How it was fixed (2026-08-24, `66ec4d983`).** Not by substituting
+`readable_on(toggle_bg)` at each site, which is what this entry proposed, but
+by *removing the sites*: `gui/desktop/src/switch.rs` now draws the control and
+derives the knob, and seventeen modules call it. The substitution would have
+fixed the seventeen copies that existed and left the shape open for the
+eighteenth panel; the trigger note above ("one sweep with one test") already
+implied the sweep would have to be repeated by hand for every new panel.
+
+Two corrections to the scope recorded above, both found by measuring rather
+than grepping for `toggle_bg`:
+
+- It was **seventeen** modules, not "`network_settings.rs` alone has four."
+  Several panels use `p.green` rather than `p.accent` for *on*, so a grep for
+  the accent missed them, and they had the identical defect: `p.text` on
+  `green` is no better than `p.text` on `blue`.
+- The proposed shared test — "every knob equals `readable_on` of the pill in
+  both modes and under every accent" — is now `switch.rs`'s
+  `the_knob_is_legible_on_every_track_a_panel_can_choose`, but it could not be
+  written as a floor over *every role*: `readable_on` picks between exactly two
+  inks, and on a mid-grey (`overlay0`, `#6C7086`) the better of the two is
+  4.32:1, so 4.5 is unreachable without a third ink. The floor is asserted over
+  the colours a switch track can actually be, and a separate test asserts the
+  weaker but universal claim (the choice between the two inks is the right way
+  round) on all 42 role-mode pairs.
+
+**The measured headroom is nine hundredths.** The tightest switch track in the
+shell is light-mode `Maroon` at **4.60:1**. An accent added to
+`AccentColor::presets()` that is a shade paler fails that test. That is the
+intended behaviour — the accent is the thing to change, not the threshold —
+but it is worth knowing before adding a hue.
 ---
 
 ### TD-C-THE-TOOLKIT-HOLDS-A-THIRD-COPY-OF-THE-PALETTE-AND-DISAGREES-WITH-ITSELF-ABOUT-IT — 2026-08-22 — OPEN
@@ -71737,6 +71768,361 @@ which fixes the whole family rather than `EBADF` alone.
 
 ---
 
+### TD-C-A-SLIDER-THUMB-WAS-THE-SAME-COLOUR-AS-ITS-OWN-FILL — 2026-08-24 — FIXED same day (`a03536528`)
+
+**In short.** The touchpad settings page draws sliders (a horizontal bar you
+drag a round handle along to set a number). The bar's left-hand portion — the
+part showing how far along you are — was painted in the user's accent colour,
+and so was the handle. Identical colours: 1.00:1 contrast, which means *no
+visible difference at all*. For the whole left half of the slider's travel the
+handle sat entirely on top of that fill and simply was not there; what the user
+saw was one accent-coloured blob whose ragged right edge happened to be where
+the value was. Fixed the day it was found.
+
+**Where:** `gui/desktop/src/touchpad.rs`, the slider row's knob. Four other
+modules drew the same control by hand — `display_settings.rs`, `notif_pane.rs`,
+`osd.rs`, `mouse_settings.rs` — and disagreed about the handle's colour three
+ways: three used `p.text`, `mouse_settings` used `appearance::emphasized` of
+the fill, `touchpad` used the fill itself.
+
+**How it was fixed.** `gui/desktop/src/slider.rs` now draws the control, and
+all five call it. Same remedy as
+`TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`, for the same reason: five
+hand-drawn copies with a correct answer in one of them is the defect, and
+correcting the one broken copy would have left five copies and three opinions.
+
+**The interesting part: the fix is the *opposite* of the switch fix, and that
+is not an inconsistency.** A switch knob is `readable_on` its own track,
+because it is inset two pixels inside the track and the track is therefore the
+only thing behind it. A slider thumb is **larger than its track** — a 10-to-14
+pixel disc on a track 4 or 6 pixels tall — so most of it hangs over the card
+behind the control, and its round outline (the thing that says *this is the
+handle*) is read against that card, not against the fill. Applying the switch
+rule here would give `readable_on(accent)` = `#11111B`, which on the stock dark
+theme is 1.1:1 against a `base` card: an invisible handle with a crisp interior
+nobody can see. So the thumb is `text`: 11.34:1 against the card, 1.46:1
+against the fill, and the weak number is the one that costs nothing because the
+fill only ever touches the thumb's *interior*.
+
+The rule to carry forward: **ink is chosen for the background the shape's
+outline is read against, and containment is what decides which background that
+is.** `slider.rs` asserts the containment premise directly
+(`the_thumb_overhangs_the_track_on_every_shape_the_shell_draws`) so that a
+shape whose thumb fitted *inside* its track would fail rather than silently
+inherit reasoning that no longer applies to it.
+
+**This superseded a documented judgement**, `mouse_settings.rs` judgement 3
+("the slider thumb is derived from its fill"), which was recorded when that
+module was converted. Its instinct was right — the thumb had been a `LAVENDER`
+constant named beside a `BLUE` fill, free to drift — and its background was
+wrong. Both the module docs and its test now record the revision rather than
+overwrite it, because the claim that outlived the change (the thumb is not a
+constant chosen beside the fill) is the one worth keeping.
+
+---
+
+### TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES-IS-BELOW-THE-CONTRAST-FLOOR — 2026-08-24 — OPEN
+
+**In short.** The desktop's light theme has six background shades a card or
+panel can be painted. On the two palest of them, ordinary text is below the
+4.5:1 contrast ratio that readable body text is supposed to reach. (Contrast
+ratio: how far apart two colours are in lightness; 1:1 is invisible, 4.5:1 is
+the standard floor for text.) Nothing is unreadable, but text on those two
+surfaces is measurably harder to read than the theme claims. The dark theme
+does not have the problem.
+
+**Where:** `gui/appearance/src/lib.rs`, the Latte (light) role table. Measured
+2026-08-24, `text` against each card colour:
+
+| card | dark | light |
+|---|---|---|
+| `base` | 11.34 | 7.06 |
+| `mantle` | 12.14 | 6.57 |
+| `crust` | 12.97 | 6.04 |
+| `surface0` | 8.69 | 5.17 |
+| `surface1` | 6.31 | **4.39** |
+| `surface2` | 4.62 | **3.69** |
+
+**Found by:** `gui/desktop/src/slider.rs`'s
+`the_thumb_is_legible_against_every_card_it_can_sit_on`, which was originally
+written with a 4.5 floor and failed on light `surface2` at 3.69:1. The slider
+test now asserts 3:1, which is the criterion that actually applies to it (WCAG
+SC 1.4.11 *Non-text Contrast*, for a graphical object that identifies a
+control, as opposed to SC 1.4.3's 4.5:1 for text). That is the right floor for
+a 12-pixel disc and the *wrong* floor for a label, so the finding is logged
+here rather than absorbed into the slider's test.
+
+**The proper fix** is to darken Latte's `text` (`#4C4F69`) until it clears
+4.5:1 on `surface2` (`#ACB0BE`) — roughly `#3C3F55` or darker — or to rule that
+`surface1`/`surface2` are not permitted as card backgrounds in light mode and
+enforce that. The first is a change to a published palette that the whole shell
+and every ported app reads; the second is a rule with no mechanism behind it
+today. Both are wider than one module, which is why this is logged rather than
+done.
+
+**Whether anything actually draws text on those surfaces has not been
+surveyed.** That survey is the first step of any fix, and it may show the
+answer is "nothing does," in which case this becomes a latent hazard rather
+than a live defect. Do not assume either way from this entry.
+
+**If never fixed:** light-mode users reading a settings row on a `surface1` or
+`surface2` card get slightly-too-low contrast. It does not get worse over time,
+but it gets *wider* every time a panel picks one of those two surfaces for a
+card, since nothing today stops it.
+
+---
+
+### TD-C-THE-PANEL-THAT-CHOOSES-THE-THEME-IS-THE-ONE-PANEL-THAT-DOES-NOT-FOLLOW-IT — 2026-08-24 — OPEN
+
+**In short.** `appearance_settings.rs` is the settings page where the user
+picks their theme and accent colour. It is the only shell module of the fifty
+that never receives a `Palette` — the object holding the colours the user just
+chose — and instead draws itself from hardcoded colour constants. So the page
+that chooses the theme is the one page that ignores it: switch to a light theme
+or a different accent and that page keeps rendering in the stock dark one. It
+is the last unconverted module of the 49-module palette conversion, and it is
+unconverted precisely because it is the awkward one.
+
+**Where:** `gui/desktop/src/appearance_settings.rs`. Verified 2026-08-24: zero
+occurrences of `Palette` and zero `p.<role>` references in the file; 34 draw
+sites reference hardcoded role constants (`TEXT`, `GREEN`, `SURFACE2` and
+friends) imported from `appearance`.
+
+**Why it is awkward rather than merely last.** This panel legitimately needs to
+draw colours that are *not* the current theme — the swatch grid previewing the
+fourteen accents, and the light/dark preview tiles, must show colours the user
+has not chosen yet. So a mechanical substitution of `CONST` to `p.role` is
+wrong here in a way it was not for the other 48: some of these constants are
+the panel's *subject matter* and must stay literal, while the rest are its
+chrome and must follow the theme. Telling the two apart is a judgement per
+site, not a sweep.
+
+**The proper fix:** thread `&Palette` into the panel's render, convert the 34
+sites one at a time deciding subject-vs-chrome for each, and add the standard
+`assert_drawn_from` sweep with the preview swatches declared as the exemption
+(the same escape hatch `mouse_settings` uses for a derived colour, used here
+for a deliberately-foreign one). The panel's *own* switches were already
+converted to `crate::switch` in `66ec4d983`; they pass hardcoded `GREEN` and
+`SURFACE2` as the track and are commented as the one remaining site that will
+need revisiting when the panel is converted.
+
+**If never fixed:** a user who picks a light theme sees every settings page
+respect it except the one they picked it on, which reads as the setting not
+having applied. It is the most visible remaining instance of
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`.
+
+---
+
+### TD-C-THREE-TEST-MODULES-HAND-ROLL-THE-ACCENT-LIST-THAT-A-HELPER-ALREADY-RETURNS — 2026-08-24 — OPEN
+
+**In short.** Small duplication, no user-visible symptom, but it is the exact
+shape of defect that produced the two switch/slider bugs above: a correct
+answer exists in one place, callers did not find it, so they wrote their own
+copy. `appearance::AccentColor::presets()` returns the fourteen accent colours
+the appearance page offers. Three test modules declare their own
+`const OFFERED: [AccentColor; 14]` listing the same fourteen by hand.
+
+**Where:** `gui/desktop/src/accessibility_settings.rs:1177`,
+`gui/desktop/src/display_settings.rs:1390`, `gui/desktop/src/snap.rs:1121`.
+
+**Why it matters despite being test-only.** These lists exist so that a test
+sweeps every accent a user can pick. A fifteenth accent added to `presets()`
+would be covered by every test that calls the helper and silently *not* covered
+by these three, which would keep passing while checking a stale set — a test
+that has quietly stopped testing what its name says. That is worse than a
+compile error.
+
+**The proper fix:** delete all three constants and iterate
+`AccentColor::presets()`. `gui/desktop/src/switch.rs` and
+`gui/desktop/src/slider.rs` already do, and their doc comments state the reason
+("a hue added there is covered here without anyone remembering to"), so the
+pattern to copy exists.
+
+**If never fixed:** nothing breaks today. The cost lands entirely on whoever
+adds the fifteenth accent, in the form of three tests that pass and should not
+have.
+
+### TD-C-A-TEST-THAT-NO-REINTRODUCTION-DEFECT-PROVES-IS-INVISIBLE-TO-EVERY-CHECK-WE-HAVE
+
+**Status:** OPEN
+**Found:** 2026-08-24, while repairing the 56 defects the control-module
+refactor stranded (design-decisions.md §535).
+
+**What it is.** `scripts/reintro-palette.py` answers "is this test real?" by
+putting a bug back and checking the test complains. It answers that question
+only for tests some defect *names*. A test that no defect names is never asked
+anything, and nothing anywhere reports that fact — not `--check`, which only
+verifies that existing patterns still match, and not the orphan diff added in
+§535, which only compares a defect list against its own previous version.
+
+The gap is not hypothetical. `mouse_settings::the_knob_is_legible_on_both_pills`
+was added by the switch work and had **zero** provers until it was noticed by
+accident, during the orphan diff, because a *different* test in the same file
+happened to lose its last prover. Had the switch work not also stranded 56
+defects, nobody would have looked.
+
+**Why it matters.** This is the harness's own failure mode, one level up. The
+entire argument for the harness is that a test which passes tells you nothing
+until you have seen it fail for the right reason. A test with no defect is in
+exactly that unproven state, and it is worse than an untested one because the
+suite's green result now includes it and reads as if it were checked.
+
+**Where it lives.** `scripts/reintro-palette.py` — the `DEFECTS` list and the
+`check()` preflight (around line 22471). The information needed is already in
+the tree: every `#[test] fn` name under `gui/`, minus every name appearing in
+any defect's expected-failures list.
+
+**How to reproduce.** `python scripts/reintro-palette.py --coverage`. It reads
+the tree and writes nothing, so it is safe to run at any time, including while
+a sweep is in flight.
+
+**MEASURED 2026-08-24.** The reporting half is now built (`--coverage`, added
+the same day this entry was written), so the size is no longer unknown:
+
+```
+2922 tests in the swept packages, 2479 unproved (15.2% proved),
+0 dangling, 77 single-prover
+```
+
+Read that carefully before reacting to it. **It does not mean 85% of the suite
+is worthless.** A large share of those 2479 cannot be reached by a
+source-level find/replace at all — a test of a pure arithmetic helper has no
+"defect" short of rewriting the helper, and inventing one would be ceremony
+rather than proof. What the number *is* is the first honest measurement of how
+much of the suite has been examined, against a defect list that (as of the same
+change) is 0 stale, 0 ambiguous, 0 no-op and therefore means what it says.
+
+The two encouraging figures:
+
+- **0 dangling.** No defect names a test that does not exist, so no defect can
+  currently report a spurious `MISSING` after an hours-long run.
+- **77 single-prover.** These are the fragile ones — one refactor from becoming
+  unproved, exactly as `touchpad::the_panel_draws_nothing_that_is_immediately_erased`
+  was. They are the cheapest thing to harden and the list is short enough to
+  work through deliberately.
+
+**What remains.** The report exists; the number now has to be driven down. That
+is deliberate ongoing work, not a single task: pick a module, read its unproved
+tests, and either write a defect that makes each one fire or satisfy yourself
+that it is genuinely unreachable by patching. The report is explicitly **not** a
+gate — it exits non-zero only on dangling declarations, which are unambiguously
+a mistake — because a gate on a number with a legitimate floor just gets
+silenced.
+
+**Why the report could not be written earlier.** The 56 stranded defects had to
+be resolved first. A coverage report computed against a list containing 56
+entries that no longer apply would have overstated the proved set by exactly
+those 56, and been wrong in a way that is very hard to see.
+
+### BUG-C-GUITK-CONTRAST_TEXT-PICKS-WHITE-WHERE-BLACK-IS-FOUR-TIMES-MORE-LEGIBLE
+
+**Status: FIXED** 2026-08-24, the same day it was found — see §537. Kept here
+in full because the *prediction* at the bottom of this entry was wrong, and how
+it was wrong is the useful part.
+
+**What actually happened.** `contrast_text` and `is_dark` had **no production
+callers at all** — only their own six tests, between them checking `#14141E`,
+`#F0F0F0`, pure black, pure white, and the Mocha and Latte backgrounds
+(`#1E1E2E`, `#EFF1F5`). Every one of those is far from the 0.179 crossover, so
+all six passed before the fix and all six pass after it, unchanged: they never
+constrained the rule they were named for. The "run of pinned-colour test
+failures" this entry
+told a future reader to expect was zero, and the blast radius it told them to
+reconcile was empty. The entry asserted "a crate with many widget callers"
+without grepping for one. **A blast-radius estimate that was not measured
+should say so** — an unmarked guess in a tracking file is read later as a
+finding, and this one made a fifteen-minute change look like a second project
+and kept it queued longer than it needed to be.
+
+The severity figures below were also understated. Measured over the whole
+24-bit cube: the wrong rule disagreed with the right one on **41.78 %** of all
+colours, and its worst case was `#21D828`, where it returned white at
+**1.92:1** with black available at **10.92:1**.
+
+---
+
+**Status when filed: OPEN** — found 2026-08-24 while fixing the same defect in `appearance::readable_on` (§536).
+
+**Where:** `gui/toolkit/src/theme.rs:16-35` — `luminance`, `is_dark`, `contrast_text`.
+
+```rust
+fn luminance(c: Color) -> f32 {
+    let r = (c.r as f32 / 255.0).powf(2.2);   // ...
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+pub fn is_dark(color: Color) -> bool { luminance(color) < 0.5 }
+pub fn contrast_text(background: Color) -> Color {
+    if is_dark(background) { Color::WHITE } else { Color::BLACK }
+}
+```
+
+**What is wrong.** `contrast_text` answers "black or white on this?" by
+thresholding relative luminance at **0.5**. The crossover where pure black and
+pure white are equally legible is not 0.5 — it is
+`sqrt(0.05 * 1.05) - 0.05 = 0.1791`. Every background whose luminance falls
+between 0.179 and 0.5 therefore gets **white** when **black** is the better
+answer, and the gap is not small: at luminance 0.40 white reaches 1.16:1 while
+black reaches 9.0:1. That band is not exotic — it is most mid-tone colours: a
+mid grey, a medium blue, a muted green.
+
+Two smaller faults compound it:
+
+- `luminance` uses `powf(2.2)` as a stand-in for the sRGB transfer function.
+  sRGB is a linear segment below 0.03928 and `((v+0.055)/1.055)^2.4` above it;
+  the 2.2 power is a decent approximation in the middle and drifts at both
+  ends. The real function is four lines and there is no reason to approximate
+  it.
+- `is_dark` is `pub` and reads as a general-purpose question, so the 0.5
+  threshold — which is only ever meaningful as (a wrong) answer to the
+  black-or-white question — is exported for other code to build on.
+
+**How to see it.** `contrast_text(Color::from_hex(0x6A6A6A))` returns
+`Color::WHITE`; white on `#6A6A6A` is 2.85:1, black on it is 7.36:1.
+
+**The proper fix,** which is exactly what §536 did one crate over: delete the
+threshold and compare the two candidate inks by contrast ratio.
+`appearance::contrast_ratio` is now public and is the single correct
+implementation, but `guitk` cannot depend on `appearance` (the dependency runs
+the other way — `appearance` depends on `guitk` for `Color`). So the ratio
+belongs *here*, in `guitk`, and `appearance::relative_luminance` /
+`appearance::contrast_ratio` should become thin re-exports of it. That is the
+right direction anyway: a colour metric is a property of the colour type, and
+the colour type lives in the toolkit.
+
+Sketch:
+
+```rust
+// gui/toolkit/src/color.rs (or theme.rs)
+pub fn relative_luminance(c: Color) -> f32 { /* the real sRGB curve */ }
+pub fn contrast_ratio(a: Color, b: Color) -> f32 { /* (hi+0.05)/(lo+0.05) */ }
+pub fn contrast_text(bg: Color) -> Color {
+    if contrast_ratio(bg, Color::BLACK) >= contrast_ratio(bg, Color::WHITE) {
+        Color::BLACK
+    } else {
+        Color::WHITE
+    }
+}
+```
+
+`is_dark` should either go (it has no correct threshold to name) or be redefined
+as `contrast_ratio(c, Color::WHITE) > contrast_ratio(c, Color::BLACK)`, which is
+the only question it can answer honestly.
+
+**Why it was not done in the same change.** `contrast_text` is `pub` in a crate
+with many widget callers, and flipping the ink for the whole mid-tone band will
+move colours in widgets whose tests pin them. That is a second diff with its own
+test sweep, not a rider on a one-crate palette fix — and mixing them would have
+made neither testable as one thing. It is not blocked on anything; it is queued.
+
+**Blast radius to check when doing it:** every caller of `contrast_text` and
+`is_dark` in `gui/toolkit/**` and anything outside it that imports them, plus
+`guitk`'s own theme tests. Expect a run of pinned-colour test failures, each of
+which should be checked individually — the new value is the more legible one by
+construction, so a failure is a fixture to update, not a regression, but the
+*count* of them should be reconciled against the callers found.
+
+---
+
 ## TD-COREUTILS-BROKEN-PIPE-IS-HAND-ROLLED-IN-FOURTEEN-PLACES (lane B, 2026-08-24) — **open (predicate landed; 14 sites to migrate)**
 
 **What it is.** A write that fails because the reader went away is the one
@@ -72771,3 +73157,251 @@ the file a naive mtime check watches while leaving the compiled code beneath it
 untouched. Any future check of this shape — for another package, another
 language, another build system — should be pointed at the compilation unit, not
 at the final product.
+
+## A-KSHELL-2334-COMMANDS-PRINTED-PAST-THE-CAPTURE — ✅ FIXED 2026-08-24 (lane A)
+
+**In short:** 2,334 places in the shell printed straight to the machine's own
+screen instead of to whoever asked for the output. If you were logged in over
+SSH and typed `container ls`, the listing appeared on the *physical monitor of
+the machine you dialled into* and you saw a blank line. If a script did
+`x=$(container ls)`, `x` came back empty — not an error, just empty — and the
+script carried on with it.
+
+**Where:** `kernel/src/kshell.rs`, 2,334 `crate::console_println!` and 13
+`crate::console_print!` calls, converted to `shell_println!` / `shell_print!`.
+
+**Why it happened.** kshell has no stderr. There is `shell_println!` and there
+is `crate::console_println!`, and no `shell_eprintln!` — so the split between
+the two was never a stdout/stderr distinction, it was drift. 17,819 sites used
+the shell writer and 2,335 used the console writer, and nothing distinguished
+them: `cmd_container` alone had 266 console sites, `cmd_help` 254, `cmd_oci`
+85, `cmd_netns` 63, `cmd_cgroup` 60, `cmd_docker` 57, `cmd_firewall` 48,
+`cmd_tar` 45. 2,194 of the 2,334 were inside 176 `cmd_*` functions, i.e. they
+were ordinary command output, not diagnostics.
+
+**Why it is a correctness bug and not a tidiness one.** `capture_command` is
+not only `$(…)`. It is also what `net/ssh.rs:1759` and `net/telnet.rs:558`
+call to run a remote user's command line. So every one of these sites was a
+remote-shell bug with a second, worse half: the remote user's output was
+printed on the *host's* console, in front of whoever is sitting at it.
+
+**Why the conversion is provably safe.** `shell_write_bytes` already falls
+back to `crate::console::write_bytes` when `SHELL_OUTPUT` is `None`. With
+nothing capturing — the local interactive case — the two writers are the same
+writer. The change is a no-op locally and a fix everywhere else, which is why
+it could be applied to all 2,334 sites at once rather than audited one by one.
+
+**17 sites stay on the console, and the rule separating them is not "these
+happened to be console calls" but *terminal interaction is not output*.** A
+prompt, a menu and the echo of the user's own keystrokes are the terminal's
+furniture; they are not something a caller asked for and must never appear in
+a captured value. Bash agrees: it puts all of them on stderr or leaves them to
+the tty.
+
+| kept on the console | why |
+|---|---|
+| `execute` — the `+ {}` xtrace line | Bash sends xtrace to stderr. Capturing it would make `x=$(echo hi)` evaluate to `"+ echo hi\nhi"`, so *turning on tracing would silently corrupt every captured value in the script being traced.* |
+| `execute_select` × 6 — the numbered menu, the `#? ` prompt, backspace and character echo | `x=$(select …)` would otherwise contain the menu, the prompt and the user's typing. |
+| `cmd_read` × 5 — the `-p` prompt, backspace and character echo | `read`'s result is the variable it sets, not anything it printed. |
+| `run` × 5 — the startup banner and the `> ` / `cwd> ` prompt | No capture can be active in the REPL loop, so behaviour is identical either way — but routing a prompt through the shell writer would encode the claim that a prompt is something a caller might want, and it is not. |
+
+The `cmd_read` five were *already* `shell_print!` before this change and were
+wrong in the pre-existing code, not broken by the sweep; they are corrected
+here because the rule is being written down here. Each group carries a comment
+at the site, and self-test §17 asserts the xtrace case, so nobody "finishes
+the conversion" later.
+
+**Covered by** kshell self-test §17: a command body reaching the capture
+(`cgroup`), a usage diagnostic from inside the same command
+(`cgroup delete`), the unknown-command message — the sharpest case, since a
+typo over SSH previously showed the remote user nothing whatsoever — and the
+xtrace exclusion, asserting `$(echo hi)` under `set -x` is exactly `hi\n`.
+
+**The 38 raw `crate::console::write` calls are now audited too**, since a
+macro sweep cannot reach them. 36 of them are the line editor — prompt
+redraws, `\r\x1b[2K` erases, the `(reverse-i-search)` overlay, keystroke echo
+— and are correctly console-only under the rule above; `read_line`'s doc
+comment now says so explicitly, so the next sweep skips the region on purpose
+rather than by luck. One is `shell_write_bytes`'s own fallback. **The
+thirty-eighth was a live instance of exactly this bug**: `container logs`
+wrote the log body with `console::write_str` and only its trailing newline
+with `shell_println!`, so `$(container logs 1)` evaluated to a single `"\n"`
+while the log itself printed on the host's screen. Fixed with
+`shell_println_bytes`, which is also byte-clean — a container's captured
+output is not ours to launder through a format string.
+
+**Still open in this class:** nothing known in kshell. The same audit has not
+been done for other kernel-side command surfaces.
+
+**Lesson:** the fourth silent-success bug in the shell in two days. Here the
+tell was the *absence* of a distinction — with no `shell_eprintln!` in the
+codebase, two output macros cannot be encoding a stdout/stderr split, so one
+of them had to be wrong. When two ways of doing the same thing coexist with
+no rule separating them, that is not style; it is a bug that has not been
+observed yet.
+
+## A-KSHELL-3676-FAILING-COMMANDS-REPORTED-SUCCESS — ✅ FIXED 2026-08-24 (lane A)
+
+**In short:** 3,676 built-in shell commands printed an error message and then
+told the script that they had succeeded. Nothing looked wrong on screen — the
+error was right there in the terminal — but a script could not see it. `rm -rf
+"$dir"` after a failed step still ran; `cmd || echo "failed"` never printed
+"failed"; `id=$(cgroup create)` set `id` to the empty string and carried on.
+Fixed by giving every one of them a failing exit status, in three sweeps, plus
+a fourth commit undoing the four places where the sweep went too far.
+
+**Where:** `kernel/src/kshell.rs`. Commits `306eba384`, `ad372afab`,
+`2e7008827`, `2ab39d291`.
+
+**The damage is never the wrong value.** It is the control-flow decision
+downstream, and every shell construct that branches — `||`, `&&`, `if`,
+`set -e` — reads the exit status and nothing else. A shell in which failure
+reports 0 makes all of them decide the opposite of what they were written to
+decide. That is strictly worse than the command not existing: a missing command
+at least fails.
+
+### Three shapes, found by three different rules
+
+| shape | sites | what it looks like |
+|---|---|---|
+| bail | 766 | diagnostic, then a bare `return;` |
+| fall-through | 945 | diagnostic is the last statement of its block; control falls out |
+| error arm | 1,965 | `Err(e) => shell_println!("Error: {:?}", e),` |
+
+The error arms are the worst of the three, because the message is *right
+there*. A human reading the terminal sees the error and assumes everything
+downstream saw it too.
+
+### What made the sweeps safe, and the three times they weren't
+
+A line-level rule — "the text contains Usage:/Invalid/not found" — is wrong,
+and it was wrong on real sites. Each guard below exists because it caught one:
+
+1. **Judge the statement *run*, not the line.** Walk up from the last print and
+   collect the contiguous run at the same indent (folding rustfmt's split `);`
+   tail back into one statement), then judge the run by its **first** message. A
+   multi-line usage block leads with `"Usage: …"` and continues with indented
+   examples; a listing leads with a banner or a row.
+2. **A complaint starts its own message.** If the run's first literal begins
+   with whitespace it is an indented row inside a report. That single test is
+   what separates `"Group '{}' not found"` from `"  Unknown drops:    {}"` — a
+   row of `vlan stats`, which the first draft swept. Marking that command failed
+   would have been a *new* bug.
+3. **`Usage:`/`Error:` must lead the message** (after at most a `cmdname: `
+   prefix), **and every other word must be a whole word.** Two successes were
+   swept before these anchors existed:
+   - `"Network Usage: {} apps, {} interfaces"` — the *header* of `netusage
+     stats`, which then ends on an indented row: textually the exact shape of a
+     usage error.
+   - `"datausage: self-tests completed (see serial)."` — the command name
+     `datausage` merely ends in the letters `usage`.
+4. **A `=== … ===` banner means output, not a diagnostic.** Encoded as a rule
+   rather than an exception for `cmd_ksyms`, the only site that trips it today.
+5. **`Err` arms need no anchoring.** The arm *is* the failure path — stronger
+   corroboration than the `return;` the first sweep leaned on. All 197 distinct
+   messages were enumerated: every one names a real failure, so the vocabulary
+   filter (which exists to spare arms that absorb an error deliberately) had
+   nothing to spare.
+
+### The mirror-image bug the sweep introduced: `--help` is not a mistake
+
+`ad372afab`. A granted help request and a rejected argument **print the same
+text**, so no textual rule can separate them — only the gate above the block
+can. Four sites printed the usage because the user asked for it, and the sweep
+marked all four as failures. That is this task's own bug class in reverse: a
+command that succeeded reporting failure, breaking `cmd --help >/dev/null ||
+echo "not installed"`, a real idiom for probing whether a tool exists. `grep
+--help` exits 0; `grep --bogus` exits 2.
+
+Three were a plain deletion (`dedup`, `journal`, `fsck.ext4`). `zip` was not:
+its gate is `args.is_empty() || args == "--help" || args == "-h"`, one condition
+covering both a granted request and a command with nothing to run, so it had to
+be split.
+
+Found by scanning **every** help-gated block in the file for a failure status,
+not by re-reading the sweep's diff — so the check outlives the commit and covers
+sites no sweep touched. It is worth re-running after any future sweep.
+
+### Coverage
+
+Self-test rungs 18–20 in `kshell::self_test`, one per lesson rather than one per
+shape:
+
+| rung | asserts |
+|---|---|
+| 18 | `zip --help` and `zip` print **byte-identical** output and opposite statuses |
+| 19 | `tag zzz` fails (fall-through); `netusage stats` and `datausage test` do **not** (report header, whole-word) |
+| 20 | `cgroup delete <bogus>` fails (error arm); **and `echo ok` still reports 0** |
+
+That last control is the one that makes the set meaningful. Without it, a
+kshell that set status 1 unconditionally would pass rungs 17–20.
+
+### Known under-sweep, left deliberately
+
+Rule 3 rejects `"base64: decode error: {}"` and `"tee: write error: {:?}"`,
+which have two words before the `error:`. Loosening the anchor to admit them
+re-admits `"Network Usage:"`. Three unfixed sites beat one invented failure.
+
+**Lesson:** a mechanical rewrite over thousands of sites is only as good as the
+predicate, and a predicate that reads one line cannot tell a complaint from a
+row of a report. Every guard above came from *sampling the sites the rule chose*
+and *enumerating every distinct message it matched* — not from reading the
+rule and judging it plausible. Two of the three false positives were single
+sites out of thousands, and both would have turned a working command into a
+failing one.
+
+## TD-C-TWO-TOOLKIT-TEXT-FIELDS-DRAW-NO-CARET-AT-ALL (lane C, 2026-08-24) — **open**
+
+`WidgetKind::TextInput` (`gui/toolkit/src/widget.rs`, render arm at ~line 618)
+and `InputDialog` (`gui/toolkit/src/modal.rs`, ~line 1376) both **track** a
+caret and move it, but neither one ever draws it. Each pushes a single
+`RenderCommand::Text` for the field's contents and nothing else; the only
+`Line` commands in either file are a `Separator` and a resize grip.
+
+So a user typing into either of these sees the text change with no indication
+of where the next character will go, and the arrow keys appear to do nothing
+at all.
+
+### Why it surfaced now
+
+§541 switched both fields' arrows to *visual* caret motion, which put the
+question "where is the caret drawn?" in front of me for all five text fields in
+the tree. Three answer it — the path bar (`pathbar.rs:835`), the launcher and
+the Run dialog all place theirs with `text::caret_x`. These two do not answer
+it because they never asked it.
+
+That also means these two fields are the only ones whose §541 conversion cannot
+be tested end to end: `the_arrows_move_by_the_screen_and_keep_the_side_they_are_on`
+and `a_plain_input_dialog_moves_its_caret_by_the_screen` can assert where the
+cursor *went*, never where it is *shown*, because there is nothing shown. The
+equivalents for the other three (`the_drawn_caret_moves_rightwards_every_time_
+the_right_arrow_does`, `the_run_dialogs_drawn_caret_only_ever_moves_rightwards_
+under_the_right_arrow`) are the tests that catch a caret that moves correctly
+and draws wrongly — a defect these two cannot have, only because they draw
+nothing.
+
+### The proper fix
+
+Push a vertical `RenderCommand::Line` at
+`text::caret_x(value, *cursor, self.style.font_size, FontWeightHint::Regular)`
+in each render arm, exactly as the launcher does, gated on the widget having
+focus. Two further things fall out of it and should land in the same change
+rather than after it:
+
+- **Selection.** Neither field has a selection anchor at all, so neither can
+  show a selection, and Shift+Arrow does nothing. The Run dialog's
+  `selection_anchor: Option<usize>` is the shape to copy — deliberately a plain
+  byte, since a selection is a range of text and has no side of a boundary to
+  be on.
+- **Horizontal scrolling.** Both draw with `TextOverflow::Ellipsis` and no
+  scroll offset, so text longer than the field is cut at the right edge and a
+  caret past that edge would be painted outside the field even once it exists.
+  A caret without a scroll offset is a caret that leaves the box.
+
+### Why it is not fixed in the same change as §541
+
+It is a feature these widgets never had, not a regression §541 introduced —
+their arrows were equally invisible before the switch. Bundling a
+caret/selection/scrolling implementation into the change that moved five
+fields' arrows would have made a reviewable diff unreviewable. Nothing depends
+on it: `pathbar` is the toolkit field the shell actually uses for typing.

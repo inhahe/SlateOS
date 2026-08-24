@@ -791,6 +791,7 @@ name = "backup-app"
 version = "0.1.0"
 dependencies = [
  "safeio",
+ "scratchdir",
  "sha2",
  "textfmt",
  "tzrules",
@@ -2135,6 +2136,7 @@ dependencies = [
  "guitk",
  "inputsettings",
  "osfont",
+ "settingsfile",
 ]
 
 [[package]]
@@ -2867,6 +2869,9 @@ dependencies = [
 [[package]]
 name = "diffcore"
 version = "0.1.0"
+dependencies = [
+ "scratchdir",
+]
 
 [[package]]
 name = "difftastic"
@@ -3367,6 +3372,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "safeio",
+ "scratchdir",
 ]
 
 [[package]]
@@ -3663,6 +3669,7 @@ version = "0.1.0"
 dependencies = [
  "byteread",
  "guitk",
+ "scratchdir",
  "textfind",
 ]
 
@@ -5468,6 +5475,7 @@ version = "0.1.0"
 dependencies = [
  "byteread",
  "guitk",
+ "scratchdir",
 ]
 
 [[package]]
@@ -5490,6 +5498,7 @@ version = "0.1.0"
 name = "indexer-app"
 version = "0.1.0"
 dependencies = [
+ "scratchdir",
  "textfmt",
 ]
 
@@ -7204,6 +7213,7 @@ dependencies = [
  "diffcore",
  "guitk",
  "safeio",
+ "scratchdir",
 ]
 
 [[package]]
@@ -9047,6 +9057,7 @@ dependencies = [
  "byteread",
  "guitk",
  "safeio",
+ "scratchdir",
 ]
 
 [[package]]
@@ -10865,6 +10876,9 @@ version = "0.1.0"
 [[package]]
 name = "safeio"
 version = "0.1.0"
+dependencies = [
+ "scratchdir",
+]
 
 [[package]]
 name = "sage-cli"
@@ -11053,6 +11067,7 @@ version = "0.1.0"
 dependencies = [
  "guitk",
  "safeio",
+ "scratchdir",
 ]
 
 [[package]]
@@ -11284,12 +11299,14 @@ dependencies = [
  "guitk",
  "inputsettings",
  "oswindow",
+ "settingsfile",
 ]
 
 [[package]]
 name = "settingsfile"
 version = "0.1.0"
 dependencies = [
+ "scratchdir",
  "yamldoc",
 ]
 

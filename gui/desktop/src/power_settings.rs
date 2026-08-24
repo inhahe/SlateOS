@@ -1058,23 +1058,7 @@ impl PowerSettingsUI {
         });
         let tx = x + width - 48.0;
         let bg = if on { p.green } else { p.surface1 };
-        cmds.push(RenderCommand::FillRect {
-            x: tx,
-            y,
-            width: 40.0,
-            height: 20.0,
-            color: bg,
-            corner_radii: CornerRadii::all(10.0),
-        });
-        let knob_x = if on { tx + 22.0 } else { tx + 2.0 };
-        cmds.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: y + 2.0,
-            width: 16.0,
-            height: 16.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        cmds.extend(crate::switch::switch(tx, y, 40.0, 20.0, on, bg));
     }
 
     /// Hit-test for tab selection.
@@ -1494,7 +1478,19 @@ mod tests {
                             ui.set_active_tab(tab);
                             for width in [320.0_f32, 500.0, 900.0] {
                                 let cmds = ui.render(&p, 0.0, 0.0, width);
-                                assert_drawn_from(&p, &cmds, &[], "power settings");
+                                // A switch knob is `readable_on` its own track
+                                // — one of the two extremes, not a role. The
+                                // tracks are named rather than the extremes,
+                                // so the exemption stays tied to its fill.
+                                assert_drawn_from(
+                                    &p,
+                                    &cmds,
+                                    &[
+                                        appearance::readable_on(p.green),
+                                        appearance::readable_on(p.surface1),
+                                    ],
+                                    "power settings",
+                                );
                             }
                         }
                     }

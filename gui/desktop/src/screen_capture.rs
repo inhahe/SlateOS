@@ -33,8 +33,8 @@
 //!    one.** Record, Pause and Resume were lettered with the near-black
 //!    `MOCHA_BASE`, which is legible on Mocha's pale red, yellow and green —
 //!    and illegible on the light theme's, where all three fills are *dark*
-//!    (lumas 78, 104 and 91 against [`readable_on`](appearance::readable_on)'s
-//!    threshold of 140). Naming the ink beside the fill is what allowed the
+//!    enough that [`readable_on`](appearance::readable_on) answers with the
+//!    pale endpoint instead. Naming the ink beside the fill is what allowed the
 //!    two to disagree; [`readable_on`](appearance::readable_on) of the fill
 //!    cannot. The tests pin the endpoint each mode must produce, computed by
 //!    hand rather than by calling the same function the renderer calls.
@@ -1725,15 +1725,15 @@ mod tests {
                 label,
             );
 
-            // Mocha's red, yellow and green are all pale — luma 173, 227 and
-            // 201 against the threshold of 140 — so all three want dark ink.
+            // Mocha's red, yellow and green are all pale enough that
+            // near-black is the more legible endpoint on each, so all three
+            // want dark ink.
             assert_eq!(
                 rgb(ink_dark),
                 NEAR_BLACK,
                 "{label} in dark mode should be lettered near-black"
             );
-            // The light theme's are all *dark* — luma 78, 104 and 91 — so all
-            // three want the opposite. This is exactly what the deleted
+            // The light theme's are all deep enough to want the opposite. This is exactly what the deleted
             // `MOCHA_BASE` ink could not do, and why it was a legibility bug
             // rather than merely an unconverted constant.
             assert_eq!(

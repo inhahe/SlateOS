@@ -759,39 +759,21 @@ impl OsdManager {
         let track_w = osd_w - padding * 2.0;
         let track_h = 6.0;
 
-        commands.push(RenderCommand::FillRect {
+        crate::slider::Slider {
             x: track_x,
             y: track_y,
             width: track_w,
             height: track_h,
-            color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, text_alpha),
-            corner_radii: CornerRadii::all(3.0),
-        });
-
-        // Filled portion.
-        let fill_w = track_w * (level.min(100) as f32 / 100.0);
-        if fill_w > 0.0 {
-            commands.push(RenderCommand::FillRect {
-                x: track_x,
-                y: track_y,
-                width: fill_w,
-                height: track_h,
-                color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),
-                corner_radii: CornerRadii::all(3.0),
-            });
+            frac: level.min(100) as f32 / 100.0,
+            thumb: 10.0,
+            track: p.surface0,
+            fill: accent,
+            p,
+            // The overlay fades in and out as one thing, so the slider takes
+            // the same opacity as the label above it.
+            alpha: text_alpha,
         }
-
-        // Knob.
-        let knob_x = track_x + fill_w - 5.0;
-        let knob_y = track_y - 2.0;
-        commands.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: knob_y,
-            width: 10.0,
-            height: 10.0,
-            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),
-            corner_radii: CornerRadii::all(5.0),
-        });
+        .draw(commands);
     }
 
     /// Render a media track OSD with title/artist/album.
@@ -1050,27 +1032,14 @@ impl OsdSettingsUI {
         } else {
             p.subtext0
         };
-        commands.push(RenderCommand::FillRect {
-            x: x + padding,
-            y: cy,
-            width: 40.0,
-            height: 20.0,
-            color: enable_color,
-            corner_radii: CornerRadii::all(10.0),
-        });
-        let toggle_x = if self.config.enabled {
-            x + padding + 22.0
-        } else {
-            x + padding + 2.0
-        };
-        commands.push(RenderCommand::FillRect {
-            x: toggle_x,
-            y: cy + 2.0,
-            width: 16.0,
-            height: 16.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        commands.extend(crate::switch::switch(
+            x + padding,
+            cy,
+            40.0,
+            20.0,
+            self.config.enabled,
+            enable_color,
+        ));
         commands.push(RenderCommand::Text {
             x: x + padding + 52.0,
             y: cy + 2.0,
@@ -3022,13 +2991,14 @@ mod tests {
                 vec![rgb(p.subtext0)],
                 "the enable pill, off"
             );
-            // T3: the pill's knob.
+            // T3: the pill's knob — `readable_on` the pill it sits on, not a
+            // role. `s` is the enabled fixture, so the pill is `green`.
             assert_eq!(
                 fills(&s, 16.0, 16.0)
                     .iter()
                     .map(|c| rgb(*c))
                     .collect::<Vec<_>>(),
-                vec![rgb(p.text)],
+                vec![rgb(appearance::readable_on(p.green))],
                 "the pill knob"
             );
             // T6: the position dots — one selected, four not.

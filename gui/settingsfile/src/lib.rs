@@ -186,8 +186,17 @@ pub fn store(name: &str, doc: &Document) -> io::Result<()> {
 
 // Test support, so panicking on a broken precondition is the right behaviour:
 // a test whose sandbox cannot be created must fail loudly rather than quietly
-// fall through to the developer's real configuration directory. The module is
-// not `#[cfg(test)]` because dependent crates' tests need it.
+// fall through to the developer's real configuration directory.
+//
+// The module cannot be `#[cfg(test)]` because dependent crates' *own* tests
+// need it, and a `#[cfg(test)]` item is compiled only when its own crate is
+// under test. It is instead behind a default-off feature, which a dependent
+// turns on in its `[dev-dependencies]` — the same shape `safeio`'s `audit`
+// counters use. The reason it is not simply unconditional: it needs
+// `scratchdir`, whose whole point is to be a `[dev-dependencies]` entry that
+// never reaches a target build, and an unconditional `pub mod testing` would
+// have dragged it into the shipped compositor.
+#[cfg(feature = "testing")]
 #[allow(clippy::expect_used)]
 pub mod testing {
     //! Test support: run against a private, throwaway configuration directory.
@@ -202,14 +211,48 @@ pub mod testing {
     //! `set_var`/restore dance is three chances to leave `$HOME` pointing at a
     //! deleted directory for the rest of the run.
 
+    use scratchdir::ScratchDir;
     use std::env;
-    use std::fs;
+    use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
     /// The environment is process-global, so callers take turns rather than
     /// racing each other over `XDG_CONFIG_HOME`.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Restores `XDG_CONFIG_HOME` and `HOME` to what the process had, on every
+    /// exit path.
+    ///
+    /// This used to be straight-line code after the call to `body`, which meant
+    /// a body that panicked — i.e. any failing assertion, which is the normal
+    /// way a test ends badly — skipped the restore entirely and left
+    /// `XDG_CONFIG_HOME` pointing at a directory that was about to be deleted.
+    /// Every later test in the process then read its settings from a path that
+    /// does not exist. That is precisely the failure this module's own doc
+    /// comment says it exists to prevent, so the restore has to be a `Drop`.
+    struct EnvRestore {
+        xdg: Option<OsString>,
+        home: Option<OsString>,
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            // SAFETY: `ENV_LOCK` is held for as long as this guard lives, so
+            // this is the only thread touching the environment — which is what
+            // `set_var`/`remove_var` require.
+            unsafe {
+                match self.xdg.take() {
+                    Some(v) => env::set_var("XDG_CONFIG_HOME", v),
+                    None => env::remove_var("XDG_CONFIG_HOME"),
+                }
+                match self.home.take() {
+                    Some(v) => env::set_var("HOME", v),
+                    None => env::remove_var("HOME"),
+                }
+            }
+        }
+    }
 
     /// Run `body` with the configuration directory pointed at a fresh empty
     /// directory, which is removed afterwards. The directory is passed in so
@@ -219,46 +262,42 @@ pub mod testing {
     ///
     /// If the scratch directory cannot be created.
     pub fn with_scratch_config<T>(tag: &str, body: impl FnOnce(&Path) -> T) -> T {
-        // A poisoned lock means some other test panicked while holding it;
-        // the environment was still restored by the guard below, so there is
-        // nothing to recover and no reason to fail this test too.
+        // A poisoned lock means some other test panicked while holding it; the
+        // environment was restored by `EnvRestore` on the way out of that
+        // panic, so there is nothing to recover and no reason to fail this
+        // test too.
         let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        let mut root = env::temp_dir();
-        let id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        root.push(format!("slateos-scratch-{tag}-{id}"));
-        fs::create_dir_all(&root).expect("create scratch config dir");
+        // Named from the process id and a per-process counter rather than from
+        // the clock. The clock tag this replaces was not unique: `cargo test`
+        // runs a binary's tests as threads of one process, and the clock a
+        // thread reads is only refreshed on a timer interrupt, so every caller
+        // that arrived within the same tick got the same directory. (The
+        // `ENV_LOCK` above serialises callers *within* one process, but not
+        // two test binaries running at once, which cargo does routinely.)
+        let root = ScratchDir::new(&format!("slateos-scratch-{tag}"));
 
-        let old_xdg = env::var_os("XDG_CONFIG_HOME");
-        let old_home = env::var_os("HOME");
+        let restore = EnvRestore {
+            xdg: env::var_os("XDG_CONFIG_HOME"),
+            home: env::var_os("HOME"),
+        };
         // SAFETY: the lock above makes this the only thread touching the
         // environment for the duration, which is what `set_var` requires.
         unsafe {
-            env::set_var("XDG_CONFIG_HOME", &root);
+            env::set_var("XDG_CONFIG_HOME", root.dir());
             // Removed as well as overridden: `config_dir` prefers XDG, but a
             // test that clears XDG itself should not fall through to the
             // developer's real home.
             env::remove_var("HOME");
         }
 
-        let out = body(&root);
+        let out = body(root.dir());
 
-        // SAFETY: as above.
-        unsafe {
-            match old_xdg {
-                Some(v) => env::set_var("XDG_CONFIG_HOME", v),
-                None => env::remove_var("XDG_CONFIG_HOME"),
-            }
-            match old_home {
-                Some(v) => env::set_var("HOME", v),
-                None => env::remove_var("HOME"),
-            }
-        }
-        // Best effort: a scratch directory left behind in the system temp
-        // directory is litter, not a failure worth masking the test result.
-        let _ = fs::remove_dir_all(&root);
+        // Explicit, so the order is stated rather than inherited from the
+        // declaration order: environment first (while the directory it names
+        // still exists), then the directory, then the lock.
+        drop(restore);
+        drop(root);
         drop(guard);
         out
     }
@@ -283,6 +322,7 @@ pub mod testing {
 )]
 mod tests {
     use super::*;
+    use scratchdir::ScratchDir;
 
     /// `env::set_var` is process-global, so these tests take turns rather than
     /// racing each other over `HOME`.
@@ -322,28 +362,6 @@ mod tests {
         out
     }
 
-    /// A scratch directory that removes itself.
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let mut path = env::temp_dir();
-            let id = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            path.push(format!("slateos-cfg-{tag}-{id}"));
-            fs::create_dir_all(&path).expect("create scratch dir");
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
     #[test]
     fn xdg_config_home_wins_over_home() {
         let dir = with_env(Some("/x"), Some("/h"), config_dir);
@@ -377,8 +395,8 @@ mod tests {
 
     #[test]
     fn a_missing_file_loads_as_an_empty_document() {
-        let temp = TempDir::new("missing");
-        let doc = with_env(Some(temp.0.to_str().unwrap()), None, || {
+        let temp = ScratchDir::new("slateos-cfg-missing");
+        let doc = with_env(Some(temp.dir().to_str().unwrap()), None, || {
             load("nothing-here")
         });
         assert!(doc.is_empty());
@@ -395,10 +413,10 @@ mod tests {
 
     #[test]
     fn a_stored_document_reloads_as_itself() {
-        let temp = TempDir::new("roundtrip");
+        let temp = ScratchDir::new("slateos-cfg-roundtrip");
         let text = "# hand-written\nfonts:\n  size: 13  # points\n";
         let doc = Document::parse(text);
-        with_env(Some(temp.0.to_str().unwrap()), None, || {
+        with_env(Some(temp.dir().to_str().unwrap()), None, || {
             store("appearance", &doc).expect("store");
             // The comment and the layout have to come back, not just the value.
             assert_eq!(load("appearance").to_text(), text);
@@ -410,8 +428,8 @@ mod tests {
 
     #[test]
     fn a_second_store_leaves_no_temporary_behind() {
-        let temp = TempDir::new("clean");
-        with_env(Some(temp.0.to_str().unwrap()), None, || {
+        let temp = ScratchDir::new("slateos-cfg-clean");
+        with_env(Some(temp.dir().to_str().unwrap()), None, || {
             let mut doc = Document::parse("a: 1\n");
             store("appearance", &doc).expect("first store");
             doc.set_i64(&["a"], 2);
@@ -429,8 +447,8 @@ mod tests {
 
     #[test]
     fn store_creates_the_directory() {
-        let temp = TempDir::new("mkdir");
-        let nested = temp.0.join("deep").join("deeper");
+        let temp = ScratchDir::new("slateos-cfg-mkdir");
+        let nested = temp.dir().join("deep").join("deeper");
         with_env(Some(nested.to_str().unwrap()), None, || {
             store("appearance", &Document::parse("a: 1\n")).expect("store");
             assert_eq!(load("appearance").get_i64(&["a"]), Some(1));

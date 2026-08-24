@@ -1418,29 +1418,14 @@ impl AccountSettingsUI {
         // two an "on" switch uses; that inconsistency is recorded in
         // known-issues.md and is not a thing to settle mid-conversion.
         let toggle_bg = if enabled { p.green } else { p.surface0 };
-        cmds.push(RenderCommand::FillRect {
-            x: toggle_x,
-            y: y + 2.0,
-            width: 36.0,
-            height: 18.0,
-            color: toggle_bg,
-            corner_radii: CornerRadii::all(9.0),
-        });
-
-        // Toggle knob
-        let knob_x = if enabled {
-            toggle_x + 20.0
-        } else {
-            toggle_x + 2.0
-        };
-        cmds.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: y + 4.0,
-            width: 14.0,
-            height: 14.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(7.0),
-        });
+        cmds.extend(crate::switch::switch(
+            toggle_x,
+            y + 2.0,
+            36.0,
+            18.0,
+            enabled,
+            toggle_bg,
+        ));
     }
 }
 

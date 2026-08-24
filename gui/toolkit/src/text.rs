@@ -1093,8 +1093,11 @@ impl TextCursor {
     ///
     /// *Logical* motion — backwards through the string, which on text that runs
     /// right to left is not backwards on the screen. [`caret_left`] is the
-    /// visual counterpart; which one an arrow key should call is `C-Q2` in
-    /// `open-questions.md`.
+    /// visual counterpart, and is what the arrow keys call
+    /// (`design-decisions.md` §541). This one remains the right choice for
+    /// edits rather than movement — Backspace deletes the previous character in
+    /// the string wherever it is drawn — and for a password field, whose mask
+    /// is drawn in string order whatever was typed.
     ///
     /// Callers wrote this as "slice the text before me, take the last character,
     /// subtract its UTF-8 length" — three steps, of which the slice can panic on

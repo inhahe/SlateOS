@@ -9,5 +9,11 @@ description = "SlateOS Background File Indexer — builds and maintains a search
 [dependencies]
 textfmt = { path = "../../textfmt" }
 
+# Test fixtures only: a private temp directory per test, removed on drop --
+# named from the process id and a counter, so two tests in one process can
+# never draw the same name the way a clock-tagged name could.
+[dev-dependencies]
+scratchdir = { path = "../../userspace/scratchdir" }
+
 [lints]
 workspace = true

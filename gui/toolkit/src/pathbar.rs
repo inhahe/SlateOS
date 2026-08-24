@@ -438,12 +438,23 @@ impl PathBar {
             self.selection_anchor = Some(self.cursor.byte);
         }
 
-        // Backwards through the string, which on a path holding a right-to-left
-        // directory name is not leftwards on the screen. Deliberate and
-        // unresolved: `open-questions.md` → C-Q2. `text::caret_left` is the
-        // visual alternative, built and tested, and switching is calling it
-        // here instead — but not without an answer.
-        if let Some(prev) = self.cursor.prev_in(&self.edit_text) {
+        // Leftwards on the screen, which on a path holding a right-to-left
+        // directory name is not backwards through the string: the caret walks
+        // through that name rather than jumping across it. The operator chose
+        // visual motion; the reasoning is `design-decisions.md` §541.
+        //
+        // Measured at `FONT_SIZE`/`Regular` because that is what `edit_text` is
+        // drawn at — the gaps between glyphs belong to the shaped run, so any
+        // other size would put the caret where this bar never drew it. And the
+        // returned cursor is assigned whole: its affinity is what tells apart
+        // the two screen positions that share one byte offset where the two
+        // directions meet.
+        if let Some(prev) = crate::text::caret_left(
+            &self.edit_text,
+            self.cursor,
+            FONT_SIZE,
+            FontWeightHint::Regular,
+        ) {
             self.cursor = prev;
         }
     }
@@ -459,8 +470,13 @@ impl PathBar {
             self.selection_anchor = Some(self.cursor.byte);
         }
 
-        // Logical, for the reason given in `move_cursor_left` above.
-        if let Some(next) = self.cursor.next_in(&self.edit_text) {
+        // Visual, for the reason given in `move_cursor_left` above.
+        if let Some(next) = crate::text::caret_right(
+            &self.edit_text,
+            self.cursor,
+            FONT_SIZE,
+            FontWeightHint::Regular,
+        ) {
             self.cursor = next;
         }
     }
@@ -1501,6 +1517,49 @@ mod tests {
     }
 
     // --- Navigation tests ---
+
+    /// The path bar's arrows walk the *screen*, not the string
+    /// (`design-decisions.md` §541) — and they do it in the middle of a path,
+    /// not just on a bare word.
+    ///
+    /// `/x/ab\u{05D0}\u{05D1}cd` draws as `/ x / a b <bet> <aleph> c d`: the two
+    /// Hebrew letters run right-to-left inside a left-to-right line, so the one
+    /// stored second is painted first. The `/x/` before them is unaffected, and
+    /// that is half the claim — a directory whose name is in a right-to-left
+    /// script must not change how the rest of the path is walked.
+    ///
+    /// The other half is the repeat. The two gaps where the directions meet —
+    /// `b|<bet>` and `<aleph>|c` — each answer to *both* byte 5 and byte 9, and
+    /// which one is reported depends on the side the caret is on. It keeps the
+    /// side it is travelling towards, so leftwards reports 9 at both gaps and
+    /// rightwards reports 5 at both.
+    ///
+    /// **A failure here showing a sequence without the repeat is §541's
+    /// measured trap**: a bar that stored only the byte cannot tell the second
+    /// 9 from the first, and jumps the whole directory name in one keypress —
+    /// worse than the logical motion this replaced.
+    #[test]
+    fn the_path_bars_arrows_cross_a_right_to_left_directory_name_letter_by_letter() {
+        let mut bar = PathBar::new("/x/ab\u{05D0}\u{05D1}cd");
+        bar.handle_key_event(&key_press_ctrl(Key::L)); // edit mode copies `path`
+        bar.drain_events();
+        assert_eq!(bar.edit_text, "/x/ab\u{05D0}\u{05D1}cd");
+        assert_eq!(bar.cursor.byte(), 11, "edit mode starts at the end");
+
+        let mut leftwards = Vec::new();
+        for _ in 0..9 {
+            bar.handle_key_event(&key_press(Key::Left));
+            leftwards.push(bar.cursor.byte());
+        }
+        assert_eq!(leftwards, vec![10, 9, 7, 9, 4, 3, 2, 1, 0]);
+
+        let mut rightwards = Vec::new();
+        for _ in 0..9 {
+            bar.handle_key_event(&key_press(Key::Right));
+            rightwards.push(bar.cursor.byte());
+        }
+        assert_eq!(rightwards, vec![1, 2, 3, 4, 5, 7, 5, 10, 11]);
+    }
 
     #[test]
     fn test_navigate_via_enter() {

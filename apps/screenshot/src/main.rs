@@ -265,7 +265,15 @@ impl Capture {
     }
 
     /// Set the timestamp on this capture.
-    pub fn with_timestamp(mut self, year: u16, month: u8, day: u8, hour: u8, min: u8, sec: u8) -> Self {
+    pub fn with_timestamp(
+        mut self,
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        min: u8,
+        sec: u8,
+    ) -> Self {
         self.timestamp = (year, month, day, hour, min, sec);
         self
     }
@@ -374,12 +382,25 @@ pub fn write_bmp(path: &Path, width: u32, height: u32, pixels: &[u32]) -> Result
         });
     }
 
-    let row_bytes = width.checked_mul(BMP_BYTES_PER_PIXEL).ok_or(BmpError::DimensionOverflow)?;
-    let pixel_data_size = row_bytes.checked_mul(height).ok_or(BmpError::DimensionOverflow)?;
+    let row_bytes = width
+        .checked_mul(BMP_BYTES_PER_PIXEL)
+        .ok_or(BmpError::DimensionOverflow)?;
+    let pixel_data_size = row_bytes
+        .checked_mul(height)
+        .ok_or(BmpError::DimensionOverflow)?;
     let header_size = BMP_FILE_HEADER_SIZE + BMP_INFO_HEADER_SIZE;
-    let file_size = header_size.checked_add(pixel_data_size).ok_or(BmpError::DimensionOverflow)?;
+    let file_size = header_size
+        .checked_add(pixel_data_size)
+        .ok_or(BmpError::DimensionOverflow)?;
 
-    let data = encode_bmp_bytes(width, height, pixels, file_size, header_size, pixel_data_size)?;
+    let data = encode_bmp_bytes(
+        width,
+        height,
+        pixels,
+        file_size,
+        header_size,
+        pixel_data_size,
+    )?;
     safeio::write_atomically(path, &data)?;
     Ok(())
 }
@@ -429,12 +450,25 @@ pub fn encode_bmp(width: u32, height: u32, pixels: &[u32]) -> Result<Vec<u8>, Bm
         });
     }
 
-    let row_bytes = width.checked_mul(BMP_BYTES_PER_PIXEL).ok_or(BmpError::DimensionOverflow)?;
-    let pixel_data_size = row_bytes.checked_mul(height).ok_or(BmpError::DimensionOverflow)?;
+    let row_bytes = width
+        .checked_mul(BMP_BYTES_PER_PIXEL)
+        .ok_or(BmpError::DimensionOverflow)?;
+    let pixel_data_size = row_bytes
+        .checked_mul(height)
+        .ok_or(BmpError::DimensionOverflow)?;
     let header_size = BMP_FILE_HEADER_SIZE + BMP_INFO_HEADER_SIZE;
-    let file_size = header_size.checked_add(pixel_data_size).ok_or(BmpError::DimensionOverflow)?;
+    let file_size = header_size
+        .checked_add(pixel_data_size)
+        .ok_or(BmpError::DimensionOverflow)?;
 
-    encode_bmp_bytes(width, height, pixels, file_size, header_size, pixel_data_size)
+    encode_bmp_bytes(
+        width,
+        height,
+        pixels,
+        file_size,
+        header_size,
+        pixel_data_size,
+    )
 }
 
 /// Internal helper: builds the complete BMP byte buffer.
@@ -449,25 +483,25 @@ fn encode_bmp_bytes(
     let mut buf = Vec::with_capacity(file_size as usize);
 
     // --- BITMAPFILEHEADER (14 bytes) ---
-    buf.extend_from_slice(b"BM");                          // magic
-    buf.extend_from_slice(&file_size.to_le_bytes());       // file size
-    buf.extend_from_slice(&0u16.to_le_bytes());            // reserved1
-    buf.extend_from_slice(&0u16.to_le_bytes());            // reserved2
-    buf.extend_from_slice(&header_offset.to_le_bytes());   // offset to pixel data
+    buf.extend_from_slice(b"BM"); // magic
+    buf.extend_from_slice(&file_size.to_le_bytes()); // file size
+    buf.extend_from_slice(&0u16.to_le_bytes()); // reserved1
+    buf.extend_from_slice(&0u16.to_le_bytes()); // reserved2
+    buf.extend_from_slice(&header_offset.to_le_bytes()); // offset to pixel data
 
     // --- BITMAPINFOHEADER (40 bytes) ---
     buf.extend_from_slice(&BMP_INFO_HEADER_SIZE.to_le_bytes()); // header size
-    buf.extend_from_slice(&(width as i32).to_le_bytes());       // width
+    buf.extend_from_slice(&(width as i32).to_le_bytes()); // width
     // Positive height = bottom-up row order (standard BMP)
-    buf.extend_from_slice(&(height as i32).to_le_bytes());      // height
-    buf.extend_from_slice(&1u16.to_le_bytes());                 // planes
-    buf.extend_from_slice(&32u16.to_le_bytes());                // bits per pixel
-    buf.extend_from_slice(&0u32.to_le_bytes());                 // compression (BI_RGB)
-    buf.extend_from_slice(&pixel_data_size.to_le_bytes());      // image data size
-    buf.extend_from_slice(&2835i32.to_le_bytes());              // X pixels per meter (~72 DPI)
-    buf.extend_from_slice(&2835i32.to_le_bytes());              // Y pixels per meter (~72 DPI)
-    buf.extend_from_slice(&0u32.to_le_bytes());                 // colors used
-    buf.extend_from_slice(&0u32.to_le_bytes());                 // important colors
+    buf.extend_from_slice(&(height as i32).to_le_bytes()); // height
+    buf.extend_from_slice(&1u16.to_le_bytes()); // planes
+    buf.extend_from_slice(&32u16.to_le_bytes()); // bits per pixel
+    buf.extend_from_slice(&0u32.to_le_bytes()); // compression (BI_RGB)
+    buf.extend_from_slice(&pixel_data_size.to_le_bytes()); // image data size
+    buf.extend_from_slice(&2835i32.to_le_bytes()); // X pixels per meter (~72 DPI)
+    buf.extend_from_slice(&2835i32.to_le_bytes()); // Y pixels per meter (~72 DPI)
+    buf.extend_from_slice(&0u32.to_le_bytes()); // colors used
+    buf.extend_from_slice(&0u32.to_le_bytes()); // important colors
 
     // --- Pixel data (bottom-up rows, BGRA byte order) ---
     // BMP stores rows from bottom to top. Our input is top-down ARGB.
@@ -597,7 +631,13 @@ impl RegionSelector {
         }
 
         // Semi-transparent dark overlay covering the entire screen.
-        tree.fill_rect(0.0, 0.0, self.screen_width, self.screen_height, OVERLAY_COLOR);
+        tree.fill_rect(
+            0.0,
+            0.0,
+            self.screen_width,
+            self.screen_height,
+            OVERLAY_COLOR,
+        );
 
         if self.dragging {
             let (sel_x, sel_y, sel_w, sel_h) = self.selection_rect();
@@ -615,7 +655,13 @@ impl RegionSelector {
 
             // Background for label readability.
             let label_w = text::padded_width(&label, 6.0, 13.0, FontWeightHint::Regular);
-            tree.fill_rect(label_x - 4.0, label_y - 2.0, label_w, 20.0, Color::rgba(0, 0, 0, 180));
+            tree.fill_rect(
+                label_x - 4.0,
+                label_y - 2.0,
+                label_w,
+                20.0,
+                Color::rgba(0, 0, 0, 180),
+            );
             tree.text(label_x, label_y, &label, TEXT_PRIMARY, 13.0);
         }
 
@@ -1400,7 +1446,11 @@ impl ScreenshotApp {
             };
 
             tree.fill_rounded_rect(
-                bx, by, BUTTON_WIDTH, BUTTON_HEIGHT, bg,
+                bx,
+                by,
+                BUTTON_WIDTH,
+                BUTTON_HEIGHT,
+                bg,
                 CornerRadii::all(4.0),
             );
             tree.stroke_rect(bx, by, BUTTON_WIDTH, BUTTON_HEIGHT, BORDER_COLOR, 1.0);
@@ -1447,7 +1497,13 @@ impl ScreenshotApp {
 
     fn render_countdown(&self, tree: &mut RenderTree) {
         // Dim background.
-        tree.fill_rect(0.0, 0.0, self.window_width, self.window_height, Color::rgba(0, 0, 0, 200));
+        tree.fill_rect(
+            0.0,
+            0.0,
+            self.window_width,
+            self.window_height,
+            Color::rgba(0, 0, 0, 200),
+        );
 
         // Large countdown number centered on screen.
         let cx = self.window_width / 2.0 - 20.0;
@@ -1497,7 +1553,13 @@ impl ScreenshotApp {
 
         // Annotation toolbar.
         let ann_y = TOOLBAR_HEIGHT;
-        tree.fill_rect(0.0, ann_y, self.window_width, ANNOTATION_TOOLBAR_HEIGHT, Color::rgb(55, 55, 55));
+        tree.fill_rect(
+            0.0,
+            ann_y,
+            self.window_width,
+            ANNOTATION_TOOLBAR_HEIGHT,
+            Color::rgb(55, 55, 55),
+        );
 
         for (i, tool) in PREVIEW_TOOLS.iter().enumerate() {
             let (tx, ty, tw, th) = preview_tool_rect(i);
@@ -1521,7 +1583,13 @@ impl ScreenshotApp {
 
         if let Some(ref capture) = self.current_capture {
             // Show image placeholder (the compositor would blit the actual pixels).
-            tree.fill_rect(0.0, content_y, self.window_width, content_h, Color::rgb(40, 40, 40));
+            tree.fill_rect(
+                0.0,
+                content_y,
+                self.window_width,
+                content_h,
+                Color::rgb(40, 40, 40),
+            );
 
             // Image info overlay.
             let info = format!("{}x{}", capture.width, capture.height);
@@ -1542,7 +1610,13 @@ impl ScreenshotApp {
         // Text input indicator for text tool.
         if self.annotation_tool == AnnotationTool::Text && !self.annotation_text_input.is_empty() {
             let input_y = self.window_height - STATUS_BAR_HEIGHT - 30.0;
-            tree.fill_rect(0.0, input_y, self.window_width, 30.0, Color::rgba(0, 0, 0, 180));
+            tree.fill_rect(
+                0.0,
+                input_y,
+                self.window_width,
+                30.0,
+                Color::rgba(0, 0, 0, 180),
+            );
             let display = format!("Text: {}_", self.annotation_text_input);
             tree.text(10.0, input_y + 7.0, &display, TEXT_PRIMARY, 13.0);
         }
@@ -1577,7 +1651,10 @@ impl ScreenshotApp {
         let ny = 20.0;
 
         tree.fill_rounded_rect(
-            nx, ny, nw, nh,
+            nx,
+            ny,
+            nw,
+            nh,
             Color::rgba(30, 100, 50, 230),
             CornerRadii::all(6.0),
         );
@@ -1664,7 +1741,13 @@ fn render_annotation(tree: &mut RenderTree, ann: &Annotation) {
             );
         }
         AnnotationTool::Highlight => {
-            tree.fill_rect(ann.min_x(), ann.min_y(), ann.width(), ann.height(), ann.color);
+            tree.fill_rect(
+                ann.min_x(),
+                ann.min_y(),
+                ann.width(),
+                ann.height(),
+                ann.color,
+            );
         }
     }
 }
@@ -1716,7 +1799,10 @@ impl Canvas<'_> {
         let a = u32::from(color.a);
         let inv = 255_u32.saturating_sub(a);
         let mix = |src: u8, dst: u32| -> u32 {
-            (u32::from(src).saturating_mul(a).saturating_add(dst.saturating_mul(inv))) / 255
+            (u32::from(src)
+                .saturating_mul(a)
+                .saturating_add(dst.saturating_mul(inv)))
+                / 255
         };
         let dst = *slot;
         let r = mix(color.r, (dst >> 16) & 0xFF);
@@ -1774,8 +1860,9 @@ impl Canvas<'_> {
         // `unsigned_abs` rather than `abs`: the latter panics on `i32::MIN`,
         // which a saturating subtraction can produce.
         let dx = i32::try_from(ex.saturating_sub(cx).unsigned_abs()).unwrap_or(i32::MAX);
-        let dy = 0_i32
-            .saturating_sub(i32::try_from(ey.saturating_sub(cy).unsigned_abs()).unwrap_or(i32::MAX));
+        let dy = 0_i32.saturating_sub(
+            i32::try_from(ey.saturating_sub(cy).unsigned_abs()).unwrap_or(i32::MAX),
+        );
         let sx: i32 = if cx < ex { 1 } else { -1 };
         let sy: i32 = if cy < ey { 1 } else { -1 };
         let mut err = dx.saturating_add(dy);
@@ -1805,13 +1892,7 @@ impl Canvas<'_> {
     /// off what an infinite canvas would have drawn. That is the price of a
     /// bounded loop, and it is only ever visible on the one-pixel entry stub of
     /// a line the user drew mostly outside the image.
-    fn clip_segment(
-        &self,
-        x1: f32,
-        y1: f32,
-        x2: f32,
-        y2: f32,
-    ) -> Option<((f32, f32), (f32, f32))> {
+    fn clip_segment(&self, x1: f32, y1: f32, x2: f32, y2: f32) -> Option<((f32, f32), (f32, f32))> {
         if !(x1.is_finite() && y1.is_finite() && x2.is_finite() && y2.is_finite()) {
             return None;
         }
@@ -1903,10 +1984,23 @@ pub fn flatten_annotations(capture: &Capture, annotations: &[Annotation]) -> Vec
     for ann in annotations {
         match ann.tool {
             AnnotationTool::Rectangle => {
-                canvas.stroke_rect(ann.min_x(), ann.min_y(), ann.width(), ann.height(), 2.0, ann.color);
+                canvas.stroke_rect(
+                    ann.min_x(),
+                    ann.min_y(),
+                    ann.width(),
+                    ann.height(),
+                    2.0,
+                    ann.color,
+                );
             }
             AnnotationTool::Highlight => {
-                canvas.fill_rect(ann.min_x(), ann.min_y(), ann.width(), ann.height(), ann.color);
+                canvas.fill_rect(
+                    ann.min_x(),
+                    ann.min_y(),
+                    ann.width(),
+                    ann.height(),
+                    ann.color,
+                );
             }
             AnnotationTool::Arrow => {
                 canvas.line(ann.start_x, ann.start_y, ann.end_x, ann.end_y, ann.color);
@@ -1920,8 +2014,20 @@ pub fn flatten_annotations(capture: &Capture, annotations: &[Annotation]) -> Vec
                     let base_x = ann.end_x - ux * arrow_len;
                     let base_y = ann.end_y - uy * arrow_len;
                     let wing = arrow_len * 0.5;
-                    canvas.line(ann.end_x, ann.end_y, base_x + px * wing, base_y + py * wing, ann.color);
-                    canvas.line(ann.end_x, ann.end_y, base_x - px * wing, base_y - py * wing, ann.color);
+                    canvas.line(
+                        ann.end_x,
+                        ann.end_y,
+                        base_x + px * wing,
+                        base_y + py * wing,
+                        ann.color,
+                    );
+                    canvas.line(
+                        ann.end_x,
+                        ann.end_y,
+                        base_x - px * wing,
+                        base_y - py * wing,
+                        ann.color,
+                    );
                 }
             }
             AnnotationTool::Text => {
@@ -2034,15 +2140,27 @@ fn main() {
 )]
 mod tests {
     use super::*;
+    use scratchdir::ScratchDir;
 
     // ---- Shared helpers ----
 
-    /// A fresh, empty directory under the system temp dir.
-    fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("slateos-screenshot-{tag}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        dir
+    /// A fresh, empty directory under the system temp dir, for as long as the
+    /// returned guard lives.
+    ///
+    /// It used to build a fixed path out of `tag` alone, which made the eleven
+    /// call sites below a set of names that had to stay distinct by convention
+    /// — and, worse, made two concurrent *runs* of this suite share every one
+    /// of them, since nothing in the name varied per process. The
+    /// `remove_dir_all` this opened with was the tell: a fixture that has to
+    /// delete the previous run's directory does not have one of its own.
+    ///
+    /// `ScratchDir` takes uniqueness off the caller entirely (pid plus a
+    /// process-wide counter) and removes the directory on `Drop` — the case the
+    /// trailing `remove_dir_all` lines structurally could not reach, since a
+    /// failing assertion unwinds straight past them and so the only tests that
+    /// cleaned up were the ones with nothing worth keeping.
+    fn temp_dir(tag: &str) -> ScratchDir {
+        ScratchDir::new(&format!("slateos-screenshot-{tag}"))
     }
 
     /// A directory that does not exist and whose parent does not either, so
@@ -2090,7 +2208,8 @@ mod tests {
     /// Saving the second must not destroy the first.
     #[test]
     fn a_second_capture_does_not_overwrite_the_first_ones_file() {
-        let dir = temp_dir("collide");
+        let scratch = temp_dir("collide");
+        let dir = scratch.dir().to_path_buf();
         let mut app = ScreenshotApp::new(800.0, 600.0);
         app.settings.save_directory = dir.clone();
         app.settings.default_action = PostCaptureAction::SaveToFile;
@@ -2116,14 +2235,14 @@ mod tests {
             first_bytes,
             "the two captures are different images and must not be one file"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The suffix must keep the file a `.bmp`, or anything dispatching on
     /// extension stops recognising it.
     #[test]
     fn a_disambiguated_name_keeps_its_extension() {
-        let dir = temp_dir("ext");
+        let scratch = temp_dir("ext");
+        let dir = scratch.dir().to_path_buf();
         std::fs::write(dir.join("shot.bmp"), b"taken").expect("occupy");
         let picked = unused_save_path(&dir, "shot.bmp");
         assert_eq!(picked, dir.join("shot (2).bmp"));
@@ -2133,14 +2252,14 @@ mod tests {
 
         // A free name is used as-is -- no suffix on the common case.
         assert_eq!(unused_save_path(&dir, "fresh.bmp"), dir.join("fresh.bmp"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Re-saving the *same* capture updates the file it already made, rather
     /// than leaving a trail of near-duplicates behind every annotation.
     #[test]
     fn re_saving_one_capture_rewrites_its_own_file() {
-        let dir = temp_dir("resave");
+        let scratch = temp_dir("resave");
+        let dir = scratch.dir().to_path_buf();
         let mut app = app_in_preview();
         app.settings.save_directory = dir.clone();
 
@@ -2160,15 +2279,19 @@ mod tests {
             .expect("list")
             .filter_map(Result::ok)
             .collect();
-        assert_eq!(entries.len(), 1, "annotating and re-saving left extra files");
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            entries.len(),
+            1,
+            "annotating and re-saving left extra files"
+        );
     }
 
     /// Discarding a capture must drop the name it was using, or the next
     /// capture inherits it and writes over a screenshot the user kept.
     #[test]
     fn a_discarded_capture_does_not_lend_its_file_to_the_next_one() {
-        let dir = temp_dir("discard");
+        let scratch = temp_dir("discard");
+        let dir = scratch.dir().to_path_buf();
         let mut app = app_in_preview();
         app.settings.save_directory = dir.clone();
 
@@ -2185,7 +2308,6 @@ mod tests {
             kept_bytes,
             "the discarded capture's file was overwritten by the next capture"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A failed save must not claim the name it could not create: the retry
@@ -2204,7 +2326,8 @@ mod tests {
     /// moving the `fs::write` earlier would silently break it.
     #[test]
     fn a_rejected_encode_leaves_the_previous_file_untouched() {
-        let dir = temp_dir("reject");
+        let scratch = temp_dir("reject");
+        let dir = scratch.dir().to_path_buf();
         let path = dir.join("shot.bmp");
         std::fs::write(&path, b"the screenshot the user already had").expect("seed");
 
@@ -2214,7 +2337,6 @@ mod tests {
             b"the screenshot the user already had",
             "the file the user already had was damaged by a rejected save"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The atomic write stages through a temporary in the same directory. It
@@ -2228,7 +2350,8 @@ mod tests {
     /// `a_save_goes_through_safeio`'s job.
     #[test]
     fn a_save_leaves_no_temporary_files_behind() {
-        let dir = temp_dir("litter");
+        let scratch = temp_dir("litter");
+        let dir = scratch.dir().to_path_buf();
         let path = dir.join("shot.bmp");
         write_bmp(&path, 4, 4, &[0xFF00_00FFu32; 16]).expect("save");
         let names: Vec<String> = std::fs::read_dir(&dir)
@@ -2246,7 +2369,6 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(after, vec!["shot.bmp".to_string()]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A screenshot is written through `safeio`, not `std::fs::write`.
@@ -2269,7 +2391,8 @@ mod tests {
     /// between.
     #[test]
     fn a_save_goes_through_safeio() {
-        let dir = temp_dir("routing");
+        let scratch = temp_dir("routing");
+        let dir = scratch.dir().to_path_buf();
         let path = dir.join("shot.bmp");
 
         let before = safeio::writes_performed();
@@ -2281,10 +2404,16 @@ mod tests {
             "the save did not go through safeio (writes_performed stayed at {before}) \
              -- write_bmp must not use std::fs::write"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn annotation(tool: AnnotationTool, x1: f32, y1: f32, x2: f32, y2: f32, color: Color) -> Annotation {
+    fn annotation(
+        tool: AnnotationTool,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        color: Color,
+    ) -> Annotation {
         let mut ann = Annotation::new(tool, x1, y1, color);
         ann.end_x = x2;
         ann.end_y = y2;
@@ -2302,7 +2431,8 @@ mod tests {
     /// promised they would be.
     #[test]
     fn annotations_reach_the_saved_file() {
-        let dir = temp_dir("baked");
+        let scratch = temp_dir("baked");
+        let dir = scratch.dir().to_path_buf();
         let mut app = app_in_preview();
         app.settings.save_directory = dir.clone();
         app.annotations.push(annotation(
@@ -2341,7 +2471,10 @@ mod tests {
             HIGHLIGHT_COLOR,
         )];
         let flat = flatten_annotations(&capture, &anns);
-        assert_eq!(capture.pixels, original, "the capture itself was painted on");
+        assert_eq!(
+            capture.pixels, original,
+            "the capture itself was painted on"
+        );
         assert_ne!(flat, original, "the flattened copy was not painted on");
     }
 
@@ -2355,7 +2488,14 @@ mod tests {
     fn a_rectangle_paints_its_border_and_not_its_interior() {
         let capture = Capture::solid(40, 40, 0xFF0000FF);
         let red = Color::rgb(255, 0, 0);
-        let anns = [annotation(AnnotationTool::Rectangle, 10.0, 10.0, 30.0, 30.0, red)];
+        let anns = [annotation(
+            AnnotationTool::Rectangle,
+            10.0,
+            10.0,
+            30.0,
+            30.0,
+            red,
+        )];
         let flat = flatten_annotations(&capture, &anns);
         let at = |x: usize, y: usize| flat[y * 40 + x];
 
@@ -2440,8 +2580,22 @@ mod tests {
     fn annotations_outside_the_image_are_clipped() {
         let capture = Capture::solid(20, 20, 0xFF0000FF);
         let anns = [
-            annotation(AnnotationTool::Rectangle, 100.0, 100.0, 200.0, 200.0, Color::RED),
-            annotation(AnnotationTool::Highlight, -50.0, -50.0, -10.0, -10.0, HIGHLIGHT_COLOR),
+            annotation(
+                AnnotationTool::Rectangle,
+                100.0,
+                100.0,
+                200.0,
+                200.0,
+                Color::RED,
+            ),
+            annotation(
+                AnnotationTool::Highlight,
+                -50.0,
+                -50.0,
+                -10.0,
+                -10.0,
+                HIGHLIGHT_COLOR,
+            ),
             annotation(AnnotationTool::Arrow, -30.0, 10.0, -5.0, 10.0, Color::RED),
         ];
         assert_eq!(flatten_annotations(&capture, &anns), capture.pixels);
@@ -2487,9 +2641,30 @@ mod tests {
     fn a_degenerate_annotation_does_not_panic() {
         let capture = Capture::solid(10, 10, 0xFF000000);
         let anns = [
-            annotation(AnnotationTool::Rectangle, f32::NAN, 0.0, 5.0, 5.0, Color::RED),
-            annotation(AnnotationTool::Arrow, 0.0, 0.0, f32::INFINITY, 0.0, Color::RED),
-            annotation(AnnotationTool::Highlight, 0.0, f32::NEG_INFINITY, 5.0, 5.0, HIGHLIGHT_COLOR),
+            annotation(
+                AnnotationTool::Rectangle,
+                f32::NAN,
+                0.0,
+                5.0,
+                5.0,
+                Color::RED,
+            ),
+            annotation(
+                AnnotationTool::Arrow,
+                0.0,
+                0.0,
+                f32::INFINITY,
+                0.0,
+                Color::RED,
+            ),
+            annotation(
+                AnnotationTool::Highlight,
+                0.0,
+                f32::NEG_INFINITY,
+                5.0,
+                5.0,
+                HIGHLIGHT_COLOR,
+            ),
         ];
         let _ = flatten_annotations(&capture, &anns);
     }
@@ -2498,16 +2673,31 @@ mod tests {
 
     #[test]
     fn ctrl_s_reports_where_it_saved() {
-        let dir = temp_dir("reports");
+        let scratch = temp_dir("reports");
+        let dir = scratch.dir().to_path_buf();
         let mut app = app_in_preview();
         app.settings.save_directory = dir;
 
         assert!(app.handle_event(&Event::Key(ctrl(Key::S))));
 
-        let notif = app.notification.as_ref().expect("Ctrl+S said nothing at all");
-        let path = notif.file_path.as_ref().expect("no path in the notification");
-        assert!(path.exists(), "notification named {} which does not exist", path.display());
-        assert!(notif.message.contains("saved"), "message was {:?}", notif.message);
+        let notif = app
+            .notification
+            .as_ref()
+            .expect("Ctrl+S said nothing at all");
+        let path = notif
+            .file_path
+            .as_ref()
+            .expect("no path in the notification");
+        assert!(
+            path.exists(),
+            "notification named {} which does not exist",
+            path.display()
+        );
+        assert!(
+            notif.message.contains("saved"),
+            "message was {:?}",
+            notif.message
+        );
     }
 
     /// The bug: `let _ = self.save_current()`. A save that failed looked
@@ -2519,13 +2709,19 @@ mod tests {
 
         app.handle_event(&Event::Key(ctrl(Key::S)));
 
-        let notif = app.notification.as_ref().expect("a failed save said nothing");
+        let notif = app
+            .notification
+            .as_ref()
+            .expect("a failed save said nothing");
         assert!(
             notif.message.contains("Failed"),
             "message was {:?}",
             notif.message
         );
-        assert!(notif.file_path.is_none(), "a failed save must not claim a path");
+        assert!(
+            notif.file_path.is_none(),
+            "a failed save must not claim a path"
+        );
     }
 
     #[test]
@@ -2553,7 +2749,8 @@ mod tests {
         app.save_current_notifying();
         assert!(app.notification.is_some(), "the error was suppressed");
 
-        let dir = temp_dir("quiet-ok");
+        let scratch = temp_dir("quiet-ok");
+        let dir = scratch.dir().to_path_buf();
         app.settings.save_directory = dir;
         app.notification = None;
         assert!(app.save_current_notifying());
@@ -2581,14 +2778,18 @@ mod tests {
 
     #[test]
     fn clicking_save_in_the_toolbar_saves() {
-        let dir = temp_dir("toolbar-save");
+        let scratch = temp_dir("toolbar-save");
+        let dir = scratch.dir().to_path_buf();
         let mut app = app_in_preview();
         app.settings.save_directory = dir;
 
         let (x, y, w, h) = preview_action_rect(app.window_width, 0);
         assert!(app.handle_event(&click(x + w / 2.0, y + h / 2.0)));
 
-        let notif = app.notification.as_ref().expect("the Save button did nothing");
+        let notif = app
+            .notification
+            .as_ref()
+            .expect("the Save button did nothing");
         assert!(notif.file_path.as_ref().is_some_and(|p| p.exists()));
     }
 
@@ -2625,8 +2826,22 @@ mod tests {
     #[test]
     fn clicking_undo_removes_the_last_annotation() {
         let mut app = app_in_preview();
-        app.annotations.push(annotation(AnnotationTool::Rectangle, 1.0, 1.0, 5.0, 5.0, Color::RED));
-        app.annotations.push(annotation(AnnotationTool::Arrow, 2.0, 2.0, 9.0, 9.0, Color::RED));
+        app.annotations.push(annotation(
+            AnnotationTool::Rectangle,
+            1.0,
+            1.0,
+            5.0,
+            5.0,
+            Color::RED,
+        ));
+        app.annotations.push(annotation(
+            AnnotationTool::Arrow,
+            2.0,
+            2.0,
+            9.0,
+            9.0,
+            Color::RED,
+        ));
 
         let (x, y, w, h) = preview_undo_rect();
         app.handle_event(&click(x + w / 2.0, y + h / 2.0));
@@ -2696,7 +2911,7 @@ mod tests {
 
         // BMP is bottom-up, so first row in file is row 1 (bottom).
         // Row 1, pixel 0 = blue (ARGB 0xFF0000FF) → BGRA = (0xFF, 0x00, 0x00, 0xFF)
-        assert_eq!(data[offset], 0xFF);     // B
+        assert_eq!(data[offset], 0xFF); // B
         assert_eq!(data[offset + 1], 0x00); // G
         assert_eq!(data[offset + 2], 0x00); // R
         assert_eq!(data[offset + 3], 0xFF); // A
@@ -2708,8 +2923,8 @@ mod tests {
         assert_eq!(data[offset + 7], 0xFF); // A
 
         // Row 0, pixel 0 = red (ARGB 0xFFFF0000) → BGRA = (0x00, 0x00, 0xFF, 0xFF)
-        assert_eq!(data[offset + 8], 0x00);  // B
-        assert_eq!(data[offset + 9], 0x00);  // G
+        assert_eq!(data[offset + 8], 0x00); // B
+        assert_eq!(data[offset + 9], 0x00); // G
         assert_eq!(data[offset + 10], 0xFF); // R
         assert_eq!(data[offset + 11], 0xFF); // A
 
@@ -2768,8 +2983,8 @@ mod tests {
 
     #[test]
     fn test_capture_default_filename() {
-        let capture = Capture::new(100, 100, vec![0; 10000])
-            .with_timestamp(2026, 5, 17, 14, 30, 45);
+        let capture =
+            Capture::new(100, 100, vec![0; 10000]).with_timestamp(2026, 5, 17, 14, 30, 45);
         assert_eq!(capture.default_filename(), "screenshot_20260517_143045.bmp");
     }
 

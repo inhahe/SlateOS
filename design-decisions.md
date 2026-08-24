@@ -41122,3 +41122,680 @@ pinned separately by `the_crosshairs_are_legible_on_the_lens_in_both_modes`:
 the crosshairs used to be white at alpha 128, which over Latte `base` measures
 **1.06:1** — a hairline no one can see, in a magnifier. They are now
 `readable_on(p.base)` at full alpha, 14.50:1 dark and 16.58:1 light.
+
+## 534. A repeated control gets a module that draws it, and the ink is chosen for whatever the shape's outline is read against
+
+**Date:** 2026-08-24
+**Decided by:** Claude (autonomous)
+
+**In short:** Two controls in the desktop shell — the on/off switch and the
+horizontal slider — were each being drawn from scratch in every panel that
+needed one: seventeen hand-written copies of the switch and five of the slider.
+Every copy had to pick the colour of the small moving part (the switch's knob,
+the slider's handle), and they picked wrong in ways that made that part hard or
+impossible to see. Rather than correct twenty-two copies, each control now has
+one module that draws it and picks that colour itself. The second half of the
+decision is *which* colour each one picks — and the two answers are opposite,
+because the two shapes sit on different backgrounds.
+
+### What was decided
+
+1. **A control drawn by more than one module gets its own module.**
+   `gui/desktop/src/switch.rs` and `gui/desktop/src/slider.rs` draw the
+   geometry and choose the ink; call sites pass position, size, state and the
+   *background* colours only.
+2. **A switch knob is `appearance::readable_on(track)`.**
+3. **A slider thumb is `p.text`** — deliberately *not* derived from the fill.
+4. **The general rule behind 2 and 3:** an ink is chosen for the background the
+   shape's outline is read against, and *containment* is what decides which
+   background that is.
+
+### Why the ink rules are opposite
+
+This is the part that looks like an inconsistency and is not.
+
+A switch knob is inset two pixels from every edge of its track. It is
+*contained*: the track is the only thing behind it, so the track is what it must
+be legible against, and `readable_on(track)` — which returns near-black on a
+pale fill and near-white on a deep one — is exactly right. Measured, the
+seventeen copies were using `p.text`, which on the stock dark accent is 1.35:1.
+
+A slider thumb is *bigger* than its track: a 10-to-14 pixel disc on a track 4 or
+6 pixels tall. Most of it hangs over the card behind the control, so the round
+outline that says *this is the handle* is drawn against the card, not the fill.
+Apply the switch rule and you get `readable_on(accent)` = `#11111B`, which on
+the stock dark theme is 1.1:1 against a `base` card — the handle disappears into
+the page while gaining a crisp interior edge nobody can see. `p.text` is
+11.34:1 against the card and 1.46:1 against the fill; the weak number is the one
+that costs nothing, because the fill only ever touches the thumb's *interior*,
+which carries no information once the circle is visible.
+
+`slider.rs` asserts the containment premise directly rather than relying on the
+prose, so a future shape whose thumb fitted *inside* its track fails a test
+instead of silently inheriting reasoning that no longer applies to it.
+
+### Alternatives considered
+
+**(a) Fix the colour in place at each of the twenty-two sites.** Smaller diff,
+no new module, nothing else can regress. Rejected: that is what the tree already
+was. `mouse_settings.rs` had *already* worked out that a handle on an accent
+fill needs a derived colour and had already fixed its own slider, and that fix
+stayed in the one file where it was made while four other sliders and seventeen
+switches carried the defect. A correct answer callers cannot reach grows wrong
+copies — the defect the whole 49-module palette conversion existed to remove. In
+-place fixes also leave the shape open for the eighteenth panel, which is not a
+hypothetical: this shell gains panels.
+
+**(b) One `controls.rs` holding both.** Rejected on a thin margin: two modules
+named for two controls read better at the call site (`crate::switch::switch`,
+`crate::slider::Slider`), and each control's ink reasoning is long enough to
+want its own module doc. Revisit if a third and fourth control arrive.
+
+**(c) Make the thumb's ink a parameter, as the track's is.** Rejected — that is
+precisely how one site came to ink its thumb with the same accent as the fill
+underneath it. The track *is* a parameter, because panels disagree about it on
+purpose (most use `p.accent` for *on*, but the accessibility and notification
+panels use `p.green`, since there *on* means safe rather than selected). The ink
+is not a disagreement anyone is entitled to have.
+
+**(d) Unify both controls on one rule for consistency's sake.** Rejected. The
+consistency would be superficial and the result would be worse on one of the two
+— which is the whole content of the containment argument above.
+
+### What it cost
+
+The switch conversion touched 18 files and broke 20 tests, every one of them
+correctly: they had pinned the knob to `p.text`, i.e. they asserted the bug.
+Each was rewritten to state the claim the fix makes rather than relaxed. The
+slider conversion broke two more, one of which
+(`touchpad::every_control_that_offers_something_follows_the_accent`) had listed
+the slider knob as a *fourth* thing that correctly follows the accent — the bug
+written down as a requirement. It now asserts the opposite, with the reason
+beside it.
+
+### Two limits worth recording
+
+- **The switch's 4.5:1 floor could not be asserted over every palette role.**
+  `readable_on` picks between exactly two inks, so on a mid-grey (`overlay0`,
+  `#6C7086`) the better of the two is 4.32:1 and 4.5 is unreachable without a
+  third ink. The floor is asserted over the colours a switch track can actually
+  be; a separate test asserts the weaker but universal claim — that the choice
+  between the two inks is the right way round — on all 42 role-mode pairs. That
+  second test earns its place: `readable_on` decides with a fast weighted-luma
+  threshold while legibility is governed by gamma-corrected WCAG relative
+  luminance, and nothing before now had checked that the approximation never
+  crosses over. It does not.
+- **The two controls use different floors on purpose.** The switch asserts
+  4.5:1 and the slider 3:1. 3:1 is WCAG SC 1.4.11 (*Non-text Contrast*), the
+  criterion that actually applies to a graphical object identifying a control;
+  4.5:1 is SC 1.4.3, for text. The stricter number is kept where it is
+  reachable and not invented where it is not — ten of the slider's twelve
+  card-mode pairs clear 4.5 anyway, and the two that do not are a palette fact
+  logged separately as
+  `TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES-IS-BELOW-THE-CONTRAST-FLOOR`.
+
+## 535. A refactor that deletes call sites must resolve the reintroduction defects it strands, splitting them into re-targeted and retired-by-construction
+
+**Date:** 2026-08-24
+**Decided by:** Claude (autonomous)
+
+**In short:** We keep a harness that proves our tests are real, by putting each
+bug back into the code on purpose and checking that a test complains. When the
+switch and slider work replaced 22 hand-drawn controls with two shared modules,
+it deleted the exact lines 56 of those recorded bugs were written against. The
+harness noticed and said so — but a bug it can no longer put back is a test we
+have stopped proving, while the list still *looks* as long as it was. The
+decision is that this is never allowed to sit: every stranded entry is either
+pointed at wherever the choice moved to, or deleted with a note saying which
+single new entry replaced it, and nothing may be left merely stale.
+
+### What happened
+
+`scripts/reintro-palette.py` holds 1705 *defects*: a named bug, a file, one or
+more literal find/replace pairs that put it back, and the tests expected to
+fail when it is in. `--check` applies nothing and only asks whether each
+pattern still matches. After the two control modules landed it reported **56
+stale** — spread over nine files, all of them either a switch or a slider.
+
+That number is the refactor's own footprint. `touchpad.rs` had eleven, because
+it had a switch *and* a slider and both were hand-drawn.
+
+### The split
+
+The 56 are not one thing, and treating them as one would have thrown away real
+coverage or kept fake coverage. They divide by a single question: **does the
+panel still choose this colour?**
+
+| | Count | Disposition |
+|---|---|---|
+| The panel still chooses it; only the text around it moved | 30 | Re-target |
+| The panel no longer names it at all | 26 | Retire, naming the replacement |
+
+*Re-targeted* means, for example, that `color: if enabled { p.green } else {
+p.surface2 },` is now the sixth argument to `switch(...)` and so is written
+`if enabled { p.green } else { p.surface2 },`; a slider's track and fill became
+the named struct fields `track:` and `fill:`. The bug is unchanged and still
+belongs to the panel. Eight of the accessibility panel's defects are of this
+kind — the choice of `green` over `accent` there is a real editorial decision
+that panel makes, and it should stay guarded at that panel.
+
+*Retired* means the opposite, and it is the refactor's whole point. Fourteen
+separate defects said "the switch knob keeps Mocha's `text`" — one per panel.
+There is now exactly one line in the shell that inks a knob, so that bug can be
+written down once and only once. Seven thumb-colour defects and three
+empty-fill guards collapse the same way. Deleting them is not a coverage loss;
+it is the coverage becoming *cheaper to state*, and the count dropping from 56
+sites to 3 lines is the measurement of what the refactor bought.
+
+One entry is retired for a third reason and says so explicitly: `AAAA…x12`
+asserted that a slider thumb following the body text was **wrong** and that the
+accent was right. That is exactly backwards — an accent thumb sitting on an
+accent fill is 1.00:1 — so the expectation it encoded is the bug that §534
+fixed. Retiring it as merely relocated would have hidden that.
+
+### The rule this establishes
+
+1. **A refactor is not finished while `--check` is non-zero.** Stale is not a
+   warning to triage later; the whole value of the list is that its length
+   means something.
+2. **Ask "does the caller still choose this?" per entry, not per file.** The
+   nine affected files each contained both kinds.
+3. **A retirement must name its replacement.** Every deleted entry leaves a
+   four-line comment in place saying which module-50 defect now covers it. A
+   silent deletion is indistinguishable from giving up.
+4. **Check for orphans before accepting the retirements.** Diff the (file,
+   test) coverage sets before and after; any pair that loses its last prover is
+   a test that has quietly stopped being proved.
+
+That last check earned its keep immediately. Two pairs came back:
+
+- `mouse_settings::the_knob_is_legible_on_both_pills` had **no** prover at all,
+  because it is a test the switch work added and I had not yet declared
+  anywhere. It pins the ink by equality with `readable_on(pill)` rather than by
+  a contrast floor, so it fails for *any* change to that one line — which makes
+  it the natural inheritor of all fourteen retired knob defects, and it is now
+  declared on `CCC…x80`.
+- `touchpad::the_panel_draws_nothing_that_is_immediately_erased` lost its only
+  prover when the empty-fill guard moved into `slider.rs`. The guard itself is
+  proved once now, by `JJJ…x80` — but the harness sweeps per file, so a defect
+  in `slider.rs` never asks touchpad's sweep anything, and a sweep nothing can
+  trip proves nothing. `NNN…x80` patches touchpad's `frac` to `1.0` so the fill
+  covers the track exactly, which is the erasure the test is named for.
+
+Two further pairs looked orphaned and were not: `the_knob_is_the_same_ink_on_both_pills`
+and `the_thumb_is_derived_from_the_fill_it_ends` no longer exist — §534 renamed
+and inverted both — and their successors are proved.
+
+### Alternatives rejected
+
+- **Leave the 56 stale and let `--check` report them.** Rejected: this is the
+  failure the harness exists to prevent, one level up. A test nobody proves and
+  a defect nobody can apply fail the same way — silently, while looking fine.
+- **Re-target all 56 at `switch.rs`/`slider.rs`.** Rejected: seventeen defects
+  all patching one line is seventeen copies of one experiment. It would keep
+  the count flattering and make the sweep seventeen times slower for no extra
+  information, which is the same "wrong copies of one answer" disease §534 was
+  about — just moved into the test harness.
+- **Delete all 56 and rely on module 50.** Rejected: it would throw away the 30
+  that are still genuine per-panel editorial choices. That the accessibility
+  page uses `green` where every other page uses `accent` is a decision that
+  belongs to that page and should break there if someone changes it.
+- **Regenerate the defect list mechanically from the diff.** Rejected: the
+  interesting half of each entry is the *title* — the sentence saying what a
+  user would see. That cannot be derived from a patch, and an entry without it
+  is a checksum, not a test of a test.
+
+### Limits
+
+- The split was made by reading all 56, not by a rule a script could apply. A
+  future refactor of this size gets the same manual pass; there is no shortcut,
+  and pretending otherwise is how the wrong half gets deleted.
+- The orphan check compares against the *previous* defect list, so it only
+  catches coverage lost in the same change that introduced the retirements. A
+  test that was never proved by anything is invisible to it — which is how
+  `the_knob_is_legible_on_both_pills` came to have no prover in the first
+  place, and is logged in known-issues as its own gap.
+
+## 536. `readable_on` measures the contrast ratio rather than estimating brightness, and so guarantees a floor for colours nobody chose in advance
+
+**Date:** 2026-08-24
+**Decided by:** Claude (autonomous)
+
+**In short:** The shell picks black-ish or white-ish lettering for anything drawn on a coloured fill — a switch knob, a title bar, the label on a selected chip. It used to guess which one by adding up the red, green and blue of the fill and comparing that sum against a fixed number. That guess is close enough for the fourteen accent colours the settings page offers, but the user can also pick *any* colour with a custom-accent picker, and for some of those the guess is badly wrong: a bright green gets pale lettering that is nearly invisible on it. The fix is to stop guessing. Ask the actual legibility ratio — the same number the accessibility standards and all our own tests are stated in — and use whichever of the two inks scores higher.
+
+### What was there
+
+```rust
+pub fn readable_on(bg: Color) -> Color {
+    let luma = 0.299 * f32::from(bg.r) + 0.587 * f32::from(bg.g) + 0.114 * f32::from(bg.b);
+    if luma > 140.0 { DARK_EXTREME } else { LIGHT_EXTREME }
+}
+```
+
+*Luma* (a weighted sum of the stored bytes, green counting most because the eye is most sensitive to it) is a reasonable estimate of perceived brightness, and 140 was a reasonable place to cut it. Both halves of that sentence are true and the function was still wrong, for a reason worth stating precisely:
+
+**Luma is not a monotone function of contrast.** Contrast ratio (WCAG 2's, the one every legibility floor in this tree is written in) first *linearises* each channel — undoes the sRGB gamma curve, so the number describes light rather than the byte that encodes it — and then weights the results differently again (0.2126/0.7152/0.0722). Two colours with the same luma can therefore sit on opposite sides of the real crossover. So a luma threshold cannot be tuned to agree with the ratio everywhere; it can only be tuned to agree on some particular set of colours.
+
+Which is exactly what had happened. Measured over the whole 24-bit cube, the threshold's worst answer was **1.40:1**, at `#00EE02` — luma 139.93, a hair under the cut, so called dark and inked `#EFF1F5`. That is not a contrived colour: `AccentColor::Custom` lets the appearance page write any RGB triple into `custom_accent`, `effective_accent()` returns it, and `Palette::accent` is what switch pills, title bars and chips are filled with. A user who dragged the picker to a bright green got a switch knob they could not see.
+
+The threshold's *other* failure was quieter and is the one that made this hard to notice: it was never checked against anything. `gui/appearance`'s own colours have a wide empty band around it — the nearest are `#7F849C` at luma 133 and `#9CA0B0` at 161 — so the threshold could have been anywhere from 134 to 160 without a single test changing its verdict. A number that nothing constrains is a number that is only as right as the day it was typed.
+
+### What is there now
+
+```rust
+pub fn readable_on(bg: Color) -> Color {
+    if contrast_ratio(bg, DARK_EXTREME) >= contrast_ratio(bg, LIGHT_EXTREME) {
+        DARK_EXTREME
+    } else {
+        LIGHT_EXTREME
+    }
+}
+```
+
+with `relative_luminance` and `contrast_ratio` made public, because they are the input to every legibility question the shell asks and there must be exactly one implementation of the question.
+
+The property this buys is the point of the change, and it is not "slightly better on average":
+
+| | luma threshold at 140 | contrast comparison |
+|---|---|---|
+| worst ink over the whole cube | **1.40:1** (`#00EE02`) | **4.07:1** (`#B82EE5`) |
+| depends on which colours are in the palette | yes | no |
+| stated in the same units as the floors the tests assert | no | yes |
+
+4.07:1 is not a target anyone picked. It falls out of the two extremes: it is the ratio at the colour equidistant from both, and it is therefore the *best possible* guarantee for a function that must answer with one of two fixed inks. It sits above the 3:1 that SC 1.4.11 asks of a control's outline and below the 4.5:1 that SC 1.4.3 asks of body text, which is the honest statement of what an arbitrary user-chosen accent can promise. Raising it would mean moving the extremes apart, not editing a number.
+
+### Cost paid
+
+**Almost none in what ships.** Exactly two colours in the shell's own palettes change ink, both upward: dark `overlay1` (3.27 → 5.07) and the plain grey `#808080` (3.49 → 4.75). No preset accent moves at all, so the desktop a user sees is pixel-identical unless they had chosen a custom accent in the band where the old rule was wrong — which is precisely the population the change is for.
+
+**Some in arithmetic.** Two `powf(2.4)` per channel per call instead of three multiplies. `readable_on` is called a handful of times per panel render, not per pixel; if it ever moves into a per-pixel path the answer is a 256-entry linearisation table, not a return to the estimate.
+
+**Three test fixtures lost their premise,** and that is the interesting cost. Each had chosen its fixture accent *because of* its luma:
+
+- `accessibility_settings::accented` and `default_apps::accented` used magenta `#FF00FF` because a luma sum calls it dark (105) and it therefore inked pale — which is what let their deleted-constant tables forbid `CRUST`, whose value `#11111B` is also the dark extreme. By ratio, magenta inks dark (5.98:1 against 2.77:1), so the tables could no longer distinguish a leftover `CRUST` literal from the correct answer. Both fixtures moved to indigo `#4B0082`, which is dark under both readings with a margin (11.4:1 pale against 1.4:1 dark) that no retune can close.
+- `print_manager` counts exactly three sites that move with the accent, one of which moves only if its two fixture accents *straddle* `readable_on`'s answer. They stopped straddling, so the count silently became a count of two — and, being a count, it still passed the "nothing extra follows the accent" half of its job while quietly dropping the "the derived ink is one of them" half.
+
+In all three the repair was the same shape, and it is the rule this decision leaves behind: **a fixture chosen for a property must assert that property, not describe it in a doc comment.** All three now do; a fourth flip of the ink rule fails at the fixture, naming itself, instead of at a distant assertion whose message is about something else.
+
+`display_settings` had a fourth variant of the problem: it modelled the ink rule *by hand* as a deliberately independent oracle, and the model was the luma threshold. It survived its own replacement only by luck — all fourteen accents fall on the same side under both readings — so it would have gone on passing while asserting a rule the shell no longer follows. It now transcribes the WCAG ratio. An independent oracle is only worth having while it is independently *right*; the independence is what makes it silent when it rots.
+
+### Alternatives rejected
+
+- **Retune the threshold.** No value works: the disagreement between luma and contrast is not an offset, it is a different shape. The best threshold still has a worst case around 1.4:1 somewhere in the cube.
+- **Keep the threshold and forbid custom accents outside a safe band.** Takes a feature away from the user to protect an implementation detail, and would need the contrast computation anyway to define the band.
+- **Return the ink with the higher contrast *and* widen the extremes to reach 4.5:1 everywhere.** The extremes are `LIGHT_BASE`'s value and Mocha `CRUST`'s, chosen (§532 and the constants' own docs) so that accented surfaces still look like part of this desktop. Pushing them to `#000`/`#fff` to buy 0.4 of a ratio point would make every accented label a different black from the one beside it. Rejected for the same reason `readable_on` is not `guitk::theme::contrast_text`.
+- **Leave it and document the corner.** The corner is reachable from a shipping settings picker in two clicks, and the symptom is an invisible control. Documenting a live legibility bug is not a resolution of it.
+
+### Left standing, deliberately
+
+`guitk::theme::contrast_text` has the *same* defect in a worse form: it picks pure black or white by `luminance(c) < 0.5`, where `luminance` uses a `powf(2.2)` approximation and the true crossover for black-vs-white is 0.179. Colours between those two figures get white when black is far better — around 2.3:1 at the midpoint. It is a separate crate with its own callers and its own test surface, it is not what the palette uses, and folding it into this change would have made a two-crate diff untestable as one thing. Logged in `known-issues.md` as its own item.
+
+## 537. The contrast arithmetic moves down into the toolkit, so the crate every widget depends on holds the only copy
+
+**Date:** 2026-08-24
+**Decided by:** Claude (autonomous)
+
+**In short:** Two different parts of the desktop were each working out, on their own, whether to write on a coloured button in dark ink or light ink. The appearance settings had a correct method as of §536; the widget toolkit had its own, and the toolkit's was wrong for nearly half of all colours — on a plain red button it chose white lettering when black is noticeably easier to read. The toolkit could not simply call the good one, because the good one lived in a crate that sits *above* it. So the good one moved down into the toolkit, and the appearance crate now points at it instead of keeping a copy. There is one implementation in the tree again.
+
+### The defect
+
+`guitk::theme::contrast_text` chose between pure black and pure white by thresholding relative luminance at **0.5**:
+
+```rust
+fn luminance(c: Color) -> f32 {
+    let r = (c.r as f32 / 255.0).powf(2.2);  // and g, b
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+pub fn is_dark(color: Color) -> bool { luminance(color) < 0.5 }
+pub fn contrast_text(bg: Color) -> Color {
+    if is_dark(bg) { Color::WHITE } else { Color::BLACK }
+}
+```
+
+Black and white are equally legible not at luminance 0.5 but at `sqrt(0.0525) - 0.05` ≈ **0.179**. The `+0.05` term in the WCAG ratio is a fixed allowance for ambient flare; it is a large fraction of a dark colour's luminance and a negligible fraction of a light one's, so it pushes the balance point down to roughly a sixth of the range. Everything between 0.179 and 0.5 therefore got the worse ink.
+
+Measured over all 16 777 216 colours:
+
+| | Old rule | New rule |
+|---|---|---|
+| Worst ink returned | **1.92:1**, at `#21D828` (black was available at 10.92:1) | **4.58:1** |
+| Colours given the worse ink | **41.78 %** | 0 |
+| Guarantee it can state | none — depends on which colours were nearby when 0.5 was picked | 4.58:1 for *any* colour, from the crossover |
+
+`#FF0000` and `#808080` are both in the wrong band: red was inked white at 4.00:1 with black available at 5.25:1, grey white at 3.95:1 with black at 5.32:1. These are not exotic colours.
+
+A second, independent error compounded it: `luminance` used `powf(2.2)` where sRGB is a linear segment below 0.03928 and `((v+0.055)/1.055)^2.4` above. On its own that flips only 0.56 % of the cube — small, but it is four lines to do exactly and there was no reason to approximate.
+
+### The decision, and why it is a move rather than a fix
+
+The obvious repair is to write the ratio comparison into `guitk` as well. That fixes the behaviour and leaves the actual problem in place: two crates, two implementations of relative luminance, correct today and free to drift tomorrow. This is the §534 shape — *the tree holds one correct answer that callers cannot reach, so it grows wrong copies* — and repairing the copy without removing it is treating the symptom.
+
+`guitk` cannot call `appearance`; the dependency runs `appearance → guitk`. So the single copy has to live in `guitk`, and it does now:
+
+- `guitk::theme::relative_luminance` and `guitk::theme::contrast_ratio` are public, and use the real piecewise sRGB curve.
+- `contrast_text` compares the two candidate inks by ratio, exactly as `readable_on` does one crate up.
+- `appearance` **re-exports** them — `pub use guitk::theme::{contrast_ratio, relative_luminance};` — rather than wrapping them. A wrapper is a place where two things can come apart; a re-export is not.
+
+`appearance`'s own Cargo.toml already made this argument, about `Color`, before the contrast helpers existed: the toolkit is *"the one crate whose job is to stop there being two definitions of anything."* The helpers were put in `appearance` in §536 only because that is where the bug being fixed was, which is a reason about the diff, not about where the code belongs.
+
+`readable_on` stays in `appearance` and stays separate. It answers the same question with the *palette's* near-black and near-white instead of pure black and white, because §532 requires that ink on an accented surface belong to the palette. Now that the two share their arithmetic, the only thing that differs between them is which pair of inks they choose from — which is the real distinction, and is now the only one.
+
+### `is_dark`
+
+Redefined as `contrast_text(color) == Color::WHITE` rather than given a corrected threshold of its own. Two functions with two thresholds can disagree about a colour; one defined in terms of the other cannot. The name still reads as a question about brightness and the definition is now a question about legibility, which is a mismatch — but legibility is the only question it has ever been asked, and a precise answer under an imprecise name beats the reverse. The doc comment states the crossover explicitly so the next reader does not have to rediscover that it is not 0.5.
+
+Deleting it was the alternative. It has no callers, so nothing would break. Keeping it costs two lines and gives the "someone re-adds a threshold" failure a place to be caught, which `is_dark_and_contrast_text_cannot_disagree` now does.
+
+### Cost paid
+
+**None in behaviour, and that is itself the finding.** `contrast_text` and `is_dark` had no production callers — only six tests of their own, between them checking `#14141E`, `#F0F0F0`, pure black, pure white, and the two Catppuccin backgrounds. All six are nowhere near the 0.179 crossover, so all six passed before this change and pass after it, unchanged. They were tests that could not fail for the reason they were named — which is why the defect survived in a file that looked well tested.
+
+The `known-issues.md` entry filed the day before had predicted "a run of pinned-colour test failures" from "a crate with many widget callers", and deferred the work partly on that basis. Nobody had grepped for a caller. The entry is kept, marked FIXED, with the wrong prediction left visible and labelled: **a blast radius that was estimated rather than measured has to say which it is**, or a later reader treats a guess as a finding and prices the work off it.
+
+### Rejected
+
+- **Fix `contrast_text` in place, leave `appearance`'s copy alone.** Cheaper diff, and leaves the tree with two implementations of the WCAG curve — the exact condition that produced this bug. The whole point of §534 is that the second copy is the defect, not its symptom.
+- **Move the helpers to `guitk::color` instead of `guitk::theme`.** Defensible — a colour metric is arguably a property of the colour type. But `contrast_text` and `is_dark` are in `theme`, `color.rs` is currently pure data and conversion, and splitting the metric from its only two consumers buys nothing. If `color.rs` ever grows other metrics, move all of them together.
+- **Have `appearance` keep thin wrappers with its own doc comments.** The docs read better attached to the crate a shell author is already in. But a wrapper is an editable body, and an editable body is where a divergence starts; the re-export makes divergence a compile-time impossibility. `readable_on`'s doc carries the shell-facing explanation instead.
+- **Widen `contrast_text` to return the palette extremes.** That is `readable_on`, and it is already written. The toolkit has no palette and must not acquire one.
+
+## 538. Lanes publish to `main` with a fast-forward push from their own worktree, not by merging inside the shared `os` checkout
+
+**Date:** 2026-08-21 (answered), written up 2026-08-24
+**Decided by:** Operator (Claude recommended this option) — `open-questions.md` → C-Q3, answered `b`
+
+**In short:** The three agents each work in their own private copy of the source tree, which is what stops them overwriting one another. But the last step of every finished task used to send all three into **one shared copy** — the `os` folder — to publish. Two agents were in there at the same moment on 2026-08-21 and their publish steps tangled. From now on nobody enters that folder to publish: each lane publishes with a single server-side command that needs no folder at all, and if another lane got there first the command is simply refused, so you pull their work in, re-test, and try again.
+
+### The problem
+
+`roadmap.md` step 11 said: merge your lane branch into `main` from the `os` integration worktree, then push `main`. A worktree can only be in one state at a time, so two lanes merging in it simultaneously are editing the same thing — precisely the failure the per-lane worktrees exist to prevent. On 2026-08-21 that happened: git reported *"a git process may have crashed in this repository earlier"* and one lane's merge was discarded. Nothing was lost, because a discarded publish can be re-run, but the failure is silent enough to be worth removing rather than tolerating.
+
+### The decision
+
+**Option B: publish with `git push origin lane-c:main`.**
+
+This works because the rules *already* require each lane to `git fetch origin && git merge origin/main` and re-run the tests **in its own worktree** before publishing. Once that is done there is nothing left to reconcile — the lane branch already contains everything `main` has — so the push is a fast-forward, which the server performs atomically with no working directory involved.
+
+The safety property is the important part: a fast-forward push **cannot half-succeed and cannot interleave**. If another lane published in the meantime, `main` is no longer an ancestor of the lane branch and git *refuses* the push outright. The recovery is the same work the lane was already required to do: fetch, merge, re-test, push again. A refusal is a clean, loud, recoverable state, whereas a tangled merge in a shared checkout is a quiet one.
+
+Note this is not a force-push and must never become one. `--force` here would discard another lane's published work, which is exactly the outcome the whole arrangement is built to prevent. The refusal *is* the feature.
+
+### What it gives up
+
+The ability to resolve a genuine merge conflict *during* publication. That was never wanted: the rules already say resolve-then-test-then-publish, and B makes that ordering mandatory rather than conventional. A conflict now has to be resolved in the lane's own worktree, where the tests that prove the resolution can actually be run — which is where it should have been resolved anyway. Resolving a conflict in `os` and pushing produces a `main` commit whose exact tree no lane ever tested.
+
+`os` becomes a read-only window onto the combined result rather than a place work is done.
+
+### Rejected
+
+- **A — leave `roadmap.md` step 11 as it is.** Collisions stay rare but keep happening; each costs a re-run and looks alarming in the transcript. Rare-but-silent is the worst combination for a failure mode nobody is watching for.
+- **C — add a lock around the `os` worktree,** the way QEMU runs are already serialised. Solves the same problem, but by *scheduling* access to a shared resource rather than removing the need for it. It can make an agent wait, and a lock left behind by a crashed agent blocks the other two until someone clears it — a new failure mode traded for the old one. Removing the shared resource strictly dominates queueing for it.
+- **D — do nothing and document the race.** Considered implicitly and not offered: a documented race that costs a re-run every time it fires is not a resolution.
+
+### Why this was a question rather than a change
+
+`CLAUDE.md` and `roadmap.md` step 11 are the operator's, and `CLAUDE.md`'s own text forbids editing it except on an explicit instruction. The safe publish was already *permitted* by the existing wording — it just was not *prescribed* — so lane C had been publishing this way since the collision regardless. What needed the operator was making it the rule for all three lanes.
+
+## 539. Cryptographic primitives are ported from vetted implementations; the format and plumbing around them stay ours
+
+**Date:** 2026-08-24
+**Decided by:** Operator (Claude recommended this option) — `open-questions.md` → C-Q5, answered `c`
+
+**In short:** the code that protects saved passwords, login and the lock screen is cryptography this project wrote itself — including eleven separate hand-written copies of the same hash function. From now on, the *primitives* (the hash, the cipher, the password hash) are ported from implementations that other people have already spent twenty years attacking and repairing. Everything built on top of them — the vault file format, the credential service, the login flow — stays ours. The reason for the split is that hand-written crypto fails in a way this project's usual defence does not catch: the code computes the right answer and still leaks the secret, through how long it took to compute it. No test we can write notices that.
+
+### The problem this answers
+
+Nothing was ever decided about crypto. The OS has no third-party crypto dependency, so each feature that needed a hash wrote one, it worked, and it kept happening. Turning the workspace lints on for `gui/credentials` surfaced four defects, all logged in `known-issues.md`:
+
+| Problem | What it means |
+|---|---|
+| The password vault scrambles every secret with an identical repeating pattern | two saved passwords cancel each other out; the vault can be read without the master password |
+| The master password is hashed once, with an extra ingredient identical on every SlateOS machine | guessable at billions of tries per second, and one precomputed table cracks every user everywhere |
+| Nothing in userspace can obtain an unpredictable number | the built-in password *generator* produces guessable passwords |
+| Eleven hand-written copies of SHA-256 | eleven chances for one of them to be wrong, forever |
+
+Those four are being fixed regardless of this decision, as far as hand-written primitives allow. What the decision settles is the **end state** — specifically the two things that were not going to be written by hand: **authenticated encryption**, so an attacker who cannot read the vault also cannot silently alter it, and **a deliberately-slow password hash** (Argon2id or scrypt), so guessing costs an attacker real money.
+
+### Why the line falls between primitive and glue
+
+The argument for borrowing is strongest exactly where the failure is invisible. A cipher or a password hash has one property that cannot be established by checking its output: that it takes the same amount of time no matter what the secret is. The classic break is a comparison that returns a fraction sooner when the first byte is wrong; an attacker measures the timing and recovers the secret one byte at a time, against code that is perfectly correct by every test. This project's entire quality model is "if you did not test it, it is untested" — and here that model does not reach.
+
+The argument for *not* borrowing is strongest where the failure is visible. A vault file format that loses a record, a service that hands a credential to the wrong caller, a login flow that accepts an empty password — these are ordinary bugs, catchable by ordinary tests, and they are also the parts that have to fit this OS's capability model, its IPC, and its no-allocator constraints. Vendoring someone else's opinion about those would import a design, not a proof.
+
+So: borrow where testing cannot reach, write where it can. That is also what production operating systems do, and it is the same rule `design.txt` already states for the filesystem — port battle-tested code rather than writing a new one. That rule was written about ext4 and applies here with more force, because an ext4 bug crashes and a crypto bug just quietly stops protecting anything.
+
+### Rejected
+
+- **A — keep writing our own, carefully.** Implement AES-GCM and Argon2id in-tree against the official test vectors and collapse the eleven hash copies into one shared crate. For: no outside code in the trust base, works in the kernel's no-allocator environment by construction, consistent with how the rest of the OS is built. Against: "passes its tests" and "is secure" are different sentences here, and only here. This was the honest reason the question was asked at all rather than decided in-lane.
+- **B — port a vetted implementation for everything,** primitives and protocol both. For: the borrowed code is written to be constant-time on purpose by people who do only this. Against: it imports a whole design where only the arithmetic was wanted, and the surrounding layers are precisely the ones that must fit this OS's capability model rather than a general-purpose one. C gets the same protection over a smaller vendored surface.
+
+### What this obliges
+
+- The eleven SHA-256 copies collapse to one, and that one is ported rather than written.
+- New crypto written before the port lands is written knowing it is temporary; prefer deferring a crypto feature over adding a twelfth copy of something.
+- The vendored code is vendored, not depended on over the network, and carries a note recording which upstream revision it came from — otherwise "keep it current" has nothing to compare against.
+
+## 540. Printing is a background service applications submit jobs to, not a library they link
+
+**Date:** 2026-08-24
+**Decided by:** Operator (Claude recommended B, the shared library; operator chose C) — `open-questions.md` → C-Q4, answered `c`: *"let's do c since we should do it eventually anyway, no point putting it off with a stop-gap solution in its place"*
+
+**In short:** nothing in this OS can print. Two halves of a printing system exist and have never been introduced to each other — the PDF viewer knows how to work out *which pages* to print, and the desktop knows about *printers*, paper sizes, copies and a job queue. The connection between them will be a **background service**: an application hands a print job to a running system service and is then done with it. The job survives the application closing, and it can be cancelled from anywhere. This is more work than either shorter path, and it was chosen on the grounds that it is where printing has to end up anyway, so a stop-gap would be built only to be thrown away.
+
+### What already exists
+
+Both halves are real code with tests, not placeholders. Neither is reachable by any application.
+
+| | In the PDF viewer | In the desktop |
+|---|---|---|
+| Works out which pages to print | yes — including `1-3, 5, 7-9` | only a single "from page X to page Y" |
+| Knows what printers exist | no | yes |
+| Copies, paper size, double-sided, quality | no | yes |
+| Queue of pending jobs, cancel, pause | no | yes |
+| Reachable by any application | **no** | **no** |
+
+The split itself is not the mistake. A page range is something only the document can know, because it is the only thing that knows how long it is; the printer list is something only the system can know. What is missing is the join.
+
+### Why a service rather than a library
+
+The three live options were really one question asked three ways: *what does an application depend on in order to print?*
+
+- Depending on **the desktop** (option A) means every application that prints is built together with the program that draws the screen — a taskbar change could stop the PDF viewer compiling — and printing only works while the desktop is running.
+- Depending on **a library** (option B) removes the build tangle but keeps the job inside the application's own process. Close the application and the job goes with it.
+- Depending on **a service** (option C) means the application depends on a message format, not on code. The job outlives the sender by construction, because it was never the sender's to begin with.
+
+The third is what every other operating system converged on, and the reason is the property the first two cannot have at any price: **a print job is not part of the application's lifetime.** A user who prints a forty-page document and closes the viewer expects the pages to keep coming. B can be extended to A's capability, but it cannot be extended to that without becoming C.
+
+### The operator's reasoning, and why it overrode the recommendation
+
+The recommendation was B — cheaper, and the last moment at which moving the code was cheap. The operator's answer rejected the framing rather than the estimate: *"we should do it eventually anyway, no point putting it off with a stop-gap solution in its place."*
+
+That is consistent with this project's standing rule that effort is not a cost to be minimised and that a convenient intermediate is never temporary. B's real defect is not that it is worse than C — it is that it is a *way station* on the road to C, and way stations accumulate callers. Four applications written against a printing library are four applications to rewrite when the service arrives. The recommendation had priced the work and not the rewrite.
+
+Recorded because the estimate was not wrong and the conclusion still was: **"cheap now and compatible with the right answer later" is not the same as "on the way to the right answer later."** A library and a service differ in who owns the job, which is exactly the thing callers build assumptions around.
+
+### Rejected
+
+- **A — applications call the desktop's printing code directly.** Printing would work in the PDF viewer within the hour, at the price of coupling every printing application to the whole desktop. Cheap to create, expensive to undo, and the tangle grows with each new caller.
+- **B — move printer handling into a shared library.** The recommended option. No build tangle, nothing visible different from A for a user, and roughly half a day's work. Rejected as a way station: it settles the dependency question the wrong way (the job lives in the application's process) and every caller written against it is a caller to migrate.
+- **D — leave both halves unwired.** Printing stays impossible and the two models drift further apart, since each is edited for its own reasons. The two already disagree about what a page range is.
+
+### What this obliges
+
+- Printing is not unblocked by a quick change; it is a real piece of work with a message format, a service, and a queue that outlives its clients. Nothing else is currently blocked on it.
+- The PDF viewer's page-range parser is the good half and should be lifted into the job format, not reimplemented — it already handles `1-3, 5, 7-9`, which the desktop's from/to pair cannot express.
+- Until the service exists, neither half gains new callers. Wiring one application directly is exactly the stop-gap this decision refused.
+
+## 541. Arrow keys move the caret by what is on the screen, not by position in the sentence
+
+**Date:** 2026-08-24
+**Decided by:** Operator (Claude recommended this option) — `open-questions.md` → C-Q2, answered `b` (visual)
+
+**In short:** Hebrew and Arabic are written right to left, and one line can mix them with English — *"I said שלום to him"*. On such a line the order the characters are stored in is not the order they are drawn in, so the Right arrow key has two possible meanings that disagree. It now means **one step to the right on the screen**. Previously it meant "the next character in reading order", which made the caret occasionally jump a whole word sideways between two presses of the same key. The cost of the new rule is that the caret's *position in the sentence* can move backwards while it moves rightwards on screen.
+
+### The worked example
+
+The line is `I said <SHALOM> to him`, where `<SHALOM>` is one Hebrew word of five letters, drawn right-to-left inside a sentence drawn left-to-right. Put the caret just before the Hebrew word and press Right five times:
+
+| | What the caret does | Where it ends up |
+|---|---|---|
+| **Logical** (the old rule) | Steps through the letters in reading order, so it jumps to the word's right-hand end, walks leftwards, then jumps back | after the last Hebrew letter, at the word's **left** edge |
+| **Visual** (the new rule) | Moves right by one letter each press, never jumping | at the word's **right** edge, having passed through the whole word |
+
+Both arrive "after the whole word" in some sense. They disagree about which end of the word that is, and about everything in between.
+
+### Why visual
+
+Neither convention is wrong, and the major systems are split — macOS, GTK and Qt are logical; Windows edit controls are visual, and ICU's `ubidi` API is built to support the visual walk.
+
+The argument that decided it is what the key is *called*. A user presses "right arrow" while looking at the screen. A right arrow that sometimes moves the caret leftwards is surprising in a way no correctness argument repairs. The logical convention's advantage — that the caret's text offset advances monotonically — is real but **invisible**; the visual convention's advantage is the thing the user is actually looking at.
+
+Home/End and word-motion stay logical under this decision, and that is not an inconsistency: those name *positions in the sentence* ("start of line", "next word"), not *directions on the screen*. Only the two keys that name a screen direction follow the screen.
+
+### The measured caveat, which is the reason this was asked rather than guessed
+
+The caret has to carry one extra bit alongside its offset: **which side of a direction boundary it is on.** That turned out not to be a nicety. A text box that stores only the caret's position in the string between keypresses, and recomputes the rest each time, does not merely land on the wrong side of a boundary — it **skips the entire right-to-left word in a single press**, which is worse than the behaviour being replaced.
+
+So a half-implemented "visual" — switching the arrow keys without also making each widget remember that bit — is a regression, not a partial improvement. This is the specific thing to check when wiring each widget, and it is why "one line per widget" is true only because the groundwork was already built.
+
+### What was already built
+
+`caret_left` / `caret_right` were written and tested on 2026-08-17, before the answer arrived, covering a mixed-direction line, an Arabic ligature crossed as a single unit, and the pixel round-trip. They were written with nothing calling them precisely because the answer was outstanding — and they are not wasted under either answer, since mouse selection and any future screen-order feature need the same primitive. That is why the question could be left open at no cost.
+
+### Rejected
+
+- **A — keep logical.** The status quo, self-consistent, and what most of Linux does. Rejected because its one advantage is not observable by the person pressing the key, while its cost — a caret that jumps a word's width sideways between two presses of the same key — is.
+- **C — a user setting, defaulting to one of the two.** Rejected on two grounds: it asks the user a question they have no basis to answer, and it doubles the number of behaviours every future text widget must be correct in — for a rule that is subtle enough that the *single* correct behaviour already has a documented way to get it wrong.
+
+### Where this lands
+
+- `gui/font/src/shape.rs` — `ShapedRun::caret_left` / `caret_right`, the primitive; already correct.
+- `gui/toolkit/src/text.rs` — `TextCursor` and its wrappers.
+- `guitk::widget::TextInput` and `guitk::modal::InputDialog` — the arrow-key handling; each carries a comment marked `C-Q2` naming the exact line.
+- `apps/editor` is **not** covered by this decision either way. It draws its caret and scrolls horizontally on the assumption that screen order equals reading order, so it needs its own larger fix first (`known-issues.md` → `TD-EDITOR-IS-NOT-BIDIRECTIONAL`).
+
+## 542. The installer refuses an ambiguous size suffix rather than guessing which one the author meant
+
+**Date:** 2026-08-24
+**Decided by:** Operator (Claude recommended B weakly, and named C the honest option; operator chose C) — `open-questions.md` → Q55, answered `c`
+
+**In short:** an unattended-install config file describes each disk partition with a size like `"100 GB"` or `"32 GiB"`. The installer treated both spellings as the same number — the binary one — so a config asking for `500 GB` on a 500 GB drive actually asked for 537 GB and the install failed to fit. It now **refuses `GB` outright**, with an error naming both alternatives, and accepts only the unambiguous `GiB` and bare `G`. A config using `GB` stops installing until someone edits it. Nothing is ever silently resized.
+
+**Glossary:** `GB` (gigabyte) is decimal — exactly 1 000 000 000 bytes, and what a disk's box says. `GiB` (gibibyte) is binary — 1 073 741 824 bytes, about 7 % more. They diverge further at `TB`/`TiB` (10 %).
+
+### Why this one was asked when its mirror image was not
+
+§489 fixed the display side of the same confusion: code that divided by 1024 and *printed* `GB`. That was fixed without asking anyone, because printing a number under a label that means something else is simply false — there is no convention under which it is right.
+
+The input side is not like that. A suffix in a config file is an **input convention**, and the surrounding ecosystem is genuinely split: `fdisk` and `parted` treat everything as binary, and anyone who has typed `+512M` at a disk prompt expects exactly that. So the tree held two defensible conventions and had silently picked one, which is the shape of question that goes to the operator rather than getting resolved in-lane.
+
+### Why refusing beats picking
+
+The two "pick one" answers share a defect that only became visible once they were written down next to each other: **whichever is chosen, some existing config file means something different than its author intended, and nothing announces it.** Under A the author who wrote `100 GB` from the drive's label quietly gets 7 % more than they asked for. Under B that same author quietly gets 7 % less than they got yesterday. Both failures are silent, and both produce a disk layout nobody chose.
+
+C is the only option where the ambiguity is surfaced to the one party who can actually resolve it — the person who wrote the file and knows which number they meant. The cost is real and was accepted knowingly: **existing config files break loudly instead of being left wrong quietly.** For a tool that partitions disks, that trade is not close. A partition table is not a place to be helpful about a guess.
+
+This generalises past the installer: when an input has two established meanings and the tree cannot tell which was intended, refusing is a better default than defaulting. A rejection costs an edit; a wrong guess costs a disk layout, and gives no sign it happened.
+
+### Rejected
+
+- **A — leave it, every suffix is binary.** The status quo, self-consistent, and what most partitioning tools do. Rejected because self-consistency is not the property at issue: the author who copied "500 GB" off the drive's label still gets a partition that does not fit, and the error points at the partition table rather than at the units.
+- **B — honour the spelling: `GB` = 10⁹, `GiB` = 2³⁰, bare `G` = 2³⁰.** The (weak) recommendation, on the sole ground that it would agree with what §489 made the display side do. Rejected because it silently changes what every existing config file does — the same silent-wrong-layout failure as A, merely in the other direction, and newly introduced rather than long-standing.
+
+### What this obliges
+
+- `apps/installer/src/lib.rs` — the `multiplier` match in the partition-size parser, where `"K"|"KB"|"KIB"` all currently map to 1024, up through `TB`.
+- The error message must name **both** replacements (`GiB` for what you have now, `GB` was never honoured as decimal), because an author who is refused needs to know which one preserves their existing layout. An error that only says "ambiguous" makes the reader guess again, one level up.
+- Documentation and any sample config in the tree must stop using `GB`, or the installer will reject its own examples.
+
+## 543. Moving the caret follows the screen; editing and masking still follow the string
+
+**Date:** 2026-08-24
+**Decided by:** Claude (operator-approved scope) — §541 is the operator's decision; which *other* keys follow it is mine
+
+**In short:** §541 says the Left and Right arrow keys move the caret by what is
+on the screen rather than by position in the sentence. It does not say what
+Backspace does, or what a password field does, and both have to be decided
+before the change can be written. **Backspace and Delete keep following the
+string** — they remove the character before or at the caret *in reading order*,
+wherever that character happens to be drawn. **A password field keeps moving by
+the string too**, and is the only field that does. So on a line mixing English
+and Hebrew, pressing Left and then Backspace can delete a character other than
+the one immediately left of the caret on screen.
+
+**Glossary:** *logical* order is the order characters are stored and read in;
+*visual* order is the order they are painted in. On a line that mixes a
+left-to-right script with a right-to-left one they differ, and that is the only
+case where any of this matters.
+
+### Why editing stays logical
+
+An arrow key names a **direction on a screen** — that is the whole argument
+§541 turned on. Backspace does not. It names *the character you just typed*,
+and that character is the previous one in the string no matter which way its
+script runs. A reader of Hebrew pressing Backspace after typing a Hebrew letter
+means that letter; a Backspace that deleted whatever was painted to the left
+would delete the *next* letter of the word they are in the middle of writing.
+
+So the two keys genuinely disagree, and the disagreement is not an
+inconsistency to be tidied away — it is each key doing what its own name says.
+The visible cost is that Left-then-Backspace is not always "delete what I just
+moved past". That is accepted: it is the rarer operation, and the alternative
+makes typing a right-to-left word impossible.
+
+Home, End and word-motion stay logical for the reason §541 already gives:
+they name positions in the sentence, not directions on the screen.
+
+### Why a password field is the exception
+
+What a password field draws is a row of identical asterisks, in string order,
+whatever was typed. There is no visual order to follow — the mask has erased
+it. Moving by the layout of the *hidden* text would therefore scatter the caret
+among indistinguishable marks with nothing on screen to explain the jumps.
+
+Worse, the jumps are themselves a disclosure: the pattern of where the caret
+skips is a readout of where the secret changes direction, which narrows the
+script it is written in to anyone watching the screen. Preventing exactly that
+is what masking is for. A field whose contents are not drawn cannot take a rule
+about how contents are drawn.
+
+The same reasoning fixed a second defect found next door: the mask was built
+with `"*".repeat(text.len())` — the UTF-8 *byte* count — so an eight-character
+non-Latin password drew sixteen marks and leaked its encoding. It counts
+characters now.
+
+### Rejected
+
+- **Editing follows the screen too.** Self-consistent, and it would make
+  Left-then-Backspace always undo the Left. Rejected because it makes writing
+  a right-to-left word delete the wrong letter, which is not a corner case for
+  the users the feature exists for — it is every keystroke.
+- **The password field follows the screen like everything else.** One fewer
+  rule. Rejected on the disclosure argument above; a uniform rule that leaks
+  the shape of a secret is not simpler in any sense that matters.
+
+### Where this landed (superseding §541's shorter list)
+
+§541 named two widgets. There were five, and finding the other three mattered:
+a desktop with some fields switched and some not moves its caret by two rules
+depending on which box has focus, which §541 records as *worse* than not
+switching at all.
+
+| Field | Arrows | Caret drawn by |
+|---|---|---|
+| `guitk::widget::TextInput` | visual | **nothing** — see `known-issues.md` → `TD-C-TWO-TOOLKIT-TEXT-FIELDS-DRAW-NO-CARET-AT-ALL` |
+| `guitk::modal::InputDialog` | visual (logical when `password_mode`) | **nothing** — same entry |
+| `guitk::pathbar::PathBar` | visual | `text::caret_x` |
+| `desktop::launcher` | visual | `text::caret_x` |
+| `desktop::run_dialog::TextInput` | visual | `text::caret_x` |
+
+Moving correctly is only half of it. The caret must also be *drawn* where it
+moved to, and the prefix-width measurement every one of these used is right
+only while a line runs in one direction. Two of the three that draw a caret
+were drawing it wrongly, and one of those (`run_dialog`) sliced its text at the
+caret's raw byte offset inside `render`, so a drifted cursor aborted the whole
+desktop shell while merely *painting* the dialog. Both are fixed and both now
+have a test that watches the drawn caret rather than the cursor value —
+the only two such tests in the tree.
+
+`apps/editor` remains outside all of this, per §541.

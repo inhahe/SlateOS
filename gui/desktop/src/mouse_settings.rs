@@ -31,17 +31,22 @@
 //!    part of it the user happens to be looking at. Painting them with the
 //!    accent would make "in force" and "switched on" the same colour, which
 //!    are different questions with different answers on the same screen.
-//! 3. **The slider thumb is derived from its fill, never named beside it.** It
-//!    is [`emphasized`] of the accent. Until this conversion the thumb was
-//!    `LAVENDER` and the fill was `BLUE`: two constants that looked related
-//!    only because Catppuccin put them near each other, and were free to drift
-//!    apart the moment either was touched. A derivation cannot drift.
+//! 3. **The slider thumb is never a constant named beside its fill.** It was
+//!    `LAVENDER` next to a `BLUE` fill: two constants that looked related only
+//!    because Catppuccin put them near each other, and were free to drift apart
+//!    the moment either was touched. The conversion replaced it with
+//!    `emphasized` of the accent — derived, so it could not drift. That has
+//!    since been revised again: the slider moved to [`crate::slider`], which
+//!    inks every thumb in the shell with `text`, because a thumb overhangs its
+//!    track and so is read against the card rather than the fill. The rule that
+//!    survives is the one this judgement was really about — the thumb's colour
+//!    is not a constant chosen next to the fill's.
 //! 4. **Three sites choose their colour by state, so the tests render both
 //!    branches.** The section header's background, its heading ink, and the
 //!    toggle pill each pick between two roles. A branch the fixture never
 //!    renders is a branch the tests never check.
 
-use appearance::{Palette, emphasized};
+use appearance::Palette;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -532,23 +537,7 @@ impl InputSettingsUI {
         // because it does not report a position. A switch stays on inside a
         // section the user has since collapsed.
         let bg = if on { p.green } else { p.surface1 };
-        cmds.push(RenderCommand::FillRect {
-            x: tx,
-            y,
-            width: 40.0,
-            height: 20.0,
-            color: bg,
-            corner_radii: CornerRadii::all(10.0),
-        });
-        let knob_x = if on { tx + 22.0 } else { tx + 2.0 };
-        cmds.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: y + 2.0,
-            width: 16.0,
-            height: 16.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        cmds.extend(crate::switch::switch(tx, y, 40.0, 20.0, on, bg));
 
         y + 26.0
     }
@@ -568,45 +557,31 @@ impl InputSettingsUI {
         let track_w = width - 16.0;
         let track_h = 6.0_f32;
 
-        // Track background
-        cmds.push(RenderCommand::FillRect {
+        // A track whose `max` is below its `min` is a caller error, not a
+        // reason to underflow: it yields an empty range and a fill of zero.
+        let range = max.saturating_sub(min).max(1) as f32;
+        // Judgement 3, revised: this site used `emphasized(p.accent)` for the
+        // thumb, derived from the fill so the handle and the track it handles
+        // could not come out unrelated colours — it had been `LAVENDER` beside
+        // a `BLUE` fill. Deriving from the fill was the right instinct and the
+        // wrong background: a thumb is bigger than its track, so its outline is
+        // read against the *card*, where `emphasized(accent)` reaches 4.72:1
+        // and `text` 11.34:1. The unrelated-hue problem `emphasized` solved is
+        // solved just as well by a neutral. See `crate::slider`.
+        crate::slider::Slider {
             x: track_x,
             y: y + 4.0,
             width: track_w,
             height: track_h,
-            color: p.surface1,
-            corner_radii: CornerRadii::all(3.0),
-        });
-
-        // Fill
-        // A track whose `max` is below its `min` is a caller error, not a
-        // reason to underflow: it yields an empty range and a fill of zero.
-        let range = max.saturating_sub(min).max(1) as f32;
-        let frac = (value.saturating_sub(min) as f32 / range).clamp(0.0, 1.0);
-        cmds.push(RenderCommand::FillRect {
-            x: track_x,
-            y: y + 4.0,
-            width: track_w * frac,
-            height: track_h,
+            frac: value.saturating_sub(min) as f32 / range,
+            thumb: 14.0,
+            track: p.surface1,
             // Judgement 1: how much of this control is set.
-            color: p.accent,
-            corner_radii: CornerRadii::all(3.0),
-        });
-
-        // Thumb
-        let thumb_x = track_x + track_w * frac - 7.0;
-        cmds.push(RenderCommand::FillRect {
-            x: thumb_x,
-            y,
-            width: 14.0,
-            height: 14.0,
-            // Judgement 3: derived from the fill it sits at the end of, so the
-            // handle and the track it handles cannot come out unrelated
-            // colours. It was `LAVENDER` beside a `BLUE` fill, which looked
-            // deliberate only because Catppuccin lists them near each other.
-            color: emphasized(p.accent),
-            corner_radii: CornerRadii::all(7.0),
-        });
+            fill: p.accent,
+            p,
+            alpha: u8::MAX,
+        }
+        .draw(cmds);
 
         y + 20.0
     }
@@ -953,9 +928,15 @@ mod tests {
     fn every_colour_this_panel_draws_comes_from_its_palette() {
         for light in [false, true] {
             let p = accented(light);
-            // The thumb is the one colour here that is in no palette at all;
-            // judgement 3 is precisely that it is computed from the fill.
-            let derived = [emphasized(p.accent)];
+            // A switch knob is `readable_on` its own track, which is one of the
+            // two extremes rather than a role. The tracks are named rather than
+            // the extremes, so each exemption stays tied to the fill it sits
+            // on. The slider thumb needs no exemption any more: it is `text`,
+            // for the reason in `crate::slider`.
+            let derived = [
+                appearance::readable_on(p.green),
+                appearance::readable_on(p.surface1),
+            ];
             for section in 0..5 {
                 for on in [false, true] {
                     for dirty in [false, true] {
@@ -1071,7 +1052,7 @@ mod tests {
             );
             assert_eq!(
                 fills_sized(&cmds, 14.0, 14.0),
-                vec![emphasized(p.accent)],
+                vec![p.text],
                 "the slider thumb"
             );
 
@@ -1090,7 +1071,11 @@ mod tests {
                 );
                 assert_eq!(
                     fills_sized(&cmds, 16.0, 16.0),
-                    vec![p.text],
+                    vec![appearance::readable_on(if on {
+                        p.green
+                    } else {
+                        p.surface1
+                    })],
                     "the knob of a switch that is {on}"
                 );
             }
@@ -1306,27 +1291,42 @@ mod tests {
         }
     }
 
-    /// Judgement 3: the thumb is derived from the fill, never named beside it.
+    /// Judgement 3: the thumb is never a constant chosen beside the fill.
     ///
     /// It was `LAVENDER` sitting next to a `BLUE` fill — two constants that
     /// looked deliberate only because Catppuccin lists them near each other,
-    /// and free to drift apart the moment either was touched. So the claim is
-    /// not "the thumb is lavender-ish" but the two halves that make drift
-    /// impossible: it *is* [`emphasized`] of the fill, and it is no role at
-    /// all, so no future edit can quietly pin it to one.
+    /// and free to drift apart the moment either was touched. The conversion
+    /// made it [`appearance::emphasized`] of the accent; moving the control
+    /// into [`crate::slider`] made it `text`, because a thumb overhangs its
+    /// track and is therefore read against the card and not against the fill.
+    ///
+    /// Both of those are fixes for the *same* defect, and the claim that
+    /// outlived the choice between them is what is asserted here: the thumb
+    /// does not follow the accent, and it does not come out equal to it.
+    ///
+    /// The second half is checked over [`AccentColor::presets`] rather than
+    /// universally, because it is not universally true: a *custom* accent set
+    /// to exactly the theme's `text` would collide. That is a hazard the whole
+    /// shell shares — a custom accent equal to `base` erases more than this —
+    /// and it belongs to the colour picker, not to one slider.
     #[test]
-    fn the_thumb_is_derived_from_the_fill_it_ends() {
+    fn the_thumb_does_not_follow_the_fill_it_ends() {
         for light in [false, true] {
-            for hex in [0x00FF_00FF_u32, 0x0000_FFFF, 0x0000_2200] {
-                let mut p = Palette::for_mode(light);
-                p.accent = Color::from_hex(hex);
+            let stock = Palette::for_mode(light);
+            let accents = appearance::AccentColor::presets()
+                .iter()
+                .map(|a| stock.hue(*a))
+                .chain([0x00FF_00FF_u32, 0x0000_FFFF, 0x0000_2200].map(Color::from_hex));
+            for accent in accents {
+                let mut p = stock;
+                p.accent = accent;
                 let cmds = panel(0, false, false).render(&p, 0.0, 0.0, PANEL_W);
                 let thumbs = fills_sized(&cmds, 14.0, 14.0);
                 assert_eq!(thumbs.len(), 1, "one slider draws one handle");
                 assert_eq!(
-                    thumbs[0],
-                    emphasized(p.accent),
-                    "the handle is not derived from the track it ends"
+                    thumbs[0], stock.text,
+                    "the handle moved when the accent did, so it is derived \
+                     from the fill rather than from the card behind it"
                 );
                 assert_ne!(
                     (thumbs[0].r, thumbs[0].g, thumbs[0].b),
@@ -1334,14 +1334,6 @@ mod tests {
                     "the handle is the same colour as the fill, so there is \
                      nothing to grab"
                 );
-                for (name, role) in p.roles() {
-                    assert_ne!(
-                        (role.r, role.g, role.b),
-                        (thumbs[0].r, thumbs[0].g, thumbs[0].b),
-                        "the handle came out equal to {name}, so it is a named \
-                         colour after all and free to drift from the fill"
-                    );
-                }
             }
         }
     }
@@ -1380,31 +1372,56 @@ mod tests {
         }
     }
 
-    /// The knob is the same ink on both pills.
+    /// The knob is legible on both pills — which means it is *not* the same
+    /// ink on both.
     ///
-    /// It marks the switch's position, and a position does not change meaning
-    /// when the state does — so the one thing the knob must not do is follow
-    /// the pill it slides on. That it is *legible* on both is a separate
-    /// question and a real defect: `text` on `green` is two light values. See
-    /// known-issues.md `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`,
-    /// which is being fixed across the shell in one pass rather than module by
-    /// module, so that every switch reaches the same answer.
+    /// This test used to assert the opposite, and the reasoning is worth
+    /// keeping because it was not silly: the knob marks the switch's position,
+    /// a position does not change meaning when the state does, so a knob that
+    /// changed colour looked like a second, redundant state report. What that
+    /// argument missed is that the knob was `text` on *both* pills, and `text`
+    /// on `green` is two light values — 1.35:1 on the stock accent. A mark you
+    /// cannot see does not report a position at all, so the tie between the
+    /// two goals was never even: legibility is the one that makes the control
+    /// work, and consistency of ink is the one that makes it tidy.
+    ///
+    /// So the knob now follows the pill (via [`crate::switch::switch`]), and
+    /// what carries the state is what always carried it — *where* the knob is.
+    /// This asserts both halves: it moves, and it is readable at each end.
+    /// Closes known-issues.md `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`
+    /// for this module.
     #[test]
-    fn the_knob_is_the_same_ink_on_both_pills() {
+    fn the_knob_is_legible_on_both_pills() {
         for light in [false, true] {
             let p = accented(light);
-            let off = fills_sized(
-                &panel(2, false, false).render(&p, 0.0, 0.0, PANEL_W),
-                16.0,
-                16.0,
+            let draw = |on: bool| panel(2, on, false).render(&p, 0.0, 0.0, PANEL_W);
+            let off_ink = fills_sized(&draw(false), 16.0, 16.0);
+            let on_ink = fills_sized(&draw(true), 16.0, 16.0);
+            assert_eq!(
+                off_ink,
+                vec![appearance::readable_on(p.surface1)],
+                "the knob of a switch that is off is not derived from its pill"
             );
-            let on = fills_sized(
-                &panel(2, true, false).render(&p, 0.0, 0.0, PANEL_W),
-                16.0,
-                16.0,
+            assert_eq!(
+                on_ink,
+                vec![appearance::readable_on(p.green)],
+                "the knob of a switch that is on is not derived from its pill"
             );
-            assert_eq!(off, vec![p.text], "the knob of a switch that is off");
-            assert_eq!(on, off, "the knob changes colour with the switch");
+            // And the position — the thing that actually reports the state —
+            // still differs, which is what makes the shared ink dispensable.
+            let knob_x = |on: bool| -> f32 {
+                draw(on)
+                    .iter()
+                    .find_map(|c| match c {
+                        RenderCommand::FillRect { x, width, .. } if *width == 16.0 => Some(*x),
+                        _ => None,
+                    })
+                    .expect("a switch has a knob")
+            };
+            assert!(
+                knob_x(true) > knob_x(false),
+                "the on knob is not right of the off knob, so nothing reports the state"
+            );
         }
     }
 }

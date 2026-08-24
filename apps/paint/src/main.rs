@@ -4151,10 +4151,14 @@ mod tests {
     /// compares a before and after reading rather than an absolute.
     #[test]
     fn a_save_goes_through_safeio() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let path = std::env::temp_dir().join(format!("slate_paint_routing_{nanos}.bmp"));
+        // Named from the process id and a per-process counter, not from the
+        // clock: `cargo test` runs this binary's tests as threads of one
+        // process, and the clock they read only advances on a timer interrupt,
+        // so a nanosecond tag is shared by every test that starts in the same
+        // tick. The directory goes away when `scratch` drops, including on a
+        // panic -- which the `remove_file` trailer this replaces did not.
+        let scratch = scratchdir::ScratchDir::new("slate_paint_routing");
+        let path = scratch.path("drawing.bmp");
         let path_str = path.to_string_lossy().to_string();
 
         let app = PaintApp::new(800.0, 600.0);
@@ -4171,8 +4175,6 @@ mod tests {
         // A BMP that a viewer would accept, not merely a file that exists.
         let written = std::fs::read(&path).expect("read back");
         assert_eq!(&written[..2], b"BM", "not a BMP: bad magic");
-
-        let _ = std::fs::remove_file(&path);
     }
 
     // ---- Canvas tests ----

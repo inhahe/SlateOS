@@ -4433,8 +4433,8 @@ mod external_merge_tests {
     )]
 
     use super::*;
+    use scratchdir::ScratchDir;
     use std::io::Write;
-    use std::time::SystemTime;
 
     /// Build a document as if it were loaded from disk with the given content
     /// (LF-normalized `base`), without touching the filesystem.
@@ -4449,15 +4449,24 @@ mod external_merge_tests {
         d
     }
 
-    /// Create a unique temp file path under the OS temp dir.
-    fn temp_path(tag: &str) -> PathBuf {
-        let mut p = std::env::temp_dir();
-        let nanos = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        p.push(format!("slate_editor_test_{tag}_{nanos}.txt"));
-        p
+    /// A scratch file path for one test, together with the guard that owns the
+    /// directory it lives in. The file and its directory are removed when the
+    /// guard drops -- including during a panic unwind, which the manual
+    /// `let _ = fs::remove_file(...)` trailers this replaces did not do.
+    ///
+    /// The name used to carry the system clock in nanoseconds, which is not
+    /// unique. `cargo test` runs a binary's tests as threads of one process,
+    /// and the clock a thread reads is only refreshed on a timer interrupt, so
+    /// every test that starts within the same tick draws the same tag and they
+    /// fight over one file. `ScratchDir` names itself from the process id and a
+    /// per-process atomic counter, which is unique by construction.
+    ///
+    /// Bind the guard to a named local -- `let (_scratch, path) = ...` -- never
+    /// to a bare `_`, which drops it before the test's first line.
+    fn temp_path(tag: &str) -> (ScratchDir, PathBuf) {
+        let scratch = ScratchDir::new(&format!("slate_editor_test_{tag}"));
+        let p = scratch.path("doc.txt");
+        (scratch, p)
     }
 
     #[test]
@@ -4490,7 +4499,7 @@ mod external_merge_tests {
     /// compares a before and after reading rather than an absolute.
     #[test]
     fn a_save_goes_through_safeio() {
-        let path = temp_path("routing");
+        let (_scratch, path) = temp_path("routing");
         let mut d = loaded_doc("some text the user would hate to lose");
         d.path = Some(path.clone());
 
@@ -4507,7 +4516,6 @@ mod external_merge_tests {
             std::fs::read_to_string(&path).expect("read back"),
             "some text the user would hate to lose"
         );
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -4518,7 +4526,7 @@ mod external_merge_tests {
 
     #[test]
     fn disk_changed_detects_modification_and_deletion() {
-        let path = temp_path("detect");
+        let (_scratch, path) = temp_path("detect");
         {
             let mut f = std::fs::File::create(&path).expect("create temp");
             f.write_all(b"line1\nline2\n").expect("write");
@@ -4607,7 +4615,7 @@ mod external_merge_tests {
 
     #[test]
     fn editor_auto_reloads_unmodified_buffer() {
-        let path = temp_path("autoreload");
+        let (_scratch, path) = temp_path("autoreload");
         std::fs::write(&path, b"first\n").expect("write");
         let mut editor = EditorState::new();
         editor.open_file(&path).expect("open");
@@ -4616,12 +4624,11 @@ mod external_merge_tests {
         let raised = editor.check_external_change();
         assert!(!raised, "no prompt expected for unmodified buffer");
         assert_eq!(editor.active_document().buffer_text(), "second");
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn editor_prompts_on_conflicting_change() {
-        let path = temp_path("prompt");
+        let (_scratch, path) = temp_path("prompt");
         std::fs::write(&path, b"base\n").expect("write");
         let mut editor = EditorState::new();
         editor.open_file(&path).expect("open");
@@ -4639,12 +4646,11 @@ mod external_merge_tests {
         editor.review_accept();
         assert!(editor.external_prompt.is_none());
         assert_eq!(editor.active_document().buffer_text(), "local");
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn reload_choice_discards_local_edits() {
-        let path = temp_path("reload");
+        let (_scratch, path) = temp_path("reload");
         std::fs::write(&path, b"base\n").expect("write");
         let mut editor = EditorState::new();
         editor.open_file(&path).expect("open");
@@ -4655,7 +4661,6 @@ mod external_merge_tests {
         editor.resolve_external(ExternalChoice::Reload);
         assert_eq!(editor.active_document().buffer_text(), "remote");
         assert!(!editor.active_document().modified);
-        let _ = std::fs::remove_file(&path);
     }
 }
 

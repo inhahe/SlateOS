@@ -250,6 +250,41 @@ fn last_exit() -> u8 {
     LAST_EXIT.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Echo a captured command's output to serial if the command reported failure.
+///
+/// For self-test rungs that assert a *checker* succeeded. When one does not,
+/// `assert_eq!(last_exit(), 0)` reports `left: 1, right: 0` — a number, not a
+/// cause — and the report that would have named the cause is sitting in the
+/// capture buffer precisely because the rung put it there. `syshealth` prints
+/// seven `[PASS]`/`[FAIL]` rows; without this, finding which row was unhappy
+/// costs an entire extra boot, which is what it cost the first time.
+///
+/// Silent on success, so a green boot's log is unchanged.
+fn dump_if_failed(what: &str, out: &[u8]) {
+    use crate::serial_println;
+
+    if last_exit() == 0 {
+        return;
+    }
+    serial_println!(
+        "  !! `{}` reported exit {}; its output was:",
+        what,
+        last_exit()
+    );
+    for line in out.split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        // Lossy on purpose: this is a diagnostic on a path that is already
+        // failing, and a panic inside it would replace the evidence with a
+        // different panic.
+        match core::str::from_utf8(line) {
+            Ok(s) => serial_println!("     {}", s),
+            Err(_) => serial_println!("     <{} non-UTF-8 bytes>", line.len()),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Working directory
 // ---------------------------------------------------------------------------
@@ -10532,6 +10567,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             out.starts_with(b"=== Active System Health Check ==="),
             "`syshealth` ran its checks"
         );
+        // Echo the report before asserting on it. A bare `left: 1, right: 0`
+        // names a number, not a cause: this rung failed once for a real kernel
+        // fault (lockdep counted its own self-test's planted violations) and
+        // finding *which* of the seven checks was unhappy cost a whole extra
+        // boot. The checker already printed the answer; capturing it into a
+        // buffer is what threw it away.
+        dump_if_failed("syshealth", &out);
         assert_eq!(last_exit(), 0, "a checker that passed reports success");
 
         let out = capture_command("invariant");
@@ -10539,6 +10581,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             out.starts_with(b"=== Kernel Invariant Check "),
             "`invariant` ran every category"
         );
+        dump_if_failed("invariant", &out);
         assert_eq!(last_exit(), 0, "all invariants hold on a healthy kernel");
 
         // A misspelled category checks nothing, and nothing checked is not a

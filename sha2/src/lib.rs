@@ -259,7 +259,8 @@ impl Sha256 {
             let space = BLOCK_LEN.saturating_sub(self.buffered);
             let take = space.min(rest.len());
             let end = self.buffered.saturating_add(take);
-            if let (Some(dst), Some(src)) = (self.buffer.get_mut(self.buffered..end), rest.get(..take))
+            if let (Some(dst), Some(src)) =
+                (self.buffer.get_mut(self.buffered..end), rest.get(..take))
             {
                 dst.copy_from_slice(src);
             }
@@ -278,14 +279,15 @@ impl Sha256 {
             self.buffered = 0;
         }
 
-        let mut blocks = rest.chunks_exact(BLOCK_LEN);
-        for chunk in &mut blocks {
-            if let Some(block) = chunk.first_chunk::<BLOCK_LEN>() {
-                compress(&mut self.state, block);
-            }
+        // `as_chunks`, not `chunks_exact`: it yields `&[u8; BLOCK_LEN]`
+        // directly, so the block handed to `compress` is the right size by
+        // type rather than by a fallible `first_chunk` whose `None` arm was
+        // unreachable but still had to be written.
+        let (blocks, remainder) = rest.as_chunks::<BLOCK_LEN>();
+        for block in blocks {
+            compress(&mut self.state, block);
         }
 
-        let remainder = blocks.remainder();
         if let Some(dst) = self.buffer.get_mut(..remainder.len()) {
             dst.copy_from_slice(remainder);
         }
@@ -329,8 +331,8 @@ impl Sha256 {
         }
 
         let mut out = [0u8; DIGEST_LEN];
-        for (slot, word) in out.chunks_exact_mut(4).zip(self.state) {
-            slot.copy_from_slice(&word.to_be_bytes());
+        for (slot, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(self.state) {
+            *slot = word.to_be_bytes();
         }
         out
     }
@@ -340,8 +342,12 @@ impl Sha256 {
 fn compress(state: &mut [u32; 8], block: &[u8; BLOCK_LEN]) {
     // Message schedule. The first sixteen words are the block, big-endian.
     let mut w = [0u32; 64];
-    for (word, bytes) in w.iter_mut().zip(block.chunks_exact(4)) {
-        *word = u32::from_be_bytes(<[u8; 4]>::try_from(bytes).unwrap_or([0; 4]));
+    // The `as_chunks` form is what removes the fallback: `chunks_exact(4)`
+    // yields a slice, so converting it to `[u8; 4]` was fallible, and the
+    // `unwrap_or([0; 4])` written to satisfy that would have hashed zeros
+    // rather than the message had it ever been reached.
+    for (word, bytes) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+        *word = u32::from_be_bytes(*bytes);
     }
 
     // The remaining forty-eight are a recurrence over the previous sixteen.
@@ -460,11 +466,14 @@ impl fmt::Debug for Hex {
 pub fn hex(digest: &[u8; DIGEST_LEN]) -> Hex {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = [b'0'; DIGEST_LEN * 2];
-    for (pair, byte) in out.chunks_exact_mut(2).zip(digest) {
-        if let (Some(hi), Some(lo)) = (pair.first_mut(), DIGITS.get(usize::from(byte >> 4))) {
-            *hi = *lo;
+    // Destructuring `&mut [u8; 2]` is total, where the two-slot slice this
+    // used to be needed a `first_mut`/`last_mut` pair whose `None` arms could
+    // not happen but still had to be spelled.
+    for ([hi_slot, lo_slot], byte) in out.as_chunks_mut::<2>().0.iter_mut().zip(digest) {
+        if let Some(hi) = DIGITS.get(usize::from(byte >> 4)) {
+            *hi_slot = *hi;
         }
-        if let (Some(lo_slot), Some(lo)) = (pair.last_mut(), DIGITS.get(usize::from(byte & 0x0f))) {
+        if let Some(lo) = DIGITS.get(usize::from(byte & 0x0f)) {
             *lo_slot = *lo;
         }
     }
@@ -685,7 +694,10 @@ mod tests {
             !rendered.contains("hunter2") && !rendered.contains("104"),
             "Debug leaked buffered input: {rendered}"
         );
-        assert!(rendered.contains('7'), "expected the byte count: {rendered}");
+        assert!(
+            rendered.contains('7'),
+            "expected the byte count: {rendered}"
+        );
     }
 
     /// `no_std` crate, but the test harness links `std`, so formatting to a

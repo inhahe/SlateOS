@@ -29,7 +29,10 @@
 //! would have to know which host it was on. `ErrorKind` is std's own
 //! normalisation of that difference and is the one thing that means the same on
 //! both. A kind std does not recognise falls back to the host's text, which is
-//! worse than a POSIX string and much better than a wrong one.
+//! worse than a POSIX string and much better than a wrong one — but with std's
+//! ` (os error N)` suffix removed first, because that parenthetical belongs to
+//! no utility's output and is what would give the fallback away. See
+//! [`host_text`].
 
 use std::io::{Error, ErrorKind};
 
@@ -84,9 +87,44 @@ pub fn strerror(e: &Error) -> String {
         // caller here and so is recovered from the raw code; see `errno_text`.
         // Otherwise the host's text is the only description of the failure that
         // exists, and printing it beats printing "error".
-        _ => return errno_text(e).map_or_else(|| e.to_string(), ToString::to_string),
+        _ => {
+            return errno_text(e).map_or_else(|| host_text(e), ToString::to_string);
+        }
     };
     s.to_string()
+}
+
+/// The host's own wording, with the error *number* taken back off.
+///
+/// `io::Error`'s `Display` for a raw OS error is the platform's `strerror`
+/// text followed by ` (os error N)`. The text is the useful half; the
+/// parenthetical is std's, not POSIX's, and no utility this crate imitates has
+/// ever printed it — so a message that reached this fallback was recognisably
+/// ours rather than `nice`'s or `cat`'s. Measured: `nice >&-` printed
+/// `write error: Bad file descriptor (os error 9)` where GNU printed
+/// `write error: Bad file descriptor`.
+///
+/// Stripping it is a suffix removal rather than a re-lookup because the text in
+/// front of it is already the platform's `strerror` output — on SlateOS,
+/// exactly the string the match above would have produced had `ErrorKind`
+/// been able to name the errno. An error carrying no OS number (`Error::other`)
+/// has no such suffix and is returned untouched.
+fn host_text(e: &Error) -> String {
+    let text = e.to_string();
+    let Some(open) = text.rfind(" (os error ") else {
+        return text;
+    };
+    let Some(inside) = text.get(open.saturating_add(11)..) else {
+        return text;
+    };
+    let Some(digits) = inside.strip_suffix(')') else {
+        return text;
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
+        return text;
+    }
+    text.get(..open)
+        .map_or_else(|| text.clone(), ToString::to_string)
 }
 
 /// The POSIX text for `ELOOP`.
@@ -190,6 +228,49 @@ mod tests {
         assert_eq!(
             strerror(&Error::from_raw_os_error(40)),
             "Too many levels of symbolic links"
+        );
+    }
+
+    #[test]
+    fn an_errno_no_kind_names_still_loses_the_number() {
+        // EBADF. `stdfd` raises it for every `prog >&-`, and stable `ErrorKind`
+        // has no name for it, so it takes the fallback — which must still not
+        // print std's ` (os error 9)`. Measured against GNU: `nice >&-` says
+        // `nice: write error: Bad file descriptor` and nothing more.
+        #[cfg(unix)]
+        {
+            let e = Error::from_raw_os_error(9);
+            assert_eq!(strerror(&e), "Bad file descriptor");
+        }
+        // The suffix is stripped wherever it appears, host included, so the
+        // rule can be checked on both arms even though the text differs.
+        for code in [9, 22, 32] {
+            let e = Error::from_raw_os_error(code);
+            assert!(
+                !strerror(&e).contains("(os error"),
+                "raw {code} kept its number: {}",
+                strerror(&e)
+            );
+            assert!(!strerror(&e).is_empty(), "raw {code} lost its text");
+        }
+    }
+
+    #[test]
+    fn a_message_that_merely_mentions_os_error_is_left_alone() {
+        // The strip is a suffix removal with a shape, not a search: text that
+        // happens to contain the words, or a parenthetical that is not a
+        // number, is the failure's own wording and must survive.
+        for text in [
+            "no space (os error left)",
+            "read (os error )",
+            "(os error 5) came first",
+        ] {
+            assert_eq!(strerror(&Error::other(text)), text);
+        }
+        // And one that does have the shape is still cut, whoever built it.
+        assert_eq!(
+            strerror(&Error::other("Bad thing (os error 9)")),
+            "Bad thing"
         );
     }
 

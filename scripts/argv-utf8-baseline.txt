@@ -24,8 +24,6 @@ userspace/coreutils/src/bin/free.rs:argv-as-string
 userspace/coreutils/src/bin/grep.rs:argv-as-string
 userspace/coreutils/src/bin/logger.rs:argv-as-string
 userspace/coreutils/src/bin/more.rs:argv-as-string
-userspace/coreutils/src/bin/nice.rs:argv-as-string
-userspace/coreutils/src/bin/nohup.rs:argv-as-string
 userspace/coreutils/src/bin/patch.rs:argv-as-string
 userspace/coreutils/src/bin/ps.rs:argv-as-string
 userspace/coreutils/src/bin/renice.rs:argv-as-string
@@ -39,4 +37,3 @@ userspace/coreutils/src/bin/time_cmd.rs:argv-as-string
 userspace/coreutils/src/bin/tty.rs:argv-as-string
 userspace/coreutils/src/bin/which.rs:argv-as-string
 userspace/coreutils/src/bin/xargs.rs:argv-as-string
-userspace/coreutils/src/bin/yes.rs:argv-as-string

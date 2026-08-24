@@ -697,6 +697,36 @@ impl<'a> Parser<'a> {
         self.argv.get(self.word)
     }
 
+    /// How far into argv the walk has got: glibc's `optind`, as an index into
+    /// the slice this parser was given.
+    ///
+    /// It exists for the utilities that carry an **obsolete `-NUM` syntax** —
+    /// `nice -5`, and later `head -20`, `tail -5`, `split -3`, `uniq -1`,
+    /// `fold -60`. Those numbers are option-shaped but are not options, so
+    /// `getopt` cannot be told about them; GNU's answer is to interleave, one
+    /// option at a time: test the next word for the digit form itself, and if
+    /// it is not that, take exactly one item from `getopt` and resume from
+    /// wherever that left off. `nice.c`'s scanning loop is that, verbatim, and
+    /// this is the `optind` half of it.
+    ///
+    /// The interleaving is not decoration. `nice -n -5` must read `-5` as the
+    /// *argument* of `-n`, and only a scan that lets `-n` consume the next word
+    /// before the digit test looks at it can do that. A pre-pass that stripped
+    /// digit-shaped words out of argv would take the `-5` for itself and leave
+    /// `-n` bare — measured against GNU, which answers with a niceness of -5.
+    ///
+    /// While a bundle like `-ab` is half-read this answers with the index of
+    /// that word rather than the one after it, because the word has not been
+    /// finished — which is what glibc means by `optind` too.
+    #[must_use]
+    pub fn optind(&self) -> usize {
+        if self.cluster.is_empty() {
+            self.at
+        } else {
+            self.word
+        }
+    }
+
     /// The next word of argv, consumed as some option's value.
     fn next_word(&mut self) -> Option<OsString> {
         let word = self.argv.get(self.at)?.clone();
@@ -1728,5 +1758,75 @@ mod tests {
         // And a `--` with nothing after it is not an operand.
         let args = argv(&["--"]);
         assert!(walk(&args).unwrap().is_empty());
+    }
+
+    #[test]
+    fn optind_says_where_to_resume_after_each_item() {
+        // The number `nice`'s interleaved scan restarts from. Taken one item at
+        // a time, because that is how the obsolete `-NUM` utilities have to
+        // read their command line: the digit test gets a look between every
+        // pair of options.
+        let args = argv(&["-c", "-r", "ref", "f"]);
+        let mut p = TOUCH.parse(&args, TOUCH_SHORTS, TOUCH_LONGS);
+        assert_eq!(p.optind(), 0, "nothing read yet");
+        assert_eq!(p.next().unwrap().unwrap(), short(b'c'));
+        assert_eq!(p.optind(), 1);
+        // A value taken from the *next* word moves it by two, which is what
+        // stops a pre-pass from being a substitute for this.
+        assert_eq!(p.next().unwrap().unwrap(), short_with(b'r', "ref"));
+        assert_eq!(p.optind(), 3);
+        assert_eq!(p.next().unwrap().unwrap(), Opt::Operand(&args[3]));
+        assert_eq!(p.optind(), 4);
+        assert!(p.next().is_none());
+        assert_eq!(p.optind(), 4, "past the end, and it stays there");
+    }
+
+    #[test]
+    fn optind_holds_still_while_a_bundle_is_half_read() {
+        // glibc's rule: `optind` names the word being consumed until that word
+        // is finished, so a caller that resumed from it mid-bundle would see
+        // the remaining letters rather than skip them.
+        let args = argv(&["-cf", "x"]);
+        let mut p = TOUCH.parse(&args, TOUCH_SHORTS, TOUCH_LONGS);
+        assert_eq!(p.next().unwrap().unwrap(), short(b'c'));
+        assert_eq!(p.optind(), 0, "`-f` is still owed from word 0");
+        assert_eq!(p.next().unwrap().unwrap(), short(b'f'));
+        assert_eq!(p.optind(), 1, "and now the word is spent");
+        assert_eq!(p.next().unwrap().unwrap(), Opt::Operand(&args[1]));
+        assert_eq!(p.optind(), 2);
+    }
+
+    #[test]
+    fn optind_after_a_double_dash_is_past_it() {
+        // `--` is consumed by the parser and never yielded, so a scan that
+        // resumed from `optind` must not see it again — otherwise `nice -- -5`
+        // would take the `-5` for an adjustment on the second pass.
+        let args = argv(&["--", "-c"]);
+        let mut p = TOUCH.parse(&args, TOUCH_SHORTS, TOUCH_LONGS);
+        assert_eq!(p.next().unwrap().unwrap(), Opt::Operand(&args[1]));
+        assert_eq!(p.optind(), 2);
+
+        // And with nothing after it, the walk ends with the `--` behind it.
+        let args = argv(&["--"]);
+        let mut p = TOUCH.parse(&args, TOUCH_SHORTS, TOUCH_LONGS);
+        assert!(p.next().is_none());
+        assert_eq!(p.optind(), 1);
+    }
+
+    #[test]
+    fn optind_with_a_leading_plus_stops_one_past_the_first_operand() {
+        // `+` makes the first operand end option parsing — and the operand is
+        // still yielded first, so `optind` is past it. `nice`'s scan subtracts
+        // one for exactly this, which is `nice.c`'s `i += optind - 1`.
+        let args = argv(&["-c", "cmd", "-r", "x"]);
+        let mut p = TOUCH.parse(&args, "+acd:fhmr:t:", TOUCH_LONGS);
+        assert_eq!(p.next().unwrap().unwrap(), short(b'c'));
+        assert_eq!(p.optind(), 1);
+        assert_eq!(p.next().unwrap().unwrap(), Opt::Operand(&args[1]));
+        assert_eq!(p.optind(), 2, "one past `cmd`, which the caller still owns");
+        // Everything after it is an operand, `-r` included.
+        assert_eq!(p.next().unwrap().unwrap(), Opt::Operand(&args[2]));
+        assert_eq!(p.next().unwrap().unwrap(), Opt::Operand(&args[3]));
+        assert_eq!(p.optind(), 4);
     }
 }

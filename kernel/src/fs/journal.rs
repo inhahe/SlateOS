@@ -900,26 +900,54 @@ pub fn self_test() -> KernelResult<()> {
     // A probe write rather than a mount-flag check because that is the real
     // precondition: it accounts for a read-only mount, a quota, a file tag and
     // anything else that could stand between here and a successful write.
+    //
+    // Only an error that *means* "this environment cannot host the section" may
+    // skip it. Skipping on any failure at all is how a suite quietly stops
+    // testing: the write path could break outright and this would report a
+    // read-only root and pass. Anything outside the list below is a real fault
+    // and fails the suite, because "the probe write broke in a new way" is
+    // exactly the news worth having.
     let probe = "/_journal_writable_probe";
-    if crate::fs::Vfs::write_file(probe, b"").is_ok() {
-        // Absence is the expected end state, so a failure here is nothing to
-        // report.
-        let _ = crate::fs::Vfs::remove(probe);
-        flush()?;
-        match crate::fs::Vfs::stat(JOURNAL_FILE) {
-            Ok(stat) => {
-                crate::serial_println!("[journal]   Flushed to disk: {} bytes", stat.size);
-            }
-            Err(e) => {
-                crate::serial_println!(
-                    "[journal]   FAILED: journal file not found after flush: {:?}",
-                    e
-                );
-                return Err(e);
+    let mut skipped_flush = false;
+    match crate::fs::Vfs::write_file(probe, b"") {
+        Ok(()) => {
+            // Absence is the expected end state, so a failure here is nothing to
+            // report.
+            let _ = crate::fs::Vfs::remove(probe);
+            flush()?;
+            match crate::fs::Vfs::stat(JOURNAL_FILE) {
+                Ok(stat) => {
+                    crate::serial_println!("[journal]   Flushed to disk: {} bytes", stat.size);
+                }
+                Err(e) => {
+                    crate::serial_println!(
+                        "[journal]   FAILED: journal file not found after flush: {:?}",
+                        e
+                    );
+                    return Err(e);
+                }
             }
         }
-    } else {
-        crate::serial_println!("[journal]   Root is not writable — skipping flush-to-disk.");
+        Err(
+            e @ (KernelError::ReadOnlyFilesystem
+            | KernelError::PermissionDenied
+            | KernelError::NotSupported),
+        ) => {
+            skipped_flush = true;
+            crate::serial_println!(
+                "[journal]   Root is not writable ({:?}) - skipping flush-to-disk.",
+                e
+            );
+        }
+        Err(e) => {
+            crate::serial_println!(
+                "[journal]   FAILED: probe write to {} failed with {:?}, which does not mean \
+                 the root is read-only",
+                probe,
+                e
+            );
+            return Err(e);
+        }
     }
 
     // Report stats.
@@ -930,6 +958,15 @@ pub fn self_test() -> KernelResult<()> {
         max_seq
     );
 
-    crate::serial_println!("[journal] Self-test PASSED");
+    // Name the skipped section in the verdict. An unconditional "PASSED" after
+    // a skip is read as a full run -- the last line is the one a reader
+    // believes -- so a partial run has to say which part did not happen.
+    if skipped_flush {
+        crate::serial_println!(
+            "[journal] Self-test PASSED (flush-to-disk skipped: root read-only)"
+        );
+    } else {
+        crate::serial_println!("[journal] Self-test PASSED");
+    }
     Ok(())
 }

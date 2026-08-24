@@ -1635,7 +1635,7 @@ fn handle_channel_data(session: &mut Session, payload: &[u8]) -> KernelResult<Op
 
                     // Execute via kshell and capture output.
                     let result = execute_shell_command(&session.username, &line);
-                    output.extend_from_slice(result.as_bytes());
+                    output.extend_from_slice(&result);
                 }
                 // Echo newline and prompt.
                 output.extend_from_slice(b"\r\n");
@@ -1740,15 +1740,19 @@ fn handle_window_adjust(session: &mut Session, payload: &[u8]) -> KernelResult<(
 /// Execute a shell command and return the output.
 ///
 /// Dispatches to the kernel shell (kshell) and captures output.
-fn execute_shell_command(_username: &str, command: &str) -> String {
+/// Returns bytes, not a `String`: the result goes straight onto the wire
+/// (`output.extend_from_slice`), and kshell's capture buffer is byte-clean, so
+/// a command that prints a filename prints whatever bytes the filesystem
+/// holds. Decoding here would only be able to fail or corrupt.
+fn execute_shell_command(_username: &str, command: &str) -> Vec<u8> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
-        return String::new();
+        return Vec::new();
     }
 
     // Block dangerous commands over SSH (same policy as telnet).
     if trimmed == "reboot" || trimmed == "shutdown" || trimmed == "poweroff" {
-        return String::from("Reboot/shutdown not permitted via SSH.\r\n");
+        return Vec::from(&b"Reboot/shutdown not permitted via SSH.\r\n"[..]);
     }
 
     // Dispatch to kshell and capture output.
@@ -1762,13 +1766,20 @@ fn execute_shell_command(_username: &str, command: &str) -> String {
 ///
 /// SSH terminals expect CR+LF line endings.  The kshell output
 /// uses bare LF, so we convert here.
-fn lf_to_crlf(input: &str) -> String {
-    let mut result = String::with_capacity(input.len() + input.len() / 10);
-    for c in input.chars() {
-        if c == '\n' {
-            result.push('\r');
+///
+/// Operates on bytes rather than `char`s. That is behaviour-identical for
+/// valid UTF-8 — only `\n` is special-cased, and `\n` is ASCII, so it can
+/// never occur as a UTF-8 continuation byte — and it is the only form that
+/// can carry a filename the filesystem accepts but Unicode does not onto the
+/// wire. A `&str` signature here would force the caller to decode, and the
+/// only two outcomes of that decode are "refuse" and "corrupt".
+fn lf_to_crlf(input: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(input.len().saturating_add(input.len() / 10));
+    for &byte in input {
+        if byte == b'\n' {
+            result.push(b'\r');
         }
-        result.push(c);
+        result.push(byte);
     }
     result
 }
@@ -2905,12 +2916,21 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 9: LF-to-CRLF conversion for terminal output.
     {
-        assert_eq!(lf_to_crlf(""), "");
-        assert_eq!(lf_to_crlf("hello"), "hello");
-        assert_eq!(lf_to_crlf("a\nb\n"), "a\r\nb\r\n");
-        assert_eq!(lf_to_crlf("\n"), "\r\n");
-        assert_eq!(lf_to_crlf("a\r\nb"), "a\r\r\nb"); // Pre-existing CRLF: don't double-convert
-        // (real usage won't have these, but it's safe).
+        assert_eq!(lf_to_crlf(b"").as_slice(), &b""[..]);
+        assert_eq!(lf_to_crlf(b"hello").as_slice(), &b"hello"[..]);
+        assert_eq!(lf_to_crlf(b"a\nb\n").as_slice(), &b"a\r\nb\r\n"[..]);
+        assert_eq!(lf_to_crlf(b"\n").as_slice(), &b"\r\n"[..]);
+        // Already-CRLF input IS doubled: this implementation converts every LF
+        // unconditionally, unlike telnet's, which tracks the preceding CR. The
+        // divergence is harmless in practice because kshell emits bare LF, and
+        // it is asserted here so a future change to either one is noticed.
+        assert_eq!(lf_to_crlf(b"a\r\nb").as_slice(), &b"a\r\r\nb"[..]);
+        // Byte-clean: a filename the filesystem accepts but Unicode does not
+        // passes through untouched rather than becoming U+FFFD.
+        assert_eq!(
+            lf_to_crlf(b"re\xffport\n").as_slice(),
+            &b"re\xffport\r\n"[..]
+        );
         passed = passed.saturating_add(1);
         serial_println!("[ssh]   LF→CRLF conversion: OK");
     }

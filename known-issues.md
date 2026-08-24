@@ -15158,6 +15158,206 @@ the paragraph above must land *with* (b), not after. The editor buffer
 the 3583 `ch as char` landmine is still live, so that guard must not be
 widened before the buffer type changes.
 
+**[A] 2026-08-24 — the output sink has LANDED, and it uncovered a live
+data-destruction bug on the way.** The sink was the binding constraint named
+above; it is now bytes end to end:
+
+| Was | Is |
+|---|---|
+| `SHELL_OUTPUT: Mutex<Option<String>>` | `Mutex<Option<Vec<u8>>>` |
+| `capture_command(&str) -> String` | `-> Vec<u8>` |
+| `shell_write(&str)` only | `shell_write_bytes(&[u8])` is the primitive; `shell_write` wraps it |
+| `console::write_str(&str)` only | `console::write_bytes(&[u8])` is the primitive |
+| `serial::_print` only | `serial::_print_bytes` alongside it |
+| `dispatch_with_input(&str, &str)` | `(&str, &[u8])` |
+| four hand-rolled copies of the `>>` read-modify-write | one `redirect_write` |
+
+Three notes on *how*, because each was a place the obvious move was wrong:
+
+1. **The console never needed `&str`.** `write_str` looped `putchar(byte)` —
+   it was always byte-oriented, and the `&str` was a restriction on *callers*,
+   not a property the renderer had. So `write_bytes` is the primitive and
+   `write_str` is the two-line wrapper, not the other way round. A byte that
+   is not valid UTF-8 renders as whatever glyph the font maps it to, which is
+   the honest outcome for a glyph grid.
+2. **The serial deadlock-escape protocol was NOT duplicated.** `_print_bytes`
+   needed the same per-CPU `IN_PRINT` claim-before-lock dance as `_print` (a
+   nested print from an exception must take the unlocked `emergency()` port).
+   A second copy that drifted from the first would deadlock only under a
+   nested exception — the hardest case to reproduce and the most urgent to
+   survive — so the protocol was extracted into one `with_serial(emit)` that
+   both call. `serial::reentrancy_self_test` covers it.
+3. **`lf_to_crlf` (ssh *and* telnet) went byte-wise.** Iterating bytes instead
+   of `chars()` is behaviour-identical for valid UTF-8 — only `\n` and `\r`
+   are special-cased and both are ASCII, so neither can appear as a UTF-8
+   continuation byte — and it is the only form that can carry a non-UTF-8
+   filename onto the wire now that the capture buffer is byte-clean. In
+   passing: ssh's version *does* double-convert a pre-existing CRLF while its
+   comment claimed it did not; telnet's (which tracks `prev_cr`) does not. The
+   divergence is pre-existing and harmless — kshell emits bare LF — but it is
+   now asserted in both self-tests, so a future change to either is noticed
+   rather than discovered.
+
+**Where the line was drawn, and why it is a named refusal rather than a silent
+lossy decode.** 19 `cmd_*_input` implementations still take `&str`, and
+several (`sed`, `awk`, `tr`, `cut`, `fold`) are genuine `char`-oriented text
+interpreters — converting them is the largest remaining chunk and does not
+belong in this commit. Rather than scatter 19 `from_utf8_lossy` calls, there
+is one documented chokepoint, `shell_bytes_as_str`, mirroring the
+`path_arg_as_str` precedent: it **refuses** and exits non-zero instead of
+substituting U+FFFD. That distinction matters most for the consumers that
+*write* rather than print — `tee` writes its input to a file, so a lossy
+decode there is the same data-destruction class as the `>>` bug below,
+arriving through a different door. Behaviour is unchanged today (no producer
+emits non-UTF-8 yet); it is the marker for the follow-up and the guard against
+the first byte-clean producer corrupting these stages. Follow-up: convert the
+byte-safe members — `head`, `tail`, `tac`, `tee`, `wc`, `paste`, `mapfile`,
+`nl`, `rev` — to `&[u8]`, leaving only the real text interpreters behind the
+chokepoint.
+
+Also removed in passing: `execute_input_redirect` used to reject a non-UTF-8
+file with `"{path}: not a text file"` *before* dispatch. That gate now belongs
+to `dispatch_with_input`, which knows which command is about to receive the
+bytes — deciding at the read would keep a byte-safe consumer from ever seeing
+a file it could have handled.
+
+*Verification:* `kshell::self_test` sections 6 and 7 (real VFS writes for the
+append fix; `trim_trailing_newlines` and `shell_bytes_as_str` over 0xFF).
+Clippy diffed before/after across all five touched files: **no new warnings,
+two fewer** (`self_test` now genuinely uses `?`, and one `+` became
+`saturating_add`).
+
+**Still remaining for (b)/(c)** — unchanged by this: word expansion
+(`expand_vars -> String`, 24 callers) → `Vec<u8>`; completion → `PathBuf`
+candidates; the `\xNN` escape (still must be built); the editor buffer
+(`line_buf`, `History.entries`) and the 3580 input guard, with the 3583
+`ch as char` landmine still live.
+
+**[A] 2026-08-24 — the follow-up landed too: the line-oriented commands are
+byte-clean end to end** (`b3c828edb`, `eb8f4109d`). The sink could carry bytes
+that no *command* could produce; that gap is closed for the commands where
+byte handling is unambiguously correct. Converted, on **both** their pipe and
+their file paths (which had drifted apart from each other): `sort`, `uniq`,
+`head`, `tail`, `wc`, `nl`, `rev`, `tac`, `tee`, `paste`, and bare `cat`.
+
+The enabling piece is `bytestr::lines()`, matching `str::lines` exactly. It
+had to be *written* rather than substituted with `split_byte(b'\n')`, which
+differs in three ways that each add or drop a line in a real pipeline:
+
+| | `str::lines` / `bytestr::lines` | `split_byte(b'\n')` |
+|---|---|---|
+| `"a\n"` | one line | two (`"a"`, `""`) |
+| `""` | no lines | one empty field |
+| `"a\r\n"` | `"a"` (CR stripped) | `"a\r"` |
+
+The first is the one that matters: shell output almost always ends in `\n`,
+so getting it wrong appends a blank line to *every* `head`/`tail`/`nl`.
+
+**Four silent wrong answers found while converting** — each printed
+plausible-looking output and exited **0**, which is why none had been noticed:
+
+| Command(s) | Was | Effect |
+|---|---|---|
+| `head`, `tail`, `nl`, `rev` (file path) | `from_utf8(&data).unwrap_or("<binary>")` | printed one line reading `<binary>` — a well-formed answer unrelated to the file |
+| `tac` (file path) | `from_utf8(&data).unwrap_or("")` | printed **nothing at all** |
+| `paste` (both paths) | `from_utf8(&data).unwrap_or("")` | undecodable file became an *empty column*; output kept its shape, so blank cells read as "that file had nothing there" |
+| `sort`, `uniq` (file path) | raw arg passed to the VFS, no `resolve_path` | the only two file commands missing cwd resolution, so `cd /tmp && sort notes.txt` reported the file missing while `cat notes.txt` beside it worked |
+
+**The chokepoint narrowed rather than moved.** `dispatch_with_input` now calls
+`shell_bytes_as_str` **per-command at the point of use** instead of once at the
+top. Two consequences, both deliberate: a command that ignores its input
+entirely is no longer refused for a reason that cannot apply to it; and
+converting one more command is now a matter of moving its arm up into the
+byte-clean block. Still behind the chokepoint, with the reason recorded on the
+dispatch arm itself: `grep`, `cut`, `tr`, `fold` (`char`-oriented — character
+classes, field indices, display width), `sed`, `awk` (real text interpreters),
+`xargs`, `column` (re-parse into words / measure display width), and
+`mapfile`/`readarray` — which is the one blocked on something **other than
+itself**: it stores its lines in the shell environment, still a `String` map,
+so converting it would move the decode one call deeper rather than remove it.
+Two corrections to the follow-up list in the entry above, both found only by
+reading the implementations rather than reasoning from the command names:
+
+- It listed **`mapfile`** as byte-safe. It is not — see the environment
+  blocker just described. It stays behind the chokepoint.
+- The first conversion commit then over-corrected and grouped **`paste`** with
+  `mapfile` as environment-blocked. That was also wrong: `paste` only built
+  `String`s internally, by its own choice, and nothing downstream of it needs
+  text. Hence the second commit.
+
+The lesson worth keeping is the one that also caught `rev` during the first
+pass (initially assumed unsafe because reversing a line's bytes would tear a
+multi-byte character — but this `rev` reverses the *order of lines*, an alias
+of `tac`, which cannot): **classify each command by reading it, never by what
+its name implies.** Three of the four guesses made from names were wrong.
+
+*Verification:* `kshell::self_test` section 8 drives the real
+`dispatch_with_input` rather than the `cmd_*_input` functions directly,
+because the **routing** decision is the part that can regress; it covers each
+converted command over 0xFF input, `tee`'s byte-identical file copy, `paste`
+against an undecodable column, the file-path halves, the `sort`/`uniq` cwd
+fix, and both sides of the routing decision (a text-only command still refuses
+and exits 1; `echo` still runs). `bytestr::self_test` section 6 pairs every
+`lines` assertion with the `str::lines` call it must agree with. Clippy diffed
+before/after by stashing only the two touched files: **93 warnings before, 93
+after, identical multisets.**
+
+### B-KSHELL-APPEND-TRUNCATES-BINARY-FILES. `cmd >> file` silently discarded the entire existing contents of any file that was not valid UTF-8, and reported success — 2026-08-24 — ✅ FIXED 2026-08-24 by lane A (`kernel/src/kshell.rs`, `redirect_write`)
+
+**Where:** `kernel/src/kshell.rs`. Four duplicated copies of the append path,
+at (pre-fix) lines 5896, 5982, 6038 and 6128 — the plain `>`/`>>`
+(`execute_redirect`), the `>>`-with-piped-input, the heredoc suffix, and the
+input-redirect suffix.
+
+**What it was.** The VFS has no append mode, so `>>` is a read-modify-write:
+read the file, concatenate, write it back. All four copies did the read like
+this, byte-for-byte identically:
+
+```rust
+let existing = Vfs::read_file(path).unwrap_or_default();     // <-- (2)
+let mut combined = match core::str::from_utf8(&existing) {
+    Ok(s) => String::from(s),
+    Err(_) => String::new(),                                 // <-- (1)
+};
+combined.push_str(&output);
+Vfs::write_file(path, combined.as_bytes())
+```
+
+At **(1)**, a failed UTF-8 decode yields **an empty string**. So for any file
+whose bytes are not valid UTF-8 — an archive, an image, a compiled object,
+anything binary — `echo x >> file` read the file, threw all of it away, wrote
+back just the new output, exited 0, and printed nothing. Append became
+truncate, silently, for exactly the files where the loss is unrecoverable.
+
+At **(2)**, the same shape one level up: a *permission* or *I/O* error was
+also laundered into "no previous contents", so a transient read failure
+overwrote the file rather than refusing.
+
+**Why it survived:** it is invisible to any test written in text. Every `>>`
+test in the tree appends to a UTF-8 file, where the decode succeeds and the
+code is correct. And four copies meant four chances to get the read half right
+and none to notice that none of them had.
+
+**The fix.** One `redirect_write(path, output, append)`; the four sites now
+call it. It concatenates `Vec<u8>` with no decode at all, and it distinguishes
+the errors instead of flattening them: `NotFound` means "start empty" (`>>` is
+allowed to create), and **every other error is propagated** — the caller
+reports `Redirect error: …` and sets exit 1, rather than overwriting.
+
+**How it is kept fixed:** `kshell::self_test` section 6 writes
+`\x80\xffhead`, appends `tail\n`, and asserts the whole of both is on disk;
+asserts `>` still truncates; and asserts `>>` onto an absent path creates it.
+Real VFS writes under `/tmp`, not a mock, because the bug lived in the
+read-modify-write and not in the decision to append.
+
+**Found by:** the byte-clean output-sink conversion above — changing
+`capture_command`'s return type made the compiler point at all four copies at
+once. Worth noting against the previous entry's warning that "the types will
+not tell you": there, a `display()` inside `format!` type-checked its way past
+review; here, a deliberate type change was exactly what surfaced the bug. The
+lesson is not that types are useless, it is that they only help where the
+conversion actually reaches.
+
 ### D-NETSTACK-RX-DEMUX. The netstack daemon had no shared RX demux — concurrent connections couldn't safely receive at once — FIXED 2026-07-14
 
 **Where:** `services/netstack/src/main.rs`.
@@ -71621,3 +71821,472 @@ module docs say so.
 closed-descriptor sweep (todo item 9). The port is complete and correct — it
 calls `getlogin` and reports its failure exactly as GNU does — so nothing in
 `logname` needs to change when this is fixed.
+## `A-KSHELL-BYTE-AS-CHAR-MOJIBAKE` — every non-ASCII command line was corrupted before it ran — ✅ FIXED 2026-08-24 (lane A, `22a93f577`)
+
+**In short:** typing `echo café` into the kernel shell printed `cafÃ©`, and
+`mkdir Ünicode` created a directory named `Ãnicode`. Not in one command — in
+*all* of them, because the corruption happened in the variable expander that
+every command line passes through before it is dispatched. Four more scanners
+had the same defect. All five are fixed and covered by self-tests.
+
+### The bug is one line, repeated
+
+```rust
+result.push(b as char)   // b: u8, result: String
+```
+
+`b as char` is **not** a byte copy. It is the Latin-1 map: it produces the
+Unicode code point whose *number* equals the byte. For a byte below 0x80 that
+is exact — ASCII and Unicode agree there, which is precisely why this survived
+so long. For a byte at or above 0x80 it is a re-encoding: `push` then writes
+that code point back out as UTF-8, and every code point in `U+0080..=U+00FF`
+needs **two** bytes.
+
+So each byte of a multi-byte character becomes its own two-byte character:
+
+| input | bytes in | what `b as char` produced | bytes out |
+|---|---|---|---|
+| `é` | `C3 A9` | `Ã©` | `C3 83 C2 A9` |
+| `→` | `E2 86 92` | `â\u{86}\u{92}` | 6 bytes |
+| `🦀` | `F0 9F A6 80` | 4 chars | 8 bytes |
+
+The output is still *valid* UTF-8 — which is why nothing downstream rejected
+it, and why a debugger showing the string looks merely wrong rather than
+broken. The only reliable detector is the byte **length**, which is why the
+self-tests assert on `.len()` and not just on equality.
+
+### The five sites, in descending order of how much they mattered
+
+**1. `expand_vars` — the whole shell.** `execute()` calls it on the command
+line before dispatch (`kshell.rs`, the `expand_vars(line)` at the top of
+`execute`). Every command, every argument, every path. Three separate copies of
+the bridge lived in it: the ordinary byte loop, the single-quoted branch, and
+the `$`-followed-by-a-non-name branch. A user could not type a non-ASCII
+filename into the kernel shell at all.
+
+**2. `cmd_date`** — literal text in a `+FORMAT` string. `date +'%F café'`
+printed the date correctly and the word wrong.
+
+**3. `expand_tr_set` — worse than corruption, this one was silent.** `tr`
+matches its input *a character at a time*, so a set built out of Latin-1 chars
+contained entries that no input character could ever equal. `tr é e` did not
+mangle anything; it did **nothing**, and exited 0. Separately, a byte-indexed
+range like `à-â` was computed over bytes, so it could run from the second byte
+of one character into the first byte of the next — a range with no meaning.
+
+**4. `awk_eval_expr`'s string literal** — `awk '{print "café"}'`.
+
+**5. `awk_split_print_args`** — the comma splitter for `print` arguments.
+
+### The fix, and the invariant that makes it safe
+
+`expand_vars` became `expand_vars_bytes(&[u8]) -> Vec<u8>`, byte in and byte
+out, with a narrowing `expand_vars(&str) -> String` wrapper for the nine
+`&str` callers that have not been converted yet (see
+`TD-KSHELL-LINE-EDITOR-IS-UTF8` — that is the remaining half of the work). The
+wrapper's error arm **reports** rather than substituting: reaching it means one
+of those callers stopped being UTF-8, which is a bug in this file and not bad
+input, and a `from_utf8_lossy` would hide exactly the thing worth knowing.
+
+The other three sites keep a `Vec<u8>` accumulator and finish through one
+shared helper, `finish_ascii_scan`, which exists to hold the argument for why
+any of this is safe:
+
+> A UTF-8 continuation byte is always ≥ 0x80, so an **ASCII delimiter can never
+> occur inside a multi-byte sequence.** A scanner that only ever branches on
+> ASCII therefore only ever splits on character boundaries, and everything
+> between its splits is copied through verbatim.
+
+That is what all of these scanners do — they branch on `%`, `,`, `"`, `\`, `$`,
+`'`, `` ` ``, `~`. Being byte-indexed was never the bug. Feeding a `String` was.
+
+`expand_tr_set` is the exception and got the opposite treatment: it now returns
+`Vec<char>` and scans characters, because `tr` is *genuinely* character-oriented
+and a byte set is the wrong data structure, not merely a mis-filled one.
+
+### Two sites deliberately left alone
+
+`cmd_strings` and `cmd_hexdump` both use `b as char` behind a `0x20..=0x7E`
+guard. Below 0x80 the Latin-1 map and the identity map agree, so these are
+exact. Changing them would have been churn, and this entry exists partly so the
+next sweep does not "fix" them.
+
+### Why nothing caught it
+
+`kshell::self_test` section 3 had already found and fixed this **exact bug** in
+`interpret_echo_escapes`, months earlier, and documents the mechanism in a
+comment. What did not happen at the time was the obvious follow-up: grep the
+file for the rest of the class. That sweep — `grep -n 'as char' kernel/src/kshell.rs`,
+then *reading* each hit to classify it — took minutes and found seven more
+instances of a bug that made the shell unusable in any language but English.
+
+The lesson is not "grep for `as char`". It is that **a bug found in one place
+is a report about a class, not about a place.** When a fix lands, the next step
+is to enumerate the class, and the enumeration is nearly always cheap compared
+to the fix.
+
+### Coverage
+
+`kshell::self_test` sections 9 and 10, both asserting byte lengths explicitly.
+Section 10 drives `date` through the real `dispatch_with_input` rather than
+calling `cmd_date`, so the `+FORMAT` parsing is covered on the same path a user
+takes.
+
+---
+
+## A-GATES-SILENTLY-STOPPED-CHECKING — four static-analysis gates were parsing a fraction of the tree and reporting "clean" — ✅ FIXED 2026-08-24 (lane A, cb6ead0a6, 28bd7f9ac)
+
+**In short:** the project has four scripts that read every Rust file before a
+boot test and refuse the build if they find a dangerous pattern — a lock held
+across a call that takes the same lock, a lock held across a filesystem call, a
+permission check done outside the one function allowed to do it, and a
+self-test that skips itself. All four share one Rust "skimmer" that blanks out
+comments and string literals so that a `//` or a `"{"` inside text is not
+mistaken for code. The skimmer did not know what a **character literal** is
+(`'x'` — a single character in quotes, as opposed to `"x"` in double quotes).
+So the first `'"'` in a file — a perfectly ordinary character literal holding a
+double-quote — was read as *opening a string*, and everything from there to the
+next `"` anywhere later in the file was blanked out, braces and all. The
+skimmer then lost count of `{` and `}` and stopped being able to find where
+functions begin and end.
+
+**What that cost:** a gate that cannot find any functions reports no findings,
+and no findings is exactly what a clean tree looks like. There is no error, no
+warning, and the build goes green. On `kernel/src/kshell.rs` the skimmer was
+finding **43 function bodies where there are 984** — it was checking about 4%
+of the largest file in the kernel and calling the other 96% clean.
+
+**How it was found:** by accident, and only because the failure mode inverted
+for one commit. A change to an unrelated part of `kshell.rs` shifted the
+position of a `'"'`, which moved the boundary of the phantom string, which made
+the gate suddenly *see* a function it had been blind to and report it. The
+first reading was "the gate is flaky." Running the analyzer directly on the old
+and new file and printing the body count is what turned a shrug into a number.
+
+### The two defects
+
+**1. Character literals (`cb6ead0a6`).** Rust uses `'` for three unrelated
+things and a skimmer has to tell them apart the way the grammar does:
+
+| Form | Example | Opens a literal? |
+|---|---|---|
+| character literal | `'x'`, `'\''`, `'\n'` | yes — ends at the closing `'` |
+| lifetime | `&'a str`, `Foo<'_>` | no |
+| loop label | `'outer: loop {` | no |
+
+The rule implemented is the grammar's: a literal is `'\<escape>'` or
+`'<one char>'` and nothing else, so a `'` not followed by a closing quote in
+the right place opens nothing. The escape case has to skip the backslash *and*
+the character after it, or the closing quote of `'\''` is mistaken for the
+escaped one.
+
+**Raw strings** were the same defect in a second spelling: `r"…"`, `r#"…"#`,
+`br"…"` have no escapes at all, so `r"C:\"` ends at its own quote, while the
+ordinary backslash-aware rule swallows it and runs on.
+
+**2. Self-test scope (`28bd7f9ac`).** The skip-detector had to decide which
+functions belong to a self-test suite, and used *reachability* — anything the
+suite can call. That is the wrong closure: a suite that calls a command
+dispatcher reaches every command in the shell, so the gate was treating
+**1050 of 1052** functions as suite code. The right question is not "can the
+suite reach it" but "does it exist *for* the suite": a helper's only callers
+are the suite; production code reached through a dispatcher has other callers
+too. It now grows the set from the callers side and only admits a function when
+*every* caller is already in the set.
+
+### What was hidden
+
+Five findings appeared the moment the parser could see the file. Four were real
+bugs, fixed in the commits named:
+
+| Finding | Bug | Fix |
+|---|---|---|
+| `cmd_history` | held a module-global lock across `Vfs::remove`, inverting the kernel's filesystem-lock → module-state order — two CPUs wedged with no serial output | `bc8c35bf1` |
+| `cmd_history` | discarded the `Result` of that `Vfs::remove` and printed "History cleared." either way | `bc8c35bf1` |
+| `captags check` | consulted the MAC tag table directly instead of `path_access_verdict`, so it answered a *different question* from the one the kernel uses to allow access — a second policy that drifts | `b4e962aa5` |
+| `fs/journal` self-test | skipped its flush-to-disk step on *any* write error and still printed PASSED, so a genuinely broken write was reported as a pass | `cca1b94b1` |
+| `cmd_archive` | gate false positive (caused by a new integration test) — but reading it found that every failure path in `archive` reported success | `d0777b94a` |
+
+The fifth is worth its own note: chasing a false positive to the point of
+understanding it found a worse bug than any of the true positives.
+
+### The fix that matters most
+
+Both scripts gained a `--self-test` with a fixture, and `scripts/boot-test.sh`
+runs each **before** the gate it belongs to. The fixtures are built so that a
+desynced parser demonstrably drops them: each of the 15 parser cases carries a
+control function that a desync loses, and all 15 return `[]` under the old
+parser. The selftest-skips fixture was rewritten once because the first version
+passed under *both* the old and new closures — a fixture that does not
+discriminate is not a test.
+
+This is the actual lesson. The gates' failure mode is silence, and silence is
+indistinguishable from success, so **a gate needs a test that proves it still
+fires.** A narrowing that quietly turns a gate off is worse than no gate,
+because the gate's presence is what stopped anyone looking.
+
+---
+
+## A-KSHELL-CAPTURE-DID-NOT-NEST — `$(pipeline)` returned nothing and printed its answer on the console — ✅ FIXED 2026-08-24 (lane A)
+
+**In short:** The kernel shell can capture a command's output — that is what
+`$(…)` does, and it is also how a command typed over SSH gets its reply back to
+the remote user. Capturing did not survive a pipe or a `>` redirect: running
+`$(cat f | grep x)` produced an *empty* result, and the text it should have
+returned was printed on the machine's own screen instead. For an SSH or telnet
+user the effect was that any command containing `|` or `>` returned nothing to
+them and printed their output on the host's physical console.
+
+### What was wrong
+
+`capture_start()` and `capture_stop()` were a bare *set*/*take* pair on one
+global (`SHELL_OUTPUT`). Captures genuinely nest — `$(cat f | grep x)` is a
+substitution-capture wrapped around a pipeline in which *every stage* captures —
+so a caller that needed to nest had to save and restore the global by hand
+around the pair.
+
+`capture_command` did that. The four line-level plumbing functions did not:
+
+| Function | Captures | Restored the enclosing capture? |
+|---|---|---|
+| `capture_command` | `$(…)`, SSH, telnet | yes, by hand |
+| `execute_pipe_chain` | every pipeline stage | **no** |
+| `execute_redirect` | `cmd > file` | **no** |
+| `execute_input_redirect` | `cmd < file > file2` | **no** |
+| `execute_heredoc` | `cmd <<EOF | …` | **no** |
+| 5 × `self_test` helpers | test scaffolding | yes, by hand |
+
+So for `$(cat f | grep x)`: `capture_command` starts capture C1; the pipeline's
+first stage calls `capture_start()`, displacing C1 with no record of it, and its
+`capture_stop()` leaves the global `None`; the final stage therefore runs with
+*no* capture and prints to the console; `capture_command` then takes `None` and
+returns empty.
+
+The reach is what makes it serious rather than cosmetic. `capture_command` is
+the entry point used by `net/ssh.rs:1759` and `net/telnet.rs:558` to run a
+remotely-issued command, so this was a remote-shell correctness bug *and* put
+one user's command output on another's screen.
+
+### The fix
+
+One invariant with six hand-written copies and four omissions is an invariant
+in the wrong place, so it moved into the type. `capture_start()` now returns a
+`#[must_use] struct Capture(Option<Vec<u8>>)` holding the capture it displaced,
+and the bytes are reachable only through `Capture::finish(self)`, which
+reinstates that capture on the way out. Forgetting the restore is no longer
+something a call site can express.
+
+The proof the discipline is now in the API rather than in the callers is that
+`capture_command`'s hand-rolled prologue and epilogue **deleted**, down to
+`capture_start()` … `capture.finish()`, and so did all five self-test helpers'.
+
+There is deliberately no `Drop` impl: `finish` consumes `self`, and a kernel
+panic halts rather than unwinds, so `#[must_use]` plus a consuming accessor is
+the entire discipline.
+
+### How it was found, and how it stays fixed
+
+Not by a gate — by writing a *comment*. Self-test §12 (added the same day for
+the exit-status work) carried the line "the redirect and pipe paths run their
+own capture without saving this one, so nothing may be asserted about the bytes
+here." That was the bug, written down and accepted as a limitation rather than
+read as a defect. Boot test batch51 then printed the confirmation in the serial
+log: a pipeline inside §12's capture emitted `1:alpha` onto the console.
+
+Self-test §14 covers `capture_command` directly — plain command, two-stage
+pipeline, three-stage pipeline (so a *middle* capture is exercised), output
+redirect, input redirect — and asserts `SHELL_OUTPUT` is `None` afterwards, so a
+capture left running cannot be missed. §12's helper now returns the captured
+bytes and asserts on them, which is the assertion that fails against the old
+plumbing.
+
+**Lesson:** a comment explaining why a test cannot assert something is a bug
+report that nobody filed. When the reason a test is weak is "the code under it
+does not survive nesting," the weakness is the finding.
+
+---
+
+## A-KSHELL-BRACE-EXPANSION-DELETED-EVERY-QUOTE-IN-THE-SHELL — ✅ FIXED 2026-08-24 (lane A)
+
+**In short:** the kernel shell threw away quotation marks before it read the
+command line. `echo 'a > b'` did not print `a > b`; it printed `a` into a file
+called `b`. `echo 'a && b'` ran two commands. `echo 'a   b'` printed one space.
+And `trap 'grep zeta f' ERR` — the case that surfaced it — installed a trap on
+a signal named `zeta`. One function was responsible for all of it.
+
+**Where:** `kernel/src/kshell.rs::expand_braces`, called from `execute` on
+every line the shell runs.
+
+### What it was
+
+`expand_braces` was written as:
+
+```rust
+let tokens = split_words(input);
+for token in tokens { ...; result.push(' '); }
+```
+
+`split_words` is a *word splitter*, and word splitters remove quotes — that is
+their job, and it is correct there. It is catastrophic here, because
+`expand_braces` runs at `execute` line 5528, **before the line is parsed at
+all**. So the rejoin handed every downstream stage a line with all quoting
+deleted and all whitespace runs collapsed:
+
+| written | what the parsers actually received |
+|---|---|
+| `trap 'grep zeta f' ERR` | `trap grep zeta f ERR` |
+| `echo 'a   b'` | `echo a b` |
+| `echo 'a && b'` | `echo a && b` — two chained commands |
+| `echo 'a > b'` | `echo a > b` — an output redirect |
+
+The function's own doc comment promised "Tokens without `{` or `}` pass through
+unchanged." The rejoin broke that promise for every token in the shell.
+
+### How it was found, and the tell that it was systemic
+
+Boot test batch52 failed in kshell self-test §13 with `last_exit()` reading 0
+where 1 was expected. The serial log showed `trap` printing *two* errors:
+
+```
+trap: unsupported signal 'zeta'
+trap: unsupported signal '/tmp/kshell_trap_selftest.txt'
+```
+
+`cmd_trap`'s own quote parser was hand-traced against the failing string and
+proved correct — it handles `trap 'cmd args' SIG` exactly right. It simply
+never received a quote.
+
+The tell that this was not a `trap` bug: `split_chain_operators` (5601),
+`parse_redirect` (6035) and `parse_input_redirect` (6190) all carefully track
+`in_sq`/`in_dq` and refuse to split inside a quoted region. **Every one of
+those checks was dead code**, because no quote ever reached them. The shell was
+written throughout for quotes to survive to the parsers, and this one function
+was quietly guaranteeing they never did.
+
+### The fix
+
+Two stages, each doing one thing:
+
+1. **`expand_braces` is now byte-preserving.** It scans tokens itself, tracking
+   quote state, and re-emits separators, quotes, prefixes and suffixes exactly
+   as written. Only a token containing an *unquoted* `{`…`}` is rewritten, so
+   `echo '{a,b}'` is literal, as in bash. New helpers `unquoted_positions` and
+   `split_unquoted` keep the brace/comma scans quote-aware; the expansion
+   arithmetic itself moved unchanged into `expand_braces_token`.
+2. **Quote removal became an explicit, named, per-command stage.**
+   `remove_quotes` deletes quote characters and moves nothing else — it is not
+   a splitter, which is how `'a   b'`'s interior spacing now survives — and it
+   is applied in `dispatch` and `dispatch_with_input`, after the parsers have
+   had their look at the line with the quoting still in it.
+
+Commands listed in `command_parses_own_quotes` are handed the line as written
+instead. `trap` is the founding member: its handler *is* a command line
+followed by another argument, so where the handler ends is precisely the fact
+quote removal destroys.
+
+**Covered by** kshell self-test §15 ("quoting survives expansion"): the two
+stages asserted in isolation, then end-to-end through `capture_command` for
+quoted whitespace, a quoted `&&`, a quoted `>` (including that no file was
+created by it), and the `trap` handler round-trip.
+
+**Lesson:** a parser full of careful quote handling, in a shell where quotes
+never reach a parser, is not evidence that quoting works. It is evidence that
+someone upstream is eating them.
+
+---
+
+## TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV — tech debt, lane A
+
+**In short:** kshell hands each of its ~750 commands a single string of
+arguments rather than a list. A string cannot record that `a b` was written as
+`'a b'` and is therefore *one* argument, so `grep 'a b' file` searches for `a`
+in files `b` and `file`. Real shells pass a list (argv) and do not have this
+problem.
+
+**Where:** `kernel/src/kshell.rs` — 630 functions with the signature
+`fn cmd_x(args: &str)`, dispatched from `dispatch` (6648) and
+`dispatch_with_input` (6554).
+
+**Status:** the quoting *structure* now survives all the way to the dispatch
+boundary — see `A-KSHELL-BRACE-EXPANSION-DELETED-EVERY-QUOTE-IN-THE-SHELL`
+above, which fixed the stage that was destroying it earlier. What remains is
+that the boundary itself is lossy: `remove_quotes` flattens
+`'a b'` to `a b`, and a command that then calls `split_whitespace` sees two
+words. That is not a regression — it is what the shell has always done — but it
+is now the *only* place the information is lost, rather than one of several.
+
+**What the proper fix looks like:** pass `argv: &[String]` (produced once, by
+the existing quote-aware `split_words`) instead of `args: &str`. The migration
+does not have to be a single 750-function change: `command_parses_own_quotes`
+is the incremental path. A command joins that list when it learns to parse its
+own arguments quote-aware; until then it keeps receiving the dequoted string it
+was written for, and nothing regresses. When every command is on the list,
+`command_parses_own_quotes` and `remove_quotes` both delete themselves in
+favour of a real argv.
+
+**Not purely mechanical**, which is why it is debt rather than an afternoon:
+the commands disagree about what they want. `echo` wants the rest of the line
+joined; `grep` wants words; `trap` wants word 1 as a command string and word 2
+as a signal. Each conversion is a small semantic decision, and there are no
+per-command tests to catch getting one wrong.
+
+### Two smaller bugs found in the same area, not yet fixed
+
+- **`parse_inline_assignment` splits the first word on raw whitespace**
+  (`line.find([' ', '\t'])`, kshell.rs 6131), so `FOO='a b'` is read as
+  `first_word = FOO='a`, `command = b'` — it tries to run `b'`. It was equally
+  broken before the quoting fix (it read `FOO=a` and ran `b`); the fix changed
+  the wrong answer, not its wrongness. It needs the same quote-aware scan
+  `expand_braces` now uses.
+- **`grep` with no arguments prints its usage and exits 0.** Its usage arm is a
+  `console_println!` followed by a bare `return`, never reaching `set_exit(1)`.
+  This is the same silent-success class as
+  `A-KSHELL-CAPTURE-DID-NOT-NEST` and the exit-status fixes before it, and is
+  very likely not unique to `grep` — the usage arms of the other ~750 commands
+  have not been audited.
+
+---
+
+## A-KSHELL-A-MISTYPED-COMMAND-REPORTED-SUCCESS — ✅ FIXED 2026-08-24 (lane A)
+
+**In short:** type a kernel-shell command wrongly — leave off an argument,
+give it a word where it wanted a number — and it printed `Usage: …`, did
+nothing at all, and then reported that it had succeeded. Anything deciding
+what to do next based on that answer decided wrong: `cmd || fallback` never
+ran the fallback, `set -e` never stopped, and an `ERR` trap never fired, for
+a command that had not run.
+
+**Where:** `kernel/src/kshell.rs` — **710 sites across 194 `cmd_*`
+functions**. The shape was uniform: one or more `shell_println!("Usage: …")`
+lines followed by a bare `return;`, with no `set_exit(1)` anywhere between.
+`dispatch` sets the status to 0 on entry and expects the command to raise it,
+so a command that returns without raising it has claimed success.
+
+**The value was not a judgement call.** 42 usage arms in the same file
+already called `set_exit(1)`. The other 710 were not a different policy, they
+were the same policy unimplemented, so the fix is a consistency sweep and not
+a behaviour change anyone chose.
+
+**One deliberate exclusion**, found by sampling the sites rather than trusting
+the pattern: `cmd_ksyms` with no argument prints a symbol count *and* a usage
+line, but it has done its job — that is its no-argument output, not a refusal.
+It keeps reporting 0. Its sibling arm ("Invalid address") is a real failure
+and was swept in with the rest.
+
+**Covered by** kshell self-test §16, which asserts a top-level arity guard
+(`kill`), a subcommand arity guard several match arms deep
+(`fssnapshot info`), a parse failure (`ksyms zzz`), the `ksyms` exclusion, and
+— so the whole section cannot pass by everything failing — that a command
+which actually worked still reports 0.
+
+**Still open in this class:** roughly 231 further sites where the usage
+message and the `return` have other statements between them. Those do not fit
+a pattern rule and need reading one at a time; the sweep deliberately did not
+touch them rather than guess.
+
+**Lesson:** this is the third silent-success bug in the shell in two days,
+after the pipeline exit-status fixes and `A-KSHELL-CAPTURE-DID-NOT-NEST`. The
+recurring shape is not "the wrong value was computed" but "no value was
+computed and the default was reported as if it were one." A default of
+success is a claim, and every early `return` past it is an unexamined
+assertion that the claim still holds.

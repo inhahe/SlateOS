@@ -1,190 +1,352 @@
-//! whoami — print effective user name.
+//! `whoami` -- print the user name associated with the effective user ID.
 //!
-//! Usage: whoami
-//!   Prints the name of the current user.
-//!   Falls back to the numeric UID if no name database is available.
+//! # What was here before
 //!
-//! Portability: on POSIX-y targets (Linux, and our `x86_64-slateos`
-//! custom target which reports `target_os = "linux"`) we look up the
-//! effective UID via the `geteuid()` extern from the C runtime.  On
-//! Windows hosts the symbol does not exist in mingw-w64; we use the
-//! `USERNAME` env var the Win32 environment sets, falling back to the
-//! numeric UID `0` if even that is absent.  The Windows host path is
-//! purely so the coreutils crate builds and runs under `cargo test` on
-//! the developer machine — production targets always have a real
-//! `geteuid`.
+//! Seventy-five lines that answered a different question, and six defects.
+//! The first is not a detail:
+//!
+//! 1. **It read the environment.** The old `user_from_env` consulted `$USER`,
+//!    then `$LOGNAME`, and printed whichever it found. GNU `whoami` does not
+//!    look at the environment at all -- it is documented as "same as `id -un`",
+//!    which is `getpwuid(geteuid())`. The difference is the whole point of the
+//!    utility: `$USER` is a *claim* the environment makes and any process can
+//!    set, while the effective uid is what the kernel will actually enforce.
+//!    Measured, GNU 9.4: `USER=zzz LOGNAME=zzz whoami` prints the real account
+//!    name. Ours printed `zzz`. A script that used `whoami` to decide whether
+//!    it was root could be told anything at all.
+//! 2. **It fell back to printing a number.** With no name available the old
+//!    code printed the uid as if that were an answer. GNU refuses:
+//!    `whoami: cannot find name for user ID 31337` on stderr, exit 1, nothing
+//!    on stdout. Measured under `unshare --map-user=31337`.
+//! 3. **No options at all.** `whoami --help` printed a user name; `whoami -x`
+//!    did too, where GNU refuses with `invalid option -- 'x'`.
+//! 4. **An operand was accepted silently.** GNU refuses the first one --
+//!    `whoami: extra operand ‘x’` -- and refers on to `--help`.
+//! 5. **A failed write was reported as success.** `whoami >&-` exited 0,
+//!    having printed nowhere. GNU reports `whoami: write error: Bad file
+//!    descriptor` and exits 1. This is what brought the file into scope; the
+//!    rest was found on the way.
+//! 6. **The name was a `String`.** A login name is a field of `/etc/passwd`
+//!    and is bytes; forcing UTF-8 on it panics on a line that is not. It is
+//!    written as bytes now.
+//!
+//! # Why the operand is quoted curly
+//!
+//! `whoami.c` reports the extra operand with gnulib's *locale* `quote()`, not
+//! with `quotef`, so under a UTF-8 locale it comes out `‘x’` rather than
+//! `'x'`. Measured, GNU 9.4, `LC_ALL=C.UTF-8`. The same choice as `pwd`'s
+//! diagnostics and the opposite of most of the suite; see the `quoting`
+//! crate's module docs for the split.
 
-use std::env;
+// The host build stops at the `main` below that refuses to run, so everything
+// the real one would have called is unreachable there. Same reason as `id`.
+#![cfg_attr(not(unix), allow(dead_code))]
 
-#[cfg(target_os = "linux")]
-unsafe extern "C" {
-    fn geteuid() -> u32;
-}
+use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::quote::{os_bytes, quote};
+use std::ffi::OsString;
 
-/// Look up the current user name using the standard environment
-/// variables (USER then LOGNAME on POSIX, USERNAME on Windows).
+coreutils::guard_std_fds!();
+
+/// `whoami`'s usage status is 1 -- measured: `whoami x; echo $?` prints 1.
+const WHOAMI: Program = Program::new("whoami", 1);
+
+/// GNU `whoami`'s `getopt_long` string, exactly: it has no short options.
 ///
-/// Returns `None` if neither is set.  Pulled into a helper so tests
-/// can exercise it without spawning a subprocess.
-fn user_from_env() -> Option<String> {
-    if let Ok(name) = env::var("USER")
-        && !name.is_empty()
-    {
-        return Some(name);
-    }
-    if let Ok(name) = env::var("LOGNAME")
-        && !name.is_empty()
-    {
-        return Some(name);
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(name) = env::var("USERNAME")
-            && !name.is_empty()
-        {
-            return Some(name);
-        }
-    }
-    None
+/// Empty rather than absent, so that `-x` is `invalid option -- 'x'` and not
+/// an operand. And with no leading `+`, so `whoami x --help` still prints the
+/// help -- measured: it exits 0 rather than complaining about `x`.
+const SHORT_OPTIONS: &str = "";
+
+/// GNU `whoami`'s `longopts[]`: the two `parse_long_options` adds, and nothing
+/// of its own.
+const LONG_OPTIONS: &[(&str, Takes)] = &[("help", Takes::Nothing), ("version", Takes::Nothing)];
+
+/// What the command line asked for.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum Request {
+    Help,
+    Version,
+    /// Print the name. There is nothing to carry: `whoami` takes no operand
+    /// and has no flag that changes what it prints.
+    Run,
 }
 
-/// Numeric UID fallback when no name is available.
+fn help_text() -> String {
+    "\
+Usage: whoami [OPTION]...
+Print the user name associated with the current effective user ID.
+Same as id -un.
+
+      --help        display this help and exit
+      --version     output version information and exit
+"
+    .to_string()
+}
+
+// ---------------------------------------------------------------- parsing ---
+
+/// Parse `whoami`'s argv.
 ///
-/// On POSIX targets this issues `geteuid()`.  On Windows hosts we
-/// return 0 — there is no meaningful POSIX UID, and 0 is what
-/// `whoami --uid`-style flags produce when the user database is
-/// unavailable on other systems too.
-fn current_uid() -> u32 {
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: geteuid is a simple POSIX getter, no pointer arguments.
-        unsafe { geteuid() }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        0
-    }
-}
+/// # Errors
+///
+/// An unknown option, a long option given a value it does not take, or any
+/// operand at all -- only the first is named, as upstream's `argv[optind]`
+/// does.
+fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+    let mut extra: Option<OsString> = None;
 
-fn main() {
-    if let Some(name) = user_from_env() {
-        println!("{name}");
-        return;
-    }
-    println!("{}", current_uid());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
-
-    // env::set_var / env::remove_var mutate process-global state.
-    // Cargo runs unit tests in parallel by default, so serialise.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// RAII helper: lock the env mutex and remember the current values
-    /// of the variables we'll be poking, restoring them on drop so a
-    /// failing assertion doesn't leak state into subsequent tests.
-    struct EnvScope {
-        _guard: std::sync::MutexGuard<'static, ()>,
-        saved: Vec<(&'static str, Option<String>)>,
-    }
-
-    impl EnvScope {
-        fn new(keys: &[&'static str]) -> Self {
-            let guard = ENV_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let saved = keys
-                .iter()
-                .map(|&k| (k, env::var(k).ok()))
-                .collect::<Vec<_>>();
-            for (k, _) in &saved {
-                // SAFETY: env::remove_var is safe on Windows + Linux for
-                // these process-local mutations; the lock above prevents
-                // races against parallel tests.
-                unsafe {
-                    env::remove_var(k);
+    for item in WHOAMI.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
+        match item? {
+            // Recorded rather than refused on the spot: `--help` still wins
+            // over an operand that precedes it, because upstream checks
+            // `optind != argc` only after the whole scan.
+            Opt::Operand(name) => {
+                if extra.is_none() {
+                    extra = Some(name.clone());
                 }
             }
-            Self {
-                _guard: guard,
-                saved,
+            Opt::Long("help", _) => return Ok(Request::Help),
+            Opt::Long("version", _) => return Ok(Request::Version),
+            // Unreachable: the parser yields only names from the table, and
+            // every one is handled above. Refusing rather than ignoring, so a
+            // table entry added without a handler fails loudly.
+            Opt::Long(other, _) => {
+                return Err(WHOAMI.usage_referring(format!("option '--{other}' is unhandled")));
             }
-        }
-
-        fn set(&self, key: &str, value: &str) {
-            // SAFETY: see new(); lock is held for the lifetime of self.
-            unsafe {
-                env::set_var(key, value);
-            }
+            Opt::Short(other, _) => return Err(WHOAMI.invalid_option(other)),
         }
     }
 
-    impl Drop for EnvScope {
-        fn drop(&mut self) {
-            for (k, prev) in &self.saved {
-                // SAFETY: see new().
-                unsafe {
-                    match prev {
-                        Some(v) => env::set_var(k, v),
-                        None => env::remove_var(k),
+    match extra {
+        Some(name) => Err(WHOAMI.usage_referring(format!(
+            "extra operand {}",
+            quote(&os_bytes(name.as_os_str()))
+        ))),
+        None => Ok(Request::Run),
+    }
+}
+
+// ------------------------------------------------------------------- unix ---
+
+#[cfg(unix)]
+mod imp {
+    use super::{Request, help_text, parse_args};
+    use coreutils::stdfd::{self, Stream};
+    use pwdb::Db;
+    use std::ffi::OsString;
+    use std::io::Write;
+    use std::process::ExitCode;
+
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+
+    /// The effective uid.
+    ///
+    /// Upstream compares the result against `(uid_t) -1` before looking it up,
+    /// which is a guard for systems where `geteuid` can fail. POSIX says it
+    /// cannot, and a uid of `0xffff_ffff` is a legitimate (if unusual) account
+    /// number here rather than a sentinel, so the lookup is simply attempted
+    /// and its failure reported the same way any other missing account is.
+    fn effective_uid() -> u32 {
+        // SAFETY: a POSIX getter with no arguments and no pointers, which
+        // POSIX requires cannot fail.
+        unsafe { geteuid() }
+    }
+
+    pub fn main() -> ExitCode {
+        stdfd::restore();
+        let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+
+        // Decided before the stream exists: upstream's `usage (EXIT_FAILURE)`
+        // never reaches `atexit (close_stdout)` with anything buffered, so
+        // `whoami x >&-` prints only the operand complaint.
+        let request = match parse_args(&args) {
+            Ok(request) => request,
+            Err(e) => {
+                eprintln!("whoami: {e}");
+                return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
+            }
+        };
+
+        let mut out = Stream::stdout();
+        let earned = match request {
+            Request::Help => {
+                let _ = out.write_all(help_text().as_bytes());
+                ExitCode::SUCCESS
+            }
+            Request::Version => {
+                let _ = out.write_all(b"whoami (SlateOS coreutils) 0.1.0\n");
+                ExitCode::SUCCESS
+            }
+            Request::Run => {
+                let uid = effective_uid();
+                // Loaded here rather than at the top so that `--help` does not
+                // read `/etc/passwd` -- which matters when the database is the
+                // thing that is broken.
+                match Db::load().user_by_uid(uid) {
+                    Some(user) => {
+                        // Bytes, not text: a login name is a field of
+                        // `/etc/passwd` and need not be UTF-8.
+                        let _ = out.write_all(&user.name);
+                        let _ = out.write_all(b"\n");
+                        ExitCode::SUCCESS
+                    }
+                    None => {
+                        eprintln!("whoami: cannot find name for user ID {uid}");
+                        ExitCode::FAILURE
                     }
                 }
             }
-        }
+        };
+        // Reached even when the lookup failed: upstream's `die` runs the
+        // `atexit` handler too, so a closed stdout is still reported. It is
+        // silent here, because nothing was buffered -- gnulib's `close_stream`
+        // forgives `EBADF` when there was nothing left to write.
+        stdfd::close_stdout("whoami", out, earned)
+    }
+}
+
+#[cfg(unix)]
+fn main() -> std::process::ExitCode {
+    imp::main()
+}
+
+/// The host build exists only so `cargo test` runs on the developer machine.
+///
+/// There is no honest answer here: Windows has no effective uid and no
+/// `/etc/passwd`, and the old code's guess -- `%USERNAME%` -- is exactly the
+/// environment-trusting behaviour this file was rewritten to remove. `id` says
+/// the same thing for the same reason.
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("whoami: unix-only utility; not supported on this platform");
+    std::process::exit(1);
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    fn argv(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
     }
 
     #[test]
-    fn user_from_env_prefers_user_over_logname() {
-        let scope = EnvScope::new(&["USER", "LOGNAME", "USERNAME"]);
-        scope.set("USER", "alice");
-        scope.set("LOGNAME", "bob");
-        assert_eq!(user_from_env().as_deref(), Some("alice"));
+    fn a_bare_invocation_is_a_run() {
+        assert_eq!(parse_args(&argv(&[])).unwrap(), Request::Run);
     }
 
     #[test]
-    fn user_from_env_falls_back_to_logname() {
-        let scope = EnvScope::new(&["USER", "LOGNAME", "USERNAME"]);
-        scope.set("LOGNAME", "carol");
-        assert_eq!(user_from_env().as_deref(), Some("carol"));
+    fn help_and_version_are_requests() {
+        assert_eq!(parse_args(&argv(&["--help"])).unwrap(), Request::Help);
+        assert_eq!(parse_args(&argv(&["--version"])).unwrap(), Request::Version);
+    }
+
+    /// The scan runs to the end before the operand check, so a `--help` after
+    /// an operand still wins -- measured: `whoami x --help` exits 0.
+    #[test]
+    fn help_wins_over_an_operand_that_precedes_it() {
+        assert_eq!(parse_args(&argv(&["x", "--help"])).unwrap(), Request::Help);
+    }
+
+    /// An unambiguous prefix is accepted; `--h` and `--v` are distinct.
+    #[test]
+    fn an_unambiguous_prefix_is_accepted() {
+        assert_eq!(parse_args(&argv(&["--h"])).unwrap(), Request::Help);
+        assert_eq!(parse_args(&argv(&["--vers"])).unwrap(), Request::Version);
     }
 
     #[test]
-    fn user_from_env_returns_none_when_unset() {
-        let _scope = EnvScope::new(&["USER", "LOGNAME", "USERNAME"]);
-        assert_eq!(user_from_env(), None);
+    fn the_first_operand_is_the_one_named() {
+        let e = parse_args(&argv(&["x", "y"])).unwrap_err();
+        assert_eq!(e.status, 1);
+        assert_eq!(
+            e.message(),
+            "extra operand \u{2018}x\u{2019}\nTry 'whoami --help' for more information."
+        );
+    }
+
+    /// `--` ends the options, so what follows is an operand rather than a
+    /// flag -- and an operand is still an error.
+    #[test]
+    fn a_double_dash_does_not_excuse_an_operand() {
+        let e = parse_args(&argv(&["--", "x"])).unwrap_err();
+        assert_eq!(
+            e.message(),
+            "extra operand \u{2018}x\u{2019}\nTry 'whoami --help' for more information."
+        );
+    }
+
+    /// An empty word is an operand like any other, and is quoted to nothing
+    /// between the marks -- measured: `whoami ''` says `extra operand ‘’`.
+    #[test]
+    fn the_empty_operand_is_an_operand() {
+        let e = parse_args(&argv(&[""])).unwrap_err();
+        assert_eq!(
+            e.message(),
+            "extra operand \u{2018}\u{2019}\nTry 'whoami --help' for more information."
+        );
+    }
+
+    /// A lone `-` is not an option: with an empty short-option string there is
+    /// nothing for it to introduce, and getopt hands it back as an operand.
+    #[test]
+    fn a_lone_dash_is_an_operand() {
+        let e = parse_args(&argv(&["-"])).unwrap_err();
+        assert_eq!(
+            e.message(),
+            "extra operand \u{2018}-\u{2019}\nTry 'whoami --help' for more information."
+        );
     }
 
     #[test]
-    fn user_from_env_treats_empty_as_unset() {
-        let scope = EnvScope::new(&["USER", "LOGNAME", "USERNAME"]);
-        // Empty USER must not shadow LOGNAME — POSIX shells sometimes
-        // export USER="" when the user database is unavailable.
-        scope.set("USER", "");
-        scope.set("LOGNAME", "dave");
-        assert_eq!(user_from_env().as_deref(), Some("dave"));
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn user_from_env_uses_username_on_windows() {
-        let scope = EnvScope::new(&["USER", "LOGNAME", "USERNAME"]);
-        scope.set("USERNAME", "eve");
-        assert_eq!(user_from_env().as_deref(), Some("eve"));
+    fn an_unknown_option_is_refused() {
+        let e = parse_args(&argv(&["-x"])).unwrap_err();
+        assert_eq!(
+            e.message(),
+            "invalid option -- 'x'\nTry 'whoami --help' for more information."
+        );
+        let e = parse_args(&argv(&["--nope"])).unwrap_err();
+        assert_eq!(
+            e.message(),
+            "unrecognized option '--nope'\nTry 'whoami --help' for more information."
+        );
     }
 
     #[test]
-    fn current_uid_returns_zero_on_non_posix_hosts() {
-        // On Windows hosts (the common dev environment) current_uid()
-        // is the fallback path returning 0.  On Linux/slateos the cfg
-        // gate compiles the geteuid() path, which we cannot easily
-        // assert a value for — so this assertion is only run on the
-        // platforms where the fallback compiles.
-        #[cfg(not(target_os = "linux"))]
-        {
-            assert_eq!(current_uid(), 0);
-        }
+    fn a_value_given_to_a_flag_is_refused() {
+        let e = parse_args(&argv(&["--help=1"])).unwrap_err();
+        assert_eq!(
+            e.message(),
+            "option '--help' doesn't allow an argument\n\
+             Try 'whoami --help' for more information."
+        );
+    }
+
+    /// An operand that is not UTF-8 must reach the diagnostic unchanged --
+    /// escaped, as gnulib's `quote` escapes it, not replaced.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_operand_is_escaped_not_corrupted() {
+        use std::os::unix::ffi::OsStringExt;
+        let e = parse_args(&[OsString::from_vec(b"a\xffb".to_vec())]).unwrap_err();
+        assert!(
+            e.message()
+                .starts_with("extra operand \u{2018}a\\377b\u{2019}"),
+            "got {:?}",
+            e.message()
+        );
+    }
+
+    #[test]
+    fn the_help_text_names_the_program_and_both_options() {
+        let text = help_text();
+        assert!(text.starts_with("Usage: whoami [OPTION]...\n"));
+        assert!(text.contains("Same as id -un.\n"));
+        assert!(text.contains("      --help        display this help and exit\n"));
+        assert!(text.ends_with("output version information and exit\n"));
     }
 }

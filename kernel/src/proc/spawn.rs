@@ -202,29 +202,107 @@ pub fn pathz_report_skips() {
     }
 }
 
+/// The mount point the Path-Z fixture disk appears at.
+///
+/// Named rather than spelled out at each use because it is the thing
+/// [`pathz_fixture_absent`] asks about: "is the disk here at all" is a different
+/// question from "is this one file on it", and only the first is an environment
+/// fact a rung may skip for.
+const FIXTURE_MOUNT: &str = "/mnt";
+
+/// Decide whether a failed fixture read is an *absence* (skip, counted) or a
+/// *defect* (fail), and say so on the serial log either way.
+///
+/// This is the split that the predecessor of [`pathz_test_elf`] got wrong: it
+/// matched `Ok(v) if !v.is_empty() => Some(v), _ => None`, collapsing four
+/// unrelated outcomes onto one `None` that every caller then read as "absent".
+///
+/// | Read outcome | What it actually means | Old | Now |
+/// |---|---|---|---|
+/// | `Err(NotFound)`, `/mnt` unmounted | lean build, no test disk | skip | skip |
+/// | `Err(NotFound)`, `/mnt` mounted | image built without this fixture | skip | skip |
+/// | `Err(_)` — EIO, permission, corrupt | **the VFS or ext4 is broken** | skip | **fail** |
+/// | `Ok(v)`, `v.is_empty()` | fixture staged as zero bytes | skip | **fail** |
+///
+/// The bottom two rows are the dangerous ones, and not in a small way: an ext4
+/// regression would switch off every rung that could have caught it, and the
+/// boot log would be indistinguishable from a clean one. A self-test that
+/// disables itself when the thing it tests breaks is worse than no self-test,
+/// because it is believed.
+///
+/// Returns `Ok(())` when the caller should treat this as an absence — having
+/// already called [`pathz_skip`], so the skip lands in `PATHZ_SKIPPED` and is
+/// counted by [`pathz_report_skips`]. That counting is the whole point: the
+/// ~84 call sites this replaces printed their own `SKIP` line in a format
+/// `pathz_report_skips` does not parse and incremented nothing, so a boot that
+/// lost 29 rungs to a lean image still announced "complete — 0 rungs skipped".
+fn pathz_fixture_absent(rung: &str, path: &str, err: &KernelError) -> KernelResult<()> {
+    if matches!(err, KernelError::NotFound) {
+        pathz_skip(format_args!("{rung}"), path);
+        return Ok(());
+    }
+    serial_println!(
+        "[spawn]   FAIL: {}: {} could not be read: {:?} (this is not an absent fixture — \
+         the rootfs is mounted and the error is not NotFound, so the VFS or ext4 is at fault)",
+        rung,
+        path,
+        err
+    );
+    Err(KernelError::InternalError)
+}
+
 /// Load a ring-3 self-test fixture ELF from the rootfs-staged test directory
 /// (`/mnt/tests/<name>.elf`, where `/mnt` is the ext4 rootfs mounted at boot,
 /// long before the Path-Z self-tests run).
-///
-/// Returns `None` when the fixture — or the whole rootfs test disk — is absent,
-/// so a self-test that depends on an on-disk fixture cleanly *self-skips* in a
-/// lean build that carries no test disk, rather than failing.
 ///
 /// This is the seam that lets the (formerly `include_bytes!`'d, ~164 MiB) fastpy
 /// self-test ELFs live on disk instead of bloating the kernel image
 /// (TD-KERNEL-EMBED-BLOAT; see design-decisions.md #86). The `name` key is the
 /// ELF filename stem staged by `scripts/create-ext4-rootfs.sh`, which equals the
-/// fastpy directory name (e.g. `load_test_elf("fastpy-hello")` reads
+/// fastpy directory name (e.g. `pathz_test_elf("Z.7", "fastpy-hello")` reads
 /// `/mnt/tests/fastpy-hello.elf`).
-fn load_test_elf(name: &str) -> Option<alloc::vec::Vec<u8>> {
+///
+/// Three outcomes, and the caller must be able to tell them apart:
+///
+/// * `Ok(Some(bytes))` — the fixture is staged and non-empty. Run the rung.
+/// * `Ok(None)` — the fixture (or the whole test disk) is genuinely absent. The
+///   skip has **already been counted** into the end-of-boot verdict; the caller
+///   should `return Ok(())` without printing anything further.
+/// * `Err(_)` — the fixture should have been readable and was not. Fail the rung;
+///   see [`pathz_fixture_absent`] for why this is not a skip.
+///
+/// `rung` is the Path-Z rung identifier the skip line should name, which is not
+/// always `name` — several rungs load a fixture whose stem differs from the rung
+/// they belong to.
+fn pathz_test_elf(rung: &str, name: &str) -> KernelResult<Option<alloc::vec::Vec<u8>>> {
     let mut path =
         alloc::string::String::with_capacity("/mnt/tests/".len() + name.len() + ".elf".len());
     path.push_str("/mnt/tests/");
     path.push_str(name);
     path.push_str(".elf");
+    // "Is the test disk mounted at all?" first. Without it, a diskless boot
+    // would have to distinguish absence from breakage using only the error
+    // code — and a VFS that answers `NotFound` for a path under an unmounted
+    // point is indistinguishable from one that has genuinely lost the file.
+    if !crate::fs::selftest::is_mounted(FIXTURE_MOUNT) {
+        pathz_skip(
+            format_args!("{rung}"),
+            &alloc::format!("{path} (nothing is mounted at {FIXTURE_MOUNT})"),
+        );
+        return Ok(None);
+    }
     match crate::fs::Vfs::read_file(&path) {
-        Ok(v) if !v.is_empty() => Some(v),
-        _ => None,
+        Ok(v) if !v.is_empty() => Ok(Some(v)),
+        Ok(_) => {
+            serial_println!(
+                "[spawn]   FAIL: {}: {} is staged but zero bytes long — the image build \
+                 produced a truncated fixture; rerun scripts/create-ext4-rootfs.sh",
+                rung,
+                path
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => pathz_fixture_absent(rung, &path, &e).map(|()| None),
     }
 }
 
@@ -235,27 +313,67 @@ fn load_test_elf(name: &str) -> Option<alloc::vec::Vec<u8>> {
 /// `init` consults; keep it ordered most-specific-first.
 const COMMAND_PATH: &[&str] = &["/mnt/bin"];
 
-/// Resolve an installed command by *name* against a search [`path`] and return
-/// its ELF image — the resolve+load step a shell or `init` performs before it
-/// `exec`s a command (e.g. `cat` -> `/mnt/bin/cat`).
+/// Resolve an installed command by *name* against a search `path_dirs` and
+/// return its ELF image — the resolve+load step a shell or `init` performs
+/// before it `exec`s a command (e.g. `cat` -> `/mnt/bin/cat`).
 ///
-/// Returns `None` if the command is not found on any PATH entry (or is empty),
-/// so callers on a lean build with no `/bin` can self-skip. Unlike
-/// [`load_test_elf`], the name is a bare command (no `.elf` suffix), matching
-/// how binaries are installed under `/bin`.
-fn resolve_command(name: &str, path_dirs: &[&str]) -> Option<alloc::vec::Vec<u8>> {
+/// Same three-outcome contract as [`pathz_test_elf`], and the same reason for
+/// it. The difference is only in how the two failure modes are reached: a
+/// command is absent when **every** PATH entry answers `NotFound`, and is a
+/// defect the moment *any* entry answers something else — a directory that
+/// exists and refuses to be read is not a directory the command is missing
+/// from, it is a broken filesystem.
+///
+/// Unlike a test fixture, the name is a bare command (no `.elf` suffix),
+/// matching how binaries are installed under `/bin`.
+fn pathz_command(
+    rung: &str,
+    name: &str,
+    path_dirs: &[&str],
+) -> KernelResult<Option<alloc::vec::Vec<u8>>> {
+    if !crate::fs::selftest::is_mounted(FIXTURE_MOUNT) {
+        pathz_skip(
+            format_args!("{rung}"),
+            // Name the command *and* why it could not be found, rather than a
+            // bare `cat`: "prerequisite missing: cat" reads as a bug in the
+            // image build, which is the wrong place to go looking.
+            &alloc::format!("{name} (nothing is mounted at {FIXTURE_MOUNT})"),
+        );
+        return Ok(None);
+    }
     for dir in path_dirs {
         let mut path = alloc::string::String::with_capacity(dir.len() + 1 + name.len());
         path.push_str(dir);
         path.push('/');
         path.push_str(name);
-        if let Ok(v) = crate::fs::Vfs::read_file(&path) {
-            if !v.is_empty() {
-                return Some(v);
+        match crate::fs::Vfs::read_file(&path) {
+            Ok(v) if !v.is_empty() => return Ok(Some(v)),
+            Ok(_) => {
+                serial_println!(
+                    "[spawn]   FAIL: {}: {} is installed but zero bytes long — the image \
+                     build produced a truncated binary; rerun scripts/create-ext4-rootfs.sh",
+                    rung,
+                    path
+                );
+                return Err(KernelError::InternalError);
             }
+            // Not on *this* entry; keep looking. This is the one error that
+            // may be swallowed, and only because the loop as a whole still
+            // reports it: if every entry answers `NotFound`, the fall-through
+            // below counts the skip.
+            Err(KernelError::NotFound) => {}
+            // Any other error ends the search rather than continuing it. A
+            // PATH entry that exists and refuses to be read is not one the
+            // command is merely missing from, and moving on would let a
+            // broken mount masquerade as an absent command.
+            Err(e) => return pathz_fixture_absent(rung, &path, &e).map(|()| None),
         }
     }
-    None
+    pathz_skip(
+        format_args!("{rung}"),
+        &alloc::format!("{name} (not on any of {path_dirs:?})"),
+    );
+    Ok(None)
 }
 
 /// Exit code set when exec fails after tearing down the old address space.
@@ -7035,12 +7153,8 @@ pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
     // (b) the argv delivery path — kernel `SYS_PROCESS_GET_ARGS` -> crt ->
     // runtime `fpy_argv` -> `sys.argv` — carried the exact argument vector we
     // spawned it with, and the non-zero exit code propagated back.
-    let fastpy_hello_elf = match load_test_elf("fastpy-hello") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-hello: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_hello_elf) = pathz_test_elf("fastpy-hello", "fastpy-hello")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -7158,14 +7272,8 @@ pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-tls-thread/main.c`).
 pub fn self_test_ctls_thread() -> KernelResult<()> {
-    let ctest_elf = match load_test_elf("ctest-tls-thread") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP ctest-tls-thread: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(ctest_elf) = pathz_test_elf("ctest-tls-thread", "ctest-tls-thread")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -7293,14 +7401,8 @@ pub fn self_test_ctls_thread() -> KernelResult<()> {
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-libc-float/main.c`).
 pub fn self_test_clibc_float() -> KernelResult<()> {
-    let ctest_elf = match load_test_elf("ctest-libc-float") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP ctest-libc-float: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(ctest_elf) = pathz_test_elf("ctest-libc-float", "ctest-libc-float")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -7427,12 +7529,8 @@ pub fn self_test_clibc_float() -> KernelResult<()> {
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-libm/main.c`).
 pub fn self_test_clibm() -> KernelResult<()> {
-    let ctest_elf = match load_test_elf("ctest-libm") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP ctest-libm: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(ctest_elf) = pathz_test_elf("ctest-libm", "ctest-libm")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -7559,14 +7657,8 @@ pub fn self_test_clibm() -> KernelResult<()> {
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-longdouble/main.c`).
 pub fn self_test_clongdouble() -> KernelResult<()> {
-    let ctest_elf = match load_test_elf("ctest-longdouble") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP ctest-longdouble: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(ctest_elf) = pathz_test_elf("ctest-longdouble", "ctest-longdouble")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -7689,14 +7781,8 @@ pub fn self_test_clongdouble() -> KernelResult<()> {
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-fortify/main.c`).
 pub fn self_test_cfortify() -> KernelResult<()> {
-    let ctest_elf = match load_test_elf("ctest-fortify") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP ctest-fortify: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(ctest_elf) = pathz_test_elf("ctest-fortify", "ctest-fortify")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -7830,12 +7916,8 @@ pub fn self_test_cfortify() -> KernelResult<()> {
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-pgroup/main.c`).
 pub fn self_test_cpgroup() -> KernelResult<()> {
-    let ctest_elf = match load_test_elf("ctest-pgroup") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP ctest-pgroup: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(ctest_elf) = pathz_test_elf("ctest-pgroup", "ctest-pgroup")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -8022,12 +8104,8 @@ pub fn self_test_cpgroup() -> KernelResult<()> {
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-jobctl/main.c`).
 pub fn self_test_jobctl() -> KernelResult<()> {
-    let ctest_elf = match load_test_elf("ctest-jobctl") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP ctest-jobctl: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(ctest_elf) = pathz_test_elf("ctest-jobctl", "ctest-jobctl")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -8277,12 +8355,8 @@ pub fn self_test_jobctl() -> KernelResult<()> {
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-ctty/main.c`).
 pub fn self_test_cctty() -> KernelResult<()> {
-    let ctest_elf = match load_test_elf("ctest-ctty") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP ctest-ctty: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(ctest_elf) = pathz_test_elf("ctest-ctty", "ctest-ctty")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -8465,12 +8539,8 @@ pub fn self_test_cctty() -> KernelResult<()> {
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-scanf/main.c`).
 pub fn self_test_cscanf() -> KernelResult<()> {
-    let ctest_elf = match load_test_elf("ctest-scanf") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP ctest-scanf: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(ctest_elf) = pathz_test_elf("ctest-scanf", "ctest-scanf")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -8571,14 +8641,8 @@ pub fn self_test_cscanf() -> KernelResult<()> {
 /// (PID != 0) with no File cap gets `PermissionDenied`.  We grant a wildcard
 /// File cap (`resource_id == 0`) with READ|WRITE so the open of `/tmp` succeeds.
 pub fn self_test_fastpy_slateos_fileio() -> KernelResult<()> {
-    let fastpy_fileio_elf = match load_test_elf("fastpy-fileio") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-fileio: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_fileio_elf) = pathz_test_elf("fastpy-fileio", "fastpy-fileio")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -8676,14 +8740,8 @@ pub fn self_test_fastpy_slateos_fileio() -> KernelResult<()> {
 /// We assert exit == 15 and independently confirm the three lines the program
 /// wrote actually landed on the VFS.  Self-skips if the ELF fixture is absent.
 pub fn self_test_fastpy_slateos_fileio2() -> KernelResult<()> {
-    let fileio2_elf = match load_test_elf("fastpy-fileio2") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-fileio2: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fileio2_elf) = pathz_test_elf("fastpy-fileio2", "fastpy-fileio2")? else {
+        return Ok(());
     };
 
     const OUT_PATH: &str = "/tmp/fpyio2.txt";
@@ -8851,15 +8909,8 @@ pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
     // at /mnt/bin) and resolved BY COMMAND NAME through the PATH, exactly the
     // way init/a shell launches a command — not loaded from a /tests fixture.
     // On a lean build with no /bin, resolution fails and the test self-skips.
-    let fastpy_cat_elf = match resolve_command("cat", COMMAND_PATH) {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP cat: not installed on PATH ({:?}) — lean build",
-                COMMAND_PATH
-            );
-            return Ok(());
-        }
+    let Some(fastpy_cat_elf) = pathz_command("cat", "cat", COMMAND_PATH)? else {
+        return Ok(());
     };
 
     // Staged input file + its exact contents.  The exit code is the byte
@@ -8980,20 +9031,12 @@ pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
 pub fn self_test_fastpy_slateos_run() -> KernelResult<()> {
     // The runner ELF is a /tests fixture (a harness program, not an installed
     // command), loaded by name from /mnt/tests.
-    let fastpy_run_elf = match load_test_elf("fastpy-run") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-run: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_run_elf) = pathz_test_elf("fastpy-run", "fastpy-run")? else {
+        return Ok(());
     };
     // The runner execs `/mnt/bin/cat`; if cat isn't installed there is nothing
     // to hand off to, so skip rather than spuriously fail.
-    if resolve_command("cat", COMMAND_PATH).is_none() {
-        serial_println!(
-            "[spawn] SKIP fastpy-run: target command `cat` not installed on PATH ({:?})",
-            COMMAND_PATH
-        );
+    if pathz_command("fastpy-run", "cat", COMMAND_PATH)?.is_none() {
         return Ok(());
     }
 
@@ -9150,22 +9193,12 @@ pub fn self_test_fastpy_slateos_run() -> KernelResult<()> {
 pub fn self_test_fastpy_slateos_forkexec() -> KernelResult<()> {
     // The runner ELF is a /tests fixture (a harness program, not an installed
     // command), loaded by name from /mnt/tests.
-    let fastpy_forkexec_elf = match load_test_elf("fastpy-forkexec") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-forkexec: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_forkexec_elf) = pathz_test_elf("fastpy-forkexec", "fastpy-forkexec")? else {
+        return Ok(());
     };
     // The child execs `/mnt/bin/cat`; if cat isn't installed there is nothing to
     // hand off to, so skip rather than spuriously fail.
-    if resolve_command("cat", COMMAND_PATH).is_none() {
-        serial_println!(
-            "[spawn] SKIP fastpy-forkexec: target command `cat` not installed on PATH ({:?})",
-            COMMAND_PATH
-        );
+    if pathz_command("fastpy-forkexec", "cat", COMMAND_PATH)?.is_none() {
         return Ok(());
     }
 
@@ -9340,20 +9373,10 @@ pub fn self_test_fastpy_slateos_forkexec() -> KernelResult<()> {
 /// resolvable we self-skip.
 pub fn self_test_fastpy_slateos_capture() -> KernelResult<()> {
     // The runner ELF is a /tests fixture, loaded by name from /mnt/tests.
-    let fastpy_capture_elf = match load_test_elf("fastpy-capture") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-capture: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_capture_elf) = pathz_test_elf("fastpy-capture", "fastpy-capture")? else {
+        return Ok(());
     };
-    if resolve_command("cat", COMMAND_PATH).is_none() {
-        serial_println!(
-            "[spawn] SKIP fastpy-capture: target command `cat` not installed on PATH ({:?})",
-            COMMAND_PATH
-        );
+    if pathz_command("fastpy-capture", "cat", COMMAND_PATH)?.is_none() {
         return Ok(());
     }
 
@@ -9531,31 +9554,17 @@ pub fn self_test_fastpy_slateos_capture() -> KernelResult<()> {
 /// on `/mnt/tests`; if either is absent we self-skip (lean build).
 pub fn self_test_fastpy_slateos_pipeline() -> KernelResult<()> {
     // The orchestrator ELF is a /tests fixture, loaded by name from /mnt/tests.
-    let fastpy_pipeline_elf = match load_test_elf("fastpy-pipeline") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-pipeline: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_pipeline_elf) = pathz_test_elf("fastpy-pipeline", "fastpy-pipeline")? else {
+        return Ok(());
     };
     // The consumer stage is loaded by the fastpy program itself via os.execv on
     // this absolute path; confirm the fixture is staged before we bother running.
     const CONSUMER_PATH: &str = "/mnt/tests/fastpy-countin.elf";
     const CONSUMER_PATH_ARG: &[u8] = b"/mnt/tests/fastpy-countin.elf";
-    if load_test_elf("fastpy-countin").is_none() {
-        serial_println!(
-            "[spawn] SKIP fastpy-pipeline: consumer fixture `fastpy-countin` absent on /mnt/tests \
-             (lean build)"
-        );
+    if pathz_test_elf("fastpy-pipeline", "fastpy-countin")?.is_none() {
         return Ok(());
     }
-    if resolve_command("cat", COMMAND_PATH).is_none() {
-        serial_println!(
-            "[spawn] SKIP fastpy-pipeline: producer command `cat` not installed on PATH ({:?})",
-            COMMAND_PATH
-        );
+    if pathz_command("fastpy-pipeline", "cat", COMMAND_PATH)?.is_none() {
         return Ok(());
     }
 
@@ -9768,20 +9777,10 @@ pub fn self_test_fastpy_slateos_pipeline() -> KernelResult<()> {
 /// installed at `/bin/cat`; if it isn't resolvable we self-skip.
 pub fn self_test_fastpy_slateos_redirect() -> KernelResult<()> {
     // The runner ELF is a /tests fixture, loaded by name from /mnt/tests.
-    let fastpy_redirect_elf = match load_test_elf("fastpy-redirect") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-redirect: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_redirect_elf) = pathz_test_elf("fastpy-redirect", "fastpy-redirect")? else {
+        return Ok(());
     };
-    if resolve_command("cat", COMMAND_PATH).is_none() {
-        serial_println!(
-            "[spawn] SKIP fastpy-redirect: target command `cat` not installed on PATH ({:?})",
-            COMMAND_PATH
-        );
+    if pathz_command("fastpy-redirect", "cat", COMMAND_PATH)?.is_none() {
         return Ok(());
     }
 
@@ -9980,22 +9979,13 @@ pub fn self_test_fastpy_slateos_redirect() -> KernelResult<()> {
 /// self-skip.
 pub fn self_test_fastpy_slateos_inredirect() -> KernelResult<()> {
     // The runner ELF is a /tests fixture, loaded by name from /mnt/tests.
-    let fastpy_inredirect_elf = match load_test_elf("fastpy-inredirect") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-inredirect: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_inredirect_elf) = pathz_test_elf("fastpy-inredirect", "fastpy-inredirect")?
+    else {
+        return Ok(());
     };
     // The consumer (`fastpy-countin`) is also a /tests fixture; the child execs
     // it by absolute path. If it's absent we can't run the test.
-    if load_test_elf("fastpy-countin").is_none() {
-        serial_println!(
-            "[spawn] SKIP fastpy-inredirect: consumer `fastpy-countin` fixture absent on \
-             /mnt/tests (lean build)"
-        );
+    if pathz_test_elf("fastpy-inredirect", "fastpy-countin")?.is_none() {
         return Ok(());
     }
 
@@ -10192,25 +10182,21 @@ pub fn self_test_fastpy_slateos_inredirect() -> KernelResult<()> {
 /// `services/fastpy-minishell/build.py`) pinpoint a parser/dispatch failure.
 /// `cat` must be installed at `/bin/cat`; if it isn't we self-skip.
 pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
-    let minishell_elf = match load_test_elf("fastpy-minishell") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-minishell: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(minishell_elf) = pathz_test_elf("fastpy-minishell", "fastpy-minishell")? else {
+        return Ok(());
     };
-    if resolve_command("cat", COMMAND_PATH).is_none() {
-        serial_println!(
-            "[spawn] SKIP fastpy-minishell: target command `cat` not installed on PATH ({:?})",
-            COMMAND_PATH
-        );
+    if pathz_command("fastpy-minishell", "cat", COMMAND_PATH)?.is_none() {
         return Ok(());
     }
-    let have_countin = load_test_elf("fastpy-countin").is_some();
-    let have_catstdin = load_test_elf("fastpy-catstdin").is_some();
-    let have_tee = load_test_elf("fastpy-tee").is_some();
+    // These three gate *sections* of this rung rather than the rung itself, so
+    // the rung name carries the section: "fastpy-countin" alone would read, in
+    // the end-of-boot verdict, as a rung that never ran — when in fact the
+    // minishell rung ran and lost one of its three redirection cases.
+    let have_countin =
+        pathz_test_elf("fastpy-minishell (stdin-redirect case)", "fastpy-countin")?.is_some();
+    let have_catstdin =
+        pathz_test_elf("fastpy-minishell (pipeline case)", "fastpy-catstdin")?.is_some();
+    let have_tee = pathz_test_elf("fastpy-minishell (tee case)", "fastpy-tee")?.is_some();
 
     const IN_PATH: &str = "/tmp/minishell-in.txt";
     const TEE_PATH: &str = "/tmp/minishell-tee.txt";
@@ -10766,14 +10752,8 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
 /// exception raised in a `with` body silently vanished as soon as `__exit__`
 /// dirtied that register (touching `self` sufficed).
 pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
-    let pathlib_elf = match load_test_elf("fastpy-pathlib") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-pathlib: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(pathlib_elf) = pathz_test_elf("fastpy-pathlib", "fastpy-pathlib")? else {
+        return Ok(());
     };
 
     const OUT_PATH: &str = "/tmp/fpy-pathlib.txt";
@@ -10952,15 +10932,8 @@ pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
 /// (asserting exit 0) and once with a pattern that does not (asserting exit 1).
 pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
     // Promoted /bin command: resolved by name via PATH (see the cat test).
-    let fastpy_grep_elf = match resolve_command("grep", COMMAND_PATH) {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP grep: not installed on PATH ({:?}) — lean build",
-                COMMAND_PATH
-            );
-            return Ok(());
-        }
+    let Some(fastpy_grep_elf) = pathz_command("grep", "grep", COMMAND_PATH)? else {
+        return Ok(());
     };
 
     const GREP_PATH: &str = "/tmp/grep-input.txt";
@@ -11087,15 +11060,8 @@ pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
 /// harness can grep it for the actual count values.
 pub fn self_test_fastpy_slateos_wc() -> KernelResult<()> {
     // Promoted /bin command: resolved by name via PATH (see the cat test).
-    let fastpy_wc_elf = match resolve_command("wc", COMMAND_PATH) {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP wc: not installed on PATH ({:?}) — lean build",
-                COMMAND_PATH
-            );
-            return Ok(());
-        }
+    let Some(fastpy_wc_elf) = pathz_command("wc", "wc", COMMAND_PATH)? else {
+        return Ok(());
     };
 
     const WC_PATH: &str = "/tmp/wc-input.txt";
@@ -11193,15 +11159,8 @@ pub fn self_test_fastpy_slateos_wc() -> KernelResult<()> {
 /// verified in the serial log by the boot harness.
 pub fn self_test_fastpy_slateos_head() -> KernelResult<()> {
     // Promoted /bin command: resolved by name via PATH (see the cat test).
-    let fastpy_head_elf = match resolve_command("head", COMMAND_PATH) {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP head: not installed on PATH ({:?}) — lean build",
-                COMMAND_PATH
-            );
-            return Ok(());
-        }
+    let Some(fastpy_head_elf) = pathz_command("head", "head", COMMAND_PATH)? else {
+        return Ok(());
     };
 
     const HEAD_PATH: &str = "/tmp/head-input.txt";
@@ -11301,15 +11260,8 @@ pub fn self_test_fastpy_slateos_head() -> KernelResult<()> {
 /// harness (grep counts: `UNIQ_A`=2, `UNIQ_B`=1, `UNIQ_C`=1 — *not* 3/1/2).
 pub fn self_test_fastpy_slateos_uniq() -> KernelResult<()> {
     // Promoted /bin command: resolved by name via PATH (see the cat test).
-    let fastpy_uniq_elf = match resolve_command("uniq", COMMAND_PATH) {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP uniq: not installed on PATH ({:?}) — lean build",
-                COMMAND_PATH
-            );
-            return Ok(());
-        }
+    let Some(fastpy_uniq_elf) = pathz_command("uniq", "uniq", COMMAND_PATH)? else {
+        return Ok(());
     };
 
     const UNIQ_PATH: &str = "/tmp/uniq-input.txt";
@@ -11412,15 +11364,8 @@ pub fn self_test_fastpy_slateos_uniq() -> KernelResult<()> {
 /// (`TAIL_L4`, `TAIL_L5`) were printed and the first three were skipped.
 pub fn self_test_fastpy_slateos_tail() -> KernelResult<()> {
     // Promoted /bin command: resolved by name via PATH (see the cat test).
-    let fastpy_tail_elf = match resolve_command("tail", COMMAND_PATH) {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP tail: not installed on PATH ({:?}) — lean build",
-                COMMAND_PATH
-            );
-            return Ok(());
-        }
+    let Some(fastpy_tail_elf) = pathz_command("tail", "tail", COMMAND_PATH)? else {
+        return Ok(());
     };
 
     const TAIL_PATH: &str = "/tmp/tail-input.txt";
@@ -11523,15 +11468,8 @@ pub fn self_test_fastpy_slateos_tail() -> KernelResult<()> {
 /// `SORT_3`).
 pub fn self_test_fastpy_slateos_sort() -> KernelResult<()> {
     // Promoted /bin command: resolved by name via PATH (see the cat test).
-    let fastpy_sort_elf = match resolve_command("sort", COMMAND_PATH) {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP sort: not installed on PATH ({:?}) — lean build",
-                COMMAND_PATH
-            );
-            return Ok(());
-        }
+    let Some(fastpy_sort_elf) = pathz_command("sort", "sort", COMMAND_PATH)? else {
+        return Ok(());
     };
 
     const SORT_PATH: &str = "/tmp/sort-input.txt";
@@ -11634,12 +11572,8 @@ pub fn self_test_fastpy_slateos_sort() -> KernelResult<()> {
 /// harness verifies the *set* of emitted records (`3 FREQ_a`, `2 FREQ_b`,
 /// `1 FREQ_c`) in the serial log rather than their order.
 pub fn self_test_fastpy_slateos_freq() -> KernelResult<()> {
-    let fastpy_freq_elf = match load_test_elf("fastpy-freq") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-freq: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_freq_elf) = pathz_test_elf("fastpy-freq", "fastpy-freq")? else {
+        return Ok(());
     };
 
     const FREQ_PATH: &str = "/tmp/freq-input.txt";
@@ -11743,15 +11677,8 @@ pub fn self_test_fastpy_slateos_freq() -> KernelResult<()> {
 /// the serial log rather than their order.
 pub fn self_test_fastpy_slateos_ls() -> KernelResult<()> {
     // Promoted /bin command: resolved by name via PATH (see the cat test).
-    let fastpy_ls_elf = match resolve_command("ls", COMMAND_PATH) {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP ls: not installed on PATH ({:?}) — lean build",
-                COMMAND_PATH
-            );
-            return Ok(());
-        }
+    let Some(fastpy_ls_elf) = pathz_command("ls", "ls", COMMAND_PATH)? else {
+        return Ok(());
     };
 
     const LS_DIR: &str = "/tmp/lsdir";
@@ -11883,15 +11810,8 @@ pub fn self_test_fastpy_slateos_ls() -> KernelResult<()> {
 /// `os.remove` that merely returned 0 without deleting (the false-pass lesson
 /// from `fastpy-ls`'s empty listing).
 pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
-    let fastpy_rm_elf = match resolve_command("rm", COMMAND_PATH) {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP rm: not installed on PATH ({:?}) — lean build",
-                COMMAND_PATH
-            );
-            return Ok(());
-        }
+    let Some(fastpy_rm_elf) = pathz_command("rm", "rm", COMMAND_PATH)? else {
+        return Ok(());
     };
 
     const RM_FILE: &str = "/tmp/rmfile";
@@ -12017,15 +11937,8 @@ pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
 /// the VFS that the source is now gone *and* the destination exists with the
 /// original bytes.
 pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
-    let fastpy_mv_elf = match resolve_command("mv", COMMAND_PATH) {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP mv: not installed on PATH ({:?}) — lean build",
-                COMMAND_PATH
-            );
-            return Ok(());
-        }
+    let Some(fastpy_mv_elf) = pathz_command("mv", "mv", COMMAND_PATH)? else {
+        return Ok(());
     };
 
     const MV_SRC: &str = "/tmp/mv-src";
@@ -12177,15 +12090,8 @@ pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
 /// runs `mkdir /tmp/fpy-mkdir`, and — the false-pass-proof check — asserts via
 /// the VFS that the path now exists *and* is a directory.
 pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
-    let fastpy_mkdir_elf = match resolve_command("mkdir", COMMAND_PATH) {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP mkdir: not installed on PATH ({:?}) — lean build",
-                COMMAND_PATH
-            );
-            return Ok(());
-        }
+    let Some(fastpy_mkdir_elf) = pathz_command("mkdir", "mkdir", COMMAND_PATH)? else {
+        return Ok(());
     };
 
     const MK_DIR: &str = "/tmp/fpy-mkdir";
@@ -12314,15 +12220,8 @@ pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
 /// VFS that the directory is now gone.  `SYS_FS_RMDIR` gates on
 /// `Rights::DELETE`, so the test grants `READ|WRITE|DELETE`.
 pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
-    let fastpy_rmdir_elf = match resolve_command("rmdir", COMMAND_PATH) {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP rmdir: not installed on PATH ({:?}) — lean build",
-                COMMAND_PATH
-            );
-            return Ok(());
-        }
+    let Some(fastpy_rmdir_elf) = pathz_command("rmdir", "rmdir", COMMAND_PATH)? else {
+        return Ok(());
     };
 
     const RM_DIR: &str = "/tmp/fpy-rmdir";
@@ -12443,12 +12342,8 @@ pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
 /// `READ | METADATA`.  It stages `/tmp/size-input.txt` with a payload of a known
 /// length and asserts the child exits with exactly that length.
 pub fn self_test_fastpy_slateos_size() -> KernelResult<()> {
-    let fastpy_size_elf = match load_test_elf("fastpy-size") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-size: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_size_elf) = pathz_test_elf("fastpy-size", "fastpy-size")? else {
+        return Ok(());
     };
 
     const SIZE_FILE: &str = "/tmp/size-input.txt";
@@ -12570,12 +12465,8 @@ pub fn self_test_fastpy_slateos_size() -> KernelResult<()> {
 /// so the type distinction flows through the exit code and a stat that ignored
 /// `st_mode` could not false-pass.  `SYS_FS_STAT` gates on `Rights::METADATA`.
 pub fn self_test_fastpy_slateos_ftype() -> KernelResult<()> {
-    let fastpy_ftype_elf = match load_test_elf("fastpy-ftype") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-ftype: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_ftype_elf) = pathz_test_elf("fastpy-ftype", "fastpy-ftype")? else {
+        return Ok(());
     };
 
     const FTYPE_FILE: &str = "/tmp/ftype-file.txt";
@@ -12698,14 +12589,8 @@ pub fn self_test_fastpy_slateos_ftype() -> KernelResult<()> {
 /// link via `Vfs::readlink` and asserts it points at the staged target — a
 /// stubbed/no-op symlink could pass neither check.
 pub fn self_test_fastpy_slateos_symlink() -> KernelResult<()> {
-    let fastpy_symlink_elf = match load_test_elf("fastpy-symlink") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-symlink: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_symlink_elf) = pathz_test_elf("fastpy-symlink", "fastpy-symlink")? else {
+        return Ok(());
     };
 
     const TARGET: &str = "/tmp/symlink-target.txt";
@@ -12851,12 +12736,8 @@ pub fn self_test_fastpy_slateos_symlink() -> KernelResult<()> {
 /// VFS and asserts they report the **same `FileMeta::ino`** — the defining
 /// property of a hard link, which a mere copy could not satisfy.
 pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
-    let fastpy_link_elf = match load_test_elf("fastpy-link") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-link: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_link_elf) = pathz_test_elf("fastpy-link", "fastpy-link")? else {
+        return Ok(());
     };
 
     // Hard links require a filesystem with a stable inode identity — memfs
@@ -13027,15 +12908,8 @@ pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
 /// asserts it now equals `0o600`.  A no-op chmod that returned 0 without
 /// persisting could not satisfy the after-check.
 pub fn self_test_fastpy_slateos_chmod() -> KernelResult<()> {
-    let fastpy_chmod_elf = match resolve_command("chmod", COMMAND_PATH) {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP chmod: not installed on PATH ({:?}) — lean build",
-                COMMAND_PATH
-            );
-            return Ok(());
-        }
+    let Some(fastpy_chmod_elf) = pathz_command("chmod", "chmod", COMMAND_PATH)? else {
+        return Ok(());
     };
 
     const TARGET: &str = "/tmp/chmod-target.txt";
@@ -13192,14 +13066,8 @@ pub fn self_test_fastpy_slateos_chmod() -> KernelResult<()> {
 /// (must be exactly the surviving 8-byte prefix).  A no-op truncate that
 /// returned 0 without resizing could not satisfy the after-checks.
 pub fn self_test_fastpy_slateos_truncate() -> KernelResult<()> {
-    let fastpy_truncate_elf = match load_test_elf("fastpy-truncate") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-truncate: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_truncate_elf) = pathz_test_elf("fastpy-truncate", "fastpy-truncate")? else {
+        return Ok(());
     };
 
     const TARGET: &str = "/tmp/truncate-target.txt";
@@ -13381,14 +13249,8 @@ pub fn self_test_fastpy_slateos_truncate() -> KernelResult<()> {
 /// returned 0 without stamping (or one that stamped a single value into both
 /// fields) could not satisfy the after-checks.
 pub fn self_test_fastpy_slateos_settimes() -> KernelResult<()> {
-    let fastpy_settimes_elf = match load_test_elf("fastpy-settimes") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-settimes: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_settimes_elf) = pathz_test_elf("fastpy-settimes", "fastpy-settimes")? else {
+        return Ok(());
     };
 
     const TARGET: &str = "/tmp/settimes-target.txt";
@@ -13558,14 +13420,8 @@ pub fn self_test_fastpy_slateos_settimes() -> KernelResult<()> {
 /// returned — and additionally confirms via the VFS that `modified_ns` was
 /// stamped to `secs * 1e9`.
 pub fn self_test_fastpy_slateos_getmtime() -> KernelResult<()> {
-    let fastpy_getmtime_elf = match load_test_elf("fastpy-getmtime") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-getmtime: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_getmtime_elf) = pathz_test_elf("fastpy-getmtime", "fastpy-getmtime")? else {
+        return Ok(());
     };
 
     const TARGET: &str = "/tmp/getmtime-target.txt";
@@ -13746,14 +13602,8 @@ pub fn self_test_fastpy_slateos_getmtime() -> KernelResult<()> {
 /// the stamped decimal seconds AND that the VFS `accessed_ns` matches the stamp
 /// (the independent atime readout — distinct from `modified_ns`).
 pub fn self_test_fastpy_slateos_getatime() -> KernelResult<()> {
-    let fastpy_getatime_elf = match load_test_elf("fastpy-getatime") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-getatime: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_getatime_elf) = pathz_test_elf("fastpy-getatime", "fastpy-getatime")? else {
+        return Ok(());
     };
 
     const TARGET: &str = "/tmp/getatime-target.txt";
@@ -13935,14 +13785,8 @@ pub fn self_test_fastpy_slateos_getatime() -> KernelResult<()> {
 /// 0 stub); the harness additionally cross-checks the exact value against the
 /// VFS `changed_ns`.
 pub fn self_test_fastpy_slateos_getctime() -> KernelResult<()> {
-    let fastpy_getctime_elf = match load_test_elf("fastpy-getctime") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-getctime: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_getctime_elf) = pathz_test_elf("fastpy-getctime", "fastpy-getctime")? else {
+        return Ok(());
     };
 
     const TARGET: &str = "/tmp/getctime-target.txt";
@@ -14149,14 +13993,8 @@ pub fn self_test_fastpy_slateos_getctime() -> KernelResult<()> {
 /// the VFS that TARGET exists and MISSING does not (anchoring cases 1 and 4),
 /// and asserts the tool wrote exactly "1100".
 pub fn self_test_fastpy_slateos_access() -> KernelResult<()> {
-    let fastpy_access_elf = match load_test_elf("fastpy-access") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-access: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_access_elf) = pathz_test_elf("fastpy-access", "fastpy-access")? else {
+        return Ok(());
     };
 
     const TARGET: &str = "/tmp/access-target.txt";
@@ -14335,14 +14173,8 @@ pub fn self_test_fastpy_slateos_access() -> KernelResult<()> {
 /// an independent readout of the exact identity the tool compared — and that
 /// the tool wrote exactly "101".
 pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
-    let fastpy_samefile_elf = match load_test_elf("fastpy-samefile") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-samefile: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_samefile_elf) = pathz_test_elf("fastpy-samefile", "fastpy-samefile")? else {
+        return Ok(());
     };
 
     const TARGET: &str = "/tmp/samefile-target.txt";
@@ -14563,14 +14395,8 @@ pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
 /// tested.  Granted `READ|WRITE|CREATE|METADATA` (symlink needs CREATE, the
 /// probe file needs WRITE, lstat needs METADATA).
 pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
-    let fastpy_islink_elf = match load_test_elf("fastpy-islink") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-islink: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_islink_elf) = pathz_test_elf("fastpy-islink", "fastpy-islink")? else {
+        return Ok(());
     };
 
     const TARGET: &str = "/tmp/islink-target.txt";
@@ -14814,12 +14640,8 @@ pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
 /// returned.  Granted `READ|WRITE|METADATA` (create/write need WRITE, stat
 /// needs METADATA).
 pub fn self_test_fastpy_slateos_stat() -> KernelResult<()> {
-    let fastpy_stat_elf = match load_test_elf("fastpy-stat") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-stat: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_stat_elf) = pathz_test_elf("fastpy-stat", "fastpy-stat")? else {
+        return Ok(());
     };
 
     const TARGET: &str = "/tmp/stat-target.txt";
@@ -15012,14 +14834,8 @@ pub fn self_test_fastpy_slateos_stat() -> KernelResult<()> {
 /// values cannot match both.  Granted `READ|WRITE|METADATA` (create/write the
 /// probe need WRITE, statvfs needs METADATA).
 pub fn self_test_fastpy_slateos_statvfs() -> KernelResult<()> {
-    let fastpy_statvfs_elf = match load_test_elf("fastpy-statvfs") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-statvfs: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_statvfs_elf) = pathz_test_elf("fastpy-statvfs", "fastpy-statvfs")? else {
+        return Ok(());
     };
 
     const TARGET: &str = "/tmp/statvfs-target.txt";
@@ -15243,14 +15059,8 @@ pub fn self_test_fastpy_slateos_statvfs() -> KernelResult<()> {
 /// distinct rules out a single-field coincidence.  Granted `READ|WRITE` (for
 /// the `/tmp` output file); the credential syscall needs no capability.
 pub fn self_test_fastpy_slateos_getuid() -> KernelResult<()> {
-    let fastpy_getuid_elf = match load_test_elf("fastpy-getuid") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-getuid: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_getuid_elf) = pathz_test_elf("fastpy-getuid", "fastpy-getuid")? else {
+        return Ok(());
     };
 
     const OUT_PATH: &str = "/tmp/fastpy-getuid.out";
@@ -15456,14 +15266,8 @@ pub fn self_test_fastpy_slateos_getuid() -> KernelResult<()> {
 /// CAP_SETUID/CAP_SETGID check is projected from that capability under §312,
 /// so the fixture must hold it to survive step 3.
 pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
-    let fastpy_setuid_elf = match load_test_elf("fastpy-setuid") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-setuid: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_setuid_elf) = pathz_test_elf("fastpy-setuid", "fastpy-setuid")? else {
+        return Ok(());
     };
 
     const OUT_PATH: &str = "/tmp/fastpy-setuid.out";
@@ -15706,12 +15510,8 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
 /// posix wrapper (the kernel mutation syscall itself needs no capability
 /// token), and IO_REALTIME on a Thread is what §312 projects that cap from.
 pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
-    let fastpy_nice_elf = match load_test_elf("fastpy-nice") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-nice: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_nice_elf) = pathz_test_elf("fastpy-nice", "fastpy-nice")? else {
+        return Ok(());
     };
 
     const OUT_PATH: &str = "/tmp/fastpy-nice.out";
@@ -15949,12 +15749,8 @@ pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
 ///     AND the requested mode (0o777), so neither a "umask ignored" bug nor a
 ///     "mode ignored, always default" bug can coincidentally pass.
 pub fn self_test_fastpy_slateos_umask() -> KernelResult<()> {
-    let fastpy_umask_elf = match load_test_elf("fastpy-umask") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-umask: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_umask_elf) = pathz_test_elf("fastpy-umask", "fastpy-umask")? else {
+        return Ok(());
     };
 
     const OUT_PATH: &str = "/tmp/fastpy-umask.out";
@@ -16151,15 +15947,8 @@ pub fn self_test_fastpy_slateos_umask() -> KernelResult<()> {
 /// (or one that stamped a single id into both fields) could not satisfy the
 /// after-checks.
 pub fn self_test_fastpy_slateos_chown() -> KernelResult<()> {
-    let fastpy_chown_elf = match resolve_command("chown", COMMAND_PATH) {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP chown: not installed on PATH ({:?}) — lean build",
-                COMMAND_PATH
-            );
-            return Ok(());
-        }
+    let Some(fastpy_chown_elf) = pathz_command("chown", "chown", COMMAND_PATH)? else {
+        return Ok(());
     };
 
     const TARGET: &str = "/tmp/chown-target.txt";
@@ -16322,12 +16111,8 @@ pub fn self_test_fastpy_slateos_chown() -> KernelResult<()> {
 /// returns `< bound` and fails).  The harness first asserts its own reading is
 /// `> 0` so the comparison is meaningful rather than `0 >= 0`.
 pub fn self_test_fastpy_slateos_clock() -> KernelResult<()> {
-    let fastpy_clock_elf = match load_test_elf("fastpy-clock") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-clock: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_clock_elf) = pathz_test_elf("fastpy-clock", "fastpy-clock")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -16527,12 +16312,8 @@ fn report_sleep_clock_agreement(hpet_available: bool, tsc_ns: u64, hpet_ns: u64)
 ///     during the run (so a tool whose *arithmetic* passed but which did not
 ///     actually block would still be caught).
 pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
-    let fastpy_sleep_elf = match load_test_elf("fastpy-sleep") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-sleep: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_sleep_elf) = pathz_test_elf("fastpy-sleep", "fastpy-sleep")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -16712,14 +16493,8 @@ pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
 ///     not match the freshly-allocated PID → fail.  Only a genuine
 ///     `SYS_PROCESS_ID` round-trip returns the caller's actual identity.
 pub fn self_test_fastpy_slateos_getpid() -> KernelResult<()> {
-    let fastpy_getpid_elf = match load_test_elf("fastpy-getpid") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-getpid: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_getpid_elf) = pathz_test_elf("fastpy-getpid", "fastpy-getpid")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -16877,14 +16652,8 @@ pub fn self_test_fastpy_slateos_getpid() -> KernelResult<()> {
 /// PID, not 1 → the `== 1` assertion fails.  So the test proves `os.getppid()`
 /// is wired to `SYS_PROCESS_PARENT_ID`, not `SYS_PROCESS_ID`.
 pub fn self_test_fastpy_slateos_getppid() -> KernelResult<()> {
-    let fastpy_getppid_elf = match load_test_elf("fastpy-getppid") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-getppid: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_getppid_elf) = pathz_test_elf("fastpy-getppid", "fastpy-getppid")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -17043,14 +16812,8 @@ pub fn self_test_fastpy_slateos_getppid() -> KernelResult<()> {
 /// not the task ID → the `== result.task_id` assertion fails.  So the test
 /// proves `os.gettid()` is wired to `SYS_TASK_ID`, not `SYS_PROCESS_ID`.
 pub fn self_test_fastpy_slateos_gettid() -> KernelResult<()> {
-    let fastpy_gettid_elf = match load_test_elf("fastpy-gettid") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-gettid: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_gettid_elf) = pathz_test_elf("fastpy-gettid", "fastpy-gettid")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -17210,12 +16973,8 @@ pub fn self_test_fastpy_slateos_gettid() -> KernelResult<()> {
 /// really wired a kernel pipe and `write`/`read` really moved data through it —
 /// there is no userspace echo path a mis-lowering could fake.
 pub fn self_test_fastpy_slateos_pipe() -> KernelResult<()> {
-    let fastpy_pipe_elf = match load_test_elf("fastpy-pipe") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-pipe: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_pipe_elf) = pathz_test_elf("fastpy-pipe", "fastpy-pipe")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -17355,12 +17114,8 @@ pub fn self_test_fastpy_slateos_pipe() -> KernelResult<()> {
 /// asserts the file the tool wrote back contains exactly it; there is no
 /// userspace echo path a mis-lowering could fake.
 pub fn self_test_fastpy_slateos_dup() -> KernelResult<()> {
-    let fastpy_dup_elf = match load_test_elf("fastpy-dup") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-dup: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_dup_elf) = pathz_test_elf("fastpy-dup", "fastpy-dup")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -17497,12 +17252,8 @@ pub fn self_test_fastpy_slateos_dup() -> KernelResult<()> {
 /// a false pass).  The tool also asserts `dup2` returned the requested fd 9, and
 /// the harness asserts the written-back file holds exactly `"DUP2_OK"`.
 pub fn self_test_fastpy_slateos_dup2() -> KernelResult<()> {
-    let fastpy_dup2_elf = match load_test_elf("fastpy-dup2") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-dup2: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_dup2_elf) = pathz_test_elf("fastpy-dup2", "fastpy-dup2")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -17637,12 +17388,8 @@ pub fn self_test_fastpy_slateos_dup2() -> KernelResult<()> {
 /// asserts the file the tool wrote back holds exactly that — no userspace path
 /// can fake a seek that never moved the offset.
 pub fn self_test_fastpy_slateos_lseek() -> KernelResult<()> {
-    let fastpy_lseek_elf = match load_test_elf("fastpy-lseek") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-lseek: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_lseek_elf) = pathz_test_elf("fastpy-lseek", "fastpy-lseek")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -17783,14 +17530,8 @@ pub fn self_test_fastpy_slateos_lseek() -> KernelResult<()> {
 /// `"ABC"` (which the harness asserts the tool wrote back) can only be right if
 /// `SYS_FS_FTRUNCATE` actually shrank the file.
 pub fn self_test_fastpy_slateos_ftruncate() -> KernelResult<()> {
-    let fastpy_ftruncate_elf = match load_test_elf("fastpy-ftruncate") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-ftruncate: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_ftruncate_elf) = pathz_test_elf("fastpy-ftruncate", "fastpy-ftruncate")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -17925,12 +17666,8 @@ pub fn self_test_fastpy_slateos_ftruncate() -> KernelResult<()> {
 /// the tool wrote back exactly `"BXYE"`, so both the offset-preservation and the
 /// correct positioning are proven end-to-end.
 pub fn self_test_fastpy_slateos_pos() -> KernelResult<()> {
-    let fastpy_pos_elf = match load_test_elf("fastpy-pos") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-pos: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_pos_elf) = pathz_test_elf("fastpy-pos", "fastpy-pos")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -18065,14 +17802,8 @@ pub fn self_test_fastpy_slateos_pos() -> KernelResult<()> {
 /// `/proc/version` banner `"Linux version 6.6.0-slateos …"` — is mirrored to serial via
 /// `SYS_CONSOLE_WRITE`, so the boot harness can grep for it.
 pub fn self_test_fastpy_slateos_sysinfo() -> KernelResult<()> {
-    let fastpy_sysinfo_elf = match load_test_elf("fastpy-sysinfo") {
-        Some(v) => v,
-        None => {
-            serial_println!(
-                "[spawn] SKIP fastpy-sysinfo: fixture absent on /mnt/tests (lean build)"
-            );
-            return Ok(());
-        }
+    let Some(fastpy_sysinfo_elf) = pathz_test_elf("fastpy-sysinfo", "fastpy-sysinfo")? else {
+        return Ok(());
     };
 
     serial_println!(
@@ -18165,12 +17896,8 @@ pub fn self_test_fastpy_slateos_sysinfo() -> KernelResult<()> {
 /// becomes a `Zombie` and exits 0.  The printed digest is mirrored to serial via
 /// `SYS_CONSOLE_WRITE`, so the boot harness can grep for it.
 pub fn self_test_fastpy_slateos_store() -> KernelResult<()> {
-    let fastpy_store_elf = match load_test_elf("fastpy-store") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-store: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_store_elf) = pathz_test_elf("fastpy-store", "fastpy-store")? else {
+        return Ok(());
     };
 
     // Staged input + the content-addressed blob the utility will create.  The
@@ -18299,12 +18026,8 @@ pub fn self_test_fastpy_slateos_store() -> KernelResult<()> {
 /// `coreutils demo\n` → 1ee068f8, `grep demo\n` → 0f4143a6) were verified
 /// against CPython.
 pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
-    let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_pkg_elf) = pathz_test_elf("fastpy-pkg", "fastpy-pkg")? else {
+        return Ok(());
     };
 
     const DB_PATH: &str = "/tmp/pkgdb.txt";
@@ -18522,12 +18245,8 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
 /// `coreutils demo\n` → 1ee068f8 as `bar`), so the content blobs are at known
 /// paths for cleanup.
 pub fn self_test_fastpy_slateos_pkg_gen() -> KernelResult<()> {
-    let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_pkg_elf) = pathz_test_elf("fastpy-pkg", "fastpy-pkg")? else {
+        return Ok(());
     };
 
     const DB_PATH: &str = "/tmp/pkgdb.txt";
@@ -18712,12 +18431,8 @@ pub fn self_test_fastpy_slateos_pkg_gen() -> KernelResult<()> {
 /// artifact; catching the tamper (step 4) is the whole point of a
 /// content-addressed store.
 pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
-    let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_pkg_elf) = pathz_test_elf("fastpy-pkg", "fastpy-pkg")? else {
+        return Ok(());
     };
 
     const DB_PATH: &str = "/tmp/pkgdb.txt";
@@ -18883,12 +18598,8 @@ pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
 /// register-then-sweep design means a no-op gc that deleted nothing — or a
 /// broken one that deleted the referenced blob — both fail.
 pub fn self_test_fastpy_slateos_pkg_gc() -> KernelResult<()> {
-    let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_pkg_elf) = pathz_test_elf("fastpy-pkg", "fastpy-pkg")? else {
+        return Ok(());
     };
 
     const DB_PATH: &str = "/tmp/pkgdb.txt";
@@ -19030,12 +18741,8 @@ pub fn self_test_fastpy_slateos_pkg_gc() -> KernelResult<()> {
 ///  - `search grep` → matches grep           → exit 0
 ///  - `search zzz`  → matches nothing        → exit 1
 pub fn self_test_fastpy_slateos_pkg_search() -> KernelResult<()> {
-    let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_pkg_elf) = pathz_test_elf("fastpy-pkg", "fastpy-pkg")? else {
+        return Ok(());
     };
 
     const DB_PATH: &str = "/tmp/pkgdb.txt";
@@ -19166,12 +18873,8 @@ pub fn self_test_fastpy_slateos_pkg_search() -> KernelResult<()> {
 ///     `foo cd352a42 libc` (new digest present, old 86732e22 gone), and read the
 ///     new blob back and assert it holds the v2 payload byte-for-byte.
 pub fn self_test_fastpy_slateos_pkg_upgrade() -> KernelResult<()> {
-    let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_pkg_elf) = pathz_test_elf("fastpy-pkg", "fastpy-pkg")? else {
+        return Ok(());
     };
 
     const DB_PATH: &str = "/tmp/pkgdb.txt";
@@ -19338,12 +19041,8 @@ pub fn self_test_fastpy_slateos_pkg_upgrade() -> KernelResult<()> {
 ///     `libncurses`) is rejected with exit 1 and the registry is unchanged — the
 ///     all-or-nothing transactional guarantee.
 pub fn self_test_fastpy_slateos_pkg_batch() -> KernelResult<()> {
-    let fastpy_pkg_elf = match load_test_elf("fastpy-pkg") {
-        Some(v) => v,
-        None => {
-            serial_println!("[spawn] SKIP fastpy-pkg: fixture absent on /mnt/tests (lean build)");
-            return Ok(());
-        }
+    let Some(fastpy_pkg_elf) = pathz_test_elf("fastpy-pkg", "fastpy-pkg")? else {
+        return Ok(());
     };
 
     const DB_PATH: &str = "/tmp/pkgdb.txt";

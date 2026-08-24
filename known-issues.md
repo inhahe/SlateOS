@@ -14351,7 +14351,7 @@ leading 4 preserved (`'A'`) and the grown tail zero-filled.
    `O_APPEND`-doesn't-block-truncate nuance. The append/immutable-flag EPERM
    path is not yet plumbed (same capability-model gap as B-CHOWN1).
 
-### W1. Intermittent boot-test hang recurred once at the OOM self-test — WATCHLIST 2026-06-10
+### W1. Intermittent boot-test hang recurred once at the OOM self-test — ✅ CLOSED 2026-08-24 (lane A), cured incidentally; see the closure at the end
 
 **Where:** boot self-test sequence; serial output (`build/serial-test.txt`)
 truncated mid-line at `[sysctl] mm.oom_pol…` during `mm::oom::self_test()`
@@ -14467,6 +14467,53 @@ clean boots the old bar asks for. Note also that the recorded streak of 7 is
 stale bookkeeping, not a real count: many dozens of routine boots have passed
 since 2026-06-14 (including a 20/20 pthread soak on 2026-08-13) with no
 recurrence, and the entry's own rule counts routine boots toward the streak.
+
+**Closed 2026-08-24 (lane A) — the 2026-08-14 recommendation, now with the
+count actually taken.**
+
+That analysis recommended retargeting the bar and then did not close the
+entry, so the Status line above has read "clean streak **7**" for ten weeks
+while the real figure was untracked. Rather than assert the streak, it is
+machine-checkable: `bench/boot-history.jsonl` records `ends_mid_line` per
+boot, which is *precisely* this entry's discriminator.
+
+| Query over `bench/boot-history.jsonl` | Result |
+|---|---|
+| Boots recorded (2026-08-16 → 2026-08-24) | **373** |
+| Verdicts | 278 PASS, 50 SELFTEST_FAIL, 37 PANIC, 8 TIMEOUT |
+| Never reached `BOOT_OK` | 45 (37 PANIC + 8 TIMEOUT) |
+| **W1-shaped (`ends_mid_line` AND not `boot_ok`)** | **0** |
+
+The 8 TIMEOUTs are the only candidates that hung rather than reported, and
+**all 8 ended on a line boundary** (`ends_mid_line: false`, from 6 lines to
+38 842). That is the discriminator the mechanism analysis turns on: a CPU
+that wedges for an unrelated reason stops *between* lines, having flushed the
+line in flight; only a CPU that stopped *inside* `_print` holding the `SERIAL`
+mutex cuts mid-token. Zero of 373 boots did that.
+
+Two records do have `ends_mid_line: true` (2026-08-21 SELFTEST_FAIL,
+2026-08-23 PASS) and **neither is W1**: both reached `BOOT_OK`. Their serial
+is cut because capture stops once the marker is seen, which truncates
+wherever the guest happened to be — the artefact of a *successful* run, not a
+wedge. Worth spelling out because `ends_mid_line` alone looks like a hit; it
+is only W1's fingerprint when paired with never reaching the marker.
+
+**Honest limit on this evidence:** the history file begins 2026-08-16, so it
+cannot demonstrate an unbroken streak back to the last recurrence
+(2026-06-12). What it does show is 373 boots inside its own window with zero
+occurrences — on its own **4× the ~90-boot bar** the entry set, without
+needing to count the two months in between.
+
+Closing as **cured incidentally**, same disposition as F6/F7, attributed to
+the three `serial.rs` fixes tabulated above (`cac8d7624`, `1e5c091f4`,
+`58102abca`), all of which postdate every piece of W1 evidence.
+
+**Re-open condition (unchanged from the 2026-08-14 recommendation, and
+narrower than the old bar):** a boot that hangs *and* leaves serial cut
+mid-token *and* produces no diagnostic — i.e. `ends_mid_line: true` with
+`boot_ok: false`. That combination would falsify the mechanism analysis, and
+is worth far more than further blind soaking. The query above is the test;
+re-run it rather than re-deriving it.
 
 Left at WATCHLIST rather than closed unilaterally, since retargeting a closure
 condition an earlier session set deliberately is the operator's call if they

@@ -71741,3 +71741,64 @@ pattern to copy exists.
 **If never fixed:** nothing breaks today. The cost lands entirely on whoever
 adds the fifteenth accent, in the form of three tests that pass and should not
 have.
+
+### TD-C-A-TEST-THAT-NO-REINTRODUCTION-DEFECT-PROVES-IS-INVISIBLE-TO-EVERY-CHECK-WE-HAVE
+
+**Status:** OPEN
+**Found:** 2026-08-24, while repairing the 56 defects the control-module
+refactor stranded (design-decisions.md §535).
+
+**What it is.** `scripts/reintro-palette.py` answers "is this test real?" by
+putting a bug back and checking the test complains. It answers that question
+only for tests some defect *names*. A test that no defect names is never asked
+anything, and nothing anywhere reports that fact — not `--check`, which only
+verifies that existing patterns still match, and not the orphan diff added in
+§535, which only compares a defect list against its own previous version.
+
+The gap is not hypothetical. `mouse_settings::the_knob_is_legible_on_both_pills`
+was added by the switch work and had **zero** provers until it was noticed by
+accident, during the orphan diff, because a *different* test in the same file
+happened to lose its last prover. Had the switch work not also stranded 56
+defects, nobody would have looked.
+
+**Why it matters.** This is the harness's own failure mode, one level up. The
+entire argument for the harness is that a test which passes tells you nothing
+until you have seen it fail for the right reason. A test with no defect is in
+exactly that unproven state, and it is worse than an untested one because the
+suite's green result now includes it and reads as if it were checked.
+
+**Where it lives.** `scripts/reintro-palette.py` — the `DEFECTS` list and the
+`check()` preflight (around line 22471). The information needed is already in
+the tree: every `#[test] fn` name under `gui/`, minus every name appearing in
+any defect's expected-failures list.
+
+**How to reproduce.** Collect the test-function names in a converted module and
+subtract the names declared across `DEFECTS`; the difference is the unproven
+set. As of this entry that difference has never been computed, so its size is
+unknown — which is itself the finding.
+
+**What the proper fix looks like.** A third preflight mode next to `--check`,
+say `--coverage`, that walks `gui/**/src/*.rs` for `fn <name>()` immediately
+under a `#[test]` attribute, walks `DEFECTS` for declared names, and prints the
+per-file difference. It should not fail the build: plenty of tests are
+legitimately not reachable by a source-level find/replace (a test of a pure
+arithmetic helper, for instance, has no "defect" short of rewriting the helper),
+so the output is a worklist, not a gate. What matters is that the number is
+*visible* and can be driven down deliberately, instead of being discovered by
+accident when something adjacent breaks.
+
+Two refinements worth having in the same pass:
+
+- Report the reverse as well — declared names that match no `#[test] fn`
+  anywhere. That catches a renamed test whose defect still names the old name,
+  which currently surfaces only as a `[MISSING: ...]` after a full sweep.
+- Count provers per test, so a test with exactly one can be told apart from one
+  with forty. The single-prover tests are the fragile ones: they are one
+  refactor away from becoming unproven, which is precisely what happened to
+  `touchpad::the_panel_draws_nothing_that_is_immediately_erased`.
+
+**Why it was not fixed in the same change.** The 56 stranded defects had to be
+resolved before anything else could be measured — a coverage report computed
+against a list containing 56 entries that no longer apply would have been wrong
+in a way that is hard to see. Now that `--check` is clean, the report can be
+written against a list that means what it says.

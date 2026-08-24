@@ -1337,18 +1337,35 @@ mod tests {
         p
     }
 
-    /// The five `DynamicTheme` phase colours, which are a picture of the sky
-    /// rather than roles of the palette and are therefore exempt from the
-    /// membership sweep. They are listed here rather than skipped so that
-    /// adding a sixth phase makes a test fail rather than quietly widening the
-    /// exemption.
+    /// The five sky tones the dynamic wallpaper is allowed to paint, written
+    /// out by hand.
+    ///
+    /// These are the *exemption* from the membership sweep — the one set of
+    /// colours in this module that are deliberately not palette roles. An
+    /// exemption read out of `DynamicTheme::default()` would be an echo of the
+    /// code it excuses: change a phase to Mocha's base and the sweep would
+    /// widen to admit it in the same breath. Written here, a change to any
+    /// phase is a colour the sweep has never heard of, and fails.
+    const SKY: [(u8, u8, u8); PHASE_COUNT] = [
+        (0x2E, 0x1A, 0x47), // dawn — deep purple-blue
+        (0x1A, 0x3A, 0x5C), // morning — cool blue
+        (0x1E, 0x4D, 0x6E), // afternoon — warm teal-blue
+        (0x4A, 0x20, 0x40), // evening — warm purple-red
+        (0x0D, 0x0D, 0x1A), // night — near-black blue
+    ];
+
+    /// The five `DynamicTheme` phase colours and every value the gradient
+    /// ramps through between each phase and its darkened twin.
     fn sky_tones() -> Vec<Color> {
-        let t = DynamicTheme::default();
-        let mut out = vec![t.dawn, t.morning, t.afternoon, t.evening, t.night];
+        let phases: Vec<Color> = SKY
+            .iter()
+            .map(|&(r, g, b)| Color::rgba(r, g, b, 255))
+            .collect();
+        let mut out = phases.clone();
         // `render_dynamic` darkens each phase by 20 per channel and then lerps
         // between the two, so every intermediate value of that ramp is drawn
         // too. Sixteen strips per phase, all derived from the phase colour.
-        for phase in [t.dawn, t.morning, t.afternoon, t.evening, t.night] {
+        for phase in phases {
             let dark = Color::rgba(
                 phase.r.saturating_sub(20),
                 phase.g.saturating_sub(20),
@@ -2260,15 +2277,11 @@ mod tests {
         let mut slideshow = WallpaperManager::new();
         slideshow.set_slideshow("/walls", 300, false);
 
+        // Left on whatever `DynamicTheme::default()` supplies rather than
+        // handed the pinned table, so that the sweep sees the module's own
+        // phase colours and not the test's copy of them.
         let mut dynamic = WallpaperManager::new();
-        let stock = DynamicTheme::default();
-        dynamic.set_dynamic_theme([
-            stock.dawn,
-            stock.morning,
-            stock.afternoon,
-            stock.evening,
-            stock.night,
-        ]);
+        dynamic.config.mode = WallpaperMode::Dynamic;
 
         vec![
             ("solid colour", solid),
@@ -2389,6 +2402,20 @@ mod tests {
     // ------------------------------------------------------------------
     // An unchosen colour is not a chosen one
     // ------------------------------------------------------------------
+
+    #[test]
+    fn the_five_sky_tones_are_the_ones_the_module_was_written_with() {
+        let t = DynamicTheme::default();
+        let got = [t.dawn, t.morning, t.afternoon, t.evening, t.night].map(|c| (c.r, c.g, c.b));
+        assert_eq!(
+            got, SKY,
+            "a dynamic-wallpaper phase colour changed. These five are the \
+             module's one exemption from the palette sweep, so a change here \
+             widens what the desktop is allowed to paint — check it is still \
+             a sky tone and not a palette role that has crept in, then update \
+             the table."
+        );
+    }
 
     #[test]
     fn a_fresh_config_has_chosen_no_colour() {

@@ -238,6 +238,7 @@ pub fn oom_kill_count() -> u64 {
 /// 4. Callback registration works.
 pub fn self_test() {
     serial_println!("[oom] Running self-test...");
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // Save original policy and event count.
     let original_policy = crate::sysctl::get(crate::sysctl::PARAM_MM_OOM_POLICY).unwrap_or(0);
@@ -264,6 +265,10 @@ pub fn self_test() {
         assert_eq!(freed, 0, "no callback should return 0");
         serial_println!("[oom]   No callback fallback: OK");
     } else {
+        skips.record(
+            "no-callback fallback",
+            "a kill callback is already registered",
+        );
         serial_println!("[oom]   Callback already registered (skip no-callback test)");
     }
 
@@ -288,5 +293,6 @@ pub fn self_test() {
     }
     register_kill_callback(noop_callback);
 
-    serial_println!("[oom] Self-test PASSED");
+    skips.report("[oom]");
+    serial_println!("[oom] Self-test PASSED{}", skips.suffix());
 }

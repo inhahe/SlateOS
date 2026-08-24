@@ -135,6 +135,20 @@ static EVENTS: EventLog = EventLog(core::cell::UnsafeCell::new(
 
 static EVENT_POS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// An 8-byte, 8-byte-aligned kernel word that exists only for [`self_test`].
+///
+/// The suite used to watch `EVENT_POS`, an `AtomicU32`, behind
+/// `if test_addr & 0x7 == 0 { ..five tests.. } else { print "skipped" }`.
+/// A `u32` static is 4-byte aligned, so whether five of the seven tests ran
+/// at all was decided by where the linker happened to put it -- a coin flip
+/// that could land tails after any unrelated edit, and that announced itself
+/// only in a line above `Self-test PASSED`.  A watchpoint reads *eight* bytes,
+/// so watching a `u32` also meant reading four bytes of whatever followed it.
+/// `AtomicU64` is 8-byte aligned by definition, which turns the precondition
+/// into something the type system guarantees rather than something the test
+/// has to check for.
+static SELFTEST_WATCHED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -355,12 +369,20 @@ pub fn self_test() {
     serial_println!("[watchpoint]   Clear: OK");
 
     // Test 2: Add a watchpoint on a known kernel variable.
-    // Use EVENT_POS — it's an AtomicU32 at a stable, 8-byte-aligned address.
-    // (ACTIVE_COUNT is AtomicU8 and might not be 8-byte aligned.)
-    let test_addr = &EVENT_POS as *const core::sync::atomic::AtomicU32 as u64;
-
-    // Make sure it's in kernel space and aligned.
-    if test_addr >= 0xffff_8000_0000_0000 && test_addr & 0x7 == 0 {
+    // `SELFTEST_WATCHED` is an `AtomicU64`, so 8-byte alignment is guaranteed
+    // by its type and the address is in the kernel image.  Both halves of the
+    // precondition therefore hold by construction -- so a failure here is a
+    // failure, not a reason to switch off the five tests that follow.
+    let test_addr = &SELFTEST_WATCHED as *const core::sync::atomic::AtomicU64 as u64;
+    assert!(
+        test_addr >= 0xffff_8000_0000_0000,
+        "watchpoint self-test target is not in kernel space: {test_addr:#x}"
+    );
+    assert!(
+        test_addr & 0x7 == 0,
+        "watchpoint self-test target is not 8-byte aligned: {test_addr:#x}"
+    );
+    {
         let slot = add(test_addr, b"test");
         assert!(slot.is_some());
         let slot = slot.unwrap();
@@ -377,11 +399,10 @@ pub fn self_test() {
         serial_println!("[watchpoint]   Poll (no change): OK");
 
         // Test 4: Change the value and poll.
-        // We need to change the value at test_addr.
-        // EVENT_POS was already incremented by poll events from earlier,
-        // but let's modify it explicitly.
-        let before = EVENT_POS.load(Ordering::Relaxed);
-        EVENT_POS.store(before.wrapping_add(100), Ordering::Relaxed);
+        // Write through the watched word itself, so the change the poller
+        // must notice is one this test made deliberately.
+        let before = SELFTEST_WATCHED.load(Ordering::Relaxed);
+        SELFTEST_WATCHED.store(before.wrapping_add(100), Ordering::Relaxed);
         let changes = poll();
         // Should detect the change.
         assert_eq!(changes, 1);
@@ -405,10 +426,8 @@ pub fn self_test() {
         assert_eq!(active_count(), 0);
         serial_println!("[watchpoint]   Remove: OK");
 
-        // Restore EVENT_POS.
-        EVENT_POS.store(before, Ordering::Relaxed);
-    } else {
-        serial_println!("[watchpoint]   (skipped address tests — alignment issue)");
+        // Restore the watched word.
+        SELFTEST_WATCHED.store(before, Ordering::Relaxed);
     }
 
     // Test 7: Invalid addresses rejected.

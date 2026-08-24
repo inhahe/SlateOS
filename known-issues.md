@@ -73730,6 +73730,31 @@ Once that exists, `InputDialog` gains click-to-place-caret in a few lines, using
 `WidgetKind::TextInput` does today, and `dismiss_on_click_outside` starts
 meaning what it says.
 
+### 2026-08-24, later — the survey before the fix found three more, and they are all the same fault
+
+Reading every `handle_mouse` in the file before starting the layout step turned
+up that the missing geometry is not one dialog's problem. It is the file's:
+
+- **`InputDialog::handle_mouse` hit-tests nothing at all.** Its whole body is
+  the overlay-dismiss check. So its OK and Cancel buttons — which it draws,
+  and highlights, and moves a focus ring between — **cannot be clicked**. The
+  dialog is keyboard-only, and nothing says so.
+- **`ProgressDialog` has no `handle_mouse` at all**, and its `handle_event`
+  has no `Event::Mouse` arm. A `.cancelable()` progress dialog draws a Cancel
+  button that can only be worked with Escape.
+- **`AlertDialog::handle_mouse` hit-tests against `compute_layout(800.0,
+  600.0)`** — a hardcoded parent size, because `handle_mouse` is not told the
+  real one. Its buttons therefore land correctly only on an 800×600 parent and
+  are offset by half the difference on any other; on a 1920×1080 desktop the
+  hit areas sit 560 px left and 240 px above the buttons the user can see.
+  This is the same bug as the other two wearing a plausible number.
+
+That last one is the reason the fix is a stored layout and not a parameter.
+`AlertDialog` already has the shared `compute_layout` the entry above asks for,
+and it *still* clicks in the wrong place — because the input the layout needs
+is not available where the click is handled. Threading it in would not have
+been "two copies of the arithmetic"; it would have been one copy fed a guess.
+
 ---
 
 ### 2026-08-24 — the `cmp`/`diff` verdict: reversing this file's own recommendation, from flat-1 to 0/1/2

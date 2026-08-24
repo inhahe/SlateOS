@@ -68811,7 +68811,7 @@ to hold to that, which is what the new self-test is there to enforce.
 
 ---
 
-### TD-KERNEL-CLIPPY-HAS-8-DENY-LEVEL-ERRORS — `cargo clippy -p kernel` does not pass — ✅ FIXED 2026-08-24 (lane A, `7465db994`)
+### TD-KERNEL-CLIPPY-HAS-8-DENY-LEVEL-ERRORS — `cargo clippy -p kernel` does not pass — ✅ FIXED 2026-08-24 (lane A, `7465db994`; gate added `81a12435c`)
 
 **What.** `CLAUDE.md` → "When You Finish a Task" requires `cargo clippy`
 clean. The kernel is not: `cargo clippy -p kernel --release` ends with
@@ -68864,6 +68864,56 @@ open question is where to put it, since a clippy run and a `cargo check` run
 invalidate each other's fingerprints in a shared `target/`, so naïvely adding
 one to `boot-test.sh` doubles every boot's build time. Tracked as the
 remaining half of this entry rather than closed outright.
+
+**Gate built 2026-08-24 (`81a12435c`) — this entry is now fully closed.**
+`scripts/boot-test.sh` → `check_kernel_clippy`, run with the other pre-build
+checks and before `cargo build`.
+
+**The paragraph above is wrong, and the way it is wrong is the more useful
+half of this entry.** "A clippy run and a `cargo check` run invalidate each
+other's fingerprints" was never measured — it was plausible reasoning written
+in the voice of a finding, and it deferred the gate for a day. `cargo clippy`
+sets `RUSTC_WORKSPACE_WRAPPER`, which is hashed into the fingerprint of every
+workspace unit, so clippy's artifacts occupy their own entries and leave the
+build's untouched. Measured:
+
+| Step | Time |
+|---|---|
+| `cargo build` (warm baseline) | 13.8 s |
+| `cargo clippy -p kernel` (cold) | 200 s |
+| `cargo build` immediately after | **4.7 s** — not invalidated |
+| `cargo clippy` again, no source edit | 5 s |
+| `cargo clippy` after touching one file | **113 s** — what a real run pays |
+| `cargo build` after touch + clippy | 215 s — an ordinary full kernel codegen |
+
+113 s against a QEMU window of 400–900 s. Not free, and the comment at the
+gate says so in numbers rather than calling it cheap.
+
+Four choices, each recorded at the gate rather than here:
+
+* **`-p kernel`, not the workspace** — a workspace-wide clippy would let a red
+  crate in lane B's or lane C's tree block lane A's boot test, which is the
+  exact coupling the lane split exists to prevent. Each lane gates its own.
+* **Same profile as the build** — `cfg(debug_assertions)` selects real code in
+  this kernel, so linting debug while shipping release would leave a hole of
+  precisely the size of the difference.
+* **Output to `build/clippy-kernel.log`, not the boot log** — clippy emits
+  18,163 lines here, all `pedantic`-level backlog, and they would bury the
+  output the rest of the script greps.
+* **Not a pipe.** `cargo … | grep` makes `$?` grep's, and grep's status answers
+  "did I match" — which for an *error* filter is inverted: a clean crate would
+  report failure and a broken one success. This is the failure mode a gate can
+  carry indefinitely, because it only misfires in the direction nobody checks.
+
+**Tested on both paths before shipping**, which for a gate is not optional —
+one that has only ever been seen green is indistinguishable from one that
+cannot fire. Green: exit 0 and a single summary line. Red: a deliberate
+`ptr_arg` violation appended to `ksyms.rs` produced exit 101 and
+``kernel\src\ksyms.rs:626:34: error: writing `&Vec` instead of `&[_]` …``
+through the failure filter; then reverted.
+
+**Still not gated:** the `bench/**` crates, also lane A's. Same one-line
+addition if they turn out to be clippy-clean; unmeasured as of this writing.
 
 ---
 
@@ -69033,7 +69083,7 @@ approximation is in every utility here that consults `hard_locale`.
 
 ---
 
-### TD-A-BOOT-TEST-IS-NOT-ISOLATED-FROM-HOST-LOAD — a concurrent `cargo` run can fail an otherwise-clean boot — OPEN 2026-08-24 (lane A)
+### TD-A-BOOT-TEST-IS-NOT-ISOLATED-FROM-HOST-LOAD — a concurrent `cargo` run can fail an otherwise-clean boot — PARTLY FIXED 2026-08-24 (lane A, `026d61d9a`) — see the correction at the end of this entry
 
 **In short:** the boot test runs the kernel inside QEMU, which is a program on
 this machine competing for the same CPUs as everything else. If you start a
@@ -69092,6 +69142,66 @@ building* instead.
    for the hang modes that *do* keep completing self-tests.
 3. **Let the harness pass a slack multiplier** when it knows the host is
    loaded. Requires the harness to know, which it does not.
+
+---
+
+### Correction, 2026-08-24 — the diagnosis above is wrong, and one real bug under it is now fixed (`026d61d9a`)
+
+**In short:** I filed this as "the machine got slower and the watchdog cannot
+tell that apart from a hang." That is not what happened. The harness was
+measuring time with a broken ruler, and the kernel with a good one, and the two
+were being compared as though they were the same ruler.
+
+**The bug.** The QEMU wait loop in `scripts/boot-test.sh` counted its own
+iterations — `sleep 1`, then `ELAPSED=$((ELAPSED + 1))`. An iteration is not a
+second: it is the sleep *plus* a `grep -q` over a serial log that reaches
+2.7 MB, plus the stall-tracking `stat`. Measured against the same script's
+epoch stamps:
+
+| Boot | host | `ELAPSED` at BOOT_OK | guest armed + arm | real QEMU wall | undercount |
+|---|---|---|---|---|---|
+| batch40 | loaded | 665 s | ~890 s | 903 s | 26% |
+| batch41 | idle | 349 s | ~472 s | 465 s | 25% |
+| batch42 | idle | 439 s | 549 s | 563 s | 22% |
+
+**The guest's clock is accurate** — within ~2.5% of real time on every run. The
+drift was entirely in the harness, and it is present on an *idle* host, so it
+was never really about contention at all. Host load only widened a gap that was
+always there.
+
+**Why that produced a false FAIL.** The harness passes `$TIMEOUT` to the guest
+as `sched.boot_deadline_ms`, and `liveness_arm` derives
+`deadline = timeout − 45 s − now_at_arm` in *real* monotonic nanoseconds. With
+`$TIMEOUT` denominated in slow iterations, the guest's deadline landed hundreds
+of seconds before the harness's kill rather than the 45 s the design intends.
+So on batch40 the watchdog fired at ~860 s real while the harness still
+believed it had a quarter of its budget left. The watchdog was not confused by
+contention; it was correctly applying a deadline that had been handed to it in
+the wrong units.
+
+Two further consequences, both live until this fix: **`$TIMEOUT` did not bound
+wall time** (batch40's "900 s timeout" permitted 903 s and would have permitted
+~1200 s — the kill under-fires exactly when a run most needs it), and
+**`"BOOT_OK detected after Ns"` was systematically low**, which matters because
+that is the figure a reader quotes when comparing two boots.
+
+**What the fix does and does not buy.** `ELAPSED` is now computed from an epoch
+stamp, so both sides measure the same thing. It does **not** make a loaded
+host's boot pass: batch40 genuinely needed 903 s of an 855 s allowance, and no
+clock change invents time. What it buys is a truthful verdict — "this boot
+exceeded its wall-clock budget", which points at the budget — instead of a
+watchdog report that reads as a hang and sends the next reader into
+`sched/mod.rs`.
+
+**The three candidate fixes above are therefore mostly answered.** (2) is moot:
+the watchdog's time base was never the problem. (3) is moot: the slack it would
+have added was an attempt to compensate for the drift now removed. (1) remains
+genuinely open, and is now the *only* open part — a `cargo` run beside QEMU
+still steals CPU from a TCG emulator that is CPU-bound and single-threaded, and
+that still shows up as a longer boot. It just no longer shows up as a *lie*.
+
+**The interim rule still stands** and is still the cheap answer: do not run
+`cargo` while a boot test is running.
 
 Candidate 2 is the most principled and the least compatible with the
 watchdog's stated purpose ("catches *any* hang mode"). Recorded rather than

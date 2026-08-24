@@ -2666,15 +2666,112 @@ check_production_unwrap() {
 
 check_production_unwrap
 
+# Resolved once, here, because two things now need it: the clippy gate below
+# and the build after it.  Hoisted out of the build block rather than
+# duplicated -- a gate that resolves `cargo` differently from the build it
+# guards could lint one toolchain and ship another.
+CARGO="${CARGO:-cargo}"
+# Try full path on Windows if cargo not in PATH
+if ! command -v "$CARGO" &>/dev/null; then
+    CARGO="/c/Users/${USER:-${USERNAME:-$(whoami)}}/.cargo/bin/cargo.exe"
+fi
+
+# Keep `cargo clippy -p kernel` exiting 0.
+#
+# The workspace sets `clippy::all = deny` and `clippy::pedantic = warn`, so the
+# exit status is an exact question with no judgement in it: **zero `clippy::all`
+# violations**.  The ~18,000 `pedantic` / `indexing_slicing` /
+# `arithmetic_side_effects` warnings are the known backlog, are `warn`-level by
+# deliberate workspace policy, and do not affect the status.
+#
+# WHY A GATE AND NOT A HABIT.  Eight `deny`-level errors accumulated in this
+# crate unnoticed and were only found on 2026-08-24 by someone running clippy by
+# hand for the first time in the project's life.  That is the whole failure mode:
+# a crate can *declare* `deny` and still drift, because a declaration is only
+# enforced by something that runs.  Fixing the eight without adding this would
+# have bought exactly one clean day.
+#
+# WHY IT IS AFFORDABLE, MEASURED RATHER THAN ASSUMED.  This gate was deferred
+# once already on the belief that "a clippy run and a `cargo check` run
+# invalidate each other's fingerprints in a shared target/, so adding one
+# doubles every boot's build time."  That is false, and it was reasoning rather
+# than evidence.  `cargo clippy` sets `RUSTC_WORKSPACE_WRAPPER`, which is hashed
+# into the fingerprint of every workspace unit, so clippy's artifacts occupy
+# their own entries and leave the build's alone.  Measured on 2026-08-24:
+#
+#   cargo build (warm baseline)          13.8 s
+#   cargo clippy -p kernel (cold)       200   s
+#   cargo build immediately after         4.7 s   <-- not invalidated
+#   cargo clippy again, no source edit    5   s
+#   cargo clippy after touching one file 113   s   <-- what a real run pays
+#
+# 113 s against a boot test whose QEMU window alone is 400-900 s.  The number is
+# not nothing, which is why it is written down here instead of being described
+# as free.
+#
+# WHY `-p kernel` AND NOT THE WORKSPACE.  A workspace-wide clippy would let a
+# red crate in lane B's or lane C's tree block lane A's boot test, which is the
+# exact coupling the lane split exists to prevent.  Each lane gates its own.
+#
+# WHY THE SAME PROFILE AS THE BUILD.  `cfg(debug_assertions)` selects real code
+# in this kernel, so linting debug while shipping release would leave a hole of
+# precisely the size of the difference.  The gate checks what the run builds.
+#
+# Skipped under --no-build: that mode boots an already-built kernel, so there is
+# no new source for the gate to have an opinion about, and 113 s buys nothing.
+check_kernel_clippy() {
+    if [ "$NO_BUILD" -ne 0 ]; then
+        echo "=== Kernel clippy gate: skipped (--no-build; nothing new to lint) ==="
+        return 0
+    fi
+
+    local log="$PROJECT_ROOT/build/clippy-kernel.log"
+    mkdir -p "$PROJECT_ROOT/build"
+
+    echo "=== Checking that the kernel is clippy-clean (clippy::all = deny) ==="
+    local start
+    start="$(date +%s)"
+    # Output to a file, never to this log.  18,000 warning lines would bury the
+    # boot output that the rest of this script greps, and the full text is worth
+    # keeping for whoever is working the pedantic backlog.
+    #
+    # Not a pipe: `cargo ... | grep` would make `$?` grep's, and grep's status is
+    # "did I match", which for an error filter is *inverted* -- a clean crate
+    # would report failure and a broken one success.
+    if (cd "$PROJECT_ROOT" && "$CARGO" clippy -p kernel \
+            ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"} \
+            --message-format=short) > "$log" 2>&1; then
+        local warns
+        warns="$(grep -c ' warning: ' "$log" 2>/dev/null || echo 0)"
+        echo "Clippy OK ($BENCH_PROFILE profile, $(( $(date +%s) - start ))s, \
+0 errors, $warns pedantic-level warnings -> $log)."
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  cargo clippy -p kernel exited non-zero," >&2
+    echo "which under this workspace's lint policy means at least one" >&2
+    echo "clippy::all violation -- those are deny-level.  Sites:" >&2
+    echo "" >&2
+    grep ' error: ' "$log" >&2 || true
+    echo "" >&2
+    echo "Full output (including the pedantic-level backlog, which is NOT what" >&2
+    echo "failed this gate): $log" >&2
+    echo "" >&2
+    echo "Fix them rather than #[allow] them.  Every one of the eight found on" >&2
+    echo "2026-08-24 was a case clippy was right about, and seven were the" >&2
+    echo "one-line rewrite clippy dictated verbatim.  If a lint genuinely does" >&2
+    echo "not apply here, the allow goes at the narrowest possible scope with a" >&2
+    echo "comment saying why -- per CLAUDE.md, not at workspace scope." >&2
+    exit 1
+}
+
+check_kernel_clippy
+
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then
     check_free_space "before building"
     echo "=== Building kernel ==="
-    CARGO="${CARGO:-cargo}"
-    # Try full path on Windows if cargo not in PATH
-    if ! command -v "$CARGO" &>/dev/null; then
-        CARGO="/c/Users/${USER:-${USERNAME:-$(whoami)}}/.cargo/bin/cargo.exe"
-    fi
     # Timed, and recorded in bench/boot-history.jsonl alongside the QEMU window.
     #
     # WHY THIS MATTERS BEYOND CURIOSITY.  open-questions.md Q46 asks whether the
@@ -3397,9 +3494,14 @@ rm -f "$PIDFILE"
 # the in-guest canary cannot reach.  Two boots of one binary minutes apart read
 # 160s and 365s while the canary called the 365s run its cleanest ever.
 #
-# A separate epoch stamp rather than reusing ELAPSED: ELAPSED counts `sleep 1`
-# iterations plus the loop body's own work, so it drifts upward on exactly the
-# busy hosts whose measurement matters most.
+# A separate epoch stamp rather than reusing ELAPSED.  When this was written
+# that was because ELAPSED counted `sleep 1` iterations plus the loop body's own
+# work, so it drifted on exactly the busy hosts whose measurement matters most.
+# ELAPSED is wall-clock as of 2026-08-24 (see the wait loop below), so the two
+# would now agree -- but they are still kept apart, because they start at
+# different instants: this one is stamped before QEMU is launched, ELAPSED's
+# after, and the launch itself is not free.  Fixing ELAPSED does not make this
+# redundant; it makes the pair consistent.
 QEMU_START_EPOCH=$(date +%s)
 #
 # `-device ati-vga,model=rv100` presents a Radeon 7000 (PCI 1002:5159) whose
@@ -3568,10 +3670,57 @@ trap 'on_boot_exit "$?" signal' INT TERM
 trap 'on_boot_exit "$?" exit' EXIT
 
 # Wait for BOOT_OK or timeout
+#
+# ELAPSED IS WALL-CLOCK SECONDS, NOT ITERATIONS, AND THE DIFFERENCE DECIDES
+# PASS/FAIL.  Until 2026-08-24 this loop counted its own iterations
+# (`ELAPSED=$((ELAPSED + 1))` after a `sleep 1`).  An iteration is not a second:
+# it is `sleep 1` *plus* a `grep -q` over a serial log that reaches 2.7 MB, plus
+# the stall-tracking `stat`.  Measured against this script's own epoch stamps,
+# the counter ran 22-26% slow on an **idle** host and worse on a loaded one:
+#
+#   | boot    | host   | ELAPSED at BOOT_OK | guest armed+arm | real QEMU wall |
+#   |---------|--------|--------------------|-----------------|----------------|
+#   | batch40 | loaded | 665 s              | ~890 s          | 903 s          |
+#   | batch41 | idle   | 349 s              | ~472 s          | 465 s          |
+#   | batch42 | idle   | 439 s              |  549 s          | 563 s          |
+#
+# The guest's own clock tracks real time to within ~2.5%; the drift was all
+# here.  Three things were wrong as a result:
+#
+#  1. **`$TIMEOUT` did not bound wall time.**  batch40's "900 s timeout" let
+#     QEMU run 903 s and would have let it reach ~1200 s.  The overrun scales
+#     with host load, so the kill under-fires exactly when a run is most likely
+#     to need it.
+#  2. **`"$WAIT_MARKER detected after Ns"` was systematically low**, and it is
+#     the number a reader quotes when comparing boots.
+#  3. **The kernel's liveness watchdog and this timeout were in different
+#     units.**  The harness passes `$TIMEOUT` to the guest as
+#     `sched.boot_deadline_ms`, and `liveness_arm` derives
+#     `deadline = timeout - 45 s - now_at_arm` measured in *real* monotonic
+#     nanoseconds.  With `$TIMEOUT` denominated in slow iterations, the guest's
+#     deadline landed hundreds of seconds before the harness's kill instead of
+#     the 45 s the design intends -- so a healthy-but-slow boot tripped the
+#     watchdog while the harness still thought it had a quarter of its budget
+#     left.  That is the mechanism behind
+#     known-issues.md -> TD-A-BOOT-TEST-IS-NOT-ISOLATED-FROM-HOST-LOAD, which
+#     was filed as "host contention breaks an assumption" when it is really a
+#     unit mismatch between two clocks that are supposed to be the same one.
+#
+# This does *not* make a loaded host's boot pass -- batch40 genuinely needed
+# 903 s of a 855 s allowance, and no clock change invents time.  What it buys is
+# that both sides now measure the same thing, so the verdict says "this boot
+# exceeded its wall-clock budget", which is true and actionable, instead of a
+# watchdog report that reads as a hang.
+#
+# `date +%s` per iteration rather than bash's `SECONDS`: SECONDS counts from
+# shell start, which includes the gates, the build and staging.
+WAIT_START_EPOCH="$(date +%s)"
 ELAPSED=0
 # Serial-stall tracking.  We remember the serial log's last observed size and
 # the elapsed time at which it last grew; if (ELAPSED - last-growth) reaches
-# STALL_SECS the kernel has gone silent.
+# STALL_SECS the kernel has gone silent.  Both are wall-clock seconds now, so
+# STALL_SECS means what its name says on a busy host too -- previously a stall
+# had to last ~1.3x STALL_SECS of real time before it was called one.
 #
 # The *tracking* is unconditional even though the stall verdict is opt-in
 # (STALL_SECS > 0), because "was the guest still producing output when the
@@ -3583,7 +3732,7 @@ STALL_LAST_SIZE=-1
 STALL_LAST_GROWTH=0
 while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     sleep 1
-    ELAPSED=$((ELAPSED + 1))
+    ELAPSED=$(( $(date +%s) - WAIT_START_EPOCH ))
 
     # Anchor to line start: the success marker is printed as a standalone line
     # (`serial_println!("BOOT_OK")`).  An UNanchored match also trips on the

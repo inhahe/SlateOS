@@ -13,7 +13,10 @@
 //!
 //! // Each frame:
 //! let changed = wp.tick(current_time_secs);
-//! let commands = wp.get_render_commands(screen_w, screen_h);
+//! // The palette is passed in rather than stored: a wallpaper that has no
+//! // colour of its own paints the desktop's `base`, and that has to be this
+//! // frame's base rather than the one in force when the config was loaded.
+//! let commands = wp.get_render_commands(&palette, screen_w, screen_h, secs);
 //!
 //! // Manual controls:
 //! wp.next_wallpaper();
@@ -21,6 +24,7 @@
 //! wp.random_wallpaper();
 //! ```
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::RenderCommand;
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
@@ -29,14 +33,23 @@ use guitk::style::CornerRadii;
 use std::fmt;
 
 // ============================================================================
-// Theme -- Catppuccin Mocha palette constants
+// Theme
 // ============================================================================
-
-mod palette {
-    use guitk::color::Color;
-
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-}
+//
+// This module holds no colour constants. The two kinds of colour it deals in
+// are kept apart deliberately:
+//
+// - **The desktop's background colour** is a *role* — the palette's `base` —
+//   and follows the theme, so it is read from a `Palette` at paint time rather
+//   than stored. `WallpaperConfig::color` is an `Option`, and `None` means
+//   "whatever the desktop's base is right now"; see the field's own doc for
+//   why a substituted default would be a bug rather than a convenience.
+// - **A `DynamicTheme`'s five phase colours** are not roles at all. They are a
+//   picture of the sky at five times of day, and the night phase is meant to
+//   be near-black on a light desktop exactly as it is on a dark one. Theming
+//   them would be like theming a photograph. They stay literal, and
+//   `set_dynamic_theme` is how a caller who wants different ones supplies
+//   them.
 
 // ============================================================================
 // Configuration error type
@@ -507,8 +520,26 @@ pub struct WallpaperConfig {
     pub mode: WallpaperMode,
     /// Path to the current single image (for SingleImage mode).
     pub image_path: String,
-    /// Solid background color.
-    pub color: Color,
+    /// The background colour the user chose, or `None` to follow the theme.
+    ///
+    /// `None` is not "no colour" — it is the *default* state, and it means the
+    /// desktop paints its background in the palette's `base`, tracking the
+    /// light/dark mode and any accent the user picks later.
+    ///
+    /// **Why this is an `Option` and not a `Color` with a sensible default.**
+    /// It used to be a `Color` initialised to Mocha's base, `#1E1E2E`, and both
+    /// halves of that were wrong. Read one way, a user on a light theme got a
+    /// near-black desktop. Read the other — and this is the worse half —
+    /// [`save_config`](WallpaperManager::save_config) writes `color=`
+    /// unconditionally, so the first time the shell saved its configuration it
+    /// wrote `#1E1E2E` into the user's file as though the user had chosen it.
+    /// From then on the desktop was pinned to one mode's base for good, and
+    /// nothing in the file recorded that this was the shell's guess rather than
+    /// a decision. A parser that substitutes the current theme cannot tell
+    /// those two apart afterwards, so it must not substitute at all — the same
+    /// reasoning as design-decisions.md §528, where a calendar event's colour
+    /// became an `Option` for exactly this reason.
+    pub color: Option<Color>,
     /// Slideshow directory path.
     pub slideshow_dir: String,
     /// Slideshow interval in seconds.
@@ -526,7 +557,11 @@ impl Default for WallpaperConfig {
         Self {
             mode: WallpaperMode::SolidColor,
             image_path: String::new(),
-            color: palette::BASE,
+            // Not a colour: a default wallpaper follows the desktop's base.
+            // `Default` cannot see a palette, which is precisely why this
+            // field must be able to say "ask one later" rather than name a
+            // value now.
+            color: None,
             slideshow_dir: String::new(),
             slideshow_interval_secs: 300,
             slideshow_shuffle: false,
@@ -602,16 +637,36 @@ impl WallpaperManager {
     // Mode setters
     // ======================================================================
 
-    /// Set the wallpaper to a solid color.
+    /// Set the wallpaper to a solid color of the user's choosing.
+    ///
+    /// This records a *decision*. To go back to following the theme, call
+    /// [`follow_desktop_base`](Self::follow_desktop_base) rather than passing
+    /// today's `base` here — the two produce the same picture right now and
+    /// diverge the moment the user switches mode.
     pub fn set_solid_color(&mut self, color: Color) {
         self.config.mode = WallpaperMode::SolidColor;
-        self.config.color = color;
+        self.config.color = Some(color);
         self.slideshow = None;
         self.current_image_id = 0;
         self.history.push(format!(
             "solid:#{:02X}{:02X}{:02X}",
             color.r, color.g, color.b
         ));
+    }
+
+    /// Set the wallpaper to a solid colour that follows the desktop's theme.
+    ///
+    /// This is the state a fresh configuration starts in. It exists as a
+    /// public operation because otherwise the default would be a one-way door:
+    /// a user who picked a colour once could never get back to "match my
+    /// theme", only to whichever hex value happened to be the base on the day
+    /// they gave up.
+    pub fn follow_desktop_base(&mut self) {
+        self.config.mode = WallpaperMode::SolidColor;
+        self.config.color = None;
+        self.slideshow = None;
+        self.current_image_id = 0;
+        self.history.push("solid:theme".to_string());
     }
 
     /// Set the wallpaper to a single image.
@@ -844,34 +899,49 @@ impl WallpaperManager {
     /// ID to actual pixel data.
     ///
     /// `time_secs` is seconds since midnight, used only for Dynamic mode.
+    ///
+    /// `p` supplies the desktop's `base` for a configuration that has no
+    /// colour of its own — which is every configuration until the user picks
+    /// one. It is taken at paint time rather than stored so that switching
+    /// light/dark repaints the desktop with the rest of the shell.
     pub fn get_render_commands(
         &self,
+        p: &Palette,
         width: f32,
         height: f32,
         time_secs: u64,
     ) -> Vec<RenderCommand> {
         match self.config.mode {
-            WallpaperMode::SolidColor => self.render_solid(width, height),
-            WallpaperMode::SingleImage => self.render_image(width, height),
-            WallpaperMode::Slideshow => self.render_slideshow(width, height),
+            WallpaperMode::SolidColor => self.render_solid(p, width, height),
+            WallpaperMode::SingleImage => self.render_image(p, width, height),
+            WallpaperMode::Slideshow => self.render_slideshow(p, width, height),
             WallpaperMode::Dynamic => self.render_dynamic(width, height, time_secs),
         }
     }
 
+    /// The background colour to paint: the user's choice, or the theme's base.
+    ///
+    /// One function rather than an `unwrap_or` at each of the three sites that
+    /// need it, so that "unset means the desktop's base" is stated once and
+    /// cannot be answered differently in one mode than in another.
+    fn background(&self, p: &Palette) -> Color {
+        self.config.color.unwrap_or(p.base)
+    }
+
     /// Render a solid color background.
-    fn render_solid(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    fn render_solid(&self, p: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {
         vec![RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width,
             height,
-            color: self.config.color,
+            color: self.background(p),
             corner_radii: CornerRadii::ZERO,
         }]
     }
 
     /// Render a single image background with a color underlay.
-    fn render_image(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    fn render_image(&self, p: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(2);
 
         // Background color underlay (visible through letterboxing or if
@@ -881,7 +951,7 @@ impl WallpaperManager {
             y: 0.0,
             width,
             height,
-            color: self.config.color,
+            color: self.background(p),
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -901,10 +971,10 @@ impl WallpaperManager {
     }
 
     /// Render the current slideshow image.
-    fn render_slideshow(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    fn render_slideshow(&self, p: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {
         // Same rendering as single image -- the slideshow logic only
         // changes which image_id is current.
-        self.render_image(width, height)
+        self.render_image(p, width, height)
     }
 
     /// Render a dynamic time-of-day gradient background.
@@ -954,10 +1024,14 @@ impl WallpaperManager {
 
         out.push_str(&format!("mode={}\n", self.config.mode.as_str()));
         out.push_str(&format!("fit={}\n", self.config.fit.as_str()));
-        out.push_str(&format!(
-            "color={:02X}{:02X}{:02X}\n",
-            self.config.color.r, self.config.color.g, self.config.color.b
-        ));
+        // Written only when the user actually chose one. Emitting the theme's
+        // current base for an unset colour would turn the shell's answer into
+        // the user's answer, and the next reader could not tell the difference
+        // — the file would say "this user wants #1E1E2E" when what happened is
+        // that the shell was in dark mode the day it saved.
+        if let Some(c) = self.config.color {
+            out.push_str(&format!("color={:02X}{:02X}{:02X}\n", c.r, c.g, c.b));
+        }
 
         if !self.config.image_path.is_empty() {
             out.push_str(&format!("image_path={}\n", self.config.image_path));
@@ -1069,7 +1143,11 @@ impl WallpaperManager {
         Ok(WallpaperConfig {
             mode,
             image_path,
-            color: color.unwrap_or(palette::BASE),
+            // Passed through, not defaulted. An absent `color:` key means the
+            // user has not chosen one, and that is a state the config can
+            // hold; substituting the theme's base here is what used to launder
+            // the shell's guess into the user's file on the next save.
+            color,
             slideshow_dir,
             slideshow_interval_secs: slideshow_interval.unwrap_or(300),
             slideshow_shuffle: slideshow_shuffle.unwrap_or(false),
@@ -1240,6 +1318,50 @@ mod tests {
     )]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
+
+    /// A dark palette with an accent that is *not* one of its own roles.
+    ///
+    /// The stock accent is `blue`, so a test that used `Palette::for_mode`
+    /// unmodified could not tell "this draws the accent" from "this draws
+    /// blue" — the two are the same bytes on a default install.
+    fn dark() -> Palette {
+        let mut p = Palette::for_mode(false);
+        p.accent = Color::from_hex(0x00FF_00FF);
+        p
+    }
+
+    fn light() -> Palette {
+        let mut p = Palette::for_mode(true);
+        p.accent = Color::from_hex(0x00FF_00FF);
+        p
+    }
+
+    /// The five `DynamicTheme` phase colours, which are a picture of the sky
+    /// rather than roles of the palette and are therefore exempt from the
+    /// membership sweep. They are listed here rather than skipped so that
+    /// adding a sixth phase makes a test fail rather than quietly widening the
+    /// exemption.
+    fn sky_tones() -> Vec<Color> {
+        let t = DynamicTheme::default();
+        let mut out = vec![t.dawn, t.morning, t.afternoon, t.evening, t.night];
+        // `render_dynamic` darkens each phase by 20 per channel and then lerps
+        // between the two, so every intermediate value of that ramp is drawn
+        // too. Sixteen strips per phase, all derived from the phase colour.
+        for phase in [t.dawn, t.morning, t.afternoon, t.evening, t.night] {
+            let dark = Color::rgba(
+                phase.r.saturating_sub(20),
+                phase.g.saturating_sub(20),
+                phase.b.saturating_sub(20),
+                phase.a,
+            );
+            for i in 0..16 {
+                let f = i as f32 / 15.0;
+                out.push(phase.lerp(dark, f));
+            }
+        }
+        out
+    }
 
     // ------------------------------------------------------------------
     // WallpaperMode parsing
@@ -1785,7 +1907,7 @@ mod tests {
         let mut mgr = WallpaperManager::new();
         mgr.set_solid_color(Color::RED);
         assert_eq!(*mgr.mode(), WallpaperMode::SolidColor);
-        assert_eq!(mgr.config.color, Color::RED);
+        assert_eq!(mgr.config.color, Some(Color::RED));
         assert!(!mgr.history.is_empty());
     }
 
@@ -2068,7 +2190,7 @@ mod tests {
     fn render_solid_produces_one_fill() {
         let mut mgr = WallpaperManager::new();
         mgr.set_solid_color(Color::from_hex(0x1E1E2E));
-        let cmds = mgr.get_render_commands(1920.0, 1080.0, 0);
+        let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             RenderCommand::FillRect {
@@ -2089,7 +2211,7 @@ mod tests {
     fn render_image_produces_fill_and_image() {
         let mut mgr = WallpaperManager::new();
         mgr.set_image("/test.png", ImageFit::Stretch);
-        let cmds = mgr.get_render_commands(1920.0, 1080.0, 0);
+        let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
         assert_eq!(cmds.len(), 2);
         assert!(matches!(&cmds[0], RenderCommand::FillRect { .. }));
         assert!(matches!(&cmds[1], RenderCommand::Image { .. }));
@@ -2105,7 +2227,7 @@ mod tests {
             Color::WHITE,
             Color::BLACK,
         ]);
-        let cmds = mgr.get_render_commands(1920.0, 1080.0, 0);
+        let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
         // Should produce 16 gradient strips.
         assert_eq!(cmds.len(), 16);
         for cmd in &cmds {
@@ -2118,9 +2240,234 @@ mod tests {
         let mut mgr = WallpaperManager::new();
         mgr.set_slideshow("/empty", 300, false);
         // No paths populated -- should still render a background color.
-        let cmds = mgr.get_render_commands(1920.0, 1080.0, 0);
+        let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
         assert!(!cmds.is_empty());
         assert!(matches!(&cmds[0], RenderCommand::FillRect { .. }));
+    }
+
+    // ------------------------------------------------------------------
+    // The desktop background follows the palette
+    // ------------------------------------------------------------------
+
+    /// The four modes, each with the manager set up to render it.
+    fn every_mode() -> Vec<(&'static str, WallpaperManager)> {
+        let mut solid = WallpaperManager::new();
+        solid.follow_desktop_base();
+
+        let mut image = WallpaperManager::new();
+        image.set_image("/wall.png", ImageFit::Fill);
+
+        let mut slideshow = WallpaperManager::new();
+        slideshow.set_slideshow("/walls", 300, false);
+
+        let mut dynamic = WallpaperManager::new();
+        let stock = DynamicTheme::default();
+        dynamic.set_dynamic_theme([
+            stock.dawn,
+            stock.morning,
+            stock.afternoon,
+            stock.evening,
+            stock.night,
+        ]);
+
+        vec![
+            ("solid colour", solid),
+            ("a single image", image),
+            ("a slideshow", slideshow),
+            ("a dynamic gradient", dynamic),
+        ]
+    }
+
+    #[test]
+    fn every_colour_this_module_draws_comes_from_its_palette() {
+        for p in [dark(), light()] {
+            for (what, mgr) in every_mode() {
+                let cmds = mgr.get_render_commands(&p, 1920.0, 1080.0, 0);
+                assert_drawn_from(&p, &cmds, &sky_tones(), what);
+            }
+        }
+        // A mode nobody added to `every_mode` is a mode nobody swept.
+        assert_eq!(
+            every_mode().len(),
+            4,
+            "a wallpaper mode was added without being swept for stray colours"
+        );
+    }
+
+    #[test]
+    fn an_unset_background_is_the_desktops_base_in_each_mode() {
+        for (p, name) in [(dark(), "dark"), (light(), "light")] {
+            let mut mgr = WallpaperManager::new();
+            mgr.follow_desktop_base();
+            let cmds = mgr.get_render_commands(&p, 100.0, 100.0, 0);
+            let RenderCommand::FillRect { color, .. } = &cmds[0] else {
+                unreachable!("solid mode draws one fill")
+            };
+            assert_eq!(
+                format!("{color:?}"),
+                format!("{:?}", p.base),
+                "an unset wallpaper colour paints {color:?} in {name} mode \
+                 rather than the desktop's base"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unset_background_moves_with_the_mode() {
+        let mut mgr = WallpaperManager::new();
+        mgr.follow_desktop_base();
+        let d = mgr.get_render_commands(&dark(), 100.0, 100.0, 0);
+        let l = mgr.get_render_commands(&light(), 100.0, 100.0, 0);
+        assert_ne!(
+            format!("{d:?}"),
+            format!("{l:?}"),
+            "the desktop background paints the same colour in both modes, so \
+             it is not reading the palette at all"
+        );
+    }
+
+    #[test]
+    fn an_images_underlay_follows_the_theme_too() {
+        // The letterbox border around a non-filling image is the desktop
+        // showing through, so it is the same surface as the solid background
+        // and must answer to the same rule. It is a separate site in the code
+        // and so a separate site here.
+        for (p, name) in [(dark(), "dark"), (light(), "light")] {
+            let mut mgr = WallpaperManager::new();
+            mgr.set_image("/wall.png", ImageFit::Center);
+            let cmds = mgr.get_render_commands(&p, 100.0, 100.0, 0);
+            let RenderCommand::FillRect { color, .. } = &cmds[0] else {
+                unreachable!("image mode draws its underlay first")
+            };
+            assert_eq!(
+                format!("{color:?}"),
+                format!("{:?}", p.base),
+                "the letterbox underlay paints {color:?} in {name} mode \
+                 rather than the desktop's base"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chosen_background_overrides_the_theme_and_does_not_move() {
+        let mut mgr = WallpaperManager::new();
+        mgr.set_solid_color(Color::from_hex(0x00FF_0000));
+        for (p, name) in [(dark(), "dark"), (light(), "light")] {
+            let cmds = mgr.get_render_commands(&p, 100.0, 100.0, 0);
+            let RenderCommand::FillRect { color, .. } = &cmds[0] else {
+                unreachable!("solid mode draws one fill")
+            };
+            assert_eq!(
+                format!("{color:?}"),
+                format!("{:?}", Color::from_hex(0x00FF_0000)),
+                "a colour the user chose was overridden by the {name} theme"
+            );
+        }
+    }
+
+    #[test]
+    fn no_wallpaper_site_wears_the_accent() {
+        // The desktop background is the one surface that is behind everything
+        // and chosen by nothing — it is not a selection, not an active state,
+        // not a "you picked this". The accent is reserved for those.
+        for p in [dark(), light()] {
+            for (what, mgr) in every_mode() {
+                for cmd in mgr.get_render_commands(&p, 1920.0, 1080.0, 0) {
+                    let RenderCommand::FillRect { color, .. } = cmd else {
+                        continue;
+                    };
+                    assert_ne!(
+                        (color.r, color.g, color.b),
+                        (p.accent.r, p.accent.g, p.accent.b),
+                        "{what} paints the desktop in the accent"
+                    );
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // An unchosen colour is not a chosen one
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn a_fresh_config_has_chosen_no_colour() {
+        assert_eq!(
+            WallpaperConfig::default().color,
+            None,
+            "a default configuration names a wallpaper colour, which is the \
+             shell putting words in the user's mouth"
+        );
+    }
+
+    #[test]
+    fn saving_an_unchosen_colour_writes_no_colour_key() {
+        let mgr = WallpaperManager::new();
+        let text = mgr.save_config();
+        assert!(
+            !text.contains("color="),
+            "the shell wrote a `color=` key for a colour the user never \
+             chose, which the next load cannot tell from a real choice:\n{text}"
+        );
+    }
+
+    #[test]
+    fn an_unchosen_colour_survives_a_save_and_load() {
+        // The round trip is where the old bug did its damage: the value was
+        // substituted on load and written out on save, so one save/load cycle
+        // silently converted "follow my theme" into "always #1E1E2E".
+        let mgr = WallpaperManager::new();
+        let loaded = WallpaperManager::load_config(&mgr.save_config()).expect("should parse");
+        assert_eq!(
+            loaded.color, None,
+            "a save/load cycle invented a wallpaper colour the user never chose"
+        );
+    }
+
+    #[test]
+    fn a_config_file_with_no_colour_key_loads_as_unchosen() {
+        let loaded = WallpaperManager::load_config("mode=solid\n").expect("should parse");
+        assert_eq!(
+            loaded.color, None,
+            "an absent `color:` key was read as a choice of the theme's base"
+        );
+    }
+
+    #[test]
+    fn choosing_the_base_and_following_it_are_different_states() {
+        // They paint identically today, which is exactly why the distinction
+        // has to be tested: it is invisible until the user switches mode.
+        let mut chose = WallpaperManager::new();
+        chose.set_solid_color(dark().base);
+        let mut follows = WallpaperManager::new();
+        follows.follow_desktop_base();
+
+        let d =
+            |m: &WallpaperManager| format!("{:?}", m.get_render_commands(&dark(), 10.0, 10.0, 0));
+        let l =
+            |m: &WallpaperManager| format!("{:?}", m.get_render_commands(&light(), 10.0, 10.0, 0));
+
+        assert_eq!(d(&chose), d(&follows), "the two states differ in dark mode");
+        assert_ne!(
+            l(&chose),
+            l(&follows),
+            "a user who picked the dark base and a user who never picked \
+             anything get the same light-mode desktop, so the choice was lost"
+        );
+    }
+
+    #[test]
+    fn following_the_theme_is_reachable_again_after_choosing() {
+        let mut mgr = WallpaperManager::new();
+        mgr.set_solid_color(Color::RED);
+        assert_eq!(mgr.config.color, Some(Color::RED));
+        mgr.follow_desktop_base();
+        assert_eq!(
+            mgr.config.color, None,
+            "once a colour is chosen there is no way back to following the \
+             theme, which makes the default a one-way door"
+        );
+        assert_eq!(*mgr.mode(), WallpaperMode::SolidColor);
     }
 
     // ------------------------------------------------------------------
@@ -2137,7 +2484,7 @@ mod tests {
         let loaded = WallpaperManager::load_config(&text).expect("should parse");
 
         assert_eq!(loaded.mode, WallpaperMode::SolidColor);
-        assert_eq!(loaded.color, Color::from_hex(0x89B4FA));
+        assert_eq!(loaded.color, Some(Color::from_hex(0x89B4FA)));
         assert_eq!(loaded.fit, ImageFit::Center);
     }
 

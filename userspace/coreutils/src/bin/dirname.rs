@@ -23,6 +23,7 @@
 //! they look — `dirname a/` is `.`, and `dirname ////a////b////` keeps every
 //! one of its leading slashes.
 
+use coreutils::diag;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::pathname::dir_name;
 use coreutils::quote::os_bytes;
@@ -60,16 +61,26 @@ enum Request {
 }
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
-    // Decided before the stream exists: upstream's `usage (EXIT_FAILURE)` never
-    // reaches `atexit (close_stdout)` with anything buffered, so `dirname >&-`
-    // prints only `dirname: missing operand` and no write error after it.
+    // Decided before the stream exists: upstream's `usage (EXIT_FAILURE)`
+    // reaches `atexit (close_stdout)` with nothing buffered on stdout, so
+    // `dirname >&-` prints only `dirname: missing operand` and no write error
+    // after it.
     let request = match parse_args(&args) {
         Ok(request) => request,
         Err(e) => {
-            eprintln!("dirname: {e}");
+            diag!("dirname: {e}");
             return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
     };

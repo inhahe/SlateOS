@@ -91,6 +91,7 @@
 
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::quoteaf_os;
+use coreutils::stdfd;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
@@ -137,6 +138,21 @@ enum Request {
 }
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    // `NOHUP_FAILURE` rather than 1, because `nohup` is one of the five that
+    // call gnulib's `initialize_exit_failure (EXIT_CANCELED)`.
+    //
+    // The `Diagnostics` inside `imp::run` keeps its *own* record, because after
+    // the redirection its messages no longer go to descriptor 2 at all. This
+    // catches the ones that do: the usage errors, which happen first.
+    stdfd::close_stderr(run_main(), u8::try_from(NOHUP_FAILURE).unwrap_or(1))
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         Ok(Request::Help) => {
@@ -641,6 +657,7 @@ mod imp {
 
 #[cfg(not(target_os = "linux"))]
 mod imp {
+    use coreutils::diag;
     use std::ffi::OsString;
     use std::process::ExitCode;
 
@@ -648,7 +665,7 @@ mod imp {
     /// numbers nor `exec`. The unit tests below cover the pure parts on every
     /// host; this arm exists so the crate builds there.
     pub fn run(_argv: &[OsString]) -> ExitCode {
-        eprintln!("nohup: not supported on this host");
+        diag!("nohup: not supported on this host");
         ExitCode::from(125)
     }
 }

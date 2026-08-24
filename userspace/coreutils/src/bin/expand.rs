@@ -95,6 +95,7 @@
 //!   options are looked at: `expand -t x -q` reports the bad list and never
 //!   mentions `-q`, while `expand -q -t x` reports only `-q`.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::quotef_os;
@@ -169,12 +170,12 @@ impl Refusal {
     fn report(&self) -> ExitCode {
         let status = match self {
             Self::Getopt(e) => {
-                eprintln!("expand: {}", e.message());
+                diag!("expand: {}", e.message());
                 e.status
             }
             Self::Tabs(messages) => {
                 for message in messages {
-                    eprintln!("expand: {message}");
+                    diag!("expand: {message}");
                 }
                 1
             }
@@ -184,6 +185,15 @@ impl Refusal {
 }
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
@@ -240,7 +250,7 @@ impl Trouble {
     fn report(&self) -> ExitCode {
         match self {
             Self::Write(e) => stdfd::write_error("expand", e),
-            Self::TooLong => eprintln!("expand: input line is too long"),
+            Self::TooLong => diag!("expand: input line is too long"),
         }
         ExitCode::FAILURE
     }
@@ -391,7 +401,7 @@ impl Input {
                     return true;
                 }
                 Err(e) => {
-                    eprintln!("expand: {}: {}", quotef_os(&name), strerror(&e));
+                    diag!("expand: {}: {}", quotef_os(&name), strerror(&e));
                     self.failed = true;
                 }
             }
@@ -426,7 +436,7 @@ impl Input {
                     // Upstream notices this through `ferror` in `next_file`, so
                     // the file is named and the run moves on to the next one.
                     if let Some(open) = self.open.take() {
-                        eprintln!("expand: {}: {}", quotef_os(&open.name), strerror(&e));
+                        diag!("expand: {}: {}", quotef_os(&open.name), strerror(&e));
                     }
                     self.failed = true;
                 }

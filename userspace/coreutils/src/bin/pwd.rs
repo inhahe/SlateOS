@@ -61,6 +61,7 @@
 //! stake beyond the marks -- but the marks are what a caller greps for, and
 //! `pwd-diff.sh` compares stderr byte for byte.
 
+use coreutils::diag;
 use coreutils::errmsg;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::os_bytes;
@@ -105,23 +106,38 @@ enum Request {
 }
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
-    // Decided before the stream exists: upstream's `usage (EXIT_FAILURE)` never
-    // reaches `atexit (close_stdout)` with anything buffered, so a bad option
-    // prints only its own diagnostic and no write error after it.
+    // Decided before the stream exists: upstream's `usage (EXIT_FAILURE)`
+    // reaches `atexit (close_stdout)` with nothing buffered on stdout, so a bad
+    // option prints only its own diagnostic and no write error after it.
     let request = match parse_args(&args, posixly_correct()) {
         Ok(request) => request,
         Err(e) => {
-            eprintln!("pwd: {e}");
+            diag!("pwd: {e}");
             return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
     };
 
     let mut out = Stream::stdout();
-    let stderr = io::stderr();
-    let mut err = stderr.lock();
+    // A `Stream` and not `io::stderr()`: the diagnostics below are threaded
+    // through an `impl Write` so the tests can read them out of a `Vec`, and
+    // `io::stderr()` would answer `Ok` to a write that never happened -- its
+    // `EBADF` is swallowed by the runtime, and its `ENOSPC` by the `let _ =`.
+    // A `Stream` on descriptor 2 records the failure in the same crate-wide
+    // flag [`diag!`] sets, which is what turns `pwd foo 2>&-` into the 1 GNU
+    // exits with rather than the 0 the run had earned.
+    let mut err = Stream::stderr();
 
     // `--help` and `--version` are writes like any other, so they fail like any
     // other: measured, `pwd --help >&-` is `pwd: write error: Bad file

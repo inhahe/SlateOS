@@ -73,6 +73,7 @@
 //! `scripts/seq-diff.sh` runs both binaries over the same command lines and
 //! compares stdout, stderr and the exit status separately.
 
+use coreutils::diag;
 use coreutils::extfloat::{self, ExtF80, Spec};
 use coreutils::getopt::{self, Program};
 use coreutils::quote::quote;
@@ -162,7 +163,7 @@ impl Trouble {
     fn report(&self) -> ExitCode {
         match self {
             Self::Refused(e) => {
-                eprintln!("seq: {}", e.message());
+                diag!("seq: {}", e.message());
                 ExitCode::from(u8::try_from(e.status).unwrap_or(1))
             }
             // Unreachable when the writer is a [`Stream`], whose `Write` impl
@@ -227,6 +228,15 @@ impl Operand {
 // ---------------------------------------------------------------------- main
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
 

@@ -78,6 +78,7 @@
 //! compares stdout, stderr and the exit status separately.
 
 use coreutils::cfmt::{self, Value};
+use coreutils::diag;
 use coreutils::extfloat::{self, ExtF80, Spec};
 use coreutils::getopt::{self, Program};
 use coreutils::quote::{self, os_bytes, quote, quotef};
@@ -160,6 +161,15 @@ enum Stop {
 // ----------------------------------------------------------------------- main
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<Vec<u8>> = env::args_os()
         .skip(1)
@@ -219,7 +229,7 @@ fn main() -> ExitCode {
     if stream_failed {
         match flushed {
             Err(e) => stdfd::write_error("printf", &e),
-            Ok(()) => eprintln!("printf: write error"),
+            Ok(()) => diag!("printf: write error"),
         }
         return ExitCode::FAILURE;
     }
@@ -232,11 +242,11 @@ fn main() -> ExitCode {
         (Ok(()), Ok(())) => ExitCode::from(u8::try_from(status).unwrap_or(1)),
         (Err(Stop::Cancel), Ok(())) => ExitCode::SUCCESS,
         (Err(Stop::Fatal(message)), Ok(())) => {
-            eprintln!("printf: {message}");
+            diag!("printf: {message}");
             ExitCode::FAILURE
         }
         (Err(Stop::Usage(e)), Ok(())) => {
-            eprintln!("printf: {}", e.message());
+            diag!("printf: {}", e.message());
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }
@@ -323,7 +333,7 @@ impl<W: Write> Printer<W> {
     /// there is nowhere left to report them, and the exit status already says
     /// something went wrong.
     fn warn(&self, message: &str) {
-        eprintln!("printf: {message}");
+        diag!("printf: {message}");
     }
 
     // ------------------------------------------------------------- the format

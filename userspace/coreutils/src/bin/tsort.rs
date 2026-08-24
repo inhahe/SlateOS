@@ -124,6 +124,7 @@
 //! compares stdout byte for byte through `od -An -c`, stderr in full, and the
 //! exit status.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::{quote, quotef_os};
@@ -189,11 +190,11 @@ enum Trouble {
 impl Trouble {
     fn report(&self) -> ExitCode {
         match self {
-            Self::Open(name, e) => eprintln!("tsort: {}: {}", quotef_os(name), strerror(e)),
+            Self::Open(name, e) => diag!("tsort: {}: {}", quotef_os(name), strerror(e)),
             Self::Read(name, e) => {
-                eprintln!("tsort: {}: read error: {}", quotef_os(name), strerror(e));
+                diag!("tsort: {}: read error: {}", quotef_os(name), strerror(e));
             }
-            Self::OddTokens(name) => eprintln!(
+            Self::OddTokens(name) => diag!(
                 "tsort: {}: input contains an odd number of tokens",
                 quotef_os(name)
             ),
@@ -204,12 +205,21 @@ impl Trouble {
 }
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
         Ok(request) => request,
         Err(e) => {
-            eprintln!("tsort: {}", e.message());
+            diag!("tsort: {}", e.message());
             return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
     };
@@ -228,7 +238,14 @@ fn main() -> ExitCode {
         Ok(data) => data,
         Err(trouble) => return trouble.report(),
     };
-    let mut err = io::stderr();
+    // A `Stream` and not `io::stderr()`: the cycle report is threaded through
+    // an `impl Write` so the tests can read it out of a `Vec`, and
+    // `io::stderr()` would answer `Ok` to a write that never happened -- the
+    // runtime swallows its `EBADF`, and the `let _ =` at the call site swallows
+    // its `ENOSPC`. A `Stream` on descriptor 2 records the failure in the same
+    // crate-wide flag `diag!` sets, so `close_stderr` in `main` can turn it
+    // into the status upstream's `fclose (stderr)` would have produced.
+    let mut err = Stream::stderr();
 
     let outcome = tsort(&data, &file, &mut out, &mut err);
 

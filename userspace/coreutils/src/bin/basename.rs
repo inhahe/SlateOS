@@ -47,6 +47,7 @@
 //!   `basename -s .h a.h b.h` is two names, not a name and an extra operand.
 //! - With `-a` and no `-s` there is no suffix at all, however many operands.
 
+use coreutils::diag;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::pathname::{base_name, is_relative};
 use coreutils::quote::{os_bytes, quote};
@@ -95,17 +96,26 @@ enum Request {
 }
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
     // The usage error is decided before the stream exists, because upstream's
-    // `usage (EXIT_FAILURE)` never reaches `atexit (close_stdout)` with
-    // anything buffered: measured, `basename >&-` prints only
+    // `usage (EXIT_FAILURE)` reaches `atexit (close_stdout)` with nothing
+    // buffered on stdout: measured, `basename >&-` prints only
     // `basename: missing operand` and exits 1, with no write error after it.
     let request = match parse_args(&args) {
         Ok(request) => request,
         Err(e) => {
-            eprintln!("basename: {e}");
+            diag!("basename: {e}");
             return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
     };

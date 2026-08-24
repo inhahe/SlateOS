@@ -53,9 +53,9 @@ pass=0; fail=0; xfail=0; xpass=0
 # `CLOSED` are the two ways to reach a write error — they are not
 # interchangeable: /dev/full fails every write, whereas a closed descriptor
 # only fails one that was actually attempted.
-ENVV=; PRE=; TO_FULL=; CLOSED=
+ENVV=; PRE=; TO_FULL=; CLOSED=; ERR_FULL=; ERR_CLOSED=
 
-reset_knobs() { ENVV=; PRE=; TO_FULL=; CLOSED=; }
+reset_knobs() { ENVV=; PRE=; TO_FULL=; CLOSED=; ERR_FULL=; ERR_CLOSED=; }
 
 # Bytes, not text: a login name is a field of `/etc/passwd` and may hold
 # anything but `:` and a newline, so the comparison must not go through
@@ -77,7 +77,19 @@ compare() {
     if [ "$side" = ours ]; then out=$o_bin; err=$o_err
     else out=$g_bin; err=$g_err; fi
     # `$ENVV` and `$PRE` are deliberately unquoted: both are word lists.
-    if [ -n "$CLOSED" ]; then
+    # A spelling per combination rather than a variable holding a redirection:
+    # the shell expands redirections before it expands variables, so `$REDIR`
+    # would be an argument and not a redirection.
+    if [ -n "$CLOSED" ] && [ -n "$ERR_CLOSED" ]; then
+      # shellcheck disable=SC2086
+      ( timeout -k 2 60 $PRE env $ENVV PATH="$bindir/$side" whoami "$@" ) >&- 2>&-
+    elif [ -n "$ERR_CLOSED" ]; then
+      # shellcheck disable=SC2086
+      ( timeout -k 2 60 $PRE env $ENVV PATH="$bindir/$side" whoami "$@" ) >"$out" 2>&-
+    elif [ -n "$ERR_FULL" ]; then
+      # shellcheck disable=SC2086
+      ( timeout -k 2 60 $PRE env $ENVV PATH="$bindir/$side" whoami "$@" ) >"$out" 2>/dev/full
+    elif [ -n "$CLOSED" ]; then
       # shellcheck disable=SC2086
       ( timeout -k 2 60 $PRE env $ENVV PATH="$bindir/$side" whoami "$@" ) >&- 2>"$err"
     elif [ -n "$TO_FULL" ]; then
@@ -124,9 +136,10 @@ report() {
 
 # The label is built before `compare` runs, because `compare` resets the knobs.
 label_of() {
-  printf 'whoami %s%s%s%s%s' "$*" \
+  printf 'whoami %s%s%s%s%s%s%s' "$*" \
     "${PRE:+  [$PRE]}" "${ENVV:+  [$ENVV]}" \
-    "${TO_FULL:+  [>/dev/full]}" "${CLOSED:+  [>&-]}"
+    "${TO_FULL:+  [>/dev/full]}" "${CLOSED:+  [>&-]}" \
+    "${ERR_FULL:+  [2>/dev/full]}" "${ERR_CLOSED:+  [2>&-]}"
 }
 run_case() { local label; label=$(label_of "$@"); compare "$@"; report "$label"; }
 
@@ -212,6 +225,27 @@ TO_FULL=1; run_case --version
 # The usage error never gets as far as a flush, so a closed stdout adds
 # nothing to it: the operand complaint is the whole output.
 CLOSED=1; run_case x
+
+# --- standard *error* closed, and full ---------------------------------------
+# gnulib's `close_stdout` closes descriptor 2 as well, and `_exit`s with
+# `exit_failure` if that fails -- so a diagnostic that could not be delivered
+# replaces the status the run had earned, silently. Ours reached this file
+# exiting 134, `Aborted (core dumped)`: `eprintln!` panics on a failed write,
+# and the panic message then fails to print for the same reason.
+#
+# `--help` and `--version` are left out on purpose: they are `xfail` on stdout
+# already, and what this group asks about is the status alone.
+ERR_FULL=1;   run_case
+ERR_CLOSED=1; run_case
+# A diagnostic was attempted and lost, so `exit_failure` replaces the status.
+ERR_FULL=1;   run_case x
+ERR_CLOSED=1; run_case x
+ERR_FULL=1;   run_case --nope
+ERR_CLOSED=1; run_case -q
+ERR_CLOSED=1; run_case --help=1
+# Neither descriptor left: the status is the only thing that carries anything.
+CLOSED=1; ERR_CLOSED=1; run_case
+CLOSED=1; ERR_CLOSED=1; run_case x
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

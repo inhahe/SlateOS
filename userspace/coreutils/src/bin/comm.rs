@@ -130,6 +130,7 @@
 //! exit status. `scripts/comm-probe.py` is the ad-hoc measurement the rows
 //! quoted above came from.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::{quote, quotef_os};
@@ -266,21 +267,30 @@ enum Trouble {
 impl Trouble {
     fn report(&self) -> ExitCode {
         match self {
-            Self::Input(name, e) => eprintln!("comm: {}: {}", quotef_os(name), strerror(e)),
+            Self::Input(name, e) => diag!("comm: {}: {}", quotef_os(name), strerror(e)),
             Self::Write(e) => stdfd::write_error("comm", e),
-            Self::Unsorted(which) => eprintln!("comm: file {which} is not in sorted order"),
+            Self::Unsorted(which) => diag!("comm: file {which} is not in sorted order"),
         }
         ExitCode::FAILURE
     }
 }
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
         Ok(request) => request,
         Err(e) => {
-            eprintln!("comm: {}", e.message());
+            diag!("comm: {}", e.message());
             return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
     };
@@ -329,7 +339,7 @@ fn main() -> ExitCode {
         return Trouble::Write(e).report();
     }
     if disordered {
-        eprintln!("comm: input is not in sorted order");
+        diag!("comm: input is not in sorted order");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
@@ -497,7 +507,7 @@ impl Column {
         if settings.check == OrderCheck::Enabled {
             return Err(Trouble::Unsorted(which));
         }
-        eprintln!("comm: file {which} is not in sorted order");
+        diag!("comm: file {which} is not in sorted order");
         self.warned = true;
         Ok(())
     }

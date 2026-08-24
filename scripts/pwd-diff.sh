@@ -86,9 +86,9 @@ mkdir -p "$nut"
 # `CLOSED` are the two ways to reach a write error — they are not
 # interchangeable: /dev/full fails every write, whereas a closed descriptor
 # only fails one that was actually attempted.
-SETUP=; ENVV=; TO_FULL=; CLOSED=
+SETUP=; ENVV=; TO_FULL=; CLOSED=; ERR_FULL=; ERR_CLOSED=
 
-reset_knobs() { SETUP=; ENVV=; TO_FULL=; CLOSED=; }
+reset_knobs() { SETUP=; ENVV=; TO_FULL=; CLOSED=; ERR_FULL=; ERR_CLOSED=; }
 
 # Bytes, not text: a directory name may hold anything but `/` and NUL, and the
 # case whose whole point is `\xff` must not be compared through something that
@@ -113,7 +113,22 @@ compare() {
     else out=$g_bin; err=$g_err; fi
     # `$ENVV` is deliberately unquoted: it is a word list, and its values are
     # paths under a `mktemp -d` directory, which never contain spaces.
-    if [ -n "$CLOSED" ]; then
+    # A spelling per combination rather than a variable holding a redirection:
+    # the shell expands redirections before it expands variables, so `$REDIR`
+    # would be an argument and not a redirection.
+    if [ -n "$CLOSED" ] && [ -n "$ERR_CLOSED" ]; then
+      # shellcheck disable=SC2086
+      ( eval "$setup" >/dev/null 2>&1 || exit 127
+        timeout -k 2 60 env $ENVV PATH="$bindir/$side" pwd "$@" ) >&- 2>&-
+    elif [ -n "$ERR_CLOSED" ]; then
+      # shellcheck disable=SC2086
+      ( eval "$setup" >/dev/null 2>&1 || exit 127
+        timeout -k 2 60 env $ENVV PATH="$bindir/$side" pwd "$@" ) >"$out" 2>&-
+    elif [ -n "$ERR_FULL" ]; then
+      # shellcheck disable=SC2086
+      ( eval "$setup" >/dev/null 2>&1 || exit 127
+        timeout -k 2 60 env $ENVV PATH="$bindir/$side" pwd "$@" ) >"$out" 2>/dev/full
+    elif [ -n "$CLOSED" ]; then
       # shellcheck disable=SC2086
       ( eval "$setup" >/dev/null 2>&1 || exit 127
         timeout -k 2 60 env $ENVV PATH="$bindir/$side" pwd "$@" ) >&- 2>"$err"
@@ -163,9 +178,10 @@ report() {
 
 # The label is built before `compare` runs, because `compare` resets the knobs.
 label_of() {
-  printf 'pwd %s%s%s%s%s' "$*" \
+  printf 'pwd %s%s%s%s%s%s%s' "$*" \
     "${SETUP:+  [$SETUP]}" "${ENVV:+  [$ENVV]}" \
-    "${TO_FULL:+  [>/dev/full]}" "${CLOSED:+  [>&-]}"
+    "${TO_FULL:+  [>/dev/full]}" "${CLOSED:+  [>&-]}" \
+    "${ERR_FULL:+  [2>/dev/full]}" "${ERR_CLOSED:+  [2>&-]}"
 }
 run_case() { local label; label=$(label_of "$@"); compare "$@"; report "$label"; }
 
@@ -363,6 +379,42 @@ TO_FULL=1; run_case --help
 TO_FULL=1; run_case --version
 TO_FULL=1; run_case foo
 TO_FULL=1; run_case -x
+
+# --- standard *error* closed, and full ---------------------------------------
+# gnulib's `close_stdout` closes descriptor 2 as well, and `_exit`s with
+# `exit_failure` if that fails — so a diagnostic that could not be delivered
+# replaces the status the run had earned. `pwd foo` is the case that shows it:
+# 0 with a working stderr, 1 without one. Ours reached this file exiting 134,
+# `Aborted (core dumped)`, because `eprintln!` panics on a failed write and the
+# panic message then fails to print for the same reason.
+#
+# `--help` and `--version` are left out on purpose: they are `xfail` on stdout
+# already, and what this group asks about is the status alone.
+ERR_FULL=1;   run_case
+ERR_CLOSED=1; run_case
+ERR_FULL=1;   run_case -L
+ERR_CLOSED=1; run_case -P
+# A diagnostic was attempted and lost: 0 becomes 1.
+ERR_FULL=1;   run_case foo
+ERR_CLOSED=1; run_case foo
+ERR_CLOSED=1; run_case a b c
+ERR_FULL=1;   SETUP="cd \"$DIFF_TMP/link\""; run_case -L foo
+# Usage errors, which already exit 1 — the override is invisible but must not
+# turn into an abort.
+ERR_FULL=1;   run_case -x
+ERR_CLOSED=1; run_case --nope
+ERR_FULL=1;   run_case --logical=3
+ERR_CLOSED=1; run_case ---logical
+# `getcwd` failing, whose diagnostic is the only output there was.
+ERR_CLOSED=1; SETUP="mkdir -p \"$DIFF_TMP/gone\" && cd \"$DIFF_TMP/gone\" && rmdir \"$DIFF_TMP/gone\""
+run_case
+ERR_FULL=1; SETUP="mkdir -p \"$DIFF_TMP/gone\" && cd \"$DIFF_TMP/gone\" && rmdir \"$DIFF_TMP/gone\""
+run_case -P
+# Neither descriptor left: the run has nowhere at all to put its answer or its
+# complaint, and the status is the only thing that carries either.
+CLOSED=1; ERR_CLOSED=1; run_case
+CLOSED=1; ERR_CLOSED=1; run_case foo
+CLOSED=1; ERR_CLOSED=1; run_case -x
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"

@@ -277,7 +277,7 @@ impl Program {
     /// Print `name: <error>` to stderr — the whole of what a utility that stops
     /// at the first command-line error does with one.
     ///
-    /// Every bin here spells that out as `eprintln!("tee: {e}")`, which is fine
+    /// Every bin here spells that out as `diag!("tee: {e}")`, which is fine
     /// when the name is a literal. It stops being fine in a module shared by
     /// several programs, where the name is data: the literal becomes
     /// `"{}: {e}"`, and `scripts/host-errmsg.py` — which exempts the shape
@@ -289,8 +289,14 @@ impl Program {
     /// The status is deliberately not returned. It is [`Error::status`], the
     /// caller is what exits, and a function that both printed and produced an
     /// exit code would be used by callers that only wanted one of the two.
+    ///
+    /// It goes out through [`crate::stdfd::diag_line`], not `eprintln!`. A
+    /// usage error is exactly the case where stderr is most likely to be
+    /// unavailable — `prog --nope 2>&-` — and `eprintln!` responds to that by
+    /// panicking, whereupon the panic message fails to print for the same
+    /// reason and the runtime aborts: status 134 where GNU exits 1.
     pub fn report(self, e: &Error) {
-        eprintln!("{}: {}", self.name, e.message());
+        crate::stdfd::diag_line(&format!("{}: {}", self.name, e.message()));
     }
 
     /// The utility's *own* usage errors — `invalid field specification '0'`,

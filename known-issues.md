@@ -71685,6 +71685,46 @@ is not a backlog item behind the sweep — it is a hole *in* it.
    harness wants `2>/dev/full` and `2>&-` against both a quiet run and a
    diagnostic-producing one.
 
+### Done, 2026-08-24 — steps 1–4 for the converted set
+
+`stdfd` grew `diag!`/`diag_line`/`diag_bytes` over raw `write(2)`, the
+`DIAGNOSTIC_LOST` flag, and `close_stderr`, and all nineteen converted bins
+plus `digest.rs` now go through them. `pwd-diff.sh` 108/0/5, `whoami-diff.sh`
+35/0/6, `logname-diff.sh` 33/0/6, `tty-diff.sh` 58/0/7 — every one of those
+files gained a `2>/dev/full` and `2>&-` group, and every case in it was a 134
+before the change.
+
+Two decisions worth carrying forward, because the remaining ~65 bins inherit
+them:
+
+* **`close_stderr` wraps `main`; it is not called per exit path.** Upstream
+  reaches the verdict from an `atexit` handler, so *every* exit gets it —
+  including the early `usage (EXIT_FAILURE)` that never returns from `main`.
+  Rust has no `atexit` that can change the status, but exactly one value
+  leaves `main`, so each bin is now `fn main() -> ExitCode {
+  stdfd::close_stderr(run_main(), FAILURE) }`. The inner is `run_main` and not
+  `run` only because `fn run` is already a worker name in about thirty of
+  these files. A call at each `return` would be the same rule written N times,
+  and the (N+1)th exit path someone adds later would not have it.
+* **`io::stderr()` is as much of a lie as `eprintln!`, and quieter about it.**
+  `pwd` and `tsort` thread their diagnostics through an `impl Write` so the
+  tests can read them out of a `Vec`; both were still handing the production
+  side `io::stderr()`, whose `EBADF` the runtime maps to success and whose
+  `ENOSPC` the `let _ =` throws away. So no flag was set, and `pwd foo 2>&-`
+  stayed at 0 against GNU's 1 *after* the funnel was in place — the harness
+  caught it, which is the whole reason the group was written. The fix is
+  `Stream::stderr()`, whose `record` sets the same flag: it implements `Write`,
+  so the threading is untouched. Any bin the sweep reaches that names
+  `io::stderr()` needs the same substitution; `cp`, `du`, `find`, `ln`,
+  `mkdir`, `mkfifo`, `ls`, `mv`, `od`, `readlink`, `realpath`, `rm`, `rmdir`,
+  `sed`, `sort`, `touch` and `awk` still do.
+
+**Still open**, and re-scoped to the closed-descriptor sweep rather than to
+this entry: ~300 `eprintln!` sites across 59 files, plus step 2's hand-written
+tails in `env`, `ls` and `sort` (`tty`'s is done). Nothing there is a
+regression — those bins were never converted — but each is a 134 waiting for
+a caller who redirects stderr.
+
 **Found on the way, and not the same bug.** `wc >/dev/full` exits **0**
 silently — it never checks the write at all. `head >/dev/full` reports the
 failure as `head: error reading '/etc/hostname'`, blaming the input for an

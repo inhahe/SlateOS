@@ -39,6 +39,11 @@
 // the real one would have called is unreachable there. Same reason as `id`.
 #![cfg_attr(not(unix), allow(dead_code))]
 
+// Only the refuse-to-run `main` below needs it at this level; the real one is
+// inside `mod imp`, which imports it separately -- a `use`d macro is a name in
+// *that* module, not in its children.
+#[cfg(not(unix))]
+use coreutils::diag;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quote};
 use std::ffi::OsString;
@@ -131,6 +136,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
 #[cfg(unix)]
 mod imp {
     use super::{Request, help_text, parse_args};
+    use coreutils::diag;
     use coreutils::stdfd::{self, Stream};
     use std::ffi::{CStr, OsString};
     use std::io::Write;
@@ -166,12 +172,12 @@ mod imp {
         let args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
         // Decided before the stream exists: upstream's `usage (EXIT_FAILURE)`
-        // never reaches `atexit (close_stdout)` with anything buffered, so
+        // reaches `atexit (close_stdout)` with nothing buffered on stdout, so
         // `logname x >&-` prints only the operand complaint.
         let request = match parse_args(&args) {
             Ok(request) => request,
             Err(e) => {
-                eprintln!("logname: {e}");
+                diag!("logname: {e}");
                 return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
             }
         };
@@ -195,7 +201,7 @@ mod imp {
                     ExitCode::SUCCESS
                 }
                 None => {
-                    eprintln!("logname: no login name");
+                    diag!("logname: no login name");
                     ExitCode::FAILURE
                 }
             },
@@ -210,7 +216,10 @@ mod imp {
 
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
-    imp::main()
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    coreutils::stdfd::close_stderr(imp::main(), 1)
 }
 
 /// The host build exists only so `cargo test` runs on the developer machine.
@@ -221,7 +230,7 @@ fn main() -> std::process::ExitCode {
 /// and `whoami` say the same thing for the same reason.
 #[cfg(not(unix))]
 fn main() {
-    eprintln!("logname: unix-only utility; not supported on this platform");
+    diag!("logname: unix-only utility; not supported on this platform");
     std::process::exit(1);
 }
 

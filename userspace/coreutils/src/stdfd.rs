@@ -106,9 +106,10 @@
 //!
 //! So [`diag!`] replaces `eprintln!` — same shape, raw `write(2)`, no panic —
 //! and records a lost diagnostic in one process-global flag, which is exactly
-//! what `ferror (stderr)` is. [`close_stdout`] consults it, and
-//! [`close_stderr`] is it alone, for the utilities that spell their own tail
-//! out.
+//! what `ferror (stderr)` is. [`close_stderr`] turns that flag into upstream's
+//! verdict and belongs around `main` itself — one wrapper per binary, standing
+//! in for the `atexit` registration, so no exit path can miss it.
+//! [`close_stdout`] consults the same flag on its way past.
 //!
 //! ## What this module deliberately does not do
 //!
@@ -553,16 +554,46 @@ pub fn close_stdout_with(program: &str, out: Stream, earned: ExitCode, failure: 
 /// Returns `failure` if any diagnostic was lost — see [`diag!`] — and `earned`
 /// otherwise. `failure` is upstream's `exit_failure`; 1 for most of the family.
 ///
-/// Every utility owes this call, including the ones whose stdout tail is
-/// hand-written, because a diagnostic that never arrived is a failure the
-/// caller has no other way of hearing about. [`close_stdout`] and
-/// [`close_stdout_with`] make it for you; a utility that finishes its own
-/// [`Stream`] must make it itself, as the last thing it does:
+/// # Wrap `main` with it; do not sprinkle it
+///
+/// Upstream does not decide this per exit path. It registers `close_stdout`
+/// once, with `atexit`, so the verdict is reached on *every* exit — including
+/// the early `usage (EXIT_FAILURE)` that never returns from `main`, which is
+/// why `pwd x 2>/dev/full` is 1 where `pwd x` is 0. Rust has no `atexit` that
+/// can change the status, but it has something better: exactly one value leaves
+/// `main`. Funnel it.
 ///
 /// ```ignore
-/// let code = match out.finish() { … };
-/// stdfd::close_stderr(code, 1)
+/// fn main() -> ExitCode {
+///     stdfd::close_stderr(run_main(), 1)
+/// }
+///
+/// fn run_main() -> ExitCode { … }
 /// ```
+///
+/// `run_main` and not `run`, only because `run` is already the name of a
+/// top-level worker in about thirty of these bins and the funnel must not
+/// collide with it.
+///
+/// The alternative — a call at each `return` — is the same rule written N
+/// times, and the (N+1)th exit path someone adds later will not have it. The
+/// wrapper cannot be forgotten by an edit that does not touch it.
+///
+/// [`close_stdout`] and [`close_stdout_with`] also call it, so the two compose:
+/// the verdict is idempotent, since `failure` is one constant per program.
+///
+/// # The flag has to be set for this to see anything
+///
+/// It reads [`diagnostic_lost`], and nothing else. A diagnostic written with
+/// `eprintln!` or through `io::stderr()` sets no flag — worse, both *lie* about
+/// having arrived, since the runtime maps `EBADF` on a standard descriptor to
+/// success and a `let _ =` throws away the `ENOSPC`. So every diagnostic must
+/// leave through [`diag!`], [`diag_line`], [`diag_bytes`] or a [`Stream`] on
+/// descriptor 2 (whose `record` sets the same flag), or this wrapper will hand
+/// back `earned` for a run whose complaint went nowhere. `pwd` is the worked
+/// example: `pwd foo` warns and exits 0, so with a lost warning GNU's 1 is the
+/// *only* observable difference, and it existed for a day because the warning
+/// still went out through `io::stderr()` after the funnel was in place.
 ///
 /// It is deliberately *silent*. There is nowhere left to complain to, which is
 /// exactly why the status has to carry the news.

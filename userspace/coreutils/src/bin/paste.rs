@@ -112,6 +112,7 @@
 //! `scripts/paste-probe.py` is the ad-hoc probe the rows quoted above came
 //! from.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::{quote_c_maybe_colon, quotef_os};
@@ -196,11 +197,11 @@ impl Refusal {
     fn report(&self) -> ExitCode {
         let status = match self {
             Self::Getopt(e) => {
-                eprintln!("paste: {}", e.message());
+                diag!("paste: {}", e.message());
                 e.status
             }
             Self::Delimiters(message) => {
-                eprintln!("paste: {message}");
+                diag!("paste: {message}");
                 1
             }
         };
@@ -225,8 +226,8 @@ enum Trouble {
 impl Trouble {
     fn report(&self) -> ExitCode {
         match self {
-            Self::Open(name, e) => eprintln!("paste: {}: {}", quotef_os(name), strerror(e)),
-            Self::StdinClosed => eprintln!("paste: standard input is closed"),
+            Self::Open(name, e) => diag!("paste: {}: {}", quotef_os(name), strerror(e)),
+            Self::StdinClosed => diag!("paste: standard input is closed"),
             Self::Write(e) => stdfd::write_error("paste", e),
         }
         ExitCode::FAILURE
@@ -234,6 +235,15 @@ impl Trouble {
 }
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
@@ -592,7 +602,7 @@ fn paste_parallel<W: Write>(
                 // standard input: the error is reported once.
                 if let Some(e) = closing.source(stdin).failed.take() {
                     let named = names.get(i).map_or_else(OsString::new, Clone::clone);
-                    eprintln!("paste: {}: {}", quotef_os(&named), strerror(&e));
+                    diag!("paste: {}: {}", quotef_os(&named), strerror(&e));
                     ok = false;
                 }
                 files_open = files_open.saturating_sub(1);
@@ -638,7 +648,7 @@ fn paste_serial<W: Write>(
                     &mut opened
                 }
                 Err(e) => {
-                    eprintln!("paste: {}: {}", quotef_os(name), strerror(&e));
+                    diag!("paste: {}: {}", quotef_os(name), strerror(&e));
                     ok = false;
                     continue;
                 }
@@ -646,7 +656,7 @@ fn paste_serial<W: Write>(
         };
         merge_one(source, settings, out)?;
         if let Some(e) = source.failed.take() {
-            eprintln!("paste: {}: {}", quotef_os(name), strerror(&e));
+            diag!("paste: {}: {}", quotef_os(name), strerror(&e));
             ok = false;
         }
     }

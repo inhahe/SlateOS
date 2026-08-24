@@ -156,6 +156,7 @@
 //! over the same fixtures and byte-compares stdout, stderr and status. The rows
 //! quoted above are from that harness's fixtures under `LC_ALL=C`.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::{os_bytes, quote, quoteaf_os, quotef_os};
@@ -314,10 +315,10 @@ enum Trouble {
 impl Trouble {
     fn report(&self) -> ExitCode {
         match self {
-            Self::Open(name, e) => eprintln!("join: {}: {}", quotef_os(name), strerror(e)),
-            Self::Read(e) => eprintln!("join: read error: {}", strerror(e)),
+            Self::Open(name, e) => diag!("join: {}: {}", quotef_os(name), strerror(e)),
+            Self::Read(e) => diag!("join: read error: {}", strerror(e)),
             Self::Write(e) => stdfd::write_error("join", e),
-            Self::BothStdin => eprintln!("join: both files cannot be standard input"),
+            Self::BothStdin => diag!("join: both files cannot be standard input"),
             Self::Unsorted(sentence) => diagnose(sentence),
         }
         ExitCode::FAILURE
@@ -328,23 +329,40 @@ impl Trouble {
 ///
 /// The order-check message embeds a line of the input verbatim, which no
 /// `String` can hold and no quoting may touch (see the module docs), so it
-/// cannot go through `eprintln!`.
+/// cannot go through `diag!`.
 fn diagnose(body: &[u8]) {
-    let mut err = io::stderr().lock();
+    // Assembled first and written once, because `diag_bytes` is a `write(2)`
+    // per call and a diagnostic torn into three of them can interleave with
+    // another process's on the same terminal. Upstream gets the same effect
+    // from `error()` writing to an unbuffered `stderr`.
+    let mut line = Vec::with_capacity(body.len().saturating_add(7));
+    line.extend_from_slice(b"join: ");
+    line.extend_from_slice(body);
+    line.push(b'\n');
     // A failed write to stderr has nowhere left to be reported, and upstream
-    // ignores it too: `error()` checks nothing.
-    let _ = err.write_all(b"join: ");
-    let _ = err.write_all(body);
-    let _ = err.write_all(b"\n");
+    // does not report it either: `error()` checks nothing. It is not
+    // *forgotten*, though -- `diag_bytes` records it, and `close_stderr` in
+    // `main` turns it into the status, which is all upstream's `fclose
+    // (stderr)` does with it.
+    stdfd::diag_bytes(&line);
 }
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
         Ok(request) => request,
         Err(e) => {
-            eprintln!("join: {}", e.message());
+            diag!("join: {}", e.message());
             return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
     };
@@ -390,7 +408,7 @@ fn main() -> ExitCode {
         return Trouble::Write(e).report();
     }
     if disordered {
-        eprintln!("join: input is not in sorted order");
+        diag!("join: input is not in sorted order");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS

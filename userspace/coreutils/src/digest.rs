@@ -83,6 +83,7 @@
 //! tests at the bottom of this file cover the line parser, which is the part a
 //! harness reaches only through whole files.
 
+use crate::diag;
 use crate::errmsg::strerror;
 use crate::getopt::{self, Opt, Program, Takes};
 use crate::quote::{os_bytes, os_from_bytes, quotef};
@@ -433,7 +434,7 @@ fn hash_file(algo: &Algorithm, name: &[u8], ignore_missing: bool, read_stdin: &m
                 if ignore_missing && e.kind() == io::ErrorKind::NotFound {
                     return Hashed::Missing;
                 }
-                eprintln!("{}: {}: {}", algo.program, quotef(name), strerror(&e));
+                diag!("{}: {}: {}", algo.program, quotef(name), strerror(&e));
                 return Hashed::Failed;
             }
         }
@@ -442,7 +443,7 @@ fn hash_file(algo: &Algorithm, name: &[u8], ignore_missing: bool, read_stdin: &m
     match result {
         Ok(()) => Hashed::Ok(hasher.finish()),
         Err(e) => {
-            eprintln!("{}: {}: {}", algo.program, quotef(name), strerror(&e));
+            diag!("{}: {}: {}", algo.program, quotef(name), strerror(&e));
             Hashed::Failed
         }
     }
@@ -680,6 +681,15 @@ fn plural(n: u64, one: &str, many: &str) -> String {
 /// Does not. Every fallible step returns a status instead.
 #[must_use]
 pub fn main(algo: &Algorithm) -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    crate::stdfd::close_stderr(run_main(algo), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main(algo: &Algorithm) -> ExitCode {
     let program = Program::new(algo.program, 1);
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
@@ -735,7 +745,7 @@ pub fn main(algo: &Algorithm) -> ExitCode {
                         // A write error here is upstream's `close_stdout`, which
                         // reports and exits 1 rather than continuing to a file
                         // whose checksum nobody will see.
-                        eprintln!("{}: write error", algo.program);
+                        diag!("{}: write error", algo.program);
                         return ExitCode::from(1);
                     }
                 }
@@ -813,7 +823,7 @@ fn check_file(
         match File::open(os_from_bytes(checkfile)) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("{}: {}: {}", algo.program, quotef(checkfile), strerror(&e));
+                diag!("{}: {}: {}", algo.program, quotef(checkfile), strerror(&e));
                 return false;
             }
         }
@@ -825,7 +835,7 @@ fn check_file(
         // `strerror`, which is why this reads oddly next to every other
         // diagnostic in the file.
         let _ = e;
-        eprintln!("{}: {}: read error", algo.program, quotef(&shown_name));
+        diag!("{}: {}: read error", algo.program, quotef(&shown_name));
         return false;
     }
 
@@ -851,7 +861,7 @@ fn check_file(
         else {
             tally.misformatted = tally.misformatted.saturating_add(1);
             if set.warn {
-                eprintln!(
+                diag!(
                     "{}: {}: {}: improperly formatted {} checksum line",
                     algo.program,
                     quotef(&shown_name),
@@ -907,14 +917,14 @@ fn check_file(
     }
 
     if !tally.any_formatted {
-        eprintln!(
+        diag!(
             "{}: {}: no properly formatted checksum lines found",
             algo.program,
             quotef(&shown_name)
         );
     } else if !set.status_only {
         if tally.misformatted != 0 {
-            eprintln!(
+            diag!(
                 "{}: WARNING: {} {}",
                 algo.program,
                 tally.misformatted,
@@ -926,7 +936,7 @@ fn check_file(
             );
         }
         if tally.unreadable != 0 {
-            eprintln!(
+            diag!(
                 "{}: WARNING: {} {}",
                 algo.program,
                 tally.unreadable,
@@ -938,7 +948,7 @@ fn check_file(
             );
         }
         if tally.mismatched != 0 {
-            eprintln!(
+            diag!(
                 "{}: WARNING: {} {}",
                 algo.program,
                 tally.mismatched,
@@ -950,7 +960,7 @@ fn check_file(
             );
         }
         if set.ignore_missing && !tally.any_matched {
-            eprintln!(
+            diag!(
                 "{}: {}: no file was verified",
                 algo.program,
                 quotef(&shown_name)

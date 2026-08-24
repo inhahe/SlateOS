@@ -96,6 +96,7 @@
 //! `scripts/fold-diff.sh` runs this and glibc's `fold` over the same command
 //! lines and compares stdout, stderr and the exit status byte for byte.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::quotef_os;
@@ -192,11 +193,11 @@ impl Refusal {
     fn report(&self) -> ExitCode {
         let status = match self {
             Self::Getopt(e) => {
-                eprintln!("fold: {}", e.message());
+                diag!("fold: {}", e.message());
                 e.status
             }
             Self::Width(message) => {
-                eprintln!("fold: {message}");
+                diag!("fold: {message}");
                 1
             }
         };
@@ -205,6 +206,15 @@ impl Refusal {
 }
 
 fn main() -> ExitCode {
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    stdfd::close_stderr(run_main(), 1)
+}
+
+/// Everything the utility does, so that [`main`] is only the exit path --
+/// upstream's `main` minus the `atexit` handler it registers.
+fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
@@ -398,7 +408,7 @@ fn fold_file<W: Write>(name: &OsString, settings: &Settings, out: &mut W) -> Res
     let mut reader = match opened {
         Ok(reader) => reader,
         Err(e) => {
-            eprintln!("fold: {}: {}", quotef_os(name), strerror(&e));
+            diag!("fold: {}: {}", quotef_os(name), strerror(&e));
             return Ok(false);
         }
     };
@@ -413,7 +423,7 @@ fn fold_file<W: Write>(name: &OsString, settings: &Settings, out: &mut W) -> Res
                 // whatever was already folded is still written and only then is
                 // the file named.
                 folder.finish(out)?;
-                eprintln!("fold: {}: {}", quotef_os(name), strerror(&e));
+                diag!("fold: {}: {}", quotef_os(name), strerror(&e));
                 return Ok(false);
             }
         };

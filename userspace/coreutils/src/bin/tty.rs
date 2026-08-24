@@ -232,18 +232,18 @@ mod imp {
         let args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
         // Decided before the stream exists: upstream's `usage (TTY_FAILURE)`
-        // never reaches `atexit (close_stdout)` with anything buffered, so
+        // reaches `atexit (close_stdout)` with nothing buffered on stdout, so
         // `tty x >&-` prints only the operand complaint and still exits 2.
         let request = match parse_args(&args) {
             Ok(request) => request,
             Err(e) => {
                 diag!("tty: {e}");
-                // Through `close_stderr` even here: upstream's `usage` calls
-                // `exit`, which runs the `atexit` handler, which closes stderr
-                // -- so a complaint that could not be delivered turns the 2
-                // into a 3. Measured: `tty x 2>/dev/full` is 3, `tty x` is 2.
-                let status = ExitCode::from(u8::try_from(e.status).unwrap_or(2));
-                return stdfd::close_stderr(status, WRITE_ERROR);
+                // The 2 still passes the `close_stderr` in `main`, because
+                // upstream's `usage` calls `exit`, which runs the `atexit`
+                // handler, which closes stderr -- so a complaint that could
+                // not be delivered turns this 2 into a 3. Measured:
+                // `tty x 2>/dev/full` is 3, `tty x` is 2.
+                return ExitCode::from(u8::try_from(e.status).unwrap_or(2));
             }
         };
 
@@ -292,7 +292,10 @@ mod imp {
 
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
-    imp::main()
+    // Upstream registers `close_stdout` with `atexit`, so its verdict is
+    // reached on every exit path, not just the last statement of `main`. One
+    // value leaves this function; funnelling it here is the same guarantee.
+    coreutils::stdfd::close_stderr(imp::main(), WRITE_ERROR)
 }
 
 /// The host build exists only so `cargo test` runs on the developer machine.
@@ -303,7 +306,11 @@ fn main() -> std::process::ExitCode {
 /// thing for the same reason.
 #[cfg(not(unix))]
 fn main() {
-    eprintln!("tty: unix-only utility; not supported on this platform");
+    // `diag!` and not `eprintln!` even here, where the message is the whole of
+    // what the program does: `eprintln!` panics when the write fails, and the
+    // panic message then fails to print for the same reason, so `tty 2>&-`
+    // would abort with 134 instead of refusing with 1.
+    coreutils::diag!("tty: unix-only utility; not supported on this platform");
     std::process::exit(1);
 }
 

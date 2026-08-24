@@ -33665,6 +33665,129 @@ its own event synthesis, focus rules and tests — all of which get deleted when
 the real device lands. That is exactly the band-aid accumulation `CLAUDE.md`
 names. This entry stays open and honest instead.
 
+**Update 2026-08-24 — both halves are built. Closed here; one dependency
+remains, and it is lane B's.**
+
+Lane A landed the kernel half on 2026-08-21
+(`requests/a-c-evdev-input-devices-exist-and-they-need-a-capability.md`): real
+`/dev/input/event0` and `event1`, 24-byte `input_event` records, `EV_KEY`/
+`EV_REL`/`EV_MSC`/`EV_SYN`, `SYN_DROPPED` with a per-fd cursor, the full
+`EVIOC*` interrogation sequence, and — more than was asked for — the set-1 →
+Linux-keycode translation done kernel-side, so the offer above to own that table
+in lane C was not taken up.
+
+Lane C has now landed the compositor half:
+
+* **`gui/compositor/src/present/evdev.rs`** and its `uapi`/`sys` submodules —
+  the client. Split three ways for the same reason `present/drm.rs` is: `uapi`
+  is the wire format and the keycode table with no fds and no `unsafe`, `sys` is
+  the four syscalls behind a trait, and the parent file holds every decision and
+  is generic over that trait. Every bug this module can have is a protocol or
+  policy bug, and none of them need a keyboard to find — but all of them would
+  be invisible if the module were behind `#[cfg(target_os = "linux")]`, because
+  the machine this tree is compiled on is not Linux.
+* **`present::Paired`** — the answer to the "alongside `DrmScanout` rather than
+  inside it" question this entry raised. `Paired<S, I>` is a `Present` made of a
+  screen and an `InputSource`: frames and monitors go to the screen, events come
+  from the source, and the screen alone decides when the session ends (a
+  keyboard being unplugged is not a reason to end it). It also keeps
+  `InputSource::set_bounds` current, which is how monitor hotplug reaches the
+  pointer. `Server::run_with` is unchanged.
+* **`main.rs`** pairs the two on the SlateOS target, and prints each node that
+  opened with its `EVIOCGNAME`.
+
+Three things the kernel deliberately does not do are done here, and are listed
+in the module docs so nobody later builds a second one: key repeat (synthesised
+from key-down/up timing at the user's own `input.yaml` delay/interval, capped
+per tick, modifiers excluded, and hardware autorepeat passed through in a way
+that pushes our timer out of the way rather than doubling with it); absolute
+pointer position (integration, the user's speed and acceleration profile,
+clamping, and the sub-pixel remainder without which a 0.25× speed setting is
+immovable); and `SYN_DROPPED` resync via `EVIOCGKEY`, reconciled *both* ways —
+releasing what is no longer held, which is the stuck-Shift bug, and pressing
+what is held and was missed, which is the Ctrl that stops making shortcuts.
+
+**Tested:** 66 tests across `evdev/tests.rs`, `uapi.rs` and `present.rs`, all
+driven by a fake device that scripts a real byte stream, so none of them need
+the capability. Proved non-vacuous by `scripts/reintro-evdev.py`, which puts 54
+one-line defects back one at a time — `REL_Y` counting upwards, the scroll axes
+crossed, `packet.scan` read instead of taken, the per-device check dropped from
+resync, `MSC_SCAN` consulted before the keycode table — and records the test
+that has to name each one.
+
+**The one dependency left is not lane C's and cannot be made so.**
+`open("/dev/input/event*")` returns `EACCES` until the compositor holds a
+`(ResourceType::InputDevice, 0, Rights::READ)` capability, which is obtainable
+only at spawn or by inheritance from an ancestor — init / the service manager,
+lane B's tree, filed as
+`requests/a-b-the-compositor-needs-an-inputdevice-capability-to-inherit.md`.
+`EvdevError::Denied` is its own variant so that this reports itself in those
+words rather than as a missing file, and the compositor prints the fix and the
+request filename on the way past, then carries on without local input. **Nothing
+here changes when that grant lands** — the code path is the one the tests
+exercise, with `sys::Devices` in place of the fake. Reply to lane A:
+`requests/c-a-the-compositor-now-reads-your-evdev-nodes-and-is-waiting-only-on-the-capability.md`.
+
+**Still open, and tracked separately:** a `ReloadInput` request reaches
+`Compositor::reload_input`, which adopts only `double_click_ms` — it has no way
+to reach `EvdevInput::set_settings`, so a pointer-speed change made in Settings
+does not take effect until the next login. See
+`TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER`.
+
+## TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER (lane C, 2026-08-24)
+
+**In short:** the Settings → Mouse page can change the pointer speed, the
+acceleration profile, the button mapping and the key-repeat rate, and the file
+it writes is read by the compositor — but only one setting out of that file is
+adopted while the desktop is running. The rest take effect at the next login. A
+user who drags the speed slider sees nothing happen.
+
+**What.** `Compositor::reload_input` (`gui/compositor/src/lib.rs`) is what a
+`ReloadInput` request lands in. It does:
+
+```rust
+let settings = inputsettings::InputFile::load().settings;
+self.set_double_click_ms(settings.mouse.double_click_ms);
+```
+
+Everything else in `InputSettings` — `mouse.speed`, `accel_profile`,
+`accel_gain`, `accel_threshold`, `natural_scroll`, `scroll_speed`,
+`button_mapping`, and the whole of `keyboard` — is used by
+`present::evdev::EvdevInput`, which has a `set_settings` for exactly this
+purpose and no caller. `reload_input` cannot reach it: the `EvdevInput` lives
+inside a `Paired` inside the `Present` that `Server::run_with` holds, and
+`Compositor` has no reference to its own display.
+
+**Why it was not fixed in the same change.** It is not a missing line; it is a
+missing direction. `Compositor` is deliberately display-agnostic — that is what
+lets the same compositor run headless, into a recording, onto a Win32 window and
+onto a DRM card — so "the compositor tells the display to reload" needs a route
+that does not put a display type into `Compositor`. The route that fits the
+existing shapes is for `Server::run_with` to notice the request instead: it
+already owns both the compositor and the `&mut dyn Present`, and it already
+drives the loop that would apply it.
+
+**The proper fix.** Add a `Present::reload_input(&mut self, settings:
+&InputSettings)` with an empty default body — the same pattern
+`Present::monitors` already uses for a capability only one implementor has —
+have `Paired` forward it to `InputSource`, add the matching
+`InputSource::reload_input` forwarding to `EvdevInput::set_settings`, and have
+`Server::run_with` call it when the tick reports that a `ReloadInput` was
+handled. `Compositor::reload_input` then returns the loaded `InputSettings`
+rather than swallowing them, so the file is read once rather than twice.
+
+**How to reproduce.** Not reproducible on the dev machine today, because the
+capability grant is not landed and there is no `EvdevInput` to reload. On
+hardware: set Settings → Mouse → pointer speed to its maximum, apply, and move
+the mouse. The double-click interval will have changed (that one setting works);
+the pointer speed will not, until the desktop is restarted.
+
+**Severity.** Medium. The setting is not lost — it is in `input.yaml` and is
+honoured at the next start — so this is a latency bug, not a data bug. But a
+slider that appears to do nothing is indistinguishable to a user from a slider
+that is broken, and it is the *second* time this exact shape has been found in
+this area (`TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING` was the first).
+
 ## TD-COMPOSITOR-COPIES-EVERY-FRAME-TWICE (lane C, 2026-08-21)
 
 **In short:** every frame the desktop draws is copied one extra time on its way

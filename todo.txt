@@ -54929,19 +54929,50 @@ an .init_array entry inside an rlib is not reliably linked in), restore(), and
 Stream (a raw-descriptor buffered writer reproducing gnulib's close_stream
 rule: prev_fail || (fclose_fail && (some_pending || errno != EBADF))).
 
-DONE       nohup, nice -- both converted, both covered by their harnesses.
+DONE       nohup, nice, echo, yes, cat -- all converted, all covered by their
+           harnesses with `>&-` and `>/dev/full` cases.
 REMAINING  every other binary in the crate.
 
 For each: decide whether its status or behaviour depends on a standard
 descriptor being open (for anything that writes to stdout, it does); if so,
 expand guard_std_fds!(), call stdfd::restore() first thing in main, route
 output through stdfd::Stream, and add `prog >&-` and `prog >/dev/full` cases to
-its differential harness.  cat, echo, yes, printf, seq, head, tail, wc, sort
-and the sum/digest family are where a pipeline is most likely to notice.
+its differential harness.  printf, seq, head, tail, wc, sort and the sum/digest
+family are where a pipeline is most likely to notice.
+
+NOT MECHANICAL -- corrected after doing five of them.  This entry used to say
+"the same three edits per binary".  It is not.  Upstream reaches its
+closed-stdout answer by three *different* routes, and which one a utility uses
+is observable, so each one has to be measured against the real GNU binary
+before it is ported rather than assumed:
+
+  close_stdout atexit hook   `prog: write error: <strerror>`.  echo; and yes
+                             and cat for --help/--version, which print through
+                             stdio before anything else happens.
+  a full_write loop that     `yes: standard output: Bad file descriptor`.
+  reports itself             coreutils 9.x yes.c never touches the stdio stream
+                             on its endless path.
+  an fstat(1) guard at the   `cat: standard output: Bad file descriptor`,
+  top of main                printed *before the first operand is opened* -- so
+                             `cat missing f >&-` never mentions `missing`.
+                             stdfd::probe() exists for this.
+
+Two more things that turned up the same way and are worth checking for in the
+next utility rather than rediscovering:
+
+  - A write failure may end the whole run, not just the current file.  GNU cat
+    aborts at the first failing write with one diagnostic and never opens the
+    remaining operands -- true for the plain copy and for -n/-A/-s alike, even
+    when the files are far smaller than any buffer.  Reproducing it needs the
+    Stream flushed between operands and Stream::error() asked there, not just
+    at finish().
+  - A harness that builds a *native Windows* binary cannot exercise any of this
+    at all, because stdfd's real implementation is #[cfg(target_os = "linux")].
+    cat-diff.sh had to be migrated to the WSL shape (design-decisions.md §374)
+    before it could test the change.  Expect the same for any pre-§374 harness.
 
 TRIGGER
-  Do it as its own pass, ahead of further argv-utf8 conversions -- it is
-  mechanical, it is the same three edits per binary, and every harness written
-  before it exists is a harness that will need revisiting.  See
+  Do it as its own pass, ahead of further argv-utf8 conversions -- every
+  harness written before it exists is a harness that will need revisiting.  See
   known-issues.md -> TD-B-EVERY-BINARY-IS-WRONG-ABOUT-A-CLOSED-STANDARD-
   DESCRIPTOR.

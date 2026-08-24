@@ -86,11 +86,16 @@
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::quotef_os;
+use coreutils::stdfd::{self, Stream};
 use std::env;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::ExitCode;
+
+// Before `main`, so that the `fstat` below still sees a caller's `cat >&-` as
+// the closed descriptor it is. See `coreutils::stdfd`.
+coreutils::guard_std_fds!();
 
 const USAGE: &str = "usage: cat [-AbeEnstTuv] [--] [FILE...]";
 
@@ -133,6 +138,7 @@ enum Request {
 }
 
 fn main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
         Ok(r) => r,
@@ -145,16 +151,20 @@ fn main() -> ExitCode {
     };
 
     let (options, mut files) = match request {
-        Request::Help => {
-            println!("{USAGE}");
-            return ExitCode::SUCCESS;
-        }
-        Request::Version => {
-            println!("cat (SlateOS coreutils)");
-            return ExitCode::SUCCESS;
-        }
+        Request::Help => return say(format!("{USAGE}\n").as_bytes()),
+        Request::Version => return say(b"cat (SlateOS coreutils)\n"),
         Request::Run(options, files) => (options, files),
     };
+
+    // `if (fstat (STDOUT_FILENO, &stat_buf) < 0) error (EXIT_FAILURE, errno,
+    // _("standard output"));` — upstream's line, in upstream's place, which is
+    // after the two options that print and before the first operand is opened.
+    // The position is observable: `cat missing f >&-` names the descriptor and
+    // never mentions `missing`, because it never got as far as opening it.
+    if let Err(e) = stdfd::probe(1) {
+        eprintln!("cat: standard output: {}", strerror(&e));
+        return ExitCode::FAILURE;
+    }
 
     // No operand means standard input, which is spelled the same way an
     // explicit request for it is, so the loop below has only the one case.
@@ -162,8 +172,7 @@ fn main() -> ExitCode {
         files.push(OsString::from("-"));
     }
 
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+    let mut out = Stream::stdout();
     let mut state = Numbering::default();
     let mut failed = false;
 
@@ -190,23 +199,41 @@ fn main() -> ExitCode {
         } else {
             copy_bytes(reader, &mut out)
         };
+        // A write failure is fatal to the whole run, not to this file: there is
+        // nowhere left to put the remaining ones. Measured — `cat a missing b
+        // >/dev/full` prints one `write error` and nothing about `missing`,
+        // because it stopped at `a`.
+        //
+        // The flush is what makes that true here, and it is not incidental. A
+        // buffered stream would carry a 12-byte file all the way to the end of
+        // the command line, so the failure would be discovered *after* `missing`
+        // had already been opened and complained about — two diagnostics where
+        // upstream prints one. Upstream delivers its pending output before
+        // moving on, so this does too. Measured with `-n`, `-A` and `-s` as
+        // well as the plain copy: all four abort at the first operand.
+        //
+        // The verdict arrives through `out.error()` rather than through `result`
+        // because a `Stream` records a delivery failure instead of returning it,
+        // the way `ferror` does. It is asked before `result` so that a write
+        // failure outranks a read failure on the same file, as upstream's
+        // `error (EXIT_FAILURE, …)` does by exiting on the spot.
+        let _ = out.flush(); // never returns `Err`; the verdict is `out.error()`
+        if let Some(e) = out.error() {
+            stdfd::write_error("cat", e);
+            return ExitCode::FAILURE;
+        }
         if let Err(e) = result {
-            // A write failure is fatal to the whole run, not to this file:
-            // there is nowhere left to put the remaining ones. A read failure
-            // is reported against the file it came from and the run goes on.
-            let fatal = e.on_write;
+            // A read failure is reported against the file it came from and the
+            // run goes on.
             eprintln!("cat: {}: {}", e.subject(path), strerror(&e.error));
             failed = true;
-            if fatal {
-                return ExitCode::FAILURE;
-            }
         }
     }
 
     // Buffered output has to reach the OS before we can claim success; a flush
     // that fails here is a truncated copy reported as a complete one.
-    if let Err(e) = out.flush() {
-        eprintln!("cat: write error: {}", strerror(&e));
+    if let Err(e) = out.finish() {
+        stdfd::write_error("cat", &e);
         failed = true;
     }
 
@@ -215,6 +242,23 @@ fn main() -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Say one thing and stop — `--help` and `--version`.
+///
+/// These reach standard output *before* the `fstat` above, exactly as upstream
+/// does, so `cat --help >&-` is `cat: write error: Bad file descriptor` (the
+/// `close_stdout` wording) and not `cat: standard output: …` (the `fstat`
+/// wording). Measured; the two differ and both are right.
+fn say(bytes: &[u8]) -> ExitCode {
+    let mut out = Stream::stdout();
+    // `Stream::write_all` records rather than returns; the verdict is `finish`.
+    let _ = out.write_all(bytes);
+    if let Err(e) = out.finish() {
+        stdfd::write_error("cat", &e);
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
 
 /// An I/O failure, and which side of the copy it happened on.

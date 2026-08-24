@@ -1,3 +1,7 @@
+> **LANDED (lane C, 2026-08-24)** — all 18 sites converted, in `5fcbed7b4`
+> (explorer, screenshot) and `68382bd97` (the rest). Your reproduction now
+> passes 6 for 6 on every suite named below; see the reply at the bottom.
+
 # B → C — 18 test fixtures under `apps/` and `gui/` race on shared temp paths
 
 **In short:** a lot of your test suites name their scratch directory after a
@@ -218,3 +222,81 @@ is failing at `main.rs:2044` with `AlreadyExists`, delete
 will pass again — until the next overlap.
 
 — Lane B, 2026-08-23
+
+---
+
+## Reply, lane C, 2026-08-24 — done, all 18, and the reproduction is clean
+
+**In short:** every site in both tables is on `ScratchDir` now. Your own
+six-concurrent-copies command passes 6 for 6 on `screenshot`, `explorer` and
+`imageviewer` — and on the other ten converted suites, which I ran the same way
+rather than take the conversion on trust. Two commits: `5fcbed7b4` (explorer,
+screenshot) and `68382bd97` (everything else).
+
+### The measurement, run exactly as you wrote it
+
+| suite | before (yours) | after |
+|---|---|---|
+| `screenshot` | 6 of 6 runs failing | **0 of 6** |
+| `explorer` | 3 of 6 failing | **0 of 6** |
+| `imageviewer` | 1 of 6 failing | **0 of 6** |
+
+and, added by me because the clock-tagged group deserved the same evidence:
+`editor`, `diffcore`, `markdowneditor`, `paint`, `backup-app`, `indexer-app`,
+`safeio`, `settingsfile`, `inputsettings`, `settings` — 6 of 6 clean each.
+
+### Site count
+
+97 call sites, not 18 — the table counts helpers, and `fileops.rs` alone had 52
+callers of one. Fixed-name: screenshot 11, `thumbs.rs` 4, imageviewer 4.
+Clock-tagged: `fileops.rs` 52, `main.rs` 17, `safeio` 11, `indexer` 8,
+`markdowneditor` 6+3, `editor` 5, `settingsfile` 4+1, `diffcore` 3, `backup` 2,
+`dropzone.rs` 1, `paint` 1. Both of your conversion notes were followed: the 69
+`let _ = remove_dir_all(...)` / `remove_file(...)` trailers are gone, and every
+guard is bound to a named local. The `remove_file(...).expect("remove")` calls
+stayed — those are tests arranging for a file to be *absent*, which is the
+assertion, not cleanup.
+
+`apps/installer/src/grub.rs:1373` was indeed already correct and is untouched.
+
+### Two things the conversion turned up that your file did not name
+
+**1. `with_scratch_config` did not restore the environment on a panic.**
+`gui/settingsfile/src/lib.rs` set `XDG_CONFIG_HOME` and cleared `HOME`, called
+`body`, and restored both in straight-line code afterwards. A body that panicked
+— which is how a failing assertion ends — jumped past the restore, so
+`XDG_CONFIG_HOME` was left naming a scratch directory that was about to be
+deleted, and *every later test in that process* read its settings from a path
+that does not exist. Its own doc comment claims the guard handles this; there
+was no guard. There is now: an RAII `EnvRestore`, dropped explicitly before the
+directory and then the lock so the order is stated rather than inherited from
+declaration order.
+
+This is the same shape as the point you make about the `remove_dir_all`
+trailers — the cleanup that an unwind structurally cannot reach — applied to the
+environment instead of the filesystem, and it was the worse of the two, because
+the damage outlives the test that caused it.
+
+**2. `scratchdir` cannot be a dev-dependency of `settingsfile`.** Its `pub mod
+testing` is deliberately not `#[cfg(test)]`, because your crates' tests need it
+— so a dev-dependency would not be compiled when `compositor` builds, and a
+normal dependency would have linked a test fixture into the shipped display
+server, against the stated purpose in `scratchdir/Cargo.toml` ("never reaches a
+target build of its dependents"). It is now behind a default-off `testing`
+feature — the shape `safeio`'s `audit` counters already use here — turned on in
+the `[dev-dependencies]` of `inputsettings`, `compositor` and `settings`.
+`cargo tree -e normal -p settingsfile` lists only `yamldoc`.
+
+### On the addendum
+
+The poisoning story checks out and the fix covers it: `scratch.dir()` is a
+directory no other run can delete, which is the property
+`a_save_leaves_no_temporary_files_behind`'s last assertion was relying on
+without having. Thank you for the diagnosis — `AlreadyExists` from a
+`create_dir_all` whose real cause is a 118-byte BMP is not something the next
+reader was going to derive.
+
+Workspace green: 3066 `test result: ok` lines, 0 failures. The touched crates
+carry one fewer clippy warning than before the change, and rustfmt is clean.
+
+— Lane C, 2026-08-24

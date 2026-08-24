@@ -7801,6 +7801,7 @@ fn cmd_meminfo() {
         }
         None => {
             shell_println!("Error: frame allocator not initialized");
+            set_exit(1);
         }
     }
 
@@ -8117,6 +8118,7 @@ fn cmd_profile(args: &str) {
         shell_println!("Applied system profile: {} (sched + memory)", name);
     } else {
         shell_println!("Failed to apply profile.");
+        set_exit(1);
     }
 }
 
@@ -8253,6 +8255,7 @@ fn cmd_renice(args: &str) {
         shell_println!("Task {} priority changed: {} -> {}", task_id, old, priority);
     } else {
         shell_println!("Task {} not found.", task_id);
+        set_exit(1);
     }
 }
 
@@ -8374,6 +8377,7 @@ fn cmd_taskset(args: &str) {
             }
             None => {
                 shell_println!("Task {} not found or invalid mask", task_id);
+                set_exit(1);
             }
         }
     } else {
@@ -8395,6 +8399,7 @@ fn cmd_taskset(args: &str) {
             }
             None => {
                 shell_println!("Task {} not found", task_id);
+                set_exit(1);
             }
         }
     }
@@ -8726,9 +8731,11 @@ fn cmd_colorscheme(args: &str) {
                     shell_println!("Foreground set to #{:06X}", color);
                 } else {
                     shell_println!("Invalid hex color. Use: color fg RRGGBB");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: color fg RRGGBB");
+                set_exit(1);
             }
         }
         "bg" => {
@@ -8739,9 +8746,11 @@ fn cmd_colorscheme(args: &str) {
                     shell_println!("Background set to #{:06X}", color);
                 } else {
                     shell_println!("Invalid hex color. Use: color bg RRGGBB");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: color bg RRGGBB");
+                set_exit(1);
             }
         }
         name => {
@@ -8852,6 +8861,7 @@ fn cmd_history(args: &str) {
                 }
             } else {
                 shell_println!("Usage: history [N | clear | search <pattern>]");
+                set_exit(1);
             }
         }
     }
@@ -8927,6 +8937,7 @@ fn cmd_scrollback(args: &str) {
                 }
             } else {
                 shell_println!("Usage: scrollback [N | search <pattern> | screen]");
+                set_exit(1);
             }
         }
     }
@@ -10441,6 +10452,46 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "`fsck.ext4 --help` prints the usage"
         );
         assert_eq!(last_exit(), 0, "`--help` is not a failure here either");
+    }
+
+    serial_println!("  kshell::self_test 19: a report is not a diagnostic");
+    // Sweeping "printed a complaint" -> "set a failure status" needs a rule for
+    // what a complaint *is*, and the obvious rule -- "the text contains one of
+    // these words" -- is wrong in two ways that both showed up in this tree.
+    // Each case below is a site the rule originally got wrong.
+    {
+        // A diagnostic that just ends its block, with no `return;` to
+        // corroborate it. `tag` with an unknown subcommand falls through its
+        // `_` arm after printing the usage.
+        let out = capture_command("tag zzz_no_such_subcommand");
+        assert!(out.starts_with(b"Usage: tag "), "an unknown subcommand");
+        assert_eq!(last_exit(), 1, "an unknown subcommand is a failure");
+
+        // ...and the word must lead the message, not merely appear in it.
+        // `netusage stats` heads its report with "Network Usage: 0 apps, ..."
+        // and ends on an indented row -- the exact shape of a usage error, and
+        // a complete success.
+        let out = capture_command("netusage stats");
+        assert!(
+            out.starts_with(b"Network Usage: "),
+            "`netusage stats` prints its report"
+        );
+        assert_eq!(last_exit(), 0, "a report header is not a usage error");
+
+        // ...and the word must be a whole word. `datausage` ends in the
+        // letters "usage", so an unanchored search for "usage:" matches inside
+        // the command's own name and turns its success line into a failure.
+        let out = capture_command("datausage test");
+        assert_eq!(
+            out.as_slice(),
+            b"datausage: self-tests completed (see serial).\n",
+            "`datausage test` reports completion"
+        );
+        assert_eq!(
+            last_exit(),
+            0,
+            "`usage:` inside `datausage:` is not a usage error"
+        );
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -13429,6 +13480,7 @@ fn cmd_integrity(args: &str) {
                             }
                         } else {
                             shell_println!("Error: not a file or directory");
+                            set_exit(1);
                         }
                     }
                     Err(e) => shell_println!("Error: {:?}", e),
@@ -13479,6 +13531,7 @@ fn cmd_integrity(args: &str) {
                             run_dir_verify(&resolved);
                         } else {
                             shell_println!("Error: not a file or directory");
+                            set_exit(1);
                         }
                     }
                     Err(_) => {
@@ -14682,6 +14735,7 @@ fn cmd_ulimit(args: &str) {
                     }
                 } else {
                     shell_println!("Usage: ulimit -n hard <value|unlimited>");
+                    set_exit(1);
                 }
             } else if let Some(val) = parse_limit_value(parts[1]) {
                 match rlimit::set_soft(uid, rlimit::Resource::NoFile, val, 0) {
@@ -14693,6 +14747,7 @@ fn cmd_ulimit(args: &str) {
                 }
             } else {
                 shell_println!("Invalid value: {}", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -14714,6 +14769,7 @@ fn cmd_ulimit(args: &str) {
                 }
             } else {
                 shell_println!("Invalid value: {}", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -14735,6 +14791,7 @@ fn cmd_ulimit(args: &str) {
                 }
             } else {
                 shell_println!("Invalid value: {}", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -14764,6 +14821,7 @@ fn cmd_ulimit(args: &str) {
 
         _ => {
             shell_println!("Usage: ulimit [-n|-f|-l|-a] [value|unlimited]");
+            set_exit(1);
         }
     }
 }
@@ -14865,6 +14923,7 @@ fn cmd_overlay(args: &str) {
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -14908,6 +14967,7 @@ fn cmd_overlay(args: &str) {
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -14930,6 +14990,7 @@ fn cmd_overlay(args: &str) {
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -14947,6 +15008,7 @@ fn cmd_overlay(args: &str) {
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -14963,6 +15025,7 @@ fn cmd_overlay(args: &str) {
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -14987,6 +15050,7 @@ fn cmd_overlay(args: &str) {
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -15012,6 +15076,7 @@ fn cmd_overlay(args: &str) {
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -15037,6 +15102,7 @@ fn cmd_overlay(args: &str) {
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -15057,6 +15123,7 @@ fn cmd_overlay(args: &str) {
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -15077,6 +15144,7 @@ fn cmd_overlay(args: &str) {
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -15286,6 +15354,7 @@ fn cmd_tmpwatch(args: &str) {
                 shell_println!("Max age set to {} seconds.", secs);
             } else {
                 shell_println!("Invalid value: {}", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -15475,9 +15544,11 @@ fn cmd_audit(args: &str) {
                     shell_println!("Rule {} removed.", id);
                 } else {
                     shell_println!("Rule {} not found.", id);
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Invalid rule ID: {}", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -15732,6 +15803,7 @@ fn cmd_namespace(args: &str) {
                 }
             } else {
                 shell_println!("Invalid ID: {}", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -15761,6 +15833,7 @@ fn cmd_namespace(args: &str) {
                 }
             } else {
                 shell_println!("Invalid ID: {}", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -15780,6 +15853,7 @@ fn cmd_namespace(args: &str) {
                 }
             } else {
                 shell_println!("Invalid ID: {}", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -15796,6 +15870,7 @@ fn cmd_namespace(args: &str) {
                 }
             } else {
                 shell_println!("Invalid ID: {}", parts[1]);
+                set_exit(1);
             }
         }
 
@@ -15819,11 +15894,13 @@ fn cmd_namespace(args: &str) {
                 }
             } else {
                 shell_println!("Invalid ID: {}", parts[1]);
+                set_exit(1);
             }
         }
 
         _ => {
             shell_println!("Usage: namespace [list|create|destroy|mounts|mount|unmount|info|init]");
+            set_exit(1);
         }
     }
 }
@@ -16126,6 +16203,7 @@ fn cmd_fssnapshot(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", parts[0]);
             shell_println!("Use: create, restore, list, info, diff, delete, entries");
+            set_exit(1);
         }
     }
 }
@@ -16218,6 +16296,7 @@ fn cmd_reclaim(args: &str) {
         }
         _ => {
             shell_println!("Usage: reclaim [run|status|enable|disable|watermark HIGH LOW]");
+            set_exit(1);
         }
     }
 }
@@ -17138,6 +17217,7 @@ fn cmd_encrypt(args: &str) {
         }
         _ => {
             shell_println!("Usage: encrypt <key|file|decrypt|read|info|status> [args...]");
+            set_exit(1);
         }
     }
 }
@@ -17364,6 +17444,7 @@ fn cmd_fsearch(args: &str) {
                 shell_println!("  size <min> [max] [path] Search by size range");
                 shell_println!("  type <file|dir> [path]  Search by entry type");
                 shell_println!("  stats                   Show search statistics");
+                set_exit(1);
             }
             case();
         }
@@ -17554,6 +17635,7 @@ fn cmd_tag(args: &str) {
             shell_println!("  list                       List all known tags");
             shell_println!("  index [path]               Build tag index");
             shell_println!("  stats                      Show statistics");
+            set_exit(1);
         }
     }
 }
@@ -17876,6 +17958,7 @@ fn cmd_fswatch(args: &str) {
                 shell_println!("  pending <id>           Show pending event count");
                 shell_println!();
                 shell_println!("Masks: create,delete,modify,rename,metadata,all");
+                set_exit(1);
             }
         }
     }
@@ -17994,6 +18077,7 @@ fn cmd_dirsync(args: &str) {
             shell_println!("  --delete, -d    Delete extra files in destination");
             shell_println!("  --verify, -v    Verify content hash before skipping");
             shell_println!("  --dry-run, -n   Show what would be done without doing it");
+            set_exit(1);
         }
     }
 }
@@ -18203,6 +18287,7 @@ fn cmd_backup(args: &str) {
             shell_println!("  --no-verify          Skip hash verification");
             shell_println!("  --dry-run, -n        Show what would be done");
             shell_println!("  --exclude, -x <pfx>  Exclude paths with prefix");
+            set_exit(1);
         }
     }
 }
@@ -18320,6 +18405,7 @@ fn cmd_undelete(args: &str) {
             shell_println!("  2. File history/CAS (versioned content)");
             shell_println!("  3. Integrity baseline (hash only)");
             shell_println!("  4. Journal (deletion record only)");
+            set_exit(1);
         }
     }
 }
@@ -18536,6 +18622,7 @@ fn cmd_archive(args: &str) {
                     Err(e) => {
                         unreadable = unreadable.saturating_add(1);
                         shell_println!("archive: cannot read {}: {}", path.display(), e);
+                        set_exit(1);
                     }
                 }
             }
@@ -18590,6 +18677,7 @@ fn cmd_archive(args: &str) {
             // deliberately, and it exits 0.
             if !sub.is_empty() && sub != "help" {
                 shell_println!("archive: unknown command: {}", sub);
+                set_exit(1);
             }
             shell_println!("Usage: archive <command> [args]");
             shell_println!();
@@ -18753,6 +18841,7 @@ fn cmd_batch(args: &str) {
             shell_println!("  glob <dir> <pattern>       List matching files");
             shell_println!("  stats                      Counts");
             shell_println!("Flags: --dry-run/-n  --overwrite  --rename");
+            set_exit(1);
         }
     }
 }
@@ -18873,6 +18962,7 @@ fn cmd_linkcheck(args: &str) {
             shell_println!("  broken [dir]   Find broken symlinks only");
             shell_println!("  fix [dir]      Remove broken symlinks [--dry-run]");
             shell_println!("  stats          Show counters");
+            set_exit(1);
         }
     }
 }
@@ -18992,6 +19082,7 @@ fn cmd_fsprofile(args: &str) {
             shell_println!("  report|show    Show detailed report (default)");
             shell_println!("  reset|clear    Reset all counters");
             shell_println!("  stats          Quick summary");
+            set_exit(1);
         }
     }
 }
@@ -19018,6 +19109,7 @@ fn cmd_fspolicy(args: &str) {
                 None => {
                     shell_println!("Unknown profile: {}", name);
                     shell_println!("Available: desktop, server, dev, gaming");
+                    set_exit(1);
                 }
             }
         }
@@ -19114,6 +19206,7 @@ fn cmd_fspolicy(args: &str) {
             shell_println!("  detect              Detect which profile matches current settings");
             shell_println!("  export              Export current config as text");
             shell_println!("  stats               Show policy engine counters");
+            set_exit(1);
         }
     }
 }
@@ -19291,6 +19384,7 @@ fn cmd_fsbench(args: &str) {
             shell_println!("  meta [dir] [iters]     Metadata cycle (create+stat+delete)");
             shell_println!("  lookup [path] [iters]  VFS path resolution latency");
             shell_println!("  stats                  Show run history");
+            set_exit(1);
         }
     }
 }
@@ -19404,6 +19498,7 @@ fn cmd_ionice(args: &str) {
             shell_println!();
             shell_println!("Classes: realtime (rt), best-effort (be), idle (bg)");
             shell_println!("Levels: 0-7 (0=highest, only for best-effort)");
+            set_exit(1);
         }
     }
 }
@@ -19456,6 +19551,7 @@ fn cmd_atime(args: &str) {
                 None => {
                     shell_println!("Unknown policy: {}", name);
                     shell_println!("Available: always, relatime, noatime, lazyday");
+                    set_exit(1);
                 }
             }
         }
@@ -19509,6 +19605,7 @@ fn cmd_atime(args: &str) {
             shell_println!("  stats                 Show counters only");
             shell_println!();
             shell_println!("Policies: always, relatime (default), noatime, lazyday");
+            set_exit(1);
         }
     }
 }
@@ -19610,6 +19707,7 @@ fn cmd_prefetch(args: &str) {
             shell_println!("  stats                  Show counters");
             shell_println!();
             shell_println!("Hints: normal, seq(uential), rand(om), willneed, dontneed");
+            set_exit(1);
         }
     }
 }
@@ -19730,6 +19828,7 @@ fn cmd_splice(args: &str) {
             shell_println!("  tee <src> <dst> [off] [len]           Tee (dup without consuming)");
             shell_println!("  stats|show                            Show statistics (default)");
             shell_println!("  reset                                 Reset counters");
+            set_exit(1);
         }
     }
 }
@@ -19867,6 +19966,7 @@ fn cmd_directio(args: &str) {
             shell_println!("  stats|show                    Show statistics (default)");
             shell_println!("  reset                         Reset counters");
             shell_println!("  clear                         Clear all path registrations");
+            set_exit(1);
         }
     }
 }
@@ -19979,6 +20079,7 @@ fn cmd_fstrim(args: &str) {
             shell_println!("  drop                       Drop all pending (no TRIM)");
             shell_println!("  stats                      Show TRIM statistics");
             shell_println!("  reset                      Reset counters");
+            set_exit(1);
         }
     }
 }
@@ -20186,6 +20287,7 @@ fn cmd_sparse(args: &str) {
             shell_println!("  stats|show                  Show statistics (default)");
             shell_println!("  clear                       Clear tracking data");
             shell_println!("  reset                       Reset counters");
+            set_exit(1);
         }
     }
 }
@@ -20419,6 +20521,7 @@ fn cmd_fsfreeze(args: &str) {
             shell_println!("  list|show                List frozen filesystems (default)");
             shell_println!("  stats                    Show statistics");
             shell_println!("  reset                    Reset counters");
+            set_exit(1);
         }
     }
 }
@@ -20513,6 +20616,7 @@ fn cmd_seal(args: &str) {
             shell_println!("  list|show                  List sealed files (default)");
             shell_println!("  stats                      Show statistics");
             shell_println!("  reset                      Reset counters");
+            set_exit(1);
         }
     }
 }
@@ -20693,6 +20797,7 @@ fn cmd_recent(args: &str) {
             shell_println!("  expire                     Remove expired entries");
             shell_println!("  stats                      Show statistics");
             shell_println!("  reset                      Reset counters");
+            set_exit(1);
         }
     }
 }
@@ -20737,6 +20842,7 @@ fn cmd_fileinfo(args: &str) {
             shell_println!("  fields <mime-type>           List known fields for MIME type");
             shell_println!("  stats                        Show statistics");
             shell_println!("  reset                        Reset counters");
+            set_exit(1);
         }
         _ => {
             // Treat as file path.
@@ -21124,6 +21230,7 @@ fn cmd_findex(args: &str) {
             shell_println!("  clear                        Clear entire index");
             shell_println!("  stats                        Show statistics");
             shell_println!("  reset                        Reset counters");
+            set_exit(1);
         }
     }
 }
@@ -21208,6 +21315,7 @@ fn cmd_thumbcache(args: &str) {
             shell_println!("  clear                        Clear entire cache");
             shell_println!("  stats                        Show statistics");
             shell_println!("  reset                        Reset counters");
+            set_exit(1);
         }
     }
 }
@@ -21299,6 +21407,7 @@ fn cmd_bookmark(args: &str) {
                 shell_println!("{}", path.display());
             } else {
                 shell_println!("Unknown bookmark: {}", parts[1]);
+                set_exit(1);
             }
         }
         "rename" => {
@@ -21340,6 +21449,7 @@ fn cmd_bookmark(args: &str) {
             shell_println!("  validate                     Check paths exist");
             shell_println!("  stats                        Show statistics");
             shell_println!("  reset                        Reset counters");
+            set_exit(1);
         }
     }
 }
@@ -21420,9 +21530,11 @@ fn cmd_clipboard(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid index.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: clipboard restore <index>");
+                set_exit(1);
             }
         }
         "watch" => {
@@ -21442,9 +21554,11 @@ fn cmd_clipboard(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid watcher id.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: clipboard unwatch <id>");
+                set_exit(1);
             }
         }
         "watchers" => {
@@ -21499,6 +21613,7 @@ fn cmd_clipboard(args: &str) {
             shell_println!("  clearall         Clear clipboard and history");
             shell_println!("  stats            Show statistics (default)");
             shell_println!("  reset            Reset counters");
+            set_exit(1);
         }
     }
 }
@@ -21589,6 +21704,7 @@ fn cmd_contextmenu(args: &str) {
                 }
             } else {
                 shell_println!("Usage: contextmenu enable <ext-id>");
+                set_exit(1);
             }
         }
         "disable" => {
@@ -21599,6 +21715,7 @@ fn cmd_contextmenu(args: &str) {
                 }
             } else {
                 shell_println!("Usage: contextmenu disable <ext-id>");
+                set_exit(1);
             }
         }
         "remove" => {
@@ -21609,6 +21726,7 @@ fn cmd_contextmenu(args: &str) {
                 }
             } else {
                 shell_println!("Usage: contextmenu remove <ext-id>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -21631,6 +21749,7 @@ fn cmd_contextmenu(args: &str) {
             shell_println!("  remove <id>            Remove an extension");
             shell_println!("  stats                  Show statistics");
             shell_println!("  reset                  Reset statistics");
+            set_exit(1);
         }
     }
 }
@@ -21730,6 +21849,7 @@ fn cmd_deskicons(args: &str) {
                 }
             } else {
                 shell_println!("Usage: deskicons select <name> [--add]");
+                set_exit(1);
             }
         }
         "deselect" => match crate::fs::deskicons::deselect_all() {
@@ -21754,6 +21874,7 @@ fn cmd_deskicons(args: &str) {
                 }
             } else {
                 shell_println!("Usage: deskicons hit <x> <y>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -21778,6 +21899,7 @@ fn cmd_deskicons(args: &str) {
             shell_println!("  hit <x> <y>         Hit test at coordinates");
             shell_println!("  stats               Show statistics");
             shell_println!("  reset               Reset statistics");
+            set_exit(1);
         }
     }
 }
@@ -21896,6 +22018,7 @@ fn cmd_dragdrop(args: &str) {
             shell_println!("  cancel       Cancel active drag session");
             shell_println!("  stats        Show statistics");
             shell_println!("  reset        Reset counters");
+            set_exit(1);
         }
     }
 }
@@ -22077,9 +22200,11 @@ fn cmd_fileops(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid operation ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: fileops cancel <op_id>");
+                set_exit(1);
             }
         }
         "undo" => {
@@ -22097,9 +22222,11 @@ fn cmd_fileops(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid operation ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: fileops undo <op_id>");
+                set_exit(1);
             }
         }
         "cleanup" => {
@@ -22132,6 +22259,7 @@ fn cmd_fileops(args: &str) {
             shell_println!("  reset                         Reset all");
             shell_println!("");
             shell_println!("Flags: --overwrite|-o  --skip|-s  --rename|-r  --merge|-m");
+            set_exit(1);
         }
     }
 }
@@ -22160,6 +22288,7 @@ fn cmd_fileselect(args: &str) {
                 }
             } else {
                 shell_println!("Usage: fileselect destroy <set-id>");
+                set_exit(1);
             }
         }
         "select" => {
@@ -22175,6 +22304,7 @@ fn cmd_fileselect(args: &str) {
                 }
             } else {
                 shell_println!("Usage: fileselect select <set-id> <path>");
+                set_exit(1);
             }
         }
         "toggle" => {
@@ -22197,6 +22327,7 @@ fn cmd_fileselect(args: &str) {
                 }
             } else {
                 shell_println!("Usage: fileselect toggle <set-id> <path>");
+                set_exit(1);
             }
         }
         "clear" => {
@@ -22207,6 +22338,7 @@ fn cmd_fileselect(args: &str) {
                 }
             } else {
                 shell_println!("Usage: fileselect clear <set-id>");
+                set_exit(1);
             }
         }
         "list" => {
@@ -22249,6 +22381,7 @@ fn cmd_fileselect(args: &str) {
                 }
             } else {
                 shell_println!("Usage: fileselect summary <set-id>");
+                set_exit(1);
             }
         }
         "pattern" => {
@@ -22281,12 +22414,15 @@ fn cmd_fileselect(args: &str) {
                         }
                     } else {
                         shell_println!("Cannot read directory for set #{}", id);
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Set #{} not found", id);
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: fileselect pattern <set-id> <glob-pattern>");
+                set_exit(1);
             }
         }
         "tree" => {
@@ -22339,6 +22475,7 @@ fn cmd_fileselect(args: &str) {
             shell_println!("  tree [dir]          Show checkbox tree");
             shell_println!("  stats               Show statistics");
             shell_println!("  reset               Reset statistics");
+            set_exit(1);
         }
     }
 }
@@ -22393,6 +22530,7 @@ fn cmd_filetype(args: &str) {
                 shell_println!("  Source:      {:?}", icon.source);
             } else {
                 shell_println!("Usage: filetype icon <path>");
+                set_exit(1);
             }
         }
         "register" => {
@@ -22420,6 +22558,7 @@ fn cmd_filetype(args: &str) {
                 }
             } else {
                 shell_println!("Usage: filetype ext <extension>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -22442,6 +22581,7 @@ fn cmd_filetype(args: &str) {
             shell_println!("  ext <extension>     Lookup MIME by extension");
             shell_println!("  stats               Show statistics");
             shell_println!("  reset               Reset statistics");
+            set_exit(1);
         }
     }
 }
@@ -22492,6 +22632,7 @@ fn cmd_openwith(args: &str) {
                 }
             } else {
                 shell_println!("Usage: openw choices <file>");
+                set_exit(1);
             }
         }
         "open" => {
@@ -22531,6 +22672,7 @@ fn cmd_openwith(args: &str) {
                 }
             } else {
                 shell_println!("Usage: openw default <file>");
+                set_exit(1);
             }
         }
         "recent" => {
@@ -22547,6 +22689,7 @@ fn cmd_openwith(args: &str) {
                 }
             } else {
                 shell_println!("Usage: openw recent <mime-type>");
+                set_exit(1);
             }
         }
         "apps" => {
@@ -22606,6 +22749,7 @@ fn cmd_openwith(args: &str) {
             shell_println!("  clear [mime]         Clear recent choices");
             shell_println!("  stats                Show statistics");
             shell_println!("  reset                Reset statistics");
+            set_exit(1);
         }
     }
 }
@@ -22662,6 +22806,7 @@ fn cmd_sidebar(args: &str) {
                 }
             } else {
                 shell_println!("Usage: sidebar toggle <section>");
+                set_exit(1);
             }
         }
         "hide" => {
@@ -22672,9 +22817,11 @@ fn cmd_sidebar(args: &str) {
                     shell_println!("{} hidden", section);
                 } else {
                     shell_println!("Unknown section: {}", section);
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: sidebar hide <section>");
+                set_exit(1);
             }
         }
         "unhide" => {
@@ -22685,9 +22832,11 @@ fn cmd_sidebar(args: &str) {
                     shell_println!("{} shown", section);
                 } else {
                     shell_println!("Unknown section: {}", section);
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: sidebar unhide <section>");
+                set_exit(1);
             }
         }
         "pin" => {
@@ -22708,6 +22857,7 @@ fn cmd_sidebar(args: &str) {
                 }
             } else {
                 shell_println!("Usage: sidebar pin <path> [label]");
+                set_exit(1);
             }
         }
         "unpin" => {
@@ -22719,6 +22869,7 @@ fn cmd_sidebar(args: &str) {
                 }
             } else {
                 shell_println!("Usage: sidebar unpin <path>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -22742,6 +22893,7 @@ fn cmd_sidebar(args: &str) {
             shell_println!("  stats                Show statistics");
             shell_println!("  reset                Reset statistics");
             shell_println!("Sections: quickaccess, thispc, network, recent, tags");
+            set_exit(1);
         }
     }
 }
@@ -22798,6 +22950,7 @@ fn cmd_statusbar(args: &str) {
             shell_println!("  disk [dir]    Show disk info");
             shell_println!("  stats         Show statistics");
             shell_println!("  reset         Reset statistics");
+            set_exit(1);
         }
     }
 }
@@ -22899,6 +23052,7 @@ fn cmd_toolbar(args: &str) {
                 }
                 None => {
                     shell_println!("Usage: toolbar section <nav|actions|view|new|search>");
+                    set_exit(1);
                 }
             }
         }
@@ -22971,6 +23125,7 @@ fn cmd_toolbar(args: &str) {
             shell_println!("  test                Run self-tests");
             shell_println!("  stats               Show statistics");
             shell_println!("  reset               Reset statistics");
+            set_exit(1);
         }
     }
 }
@@ -23277,6 +23432,7 @@ fn cmd_queryable(args: &str) {
             shell_println!("  test                    Run self-tests");
             shell_println!("  stats                   Show statistics");
             shell_println!("  reset                   Clear all data and stats");
+            set_exit(1);
         }
     }
 }
@@ -23428,6 +23584,7 @@ fn cmd_fcomment(args: &str) {
             shell_println!("  test                   Run self-tests");
             shell_println!("  stats                  Show statistics");
             shell_println!("  reset                  Clear all data and stats");
+            set_exit(1);
         }
     }
 }
@@ -23658,6 +23815,7 @@ fn cmd_rundialog(args: &str) {
             shell_println!("  test                   Run self-tests");
             shell_println!("  stats                  Show statistics");
             shell_println!("  reset                  Clear all data and stats");
+            set_exit(1);
         }
     }
 }
@@ -23856,6 +24014,7 @@ fn cmd_notifcenter(args: &str) {
             shell_println!("  test                    Run self-tests");
             shell_println!("  stats                   Show statistics");
             shell_println!("  reset                   Clear all data and stats");
+            set_exit(1);
         }
     }
 }
@@ -24094,6 +24253,7 @@ fn cmd_appregistry(args: &str) {
             shell_println!("  test                               Run self-tests");
             shell_println!("  stats                              Show statistics");
             shell_println!("  reset                              Clear all data and stats");
+            set_exit(1);
         }
     }
 }
@@ -24301,6 +24461,7 @@ fn cmd_theme(args: &str) {
             shell_println!("  test                       Run self-tests");
             shell_println!("  stats                      Show statistics");
             shell_println!("  reset                      Reset to defaults");
+            set_exit(1);
         }
     }
 }
@@ -24508,6 +24669,7 @@ fn cmd_hotkey(args: &str) {
             shell_println!("  test                          Run self-tests");
             shell_println!("  stats                         Show statistics");
             shell_println!("  reset                         Clear all");
+            set_exit(1);
         }
     }
 }
@@ -24539,6 +24701,7 @@ fn cmd_widgets(args: &str) {
             } else {
                 shell_println!("Usage: widgets add <kind> [x y]");
                 shell_println!("Kinds: clock sysmon notes calendar disk recent weather network");
+                set_exit(1);
             }
         }
         "remove" | "rm" => {
@@ -24549,6 +24712,7 @@ fn cmd_widgets(args: &str) {
                 }
             } else {
                 shell_println!("Usage: widgets remove <id>");
+                set_exit(1);
             }
         }
         "get" | "info" => {
@@ -24573,9 +24737,11 @@ fn cmd_widgets(args: &str) {
                     }
                 } else {
                     shell_println!("Widget not found");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: widgets get <id>");
+                set_exit(1);
             }
         }
         "list" | "ls" => {
@@ -24622,6 +24788,7 @@ fn cmd_widgets(args: &str) {
                 }
             } else {
                 shell_println!("Usage: widgets move <id> <x> <y>");
+                set_exit(1);
             }
         }
         "resize" => {
@@ -24636,6 +24803,7 @@ fn cmd_widgets(args: &str) {
                 }
             } else {
                 shell_println!("Usage: widgets resize <id> <width> <height>");
+                set_exit(1);
             }
         }
         "show" => {
@@ -24646,6 +24814,7 @@ fn cmd_widgets(args: &str) {
                 }
             } else {
                 shell_println!("Usage: widgets show <id>");
+                set_exit(1);
             }
         }
         "hide" => {
@@ -24656,6 +24825,7 @@ fn cmd_widgets(args: &str) {
                 }
             } else {
                 shell_println!("Usage: widgets hide <id>");
+                set_exit(1);
             }
         }
         "opacity" => {
@@ -24668,6 +24838,7 @@ fn cmd_widgets(args: &str) {
                 }
             } else {
                 shell_println!("Usage: widgets opacity <id> <0-100>");
+                set_exit(1);
             }
         }
         "data" => {
@@ -24684,6 +24855,7 @@ fn cmd_widgets(args: &str) {
                 }
             } else {
                 shell_println!("Usage: widgets data <id> [text...]");
+                set_exit(1);
             }
         }
         "title" => {
@@ -24699,6 +24871,7 @@ fn cmd_widgets(args: &str) {
                 }
             } else {
                 shell_println!("Usage: widgets title <id> <title...>");
+                set_exit(1);
             }
         }
         "refresh" => {
@@ -24812,6 +24985,7 @@ fn cmd_widgets(args: &str) {
             shell_println!("  reset                        Clear all");
             shell_println!("");
             shell_println!("Kinds: clock sysmon notes calendar disk recent weather network");
+            set_exit(1);
         }
     }
 }
@@ -25016,6 +25190,7 @@ fn cmd_soundmixer(args: &str) {
                 }
             } else {
                 shell_println!("Usage: soundmixer unstream <stream_id>");
+                set_exit(1);
             }
         }
         "play" => {
@@ -25026,6 +25201,7 @@ fn cmd_soundmixer(args: &str) {
                 }
             } else {
                 shell_println!("Usage: soundmixer play <stream_id>");
+                set_exit(1);
             }
         }
         "stop" => {
@@ -25036,6 +25212,7 @@ fn cmd_soundmixer(args: &str) {
                 }
             } else {
                 shell_println!("Usage: soundmixer stop <stream_id>");
+                set_exit(1);
             }
         }
         "streams" => {
@@ -25156,6 +25333,7 @@ fn cmd_soundmixer(args: &str) {
             shell_println!("  test                          Run self-tests");
             shell_println!("  stats                         Show statistics");
             shell_println!("  reset                         Clear all");
+            set_exit(1);
         }
     }
 }
@@ -25416,6 +25594,7 @@ fn cmd_wallpaper(args: &str) {
                 }
             } else {
                 shell_println!("Usage: wallpaper unexclude <index>");
+                set_exit(1);
             }
         }
         "history" => {
@@ -25515,6 +25694,7 @@ fn cmd_wallpaper(args: &str) {
             shell_println!("  test                          Run self-tests");
             shell_println!("  stats                         Show statistics");
             shell_println!("  reset                         Clear all");
+            set_exit(1);
         }
     }
 }
@@ -25785,6 +25965,7 @@ fn cmd_credentials(args: &str) {
             shell_println!("  test                          Run self-tests");
             shell_println!("  stats                         Show statistics");
             shell_println!("  reset                         Clear all");
+            set_exit(1);
         }
     }
 }
@@ -26044,6 +26225,7 @@ fn cmd_display(args: &str) {
                 }
             } else {
                 shell_println!("Usage: display addmode <id> <w> <h> <hz> [preferred]");
+                set_exit(1);
             }
         }
         "get" => {
@@ -26079,6 +26261,7 @@ fn cmd_display(args: &str) {
                 }
             } else {
                 shell_println!("Monitor '{}' not found", id);
+                set_exit(1);
             }
         }
         "list" | "ls" => {
@@ -26116,6 +26299,7 @@ fn cmd_display(args: &str) {
                 }
             } else {
                 shell_println!("Usage: display mode <id> <mode_index>");
+                set_exit(1);
             }
         }
         "res" | "resolution" => {
@@ -26135,6 +26319,7 @@ fn cmd_display(args: &str) {
                 }
             } else {
                 shell_println!("Usage: display res <id> <w> <h> [hz]");
+                set_exit(1);
             }
         }
         "confirm" => match display::confirm_change() {
@@ -26169,6 +26354,7 @@ fn cmd_display(args: &str) {
                 shell_println!("Scale: {}%", m.scale_percent);
             } else {
                 shell_println!("Usage: display scale <id> [percent]");
+                set_exit(1);
             }
         }
         "autoscale" => {
@@ -26189,6 +26375,7 @@ fn cmd_display(args: &str) {
                 }
             } else {
                 shell_println!("Usage: display pos <id> <x> <y>");
+                set_exit(1);
             }
         }
         "orient" | "orientation" => {
@@ -26330,6 +26517,7 @@ fn cmd_vdesktop(args: &str) {
                 }
             } else {
                 shell_println!("Desktop #{} not found", id);
+                set_exit(1);
             }
         }
         "list" | "ls" => {
@@ -26682,6 +26870,7 @@ fn cmd_keylayout(args: &str) {
                 }
             } else {
                 shell_println!("Layout '{}' not found", name);
+                set_exit(1);
             }
         }
         "use" | "activate" => {
@@ -26713,6 +26902,7 @@ fn cmd_keylayout(args: &str) {
                 }
             } else {
                 shell_println!("Usage: kbl remap <layout> <from_key> <to_key>");
+                set_exit(1);
             }
         }
         "unmap" => {
@@ -26725,6 +26915,7 @@ fn cmd_keylayout(args: &str) {
                 }
             } else {
                 shell_println!("Usage: kbl unmap <layout> <key>");
+                set_exit(1);
             }
         }
         "disable" => {
@@ -26737,6 +26928,7 @@ fn cmd_keylayout(args: &str) {
                 }
             } else {
                 shell_println!("Usage: kbl disable <layout> <key>");
+                set_exit(1);
             }
         }
         "enable" => {
@@ -26749,6 +26941,7 @@ fn cmd_keylayout(args: &str) {
                 }
             } else {
                 shell_println!("Usage: kbl enable <layout> <key>");
+                set_exit(1);
             }
         }
         "translate" | "xlat" => {
@@ -26764,6 +26957,7 @@ fn cmd_keylayout(args: &str) {
                 }
             } else {
                 shell_println!("Usage: kbl translate <key>");
+                set_exit(1);
             }
         }
         "init" => match keylayout::init_defaults() {
@@ -26853,6 +27047,7 @@ fn cmd_screenshot(args: &str) {
                 }
             } else {
                 shell_println!("Usage: scap region <x> <y> <w> <h>");
+                set_exit(1);
             }
         }
         "monitor" | "mon" => {
@@ -26891,6 +27086,7 @@ fn cmd_screenshot(args: &str) {
                 );
             } else {
                 shell_println!("Screenshot #{} not found", id);
+                set_exit(1);
             }
         }
         "history" | "list" | "ls" => {
@@ -27247,6 +27443,7 @@ fn cmd_a11y(args: &str) {
                 }
                 _ => {
                     shell_println!("Usage: a11y inject key|click|text ...");
+                    set_exit(1);
                 }
             }
         }
@@ -27653,6 +27850,7 @@ fn cmd_netindicator(args: &str) {
                 }
             } else {
                 shell_println!("Usage: netind state <name> <connected|disconnected|...>");
+                set_exit(1);
             }
         }
         "ip" => {
@@ -28078,6 +28276,7 @@ fn cmd_winsnap(args: &str) {
                 shell_println!("Screen: {}x{}", w, h);
             } else {
                 shell_println!("Usage: wsnap screen <width> <height>");
+                set_exit(1);
             }
         }
         "config" => {
@@ -28328,6 +28527,7 @@ fn cmd_colorpicker(args: &str) {
                 }
             } else {
                 shell_println!("Usage: cpick paladd <palette> <#rrggbb>");
+                set_exit(1);
             }
         }
         "palrm" => {
@@ -28379,6 +28579,7 @@ fn cmd_colorpicker(args: &str) {
                 );
             } else {
                 shell_println!("Usage: cpick convert <#rrggbb>");
+                set_exit(1);
             }
         }
         "init" => {
@@ -28632,6 +28833,7 @@ fn cmd_cursorsettings(args: &str) {
                 }
             } else {
                 shell_println!("Usage: cursor addcursor <theme> <shape> [hotx] [hoty]");
+                set_exit(1);
             }
         }
         "lookup" => {
@@ -28649,6 +28851,7 @@ fn cmd_cursorsettings(args: &str) {
                 }
             } else {
                 shell_println!("Unknown shape: {}", shape_s);
+                set_exit(1);
             }
         }
         "shapes" => {
@@ -29290,6 +29493,7 @@ fn cmd_partmgr(args: &str) {
                 }
             } else {
                 shell_println!("Usage: pmgr table <disk_id> <gpt|mbr|none>");
+                set_exit(1);
             }
         }
         "parts" => {
@@ -32591,6 +32795,7 @@ fn cmd_installer(args: &str) {
                     }
                     if !s.error_message.is_empty() {
                         shell_println!("Error:     {}", s.error_message);
+                        set_exit(1);
                     }
                 }
                 Err(e) => shell_println!("Error: {:?}", e),
@@ -38654,6 +38859,7 @@ fn cmd_storageclean(args: &str) {
                 }
             } else {
                 shell_println!("Usage: sclean threshold <0-100>");
+                set_exit(1);
             }
         }
         "largefile" => {
@@ -38664,9 +38870,11 @@ fn cmd_storageclean(args: &str) {
                     shell_println!("Large file threshold: {}", storageclean::format_size(bytes));
                 } else {
                     shell_println!("Invalid size. Use: 100M, 1G, etc.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: sclean largefile <size>");
+                set_exit(1);
             }
         }
         "olddays" => {
@@ -38675,6 +38883,7 @@ fn cmd_storageclean(args: &str) {
                 shell_println!("Old download threshold: {} days", days);
             } else {
                 shell_println!("Usage: sclean olddays <days>");
+                set_exit(1);
             }
         }
         "logdays" => {
@@ -38683,6 +38892,7 @@ fn cmd_storageclean(args: &str) {
                 shell_println!("Log retention: {} days", days);
             } else {
                 shell_println!("Usage: sclean logdays <days>");
+                set_exit(1);
             }
         }
         "exclude" => {
@@ -38920,6 +39130,7 @@ fn cmd_sysdiag(args: &str) {
             } else {
                 shell_println!("Usage: diag category <name>");
                 shell_println!("Categories: network, storage, memory, services, boot, security");
+                set_exit(1);
             }
         }
         "history" | "hist" => {
@@ -39063,11 +39274,13 @@ fn cmd_nightlight(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid temperature: {}", val);
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: nlight temp <kelvin>");
                 shell_println!("Range: 1000 (very warm) to 6500 (neutral)");
                 shell_println!("Common: 3000=warm  4000=soft  4500=default  5500=cool");
+                set_exit(1);
             }
         }
         "daytemp" => {
@@ -39079,9 +39292,11 @@ fn cmd_nightlight(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid temperature: {}", val);
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: nlight daytemp <kelvin>");
+                set_exit(1);
             }
         }
         "schedule" => {
@@ -39115,6 +39330,7 @@ fn cmd_nightlight(args: &str) {
                 }
             } else {
                 shell_println!("Usage: nlight schedule <manual|scheduled|sunset>");
+                set_exit(1);
             }
         }
         "start" => {
@@ -39126,9 +39342,11 @@ fn cmd_nightlight(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid time. Use HH:MM format (e.g., 21:00)");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: nlight start <HH:MM>");
+                set_exit(1);
             }
         }
         "end" => {
@@ -39140,9 +39358,11 @@ fn cmd_nightlight(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid time. Use HH:MM format (e.g., 07:00)");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: nlight end <HH:MM>");
+                set_exit(1);
             }
         }
         "location" | "loc" => {
@@ -39154,10 +39374,12 @@ fn cmd_nightlight(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid coordinates.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: nlight location <latitude> <longitude>");
                 shell_println!("Example: nlight location 40 -74  (New York)");
+                set_exit(1);
             }
         }
         "transition" => {
@@ -39169,9 +39391,11 @@ fn cmd_nightlight(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid value: {}", val);
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: nlight transition <minutes>");
+                set_exit(1);
             }
         }
         "battery" => {
@@ -39193,6 +39417,7 @@ fn cmd_nightlight(args: &str) {
                 }
             } else {
                 shell_println!("Usage: nlight battery <on|off>");
+                set_exit(1);
             }
         }
         "override" => {
@@ -39216,9 +39441,11 @@ fn cmd_nightlight(args: &str) {
                     );
                 } else {
                     shell_println!("Invalid time.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: nlight check <hour> <minute>");
+                set_exit(1);
             }
         }
         "rgb" => {
@@ -39368,9 +39595,11 @@ fn cmd_tasksched(args: &str) {
                         }
                     } else {
                         shell_println!("Invalid task ID: {}", id_str);
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Usage: schtask info <id>");
+                    set_exit(1);
                 }
             }
             case(&parts);
@@ -39416,9 +39645,11 @@ fn cmd_tasksched(args: &str) {
                         }
                     } else {
                         shell_println!("Invalid task ID.");
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Usage: schtask remove <id>");
+                    set_exit(1);
                 }
             }
             case(&parts);
@@ -39437,12 +39668,15 @@ fn cmd_tasksched(args: &str) {
                             }
                         } else {
                             shell_println!("Invalid time format. Use HH:MM");
+                            set_exit(1);
                         }
                     } else {
                         shell_println!("Invalid task ID.");
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Usage: schtask time <id> <HH:MM>");
+                    set_exit(1);
                 }
             }
             case(&parts);
@@ -39480,6 +39714,7 @@ fn cmd_tasksched(args: &str) {
                         }
                     } else {
                         shell_println!("Invalid task ID.");
+                        set_exit(1);
                     }
                 } else {
                     shell_println!(
@@ -39500,9 +39735,11 @@ fn cmd_tasksched(args: &str) {
                         }
                     } else {
                         shell_println!("Invalid arguments.");
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Usage: schtask interval <id> <minutes>");
+                    set_exit(1);
                 }
             }
             case(&parts);
@@ -39519,9 +39756,11 @@ fn cmd_tasksched(args: &str) {
                         }
                     } else {
                         shell_println!("Invalid task ID.");
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Usage: schtask args <id> <arguments...>");
+                    set_exit(1);
                 }
             }
             case(&parts);
@@ -39538,9 +39777,11 @@ fn cmd_tasksched(args: &str) {
                         }
                     } else {
                         shell_println!("Invalid task ID.");
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Usage: schtask desc <id> <description...>");
+                    set_exit(1);
                 }
             }
             case(&parts);
@@ -39556,9 +39797,11 @@ fn cmd_tasksched(args: &str) {
                         }
                     } else {
                         shell_println!("Invalid task ID.");
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Usage: schtask enable <id>");
+                    set_exit(1);
                 }
             }
             case(&parts);
@@ -39574,9 +39817,11 @@ fn cmd_tasksched(args: &str) {
                         }
                     } else {
                         shell_println!("Invalid task ID.");
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Usage: schtask disable <id>");
+                    set_exit(1);
                 }
             }
             case(&parts);
@@ -39600,9 +39845,11 @@ fn cmd_tasksched(args: &str) {
                         }
                     } else {
                         shell_println!("Invalid time.");
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Usage: schtask due <hour> <minute> [weekday 0-6]");
+                    set_exit(1);
                 }
             }
             case(&parts);
@@ -39623,9 +39870,11 @@ fn cmd_tasksched(args: &str) {
                         }
                     } else {
                         shell_println!("Invalid task ID.");
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Usage: schtask run <id>");
+                    set_exit(1);
                 }
             }
             case(&parts);
@@ -39757,6 +40006,7 @@ fn cmd_envvars(args: &str) {
                 }
             } else {
                 shell_println!("Usage: envvars get <NAME>");
+                set_exit(1);
             }
         }
         "set" => {
@@ -39768,6 +40018,7 @@ fn cmd_envvars(args: &str) {
                 }
             } else {
                 shell_println!("Usage: envvars set <NAME> <value...>");
+                set_exit(1);
             }
         }
         "rm" | "unset" => {
@@ -39778,6 +40029,7 @@ fn cmd_envvars(args: &str) {
                 }
             } else {
                 shell_println!("Usage: envvars rm <NAME>");
+                set_exit(1);
             }
         }
         "user" => {
@@ -39806,6 +40058,7 @@ fn cmd_envvars(args: &str) {
                                 }
                             } else {
                                 shell_println!("Usage: envvars user <uid> set <NAME> <value>");
+                                set_exit(1);
                             }
                         }
                         "get" => {
@@ -39816,6 +40069,7 @@ fn cmd_envvars(args: &str) {
                                 }
                             } else {
                                 shell_println!("Usage: envvars user <uid> get <NAME>");
+                                set_exit(1);
                             }
                         }
                         "rm" => {
@@ -39826,17 +40080,21 @@ fn cmd_envvars(args: &str) {
                                 }
                             } else {
                                 shell_println!("Usage: envvars user <uid> rm <NAME>");
+                                set_exit(1);
                             }
                         }
                         _ => {
                             shell_println!("Usage: envvars user <uid> <list|set|get|rm>");
+                            set_exit(1);
                         }
                     }
                 } else {
                     shell_println!("Invalid UID: {}", uid_str);
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: envvars user <uid> <command>");
+                set_exit(1);
             }
         }
         "resolve" => {
@@ -39885,6 +40143,7 @@ fn cmd_envvars(args: &str) {
                         }
                     } else {
                         shell_println!("Usage: envvars path append <dir>");
+                        set_exit(1);
                     }
                 }
                 "prepend" => {
@@ -39895,6 +40154,7 @@ fn cmd_envvars(args: &str) {
                         }
                     } else {
                         shell_println!("Usage: envvars path prepend <dir>");
+                        set_exit(1);
                     }
                 }
                 "rm" => {
@@ -39905,10 +40165,12 @@ fn cmd_envvars(args: &str) {
                         }
                     } else {
                         shell_println!("Usage: envvars path rm <dir>");
+                        set_exit(1);
                     }
                 }
                 _ => {
                     shell_println!("Usage: envvars path <list|append|prepend|rm>");
+                    set_exit(1);
                 }
             }
         }
@@ -39925,6 +40187,7 @@ fn cmd_envvars(args: &str) {
                 }
             } else {
                 shell_println!("Usage: envvars search <query>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -40072,6 +40335,7 @@ fn cmd_bluetooth(args: &str) {
                 }
             } else {
                 shell_println!("Usage: bt unpair <address>");
+                set_exit(1);
             }
         }
         "connect" | "conn" => {
@@ -40082,6 +40346,7 @@ fn cmd_bluetooth(args: &str) {
                 }
             } else {
                 shell_println!("Usage: bt connect <address>");
+                set_exit(1);
             }
         }
         "disconnect" | "disc" => {
@@ -40092,6 +40357,7 @@ fn cmd_bluetooth(args: &str) {
                 }
             } else {
                 shell_println!("Usage: bt disconnect <address>");
+                set_exit(1);
             }
         }
         "trust" => {
@@ -40103,6 +40369,7 @@ fn cmd_bluetooth(args: &str) {
                 }
             } else {
                 shell_println!("Usage: bt trust <address> [on|off]");
+                set_exit(1);
             }
         }
         "block" => {
@@ -40114,6 +40381,7 @@ fn cmd_bluetooth(args: &str) {
                 }
             } else {
                 shell_println!("Usage: bt block <address> [on|off]");
+                set_exit(1);
             }
         }
         "info" => {
@@ -40142,6 +40410,7 @@ fn cmd_bluetooth(args: &str) {
                 }
             } else {
                 shell_println!("Usage: bt info <address>");
+                set_exit(1);
             }
         }
         "name" => {
@@ -40153,6 +40422,7 @@ fn cmd_bluetooth(args: &str) {
                 }
             } else {
                 shell_println!("Usage: bt name <adapter name>");
+                set_exit(1);
             }
         }
         "discoverable" | "disc-mode" => {
@@ -40181,6 +40451,7 @@ fn cmd_bluetooth(args: &str) {
                 }
             } else {
                 shell_println!("Usage: bt addscan <addr> <name> [type] [rssi]");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -40279,9 +40550,11 @@ fn cmd_printmgr(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid printer ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: lp info <id>");
+                set_exit(1);
             }
         }
         "add" => {
@@ -40299,6 +40572,7 @@ fn cmd_printmgr(args: &str) {
                 }
             } else {
                 shell_println!("Usage: lp add <name> <uri> [local|network|virtual|bluetooth]");
+                set_exit(1);
             }
         }
         "remove" | "rm" => {
@@ -40310,9 +40584,11 @@ fn cmd_printmgr(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid printer ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: lp remove <id>");
+                set_exit(1);
             }
         }
         "default" => {
@@ -40324,6 +40600,7 @@ fn cmd_printmgr(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid printer ID.");
+                    set_exit(1);
                 }
             } else if let Some(def) = printmgr::default_printer() {
                 shell_println!("Default: #{} {}", def.id, def.name);
@@ -40358,6 +40635,7 @@ fn cmd_printmgr(args: &str) {
                 }
             } else {
                 shell_println!("Usage: lp print <document> [pages] [copies]");
+                set_exit(1);
             }
         }
         "jobs" => {
@@ -40388,9 +40666,11 @@ fn cmd_printmgr(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid job ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: lp cancel <job-id>");
+                set_exit(1);
             }
         }
         "complete" => {
@@ -40403,9 +40683,11 @@ fn cmd_printmgr(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid job ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: lp complete <job-id> [ok|fail]");
+                set_exit(1);
             }
         }
         "history" => {
@@ -40538,6 +40820,7 @@ fn cmd_screenrec(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 // Stop most recent active recording.
@@ -40614,6 +40897,7 @@ fn cmd_screenrec(args: &str) {
                 }
             } else {
                 shell_println!("Usage: srec format <webm|mp4|gif>");
+                set_exit(1);
             }
         }
         "audio" => {
@@ -40635,6 +40919,7 @@ fn cmd_screenrec(args: &str) {
                 }
             } else {
                 shell_println!("Usage: srec audio <none|system|mic|both>");
+                set_exit(1);
             }
         }
         "quality" => {
@@ -40656,6 +40941,7 @@ fn cmd_screenrec(args: &str) {
                 }
             } else {
                 shell_println!("Usage: srec quality <low|medium|high|lossless>");
+                set_exit(1);
             }
         }
         "fps" => {
@@ -40667,9 +40953,11 @@ fn cmd_screenrec(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid FPS.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: srec fps <value>");
+                set_exit(1);
             }
         }
         "cursor" => {
@@ -40686,9 +40974,11 @@ fn cmd_screenrec(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid value.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: srec countdown <0-10>");
+                set_exit(1);
             }
         }
         "outdir" => {
@@ -40699,6 +40989,7 @@ fn cmd_screenrec(args: &str) {
                 }
             } else {
                 shell_println!("Usage: srec outdir <path>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -40821,6 +41112,7 @@ fn cmd_datausage(args: &str) {
                 }
             } else {
                 shell_println!("Usage: datausage app <app_id>");
+                set_exit(1);
             }
         }
         "record" => {
@@ -40840,6 +41132,7 @@ fn cmd_datausage(args: &str) {
                 }
             } else {
                 shell_println!("Usage: datausage record <app_id> <rx_bytes> <tx_bytes>");
+                set_exit(1);
             }
         }
         "summary" => {
@@ -40932,6 +41225,7 @@ fn cmd_datausage(args: &str) {
                         }
                     } else {
                         shell_println!("Usage: datausage limit add <name> <bytes> [days]");
+                        set_exit(1);
                     }
                 }
                 Some("rm") | Some("remove") => {
@@ -40942,6 +41236,7 @@ fn cmd_datausage(args: &str) {
                         }
                     } else {
                         shell_println!("Usage: datausage limit rm <name>");
+                        set_exit(1);
                     }
                 }
                 Some("block") => {
@@ -40955,6 +41250,7 @@ fn cmd_datausage(args: &str) {
                         }
                     } else {
                         shell_println!("Usage: datausage limit block <name> <on|off>");
+                        set_exit(1);
                     }
                 }
                 Some("alert") => {
@@ -40968,6 +41264,7 @@ fn cmd_datausage(args: &str) {
                         }
                     } else {
                         shell_println!("Usage: datausage limit alert <name> <pct>");
+                        set_exit(1);
                     }
                 }
                 _ => {
@@ -41050,6 +41347,7 @@ fn cmd_datausage(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'datausage help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -41087,6 +41385,7 @@ fn cmd_mousesettings(args: &str) {
                 }
             } else {
                 shell_println!("Usage: mouse speed <1-20>");
+                set_exit(1);
             }
         }
         "accel" => match parts.get(1).copied() {
@@ -41106,6 +41405,7 @@ fn cmd_mousesettings(args: &str) {
                     }
                 } else {
                     shell_println!("Usage: mouse accel <flat|adaptive|0-10>");
+                    set_exit(1);
                 }
             }
             None => shell_println!("Usage: mouse accel <flat|adaptive|0-10>"),
@@ -41147,6 +41447,7 @@ fn cmd_mousesettings(args: &str) {
                     }
                 } else {
                     shell_println!("Usage: mouse scroll <wheel|smooth|none|1-20>");
+                    set_exit(1);
                 }
             }
             None => shell_println!("Usage: mouse scroll <wheel|smooth|none|speed>"),
@@ -41159,6 +41460,7 @@ fn cmd_mousesettings(args: &str) {
                 }
             } else {
                 shell_println!("Usage: mouse dblclick <100-1000>");
+                set_exit(1);
             }
         }
         "devices" => {
@@ -41282,6 +41584,7 @@ fn cmd_touchpad(args: &str) {
                 }
             } else {
                 shell_println!("Usage: touchpad sensitivity <1-20>");
+                set_exit(1);
             }
         }
         "scroll" => match parts.get(1).copied() {
@@ -41331,6 +41634,7 @@ fn cmd_touchpad(args: &str) {
                     }
                 } else {
                     shell_println!("Usage: touchpad palm <on|off|1-10>");
+                    set_exit(1);
                 }
             }
             None => shell_println!("Usage: touchpad palm <on|off|1-10>"),
@@ -41462,6 +41766,7 @@ fn cmd_powerprofile(args: &str) {
                 }
             } else {
                 shell_println!("Usage: powerprofile set <name>");
+                set_exit(1);
             }
         }
         "create" => {
@@ -41472,6 +41777,7 @@ fn cmd_powerprofile(args: &str) {
                 }
             } else {
                 shell_println!("Usage: powerprofile create <name>");
+                set_exit(1);
             }
         }
         "remove" | "rm" => {
@@ -41482,6 +41788,7 @@ fn cmd_powerprofile(args: &str) {
                 }
             } else {
                 shell_println!("Usage: powerprofile remove <name>");
+                set_exit(1);
             }
         }
         "battery" | "batt" => {
@@ -41500,6 +41807,7 @@ fn cmd_powerprofile(args: &str) {
                 }
             } else {
                 shell_println!("Usage: powerprofile brightness <1-100>");
+                set_exit(1);
             }
         }
         "boost" => {
@@ -41525,6 +41833,7 @@ fn cmd_powerprofile(args: &str) {
                     shell_println!("Auto-switch threshold: {}%", pct);
                 } else {
                     shell_println!("Usage: powerprofile autoswitch <on|off|threshold%>");
+                    set_exit(1);
                 }
             }
             None => shell_println!("Usage: powerprofile autoswitch <on|off|threshold%>"),
@@ -41605,6 +41914,7 @@ fn cmd_defaultapps(args: &str) {
                 }
             } else {
                 shell_println!("Usage: defaultapps get <mime_type> [uid]");
+                set_exit(1);
             }
         }
         "set" => {
@@ -41619,6 +41929,7 @@ fn cmd_defaultapps(args: &str) {
                 }
             } else {
                 shell_println!("Usage: defaultapps set <mime> <app> [uid]");
+                set_exit(1);
             }
         }
         "rm" | "remove" => {
@@ -41630,6 +41941,7 @@ fn cmd_defaultapps(args: &str) {
                 }
             } else {
                 shell_println!("Usage: defaultapps rm <mime> [uid]");
+                set_exit(1);
             }
         }
         "category" | "cat" => {
@@ -41663,6 +41975,7 @@ fn cmd_defaultapps(args: &str) {
                 }
             } else {
                 shell_println!("Usage: defaultapps category <type> <app> [uid]");
+                set_exit(1);
             }
         }
         "search" => {
@@ -41682,6 +41995,7 @@ fn cmd_defaultapps(args: &str) {
                 }
             } else {
                 shell_println!("Usage: defaultapps search <query>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -41782,6 +42096,7 @@ fn cmd_monitors(args: &str) {
                 }
             } else {
                 shell_println!("Usage: monitors primary <id>");
+                set_exit(1);
             }
         }
         "add" => {
@@ -41820,6 +42135,7 @@ fn cmd_monitors(args: &str) {
                 }
             } else {
                 shell_println!("Usage: monitors rm <id>");
+                set_exit(1);
             }
         }
         "mode" | "res" => {
@@ -41835,6 +42151,7 @@ fn cmd_monitors(args: &str) {
                 }
             } else {
                 shell_println!("Usage: monitors mode <id> <width> <height> [hz]");
+                set_exit(1);
             }
         }
         "pos" | "position" => {
@@ -41848,6 +42165,7 @@ fn cmd_monitors(args: &str) {
                 }
             } else {
                 shell_println!("Usage: monitors pos <id> <x> <y>");
+                set_exit(1);
             }
         }
         "scale" => {
@@ -41860,6 +42178,7 @@ fn cmd_monitors(args: &str) {
                 }
             } else {
                 shell_println!("Usage: monitors scale <id> <pct>");
+                set_exit(1);
             }
         }
         "rotate" => {
@@ -41878,6 +42197,7 @@ fn cmd_monitors(args: &str) {
                 }
             } else {
                 shell_println!("Usage: monitors rotate <id> <normal|right|inverted|left>");
+                set_exit(1);
             }
         }
         "layout" => match parts.get(1).copied() {
@@ -41905,6 +42225,7 @@ fn cmd_monitors(args: &str) {
                 shell_println!("Monitor #{} enabled.", id);
             } else {
                 shell_println!("Usage: monitors enable <id>");
+                set_exit(1);
             }
         }
         "disable" => {
@@ -41915,6 +42236,7 @@ fn cmd_monitors(args: &str) {
                 }
             } else {
                 shell_println!("Usage: monitors disable <id>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -42086,6 +42408,7 @@ fn cmd_fwsettings(args: &str) {
                 }
             } else {
                 shell_println!("Usage: firewall rm <id>");
+                set_exit(1);
             }
         }
         "enable" => {
@@ -42260,6 +42583,7 @@ fn cmd_updatemgr(args: &str) {
                 }
             } else {
                 shell_println!("Usage: updates install <id>");
+                set_exit(1);
             }
         }
         "download" => {
@@ -42270,6 +42594,7 @@ fn cmd_updatemgr(args: &str) {
                 }
             } else {
                 shell_println!("Usage: updates download <id>");
+                set_exit(1);
             }
         }
         "defer" => {
@@ -42280,6 +42605,7 @@ fn cmd_updatemgr(args: &str) {
                 }
             } else {
                 shell_println!("Usage: updates defer <id>");
+                set_exit(1);
             }
         }
         "info" => {
@@ -42309,6 +42635,7 @@ fn cmd_updatemgr(args: &str) {
                 }
             } else {
                 shell_println!("Usage: updates info <id>");
+                set_exit(1);
             }
         }
         "history" => {
@@ -42487,6 +42814,7 @@ fn cmd_notifprefs(args: &str) {
                 shell_println!("  Suppressed : {}", pref.suppressed_count);
             } else {
                 shell_println!("Usage: notifprefs app <app_id>");
+                set_exit(1);
             }
         }
         "enable" => {
@@ -42495,6 +42823,7 @@ fn cmd_notifprefs(args: &str) {
                 shell_println!("Notifications enabled for '{}'.", app_id);
             } else {
                 shell_println!("Usage: notifprefs enable <app_id>");
+                set_exit(1);
             }
         }
         "disable" => {
@@ -42503,6 +42832,7 @@ fn cmd_notifprefs(args: &str) {
                 shell_println!("Notifications disabled for '{}'.", app_id);
             } else {
                 shell_println!("Usage: notifprefs disable <app_id>");
+                set_exit(1);
             }
         }
         "banner" => {
@@ -42518,6 +42848,7 @@ fn cmd_notifprefs(args: &str) {
                 shell_println!("Banner for '{}': {}", app, style.label());
             } else {
                 shell_println!("Usage: notifprefs banner <app> <full|brief|none>");
+                set_exit(1);
             }
         }
         "priority" => {
@@ -42581,6 +42912,7 @@ fn cmd_notifprefs(args: &str) {
                 shell_println!("Dismiss timeout: {} s", val);
             } else {
                 shell_println!("Usage: notifprefs timeout <seconds>");
+                set_exit(1);
             }
         }
         "rm" | "remove" => {
@@ -42591,6 +42923,7 @@ fn cmd_notifprefs(args: &str) {
                 }
             } else {
                 shell_println!("Usage: notifprefs rm <app_id>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -42711,6 +43044,7 @@ fn cmd_fileshare(args: &str) {
                 }
             } else {
                 shell_println!("Usage: share add <name> <path> [smb|nfs|webdav|sftp]");
+                set_exit(1);
             }
         }
         "rm" | "remove" => {
@@ -42721,6 +43055,7 @@ fn cmd_fileshare(args: &str) {
                 }
             } else {
                 shell_println!("Usage: share rm <id>");
+                set_exit(1);
             }
         }
         "access" => {
@@ -42735,6 +43070,7 @@ fn cmd_fileshare(args: &str) {
                 shell_println!("Share #{}: {}", id, access.label());
             } else {
                 shell_println!("Usage: share access <id> <ro|rw|full>");
+                set_exit(1);
             }
         }
         "guest" => {
@@ -42745,6 +43081,7 @@ fn cmd_fileshare(args: &str) {
                 shell_println!("Share #{}: guest={}", id, allowed);
             } else {
                 shell_println!("Usage: share guest <id> <on|off>");
+                set_exit(1);
             }
         }
         "connect" => {
@@ -42772,6 +43109,7 @@ fn cmd_fileshare(args: &str) {
                 }
             } else {
                 shell_println!("Usage: share connect <host> <share> <mountpoint> [proto] [user]");
+                set_exit(1);
             }
         }
         "disconnect" => {
@@ -42780,6 +43118,7 @@ fn cmd_fileshare(args: &str) {
                 shell_println!("Disconnected remote #{}.", id);
             } else {
                 shell_println!("Usage: share disconnect <id>");
+                set_exit(1);
             }
         }
         "remotes" => {
@@ -43321,6 +43660,7 @@ fn cmd_parental(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'parental help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -43657,6 +43997,7 @@ fn cmd_audiodevice(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'audiodevice help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -43875,6 +44216,7 @@ fn cmd_sessionmgr(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'session help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -44069,6 +44411,7 @@ fn cmd_crashreport(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'crash help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -44227,6 +44570,7 @@ fn cmd_netproxy(args: &str) {
                 }
             } else {
                 shell_println!("Usage: proxy bypass [add <pattern> [desc] | remove <pattern>]");
+                set_exit(1);
             }
         }
         "resolve" => {
@@ -44289,6 +44633,7 @@ fn cmd_netproxy(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'proxy help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -44462,6 +44807,7 @@ fn cmd_fileversion(args: &str) {
                 }
             } else {
                 shell_println!("Usage: fver watch [add <path> [policy] | remove <path>]");
+                set_exit(1);
             }
         }
         "enable" | "disable" => {
@@ -44511,6 +44857,7 @@ fn cmd_fileversion(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'fver help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -44745,6 +45092,7 @@ fn cmd_devicemgr(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'devmgr help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -44942,6 +45290,7 @@ fn cmd_location(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'loc help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -45188,6 +45537,7 @@ fn cmd_diskencrypt(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'dencrypt help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -45380,6 +45730,7 @@ fn cmd_pkgmgr(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'pkg help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -45537,6 +45888,7 @@ fn cmd_remotedesktop(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'rdp help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -45697,6 +46049,7 @@ fn cmd_restorepoint(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'rpoint help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -45893,6 +46246,7 @@ fn cmd_battery(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'batt help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -45997,6 +46351,7 @@ fn cmd_dictation(args: &str) {
                 }
             } else {
                 shell_println!("Usage: dict vocab [add <word> [phonetic] | remove <word>]");
+                set_exit(1);
             }
         }
         "recent" => {
@@ -46028,6 +46383,7 @@ fn cmd_dictation(args: &str) {
                 }
             } else {
                 shell_println!("Usage: dict history clear");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -46064,6 +46420,7 @@ fn cmd_dictation(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'dict help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -46245,6 +46602,7 @@ fn cmd_screenreader(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'sr help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -46414,6 +46772,7 @@ fn cmd_langpack(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'lpack help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -46548,6 +46907,7 @@ fn cmd_spellcheck(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'spell help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -46673,6 +47033,7 @@ fn cmd_screentime(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'stime help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -46803,6 +47164,7 @@ fn cmd_disksmart(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'smart help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -46948,6 +47310,7 @@ fn cmd_magnifier(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'mag help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -47091,6 +47454,7 @@ fn cmd_cloudsync(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'csync help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -47178,6 +47542,7 @@ fn cmd_gestures(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'gesture help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -47312,6 +47677,7 @@ fn cmd_soundevents(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'sevents help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -47460,6 +47826,7 @@ fn cmd_usbmgr(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'usb help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -47626,6 +47993,7 @@ fn cmd_cliphistory(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'cliphist help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -47761,6 +48129,7 @@ fn cmd_displaycolor(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'dcolor help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -47911,6 +48280,7 @@ fn cmd_syslog(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'slog help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -48146,6 +48516,7 @@ fn cmd_elog(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'elog help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -48344,6 +48715,7 @@ fn cmd_logpersist(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'logpersist help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -48441,9 +48813,11 @@ fn cmd_svcstart(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid service ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: svcstart crash <service-id>");
+                set_exit(1);
             }
         }
         "crashes" => {
@@ -48505,9 +48879,11 @@ fn cmd_svcstart(args: &str) {
                     shell_println!("Crash count reset for service {}", id);
                 } else {
                     shell_println!("Invalid service ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: svcstart reset <service-id>");
+                set_exit(1);
             }
         }
         "apps" => {
@@ -48544,6 +48920,7 @@ fn cmd_svcstart(args: &str) {
                 shell_println!("Startup app {} added: {} ({})", id, name, path);
             } else {
                 shell_println!("Usage: svcstart addapp <path> <name> [wait]");
+                set_exit(1);
             }
         }
         "rmapp" => {
@@ -48555,9 +48932,11 @@ fn cmd_svcstart(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid app ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: svcstart rmapp <id>");
+                set_exit(1);
             }
         }
         "init" => {
@@ -48641,9 +49020,11 @@ fn cmd_svcstart(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid service ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: svcstart addsock <svc-id> <tcp|udp|unix|ipc> <port|path>");
+                set_exit(1);
             }
         }
         "rmsock" => {
@@ -48656,9 +49037,11 @@ fn cmd_svcstart(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid entry ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: svcstart rmsock <entry-id>");
+                set_exit(1);
             }
         }
         "test" => match svcstart::self_test() {
@@ -48686,6 +49069,7 @@ fn cmd_svcstart(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'svcstart help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -48770,6 +49154,7 @@ fn cmd_drvmon(args: &str) {
                 }
             } else {
                 shell_println!("Usage: drvmon register <name> <bus> [pid]");
+                set_exit(1);
             }
         }
         "crash" => {
@@ -48781,9 +49166,11 @@ fn cmd_drvmon(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid driver ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: drvmon crash <id>");
+                set_exit(1);
             }
         }
         "restart" => {
@@ -48799,9 +49186,11 @@ fn cmd_drvmon(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid driver ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: drvmon restart <id> [new-pid]");
+                set_exit(1);
             }
         }
         "tick" => {
@@ -48828,6 +49217,7 @@ fn cmd_drvmon(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'drvmon help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -48875,6 +49265,7 @@ fn cmd_reslimit(args: &str) {
                 }
             } else {
                 shell_println!("Usage: reslimit create <name> [parent-id]");
+                set_exit(1);
             }
         }
         "remove" => {
@@ -48886,9 +49277,11 @@ fn cmd_reslimit(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid group ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: reslimit remove <group-id>");
+                set_exit(1);
             }
         }
         "assign" => {
@@ -48900,9 +49293,11 @@ fn cmd_reslimit(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid pid or group ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: reslimit assign <pid> <group-id>");
+                set_exit(1);
             }
         }
         "unassign" => {
@@ -48914,9 +49309,11 @@ fn cmd_reslimit(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid pid");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: reslimit unassign <pid>");
+                set_exit(1);
             }
         }
         "setmem" => {
@@ -48949,10 +49346,12 @@ fn cmd_reslimit(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid group ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: reslimit setmem <group-id> <max-rss-mib> [soft-rss-mib]");
                 shell_println!("  0 = unlimited");
+                set_exit(1);
             }
         }
         "setcpu" => {
@@ -48973,10 +49372,12 @@ fn cmd_reslimit(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid group ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: reslimit setcpu <group-id> <max-percent> [weight]");
                 shell_println!("  0 = unlimited, weight default = 100");
+                set_exit(1);
             }
         }
         "setio" => {
@@ -49010,10 +49411,12 @@ fn cmd_reslimit(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid group ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: reslimit setio <group-id> <read-mbps> <write-mbps> [low]");
                 shell_println!("  0 = unlimited");
+                set_exit(1);
             }
         }
         "setproc" => {
@@ -49046,12 +49449,14 @@ fn cmd_reslimit(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid group ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!(
                     "Usage: reslimit setproc <group-id> <max-procs> <max-threads> <max-files>"
                 );
                 shell_println!("  0 = unlimited");
+                set_exit(1);
             }
         }
         "enforce" => {
@@ -49068,9 +49473,11 @@ fn cmd_reslimit(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid group ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: reslimit enforce <group-id> <on|off>");
+                set_exit(1);
             }
         }
         "info" => {
@@ -49107,9 +49514,11 @@ fn cmd_reslimit(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid group ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: reslimit info <group-id>");
+                set_exit(1);
             }
         }
         "init" => {
@@ -49143,6 +49552,7 @@ fn cmd_reslimit(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'reslimit help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -49188,6 +49598,7 @@ fn cmd_initproc(args: &str) {
                             shell_println!("Marked '{}' as critical", name);
                         } else {
                             shell_println!("Usage: initproc critical add <service-name>");
+                            set_exit(1);
                         }
                     }
                     "remove" => {
@@ -49196,12 +49607,14 @@ fn cmd_initproc(args: &str) {
                             shell_println!("Unmarked '{}' as critical", name);
                         } else {
                             shell_println!("Usage: initproc critical remove <service-name>");
+                            set_exit(1);
                         }
                     }
                     _ => shell_println!("Usage: initproc critical <add|remove> <name>"),
                 }
             } else {
                 shell_println!("Usage: initproc critical <add|remove> <name>");
+                set_exit(1);
             }
         }
         "start" => match initproc::start() {
@@ -49246,6 +49659,7 @@ fn cmd_initproc(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'initproc help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -49333,6 +49747,7 @@ fn cmd_healthmon(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'syshealth help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -49459,9 +49874,11 @@ fn cmd_udriver(args: &str) {
                     shell_println!("  I/O served: {}", d.io_requests_served);
                 } else {
                     shell_println!("Driver #{} not found", id);
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: udriver info <id>");
+                set_exit(1);
             }
         }
         "test" => {
@@ -49479,6 +49896,7 @@ fn cmd_udriver(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'udriver help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -49622,6 +50040,7 @@ fn cmd_devhotplug(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'devhotplug help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -49696,6 +50115,7 @@ fn cmd_devpower(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'devpower help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -49831,6 +50251,7 @@ fn cmd_vmguest(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'vmguest help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -49905,6 +50326,7 @@ fn cmd_pciids(args: &str) {
                 shell_println!("Subclass: {}", pciids::subclass_name(cls, sub));
             } else {
                 shell_println!("Usage: pciids lookup <vendor:device | class.subclass>");
+                set_exit(1);
             }
         }
         "vendors" => {
@@ -49937,6 +50359,7 @@ fn cmd_pciids(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'pciids help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -50083,6 +50506,7 @@ fn cmd_upnp(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'upnp help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -50212,6 +50636,7 @@ fn cmd_httpc(args: &str) {
         },
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'httpc help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -50398,6 +50823,7 @@ fn cmd_httpd(args: &str) {
         },
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'httpd help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -50436,6 +50862,7 @@ fn cmd_ws(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'ws help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -50673,6 +51100,7 @@ fn cmd_dhcpd(args: &str) {
         },
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'dhcpd help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -50781,6 +51209,7 @@ fn cmd_ntp(args: &str) {
                 shell_println!("Added NTP server: {}", addr);
             } else {
                 shell_println!("Failed to add server (full or duplicate)");
+                set_exit(1);
             }
         }
         "remove" | "rm" => {
@@ -50794,6 +51223,7 @@ fn cmd_ntp(args: &str) {
                 shell_println!("Removed NTP server: {}", addr);
             } else {
                 shell_println!("Server not found: {}", addr);
+                set_exit(1);
             }
         }
         "enable" => {
@@ -50830,6 +51260,7 @@ fn cmd_ntp(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'ntp help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -51008,6 +51439,7 @@ fn cmd_mdns(args: &str) {
                 shell_println!("Unregistered service #{}", idx);
             } else {
                 shell_println!("Service #{} not found or inactive", idx);
+                set_exit(1);
             }
         }
         "cache" => {
@@ -51056,6 +51488,7 @@ fn cmd_mdns(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'mdns help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -51164,6 +51597,7 @@ fn cmd_telnetd(args: &str) {
                 shell_println!("Disconnected session #{}", idx);
             } else {
                 shell_println!("Session #{} not found or inactive", idx);
+                set_exit(1);
             }
         }
         "test" => match telnet::self_test() {
@@ -51184,6 +51618,7 @@ fn cmd_telnetd(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'telnetd help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -51247,6 +51682,7 @@ fn cmd_sshd(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'sshd help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -51450,6 +51886,7 @@ fn cmd_tftp(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'tftp help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -51632,6 +52069,7 @@ fn cmd_netsyslog(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'syslog help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -51796,6 +52234,7 @@ fn cmd_pcap(args: &str) {
             }
             None => {
                 shell_println!("Usage: pcap snaplen <bytes>");
+                set_exit(1);
             }
         },
         "test" => match pcap::self_test() {
@@ -51804,6 +52243,7 @@ fn cmd_pcap(args: &str) {
         },
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'pcap help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -52095,6 +52535,7 @@ fn cmd_igmp(args: &str) {
                 None => {
                     shell_println!("Usage: igmp join <multicast-IP>");
                     shell_println!("  e.g.: igmp join 239.1.1.1");
+                    set_exit(1);
                 }
             }
         }
@@ -52107,6 +52548,7 @@ fn cmd_igmp(args: &str) {
                 }
                 None => {
                     shell_println!("Usage: igmp leave <multicast-IP>");
+                    set_exit(1);
                 }
             }
         }
@@ -52116,6 +52558,7 @@ fn cmd_igmp(args: &str) {
         },
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'igmp help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -52169,6 +52612,7 @@ fn cmd_mld(args: &str) {
                 None => {
                     shell_println!("Usage: mld join <multicast-IPv6>");
                     shell_println!("  e.g.: mld join ff02::fb");
+                    set_exit(1);
                 }
             }
         }
@@ -52181,6 +52625,7 @@ fn cmd_mld(args: &str) {
                 }
                 None => {
                     shell_println!("Usage: mld leave <multicast-IPv6>");
+                    set_exit(1);
                 }
             }
         }
@@ -52190,6 +52635,7 @@ fn cmd_mld(args: &str) {
         },
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'mld help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -52278,6 +52724,7 @@ fn cmd_lldp(args: &str) {
         },
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'lldp help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -52498,6 +52945,7 @@ fn cmd_ndisc(args: &str) {
                 None => {
                     shell_println!("Usage: ndisc probe6 <IPv6>");
                     shell_println!("  e.g.: ndisc probe6 fe80::1");
+                    set_exit(1);
                 }
             }
         }
@@ -52580,6 +53028,7 @@ fn cmd_ndisc(args: &str) {
         },
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'ndisc help'.", sub);
+            set_exit(1);
         }
     }
 }
@@ -52854,9 +53303,11 @@ fn cmd_nat(args: &str) {
                     shell_println!("Flushed NAT entries for namespace {}", ns_id);
                 } else {
                     shell_println!("Usage: nat flush <namespace_id>");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: nat flush <namespace_id>");
+                set_exit(1);
             }
         }
         "forward" | "fwd" => {
@@ -52917,6 +53368,7 @@ fn cmd_nat(args: &str) {
                         }
                     } else {
                         shell_println!("Invalid port");
+                        set_exit(1);
                     }
                 }
                 _ => {
@@ -54902,6 +55354,7 @@ fn cmd_inputa11y(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", sub);
             shell_println!("Use 'ia11y help' for usage.");
+            set_exit(1);
         }
     }
 }
@@ -54972,9 +55425,11 @@ fn cmd_driverupdate(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: dupdate install <id>");
+                set_exit(1);
             }
         }
         "rollback" | "revert" => {
@@ -54990,9 +55445,11 @@ fn cmd_driverupdate(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: dupdate rollback <id>");
+                set_exit(1);
             }
         }
         "setupdate" => {
@@ -55007,6 +55464,7 @@ fn cmd_driverupdate(args: &str) {
                 }
             } else {
                 shell_println!("Invalid ID.");
+                set_exit(1);
             }
         }
         "info" => {
@@ -55042,9 +55500,11 @@ fn cmd_driverupdate(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: dupdate info <id>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -55145,9 +55605,11 @@ fn cmd_netshare(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: nshare unmount <id>");
+                set_exit(1);
             }
         }
         "info" => {
@@ -55174,9 +55636,11 @@ fn cmd_netshare(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: nshare info <id>");
+                set_exit(1);
             }
         }
         "auto" => {
@@ -55317,9 +55781,11 @@ fn cmd_startuprepair(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: srepair session <id>");
+                set_exit(1);
             }
         }
         "failboot" => match startuprepair::record_failed_boot() {
@@ -55444,9 +55910,11 @@ fn cmd_remoteassist(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: rassist grant <id>");
+                set_exit(1);
             }
         }
         "revoke" => {
@@ -55458,9 +55926,11 @@ fn cmd_remoteassist(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: rassist revoke <id>");
+                set_exit(1);
             }
         }
         "pause" => {
@@ -55472,9 +55942,11 @@ fn cmd_remoteassist(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: rassist pause <id>");
+                set_exit(1);
             }
         }
         "resume" => {
@@ -55486,9 +55958,11 @@ fn cmd_remoteassist(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: rassist resume <id>");
+                set_exit(1);
             }
         }
         "end" | "stop" => {
@@ -55500,9 +55974,11 @@ fn cmd_remoteassist(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: rassist end <id>");
+                set_exit(1);
             }
         }
         "clipboard" | "clip" => {
@@ -55519,6 +55995,7 @@ fn cmd_remoteassist(args: &str) {
                 }
             } else {
                 shell_println!("Usage: rassist clipboard <id> [on|off]");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -55605,9 +56082,11 @@ fn cmd_taskmon(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid PID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: tmon kill <pid>");
+                set_exit(1);
             }
         }
         "suspend" | "stop" => {
@@ -55619,9 +56098,11 @@ fn cmd_taskmon(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid PID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: tmon suspend <pid>");
+                set_exit(1);
             }
         }
         "resume" => {
@@ -55633,9 +56114,11 @@ fn cmd_taskmon(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid PID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: tmon resume <pid>");
+                set_exit(1);
             }
         }
         "priority" | "prio" => {
@@ -55663,6 +56146,7 @@ fn cmd_taskmon(args: &str) {
                 }
             } else {
                 shell_println!("Invalid PID.");
+                set_exit(1);
             }
         }
         "register" | "add" => {
@@ -55703,9 +56187,11 @@ fn cmd_taskmon(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid PID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: tmon info <pid>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -55793,9 +56279,11 @@ fn cmd_printqueue(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid printer ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: pqueue jobs <printer_id>");
+                set_exit(1);
             }
         }
         "add" | "addprinter" => {
@@ -55833,6 +56321,7 @@ fn cmd_printqueue(args: &str) {
                 }
             } else {
                 shell_println!("Invalid printer ID.");
+                set_exit(1);
             }
         }
         "cancel" => {
@@ -55848,6 +56337,7 @@ fn cmd_printqueue(args: &str) {
                 }
             } else {
                 shell_println!("Invalid ID(s).");
+                set_exit(1);
             }
         }
         "complete" => {
@@ -55863,6 +56353,7 @@ fn cmd_printqueue(args: &str) {
                 }
             } else {
                 shell_println!("Invalid ID(s).");
+                set_exit(1);
             }
         }
         "pause" => {
@@ -55874,9 +56365,11 @@ fn cmd_printqueue(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: pqueue pause <printer_id>");
+                set_exit(1);
             }
         }
         "resume" => {
@@ -55888,9 +56381,11 @@ fn cmd_printqueue(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: pqueue resume <printer_id>");
+                set_exit(1);
             }
         }
         "clear" => {
@@ -55902,9 +56397,11 @@ fn cmd_printqueue(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: pqueue clear <printer_id>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -55991,9 +56488,11 @@ fn cmd_servicemgr(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: svcmgr start <id>");
+                set_exit(1);
             }
         }
         "stop" => {
@@ -56005,9 +56504,11 @@ fn cmd_servicemgr(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: svcmgr stop <id>");
+                set_exit(1);
             }
         }
         "restart" => {
@@ -56019,9 +56520,11 @@ fn cmd_servicemgr(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: svcmgr restart <id>");
+                set_exit(1);
             }
         }
         "startup" => {
@@ -56047,6 +56550,7 @@ fn cmd_servicemgr(args: &str) {
                 }
             } else {
                 shell_println!("Invalid ID.");
+                set_exit(1);
             }
         }
         "register" | "add" => {
@@ -56095,9 +56599,11 @@ fn cmd_servicemgr(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: svcmgr info <id>");
+                set_exit(1);
             }
         }
         "find" => {
@@ -56114,6 +56620,7 @@ fn cmd_servicemgr(args: &str) {
                 }
             } else {
                 shell_println!("Usage: svcmgr find <name>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -56258,6 +56765,7 @@ fn cmd_hwmonitor(args: &str) {
                 }
             } else {
                 shell_println!("Invalid arguments.");
+                set_exit(1);
             }
         }
         "info" => {
@@ -56279,9 +56787,11 @@ fn cmd_hwmonitor(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: hwmon info <sensor_id>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -56390,6 +56900,7 @@ fn cmd_appsandbox(args: &str) {
                 }
             } else {
                 shell_println!("Usage: sandbox check <id> <permission>");
+                set_exit(1);
             }
         }
         "grant" => {
@@ -56413,6 +56924,7 @@ fn cmd_appsandbox(args: &str) {
                 }
             } else {
                 shell_println!("Usage: sandbox grant <id> <permission>");
+                set_exit(1);
             }
         }
         "revoke" => {
@@ -56435,6 +56947,7 @@ fn cmd_appsandbox(args: &str) {
                 }
             } else {
                 shell_println!("Usage: sandbox revoke <id> <permission>");
+                set_exit(1);
             }
         }
         "remove" | "delete" => {
@@ -56446,9 +56959,11 @@ fn cmd_appsandbox(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: sandbox remove <id>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -56560,9 +57075,11 @@ fn cmd_gamepadinput(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: gamepad remove <id>");
+                set_exit(1);
             }
         }
         "deadzone" | "dz" => {
@@ -56575,6 +57092,7 @@ fn cmd_gamepadinput(args: &str) {
                 }
             } else {
                 shell_println!("Usage: gamepad deadzone <id> <value>");
+                set_exit(1);
             }
         }
         "rumble" => {
@@ -56587,6 +57105,7 @@ fn cmd_gamepadinput(args: &str) {
                 }
             } else {
                 shell_println!("Usage: gamepad rumble <id> [intensity]");
+                set_exit(1);
             }
         }
         "info" => {
@@ -56616,9 +57135,11 @@ fn cmd_gamepadinput(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: gamepad info <id>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -56714,9 +57235,11 @@ fn cmd_sysrestore(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: srestore restore <id>");
+                set_exit(1);
             }
         }
         "pin" => {
@@ -56728,9 +57251,11 @@ fn cmd_sysrestore(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: srestore pin <id>");
+                set_exit(1);
             }
         }
         "unpin" => {
@@ -56742,9 +57267,11 @@ fn cmd_sysrestore(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: srestore unpin <id>");
+                set_exit(1);
             }
         }
         "delete" | "rm" => {
@@ -56756,9 +57283,11 @@ fn cmd_sysrestore(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: srestore delete <id>");
+                set_exit(1);
             }
         }
         "rotate" => match sysrestore::run_rotation() {
@@ -56890,6 +57419,7 @@ fn cmd_audiomux(args: &str) {
                 }
             } else {
                 shell_println!("Usage: amux volume <stream_id> <0-100>");
+                set_exit(1);
             }
         }
         "mute" => {
@@ -56901,9 +57431,11 @@ fn cmd_audiomux(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: amux mute <stream_id>");
+                set_exit(1);
             }
         }
         "unmute" => {
@@ -56915,9 +57447,11 @@ fn cmd_audiomux(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: amux unmute <stream_id>");
+                set_exit(1);
             }
         }
         "reroute" | "route" => {
@@ -56930,6 +57464,7 @@ fn cmd_audiomux(args: &str) {
                 }
             } else {
                 shell_println!("Usage: amux reroute <stream_id> <output_id>");
+                set_exit(1);
             }
         }
         "default" => {
@@ -56941,9 +57476,11 @@ fn cmd_audiomux(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: amux default <output_id>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -57042,9 +57579,11 @@ fn cmd_netthrottle(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: nthrottle remove <id>");
+                set_exit(1);
             }
         }
         "priority" | "prio" => {
@@ -57064,6 +57603,7 @@ fn cmd_netthrottle(args: &str) {
                 }
             } else {
                 shell_println!("Usage: nthrottle priority <id> <level>");
+                set_exit(1);
             }
         }
         "enable" => {
@@ -57187,9 +57727,11 @@ fn cmd_dumpanalyzer(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: dump info <id>");
+                set_exit(1);
             }
         }
         "delete" | "rm" => {
@@ -57201,9 +57743,11 @@ fn cmd_dumpanalyzer(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: dump delete <id>");
+                set_exit(1);
             }
         }
         "clear" => {
@@ -57435,6 +57979,7 @@ fn cmd_parentaltime(args: &str) {
                 }
             } else {
                 shell_println!("Usage: ptime use <id> [minutes]");
+                set_exit(1);
             }
         }
         "reset" => {
@@ -57450,9 +57995,11 @@ fn cmd_parentaltime(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: ptime reset <id> [weekly]");
+                set_exit(1);
             }
         }
         "limit" => {
@@ -57468,6 +58015,7 @@ fn cmd_parentaltime(args: &str) {
                 }
             } else {
                 shell_println!("Usage: ptime limit <id> <minutes>");
+                set_exit(1);
             }
         }
         "enable" => {
@@ -57495,9 +58043,11 @@ fn cmd_parentaltime(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: ptime remove <id>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -57590,9 +58140,11 @@ fn cmd_mediakeys(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: mkeys unregister <id>");
+                set_exit(1);
             }
         }
         "update" | "np" => {
@@ -57611,6 +58163,7 @@ fn cmd_mediakeys(args: &str) {
                 }
             } else {
                 shell_println!("Usage: mkeys update <id> <title> [artist] [album] [duration_ms]");
+                set_exit(1);
             }
         }
         "play" => {
@@ -57788,9 +58341,11 @@ fn cmd_webcam(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: cam unregister <id>");
+                set_exit(1);
             }
         }
         "open" => {
@@ -57829,9 +58384,11 @@ fn cmd_webcam(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: cam close <stream_id>");
+                set_exit(1);
             }
         }
         "privacy" => {
@@ -57853,6 +58410,7 @@ fn cmd_webcam(args: &str) {
                 }
             } else {
                 shell_println!("Usage: cam privacy <cam_id> <open|prompt|disabled>");
+                set_exit(1);
             }
         }
         "block" => {
@@ -57897,6 +58455,7 @@ fn cmd_webcam(args: &str) {
                 }
             } else {
                 shell_println!("Usage: cam default <cam_id>");
+                set_exit(1);
             }
         }
         "inuse" => {
@@ -58028,6 +58587,7 @@ fn cmd_speechio(args: &str) {
                 }
             } else {
                 shell_println!("Usage: speech cancel <id>");
+                set_exit(1);
             }
         }
         "addvoice" => {
@@ -58057,6 +58617,7 @@ fn cmd_speechio(args: &str) {
                 }
             } else {
                 shell_println!("Usage: speech rmvoice <id>");
+                set_exit(1);
             }
         }
         "default" => {
@@ -58069,6 +58630,7 @@ fn cmd_speechio(args: &str) {
                 }
             } else {
                 shell_println!("Usage: speech default <voice_id>");
+                set_exit(1);
             }
         }
         "tts" => {
@@ -58215,6 +58777,7 @@ fn cmd_mobilelink(args: &str) {
                 }
             } else {
                 shell_println!("Usage: mlink confirm <device_id> <code>");
+                set_exit(1);
             }
         }
         "disconnect" | "dc" => {
@@ -58227,6 +58790,7 @@ fn cmd_mobilelink(args: &str) {
                 }
             } else {
                 shell_println!("Usage: mlink disconnect <id>");
+                set_exit(1);
             }
         }
         "reconnect" | "rc" => {
@@ -58239,6 +58803,7 @@ fn cmd_mobilelink(args: &str) {
                 }
             } else {
                 shell_println!("Usage: mlink reconnect <id>");
+                set_exit(1);
             }
         }
         "remove" | "rm" => {
@@ -58251,6 +58816,7 @@ fn cmd_mobilelink(args: &str) {
                 }
             } else {
                 shell_println!("Usage: mlink remove <id>");
+                set_exit(1);
             }
         }
         "notif" | "notifications" => {
@@ -58294,6 +58860,7 @@ fn cmd_mobilelink(args: &str) {
                 }
             } else {
                 shell_println!("Usage: mlink sms <device_id> <recipient> <message>");
+                set_exit(1);
             }
         }
         "feature" => {
@@ -58327,6 +58894,7 @@ fn cmd_mobilelink(args: &str) {
                 }
             } else {
                 shell_println!("Usage: mlink feature <device_id> <feature> [on|off]");
+                set_exit(1);
             }
         }
         "battery" => {
@@ -58338,6 +58906,7 @@ fn cmd_mobilelink(args: &str) {
                 }
             } else {
                 shell_println!("Usage: mlink battery <id> <percent>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -58423,6 +58992,7 @@ fn cmd_screenlock(args: &str) {
                 }
             } else {
                 shell_println!("Usage: slock timeout <seconds>");
+                set_exit(1);
             }
         }
         "method" => {
@@ -58570,6 +59140,7 @@ fn cmd_appstore(args: &str) {
                 }
             } else {
                 shell_println!("Usage: store install <app_id>");
+                set_exit(1);
             }
         }
         "uninstall" => {
@@ -58582,6 +59153,7 @@ fn cmd_appstore(args: &str) {
                 }
             } else {
                 shell_println!("Usage: store uninstall <app_id>");
+                set_exit(1);
             }
         }
         "update" => {
@@ -58594,6 +59166,7 @@ fn cmd_appstore(args: &str) {
                 }
             } else {
                 shell_println!("Usage: store update <app_id>");
+                set_exit(1);
             }
         }
         "check" => match appstore::check_updates() {
@@ -58649,6 +59222,7 @@ fn cmd_appstore(args: &str) {
                 }
             } else {
                 shell_println!("Usage: store review <app_id> [rating] [comment]");
+                set_exit(1);
             }
         }
         "add" => {
@@ -58686,6 +59260,7 @@ fn cmd_appstore(args: &str) {
                 }
             } else {
                 shell_println!("Usage: store remove <app_id>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -58818,6 +59393,7 @@ fn cmd_wintiling(args: &str) {
                 }
             } else {
                 shell_println!("Usage: tile rmws <workspace_id>");
+                set_exit(1);
             }
         }
         "addwin" | "add" => {
@@ -58849,6 +59425,7 @@ fn cmd_wintiling(args: &str) {
                 }
             } else {
                 shell_println!("Usage: tile rm <window_id>");
+                set_exit(1);
             }
         }
         "layout" => {
@@ -58927,6 +59504,7 @@ fn cmd_wintiling(args: &str) {
                 }
             } else {
                 shell_println!("Usage: tile float <window_id>");
+                set_exit(1);
             }
         }
         "move" => {
@@ -59056,6 +59634,7 @@ fn cmd_peninput(args: &str) {
                 }
             } else {
                 shell_println!("Usage: pen rm <id>");
+                set_exit(1);
             }
         }
         "sim" | "simulate" => {
@@ -59379,6 +59958,7 @@ fn cmd_quicksettings(args: &str) {
                 }
             } else {
                 shell_println!("Usage: qs toggle <tile_id>");
+                set_exit(1);
             }
         }
         "set" => {
@@ -59424,6 +60004,7 @@ fn cmd_quicksettings(args: &str) {
                 }
             } else {
                 shell_println!("Usage: qs rm <id>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -59847,6 +60428,7 @@ fn cmd_sharesheet(args: &str) {
             shell_println!("  unregister <id>     Remove target");
             shell_println!("  history [count]     Recent shares");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -60009,6 +60591,7 @@ fn cmd_oobe(args: &str) {
             shell_println!("  choices             Show all choices");
             shell_println!("  complete            Force complete");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -60179,6 +60762,7 @@ fn cmd_hdrdisplay(args: &str) {
             shell_println!("  colorspace <id> <cs>   Set color space");
             shell_println!("  register <name> [nits] Register display");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -60357,6 +60941,7 @@ fn cmd_surroundsound(args: &str) {
             shell_println!("  remove <id>            Remove config");
             shell_println!("  Layouts: mono, stereo, 2.1, 5.1, 7.1, atmos");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -60524,6 +61109,7 @@ fn cmd_audioeq(args: &str) {
             shell_println!("  Presets: flat rock pop jazz classical");
             shell_println!("           hiphop electronic vocal bass treble");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -60664,6 +61250,7 @@ fn cmd_screensaver(args: &str) {
             shell_println!("  register <name> <type>  Register saver");
             shell_println!("  Types: blank starfield matrix bouncing clock slideshow bubbles");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -60849,6 +61436,7 @@ fn cmd_colortemp(args: &str) {
             shell_println!("  active <id>            Set active profile");
             shell_println!("  Modes: off manual scheduled sunsync");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -60967,6 +61555,7 @@ fn cmd_gamemode(args: &str) {
             shell_println!("  fps [on|off]        FPS overlay");
             shell_println!("  auto [on|off]       Auto-detection");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -61092,6 +61681,7 @@ fn cmd_dpiscaling(args: &str) {
             shell_println!("  overrides              List overrides");
             shell_println!("  Methods: integer fractional resize");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -61258,6 +61848,7 @@ fn cmd_netprofile(args: &str) {
             shell_println!("  remove <id>            Remove profile");
             shell_println!("  Types: private public domain trusted untrusted");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -61387,6 +61978,7 @@ fn cmd_apppermissions(args: &str) {
             shell_println!("  Perms: camera mic location notif contacts");
             shell_println!("         calendar storage net bt bg settings a11y");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -61534,6 +62126,7 @@ fn cmd_kbshortcuts(args: &str) {
             shell_println!("  Mods: ctrl alt shift super (combine: ctrl+alt)");
             shell_println!("  Categories: system nav window app a11y media custom");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -61660,6 +62253,7 @@ fn cmd_displayarrange(args: &str) {
             shell_println!("  orient <id> <orient>  Set orientation");
             shell_println!("  topology <mode>       extend/mirror/single");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -61735,6 +62329,7 @@ fn cmd_sysanimations(args: &str) {
             shell_println!("  speed <percent>     Speed (10-400%)");
             shell_println!("  reduce [on|off]     Reduce motion");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -61847,6 +62442,7 @@ fn cmd_filevault(args: &str) {
             shell_println!("  autolock <id> <seconds>  Auto-lock timeout");
             shell_println!("  Ciphers: aes chacha cbc");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -61965,6 +62561,7 @@ fn cmd_mousegestures(args: &str) {
             shell_println!("  enable / disable       Toggle gestures");
             shell_println!("  Directions: up down left right (combine with +)");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -62121,6 +62718,7 @@ fn cmd_fontsettings(args: &str) {
             shell_println!("  scale <percent>       Set text scale (50-300)");
             shell_println!("  ligatures <on|off>    Toggle ligatures");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -62272,6 +62870,7 @@ fn cmd_notifbadge(args: &str) {
             shell_println!("  clear [app]           Clear badge(s)");
             shell_println!("  enable / disable      Toggle globally");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -62457,6 +63056,7 @@ fn cmd_lockwallpaper(args: &str) {
             shell_println!("  clock <on|off>        Toggle overlays");
             shell_println!("  blur <on|off>         Toggle blur behind");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -62612,6 +63212,7 @@ fn cmd_systemsounds(args: &str) {
             shell_println!("          error warning info device_connect device_disconnect");
             shell_println!("          recycle_bin message_send message_receive screenshot");
             shell_println!("          volume low_battery");
+            set_exit(1);
         }
     }
 }
@@ -62756,6 +63357,7 @@ fn cmd_hotcorners(args: &str) {
             shell_println!("  enable / disable       Toggle globally");
             shell_println!("  Corners: tl, tr, bl, br");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -62910,6 +63512,7 @@ fn cmd_dynlock(args: &str) {
             shell_println!("  check                 Check proximity now");
             shell_println!("  unlock                Manual unlock");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -63050,6 +63653,7 @@ fn cmd_snaplayout(args: &str) {
             shell_println!("  remove <id>           Remove custom layout");
             shell_println!("  groups                List snap groups");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -63210,6 +63814,7 @@ fn cmd_haptfeedback(args: &str) {
             shell_println!("  fire <event>          Test fire event");
             shell_println!("  enable / disable      Toggle globally");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -63347,6 +63952,7 @@ fn cmd_eyeprotect(args: &str) {
                 }
             } else {
                 shell_println!("Usage: eyeprotect enable <profile_id>");
+                set_exit(1);
             }
         }
         "disable" => {
@@ -63361,6 +63967,7 @@ fn cmd_eyeprotect(args: &str) {
                 }
             } else {
                 shell_println!("Usage: eyeprotect disable <profile_id>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -63384,6 +63991,7 @@ fn cmd_eyeprotect(args: &str) {
             shell_println!("  profile <id>          Switch active profile");
             shell_println!("  enable/disable <id>   Toggle profile");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -63570,6 +64178,7 @@ fn cmd_pinnedapps(args: &str) {
             shell_println!("  launch <app>           Record launch");
             shell_println!("  Locations: taskbar(tb), start(sm), desktop(dt)");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -63722,6 +64331,7 @@ fn cmd_inputmethod(args: &str) {
             shell_println!("  select <idx>          Select candidate");
             shell_println!("  commit / cancel       Finish composition");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -63916,6 +64526,7 @@ fn cmd_storagesense(args: &str) {
             shell_println!("  age <cat> <days>      Set max age");
             shell_println!("  estimate              Estimate savings");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -64016,6 +64627,7 @@ fn cmd_autofix(args: &str) {
             shell_println!("  ignore <id>           Ignore issue");
             shell_println!("  clear                 Clear resolved");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -64170,6 +64782,7 @@ fn cmd_recentsearch(args: &str) {
             shell_println!("  clear [source]        Clear history");
             shell_println!("  enable / disable      Toggle history");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -64277,6 +64890,7 @@ fn cmd_sysmaint(args: &str) {
             shell_println!("  enable/disable <id>   Toggle task");
             shell_println!("  interval <id> <hours> Set interval");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -64443,6 +65057,7 @@ fn cmd_multiclip(args: &str) {
             shell_println!("  clear                 Clear non-pinned");
             shell_println!("  enable / disable      Toggle history");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -64506,6 +65121,7 @@ fn cmd_focussession(args: &str) {
                 }
             } else {
                 shell_println!("Usage: focussession duration <minutes>");
+                set_exit(1);
             }
         }
         "breaks" => {
@@ -64518,6 +65134,7 @@ fn cmd_focussession(args: &str) {
                 }
             } else {
                 shell_println!("Usage: focussession breaks <short_mins> <long_mins>");
+                set_exit(1);
             }
         }
         "history" => {
@@ -64572,6 +65189,7 @@ fn cmd_focussession(args: &str) {
             shell_println!("  breaks <short> <long> Set break durations");
             shell_println!("  history [max]         Session history");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -64608,6 +65226,7 @@ fn cmd_quicknote(args: &str) {
                 }
             } else {
                 shell_println!("Usage: quicknote edit <id> <content>");
+                set_exit(1);
             }
         }
         "title" => {
@@ -64620,6 +65239,7 @@ fn cmd_quicknote(args: &str) {
                 }
             } else {
                 shell_println!("Usage: quicknote title <id> <title>");
+                set_exit(1);
             }
         }
         "color" => {
@@ -64644,6 +65264,7 @@ fn cmd_quicknote(args: &str) {
                 }
             } else {
                 shell_println!("Usage: quicknote pin <id>");
+                set_exit(1);
             }
         }
         "unpin" => {
@@ -64654,6 +65275,7 @@ fn cmd_quicknote(args: &str) {
                 }
             } else {
                 shell_println!("Usage: quicknote unpin <id>");
+                set_exit(1);
             }
         }
         "tag" => {
@@ -64666,6 +65288,7 @@ fn cmd_quicknote(args: &str) {
                 }
             } else {
                 shell_println!("Usage: quicknote tag <id> <tag>");
+                set_exit(1);
             }
         }
         "delete" | "rm" => {
@@ -64676,6 +65299,7 @@ fn cmd_quicknote(args: &str) {
                 }
             } else {
                 shell_println!("Usage: quicknote delete <id>");
+                set_exit(1);
             }
         }
         "show" | "get" => {
@@ -64695,9 +65319,11 @@ fn cmd_quicknote(args: &str) {
                     }
                 } else {
                     shell_println!("Note not found.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: quicknote show <id>");
+                set_exit(1);
             }
         }
         "list" => {
@@ -64745,6 +65371,7 @@ fn cmd_quicknote(args: &str) {
                 }
             } else {
                 shell_println!("Usage: quicknote search <query>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -64777,6 +65404,7 @@ fn cmd_quicknote(args: &str) {
             shell_println!("  pinned                List pinned");
             shell_println!("  search <query>        Search notes");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -64830,6 +65458,7 @@ fn cmd_uicolorscheme(args: &str) {
                 }
             } else {
                 shell_println!("Usage: colorscheme set <id>");
+                set_exit(1);
             }
         }
         "light" => match colorscheme::set_mode(colorscheme::ColorMode::Light) {
@@ -64848,6 +65477,7 @@ fn cmd_uicolorscheme(args: &str) {
                 }
             } else {
                 shell_println!("Usage: colorscheme accent <#hex>");
+                set_exit(1);
             }
         }
         "color" => {
@@ -64862,6 +65492,7 @@ fn cmd_uicolorscheme(args: &str) {
                 shell_println!("Usage: colorscheme color <role> <#hex>");
                 shell_println!("  Roles: background, surface, primary, secondary, accent,");
                 shell_println!("         text, textsec, border, error, warning, success, link");
+                set_exit(1);
             }
         }
         "get" => {
@@ -64870,9 +65501,11 @@ fn cmd_uicolorscheme(args: &str) {
                     shell_println!("{:?}: {}", role, hex);
                 } else {
                     shell_println!("Color not found.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: colorscheme get <role>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -64894,6 +65527,7 @@ fn cmd_uicolorscheme(args: &str) {
             shell_println!("  color <role> <#hex>   Set specific color");
             shell_println!("  get <role>            Get color value");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -64933,6 +65567,7 @@ fn cmd_appcompat(args: &str) {
                 }
             } else {
                 shell_println!("Usage: appcompat set <app> <current|legacy1|legacy2|max>");
+                set_exit(1);
             }
         }
         "shim" => {
@@ -64948,6 +65583,7 @@ fn cmd_appcompat(args: &str) {
                         }
                     } else {
                         shell_println!("Usage: appcompat shim add <app> <shim_name>");
+                        set_exit(1);
                     }
                 }
                 "remove" | "rm" => {
@@ -64958,6 +65594,7 @@ fn cmd_appcompat(args: &str) {
                         }
                     } else {
                         shell_println!("Usage: appcompat shim remove <app> <shim_name>");
+                        set_exit(1);
                     }
                 }
                 _ => {
@@ -64985,6 +65622,7 @@ fn cmd_appcompat(args: &str) {
                 }
             } else {
                 shell_println!("Usage: appcompat profile <app>");
+                set_exit(1);
             }
         }
         "list" => {
@@ -65014,6 +65652,7 @@ fn cmd_appcompat(args: &str) {
                 }
             } else {
                 shell_println!("Usage: appcompat launch <app>");
+                set_exit(1);
             }
         }
         "enable" => {
@@ -65024,6 +65663,7 @@ fn cmd_appcompat(args: &str) {
                 }
             } else {
                 shell_println!("Usage: appcompat enable <app>");
+                set_exit(1);
             }
         }
         "disable" => {
@@ -65034,6 +65674,7 @@ fn cmd_appcompat(args: &str) {
                 }
             } else {
                 shell_println!("Usage: appcompat disable <app>");
+                set_exit(1);
             }
         }
         "remove" | "rm" => {
@@ -65044,6 +65685,7 @@ fn cmd_appcompat(args: &str) {
                 }
             } else {
                 shell_println!("Usage: appcompat remove <app>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -65071,6 +65713,7 @@ fn cmd_appcompat(args: &str) {
             shell_println!("  enable/disable <app>  Toggle profile");
             shell_println!("  remove <app>          Remove profile");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -65142,6 +65785,7 @@ fn cmd_windowrules(args: &str) {
             } else {
                 shell_println!("Usage: windowrules add <match_type> <value> [name]");
                 shell_println!("  Match types: app, appcontains, title, class, any");
+                set_exit(1);
             }
         }
         "action" => {
@@ -65165,6 +65809,7 @@ fn cmd_windowrules(args: &str) {
                 shell_println!("  Actions: position, size, workspace, ontop, onbottom, opacity,");
                 shell_println!("           nodecor, maximized, minimized, fullscreen, skiptask,");
                 shell_println!("           skippager, pinall, center");
+                set_exit(1);
             }
         }
         "enable" => {
@@ -65175,6 +65820,7 @@ fn cmd_windowrules(args: &str) {
                 }
             } else {
                 shell_println!("Usage: windowrules enable <id>");
+                set_exit(1);
             }
         }
         "disable" => {
@@ -65185,6 +65831,7 @@ fn cmd_windowrules(args: &str) {
                 }
             } else {
                 shell_println!("Usage: windowrules disable <id>");
+                set_exit(1);
             }
         }
         "remove" | "rm" => {
@@ -65195,6 +65842,7 @@ fn cmd_windowrules(args: &str) {
                 }
             } else {
                 shell_println!("Usage: windowrules remove <id>");
+                set_exit(1);
             }
         }
         "match" => {
@@ -65235,6 +65883,7 @@ fn cmd_windowrules(args: &str) {
             shell_println!("  remove <id>           Remove rule");
             shell_println!("  match <app> [title]   Test matching");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -65314,6 +65963,7 @@ fn cmd_spatialaudio(args: &str) {
                 }
             } else {
                 shell_println!("Usage: spatialaudio layout <stereo|5.1|7.1|atmos|binaural>");
+                set_exit(1);
             }
         }
         "room" => {
@@ -65324,6 +65974,7 @@ fn cmd_spatialaudio(args: &str) {
                 }
             } else {
                 shell_println!("Usage: spatialaudio room <none|small|medium|large|hall|arena>");
+                set_exit(1);
             }
         }
         "reverb" => {
@@ -65334,6 +65985,7 @@ fn cmd_spatialaudio(args: &str) {
                 }
             } else {
                 shell_println!("Usage: spatialaudio reverb <0-100>");
+                set_exit(1);
             }
         }
         "headtrack" => {
@@ -65372,6 +66024,7 @@ fn cmd_spatialaudio(args: &str) {
                 }
             } else {
                 shell_println!("Usage: spatialaudio app <name> [on|off]");
+                set_exit(1);
             }
         }
         "apps" => {
@@ -65415,6 +66068,7 @@ fn cmd_spatialaudio(args: &str) {
             shell_println!("  app <name> [on|off]   Per-app toggle");
             shell_println!("  apps                  List app configs");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -65475,6 +66129,7 @@ fn cmd_filetransfer(args: &str) {
                 }
             } else {
                 shell_println!("Usage: filetransfer visibility <hidden|contacts|everyone>");
+                set_exit(1);
             }
         }
         "savepath" => {
@@ -65485,6 +66140,7 @@ fn cmd_filetransfer(args: &str) {
                 }
             } else {
                 shell_println!("Usage: filetransfer savepath <path>");
+                set_exit(1);
             }
         }
         "discover" => {
@@ -65513,6 +66169,7 @@ fn cmd_filetransfer(args: &str) {
                 }
             } else {
                 shell_println!("Usage: filetransfer send <device_id> <filename> [size]");
+                set_exit(1);
             }
         }
         "accept" => {
@@ -65523,6 +66180,7 @@ fn cmd_filetransfer(args: &str) {
                 }
             } else {
                 shell_println!("Usage: filetransfer accept <transfer_id>");
+                set_exit(1);
             }
         }
         "reject" => {
@@ -65533,6 +66191,7 @@ fn cmd_filetransfer(args: &str) {
                 }
             } else {
                 shell_println!("Usage: filetransfer reject <transfer_id>");
+                set_exit(1);
             }
         }
         "cancel" => {
@@ -65543,6 +66202,7 @@ fn cmd_filetransfer(args: &str) {
                 }
             } else {
                 shell_println!("Usage: filetransfer cancel <transfer_id>");
+                set_exit(1);
             }
         }
         "transfers" => {
@@ -65597,6 +66257,7 @@ fn cmd_filetransfer(args: &str) {
             shell_println!("  cancel <id>           Cancel transfer");
             shell_println!("  transfers [max]       List transfers");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -65687,6 +66348,7 @@ fn cmd_startupopt(args: &str) {
                 }
             } else {
                 shell_println!("Usage: startupopt end <stage_name>");
+                set_exit(1);
             }
         }
         "boot" => match startupopt::record_boot() {
@@ -65719,6 +66381,7 @@ fn cmd_startupopt(args: &str) {
                 }
             } else {
                 shell_println!("Usage: startupopt apply <suggestion_id>");
+                set_exit(1);
             }
         }
         "clear" => match startupopt::clear_stages() {
@@ -65754,6 +66417,7 @@ fn cmd_startupopt(args: &str) {
             shell_println!("  apply <id>            Mark suggestion applied");
             shell_println!("  clear                 Clear stage data");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -65816,6 +66480,7 @@ fn cmd_usagetime(args: &str) {
                 }
             } else {
                 shell_println!("Usage: usagetime focus <app>");
+                set_exit(1);
             }
         }
         "blur" => {
@@ -65826,6 +66491,7 @@ fn cmd_usagetime(args: &str) {
                 }
             } else {
                 shell_println!("Usage: usagetime blur <app>");
+                set_exit(1);
             }
         }
         "limit" => {
@@ -65838,6 +66504,7 @@ fn cmd_usagetime(args: &str) {
                 }
             } else {
                 shell_println!("Usage: usagetime limit <app> <minutes>");
+                set_exit(1);
             }
         }
         "unlimit" => {
@@ -65848,6 +66515,7 @@ fn cmd_usagetime(args: &str) {
                 }
             } else {
                 shell_println!("Usage: usagetime unlimit <app>");
+                set_exit(1);
             }
         }
         "category" | "cat" => {
@@ -65902,6 +66570,7 @@ fn cmd_usagetime(args: &str) {
             shell_println!("  reset                 Reset all data");
             shell_println!("  enable / disable      Toggle tracking");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -66005,6 +66674,7 @@ fn cmd_voicecontrol(args: &str) {
                 }
             } else {
                 shell_println!("Usage: voicecontrol add <phrase> <action>");
+                set_exit(1);
             }
         }
         "remove" | "rm" => {
@@ -66015,6 +66685,7 @@ fn cmd_voicecontrol(args: &str) {
                 }
             } else {
                 shell_println!("Usage: voicecontrol remove <id>");
+                set_exit(1);
             }
         }
         "recognize" | "rec" => {
@@ -66027,6 +66698,7 @@ fn cmd_voicecontrol(args: &str) {
                 }
             } else {
                 shell_println!("Usage: voicecontrol recognize <phrase>");
+                set_exit(1);
             }
         }
         "history" => {
@@ -66076,6 +66748,7 @@ fn cmd_voicecontrol(args: &str) {
             shell_println!("  recognize <phrase>    Test recognition");
             shell_println!("  history [max]         Recognition history");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -66133,6 +66806,7 @@ fn cmd_devpair(args: &str) {
                 }
             } else {
                 shell_println!("Usage: devpair pair <id>");
+                set_exit(1);
             }
         }
         "confirm" => {
@@ -66143,6 +66817,7 @@ fn cmd_devpair(args: &str) {
                 }
             } else {
                 shell_println!("Usage: devpair confirm <id>");
+                set_exit(1);
             }
         }
         "trust" => {
@@ -66153,6 +66828,7 @@ fn cmd_devpair(args: &str) {
                 }
             } else {
                 shell_println!("Usage: devpair trust <id>");
+                set_exit(1);
             }
         }
         "untrust" => {
@@ -66163,6 +66839,7 @@ fn cmd_devpair(args: &str) {
                 }
             } else {
                 shell_println!("Usage: devpair untrust <id>");
+                set_exit(1);
             }
         }
         "disconnect" => {
@@ -66173,6 +66850,7 @@ fn cmd_devpair(args: &str) {
                 }
             } else {
                 shell_println!("Usage: devpair disconnect <id>");
+                set_exit(1);
             }
         }
         "forget" => {
@@ -66183,6 +66861,7 @@ fn cmd_devpair(args: &str) {
                 }
             } else {
                 shell_println!("Usage: devpair forget <id>");
+                set_exit(1);
             }
         }
         "paired" => {
@@ -66230,6 +66909,7 @@ fn cmd_devpair(args: &str) {
             shell_println!("  forget <id>           Remove device");
             shell_println!("  paired                List paired devices");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -66312,6 +66992,7 @@ fn cmd_notifgroup(args: &str) {
                 }
             } else {
                 shell_println!("Usage: notifgroup read <notif_id>");
+                set_exit(1);
             }
         }
         "readgroup" | "rg" => {
@@ -66322,6 +67003,7 @@ fn cmd_notifgroup(args: &str) {
                 }
             } else {
                 shell_println!("Usage: notifgroup readgroup <group_id>");
+                set_exit(1);
             }
         }
         "expand" => {
@@ -66332,6 +67014,7 @@ fn cmd_notifgroup(args: &str) {
                 }
             } else {
                 shell_println!("Usage: notifgroup expand <group_id>");
+                set_exit(1);
             }
         }
         "collapse" => {
@@ -66342,6 +67025,7 @@ fn cmd_notifgroup(args: &str) {
                 }
             } else {
                 shell_println!("Usage: notifgroup collapse <group_id>");
+                set_exit(1);
             }
         }
         "mute" => {
@@ -66352,6 +67036,7 @@ fn cmd_notifgroup(args: &str) {
                 }
             } else {
                 shell_println!("Usage: notifgroup mute <group_id>");
+                set_exit(1);
             }
         }
         "unmute" => {
@@ -66362,6 +67047,7 @@ fn cmd_notifgroup(args: &str) {
                 }
             } else {
                 shell_println!("Usage: notifgroup unmute <group_id>");
+                set_exit(1);
             }
         }
         "dismiss" => {
@@ -66372,6 +67058,7 @@ fn cmd_notifgroup(args: &str) {
                 }
             } else {
                 shell_println!("Usage: notifgroup dismiss <group_id>");
+                set_exit(1);
             }
         }
         "clear" => match notifgroup::dismiss_all() {
@@ -66418,6 +67105,7 @@ fn cmd_notifgroup(args: &str) {
             shell_println!("  clear                 Dismiss all");
             shell_println!("  mode [type]           Get/set grouping");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -66521,6 +67209,7 @@ fn cmd_playmedia(args: &str) {
                 }
             } else {
                 shell_println!("Usage: playmedia track <session_id> <title> [artist]");
+                set_exit(1);
             }
         }
         "sessions" => {
@@ -66566,6 +67255,7 @@ fn cmd_playmedia(args: &str) {
             shell_println!("  track <id> <t> [a]    Set track info");
             shell_println!("  sessions              List sessions");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -66661,6 +67351,7 @@ fn cmd_kbmacro(args: &str) {
                 }
             } else {
                 shell_println!("Usage: kbmacro play <id>");
+                set_exit(1);
             }
         }
         "hotkey" => {
@@ -66673,6 +67364,7 @@ fn cmd_kbmacro(args: &str) {
                 }
             } else {
                 shell_println!("Usage: kbmacro hotkey <id> <key_combo>");
+                set_exit(1);
             }
         }
         "repeat" => {
@@ -66685,6 +67377,7 @@ fn cmd_kbmacro(args: &str) {
                 }
             } else {
                 shell_println!("Usage: kbmacro repeat <id> <count>");
+                set_exit(1);
             }
         }
         "enable" => {
@@ -66711,6 +67404,7 @@ fn cmd_kbmacro(args: &str) {
                 }
             } else {
                 shell_println!("Usage: kbmacro delete <id>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -66741,6 +67435,7 @@ fn cmd_kbmacro(args: &str) {
             shell_println!("  enable/disable <id>   Toggle macro");
             shell_println!("  delete <id>           Delete macro");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -66906,6 +67601,7 @@ fn cmd_sysresource(args: &str) {
             shell_println!("  history [max]         Show history");
             shell_println!("  clear                 Clear history");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -66952,6 +67648,7 @@ fn cmd_faceunlock(args: &str) {
                 }
             } else {
                 shell_println!("Usage: faceunlock enroll <user_id> <name>");
+                set_exit(1);
             }
         }
         "unenroll" => {
@@ -66962,6 +67659,7 @@ fn cmd_faceunlock(args: &str) {
                 }
             } else {
                 shell_println!("Usage: faceunlock unenroll <user_id>");
+                set_exit(1);
             }
         }
         "verify" => {
@@ -67028,6 +67726,7 @@ fn cmd_faceunlock(args: &str) {
             shell_println!("  security <level>      Set security level");
             shell_println!("  liveness [on|off]     Toggle liveness check");
             shell_println!("  stats / test / init");
+            set_exit(1);
         }
     }
 }
@@ -67101,9 +67800,11 @@ fn cmd_usbpolicy(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid rule ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: usbpolicy remove <rule_id>");
+                set_exit(1);
             }
         }
         "default" => {
@@ -67115,6 +67816,7 @@ fn cmd_usbpolicy(args: &str) {
                 }
             } else {
                 shell_println!("Usage: usbpolicy default <allow|deny|ask|readonly>");
+                set_exit(1);
             }
         }
         "block" => {
@@ -67126,6 +67828,7 @@ fn cmd_usbpolicy(args: &str) {
                 }
             } else {
                 shell_println!("Usage: usbpolicy block <on|off>");
+                set_exit(1);
             }
         }
         "list" => {
@@ -67270,9 +67973,11 @@ fn cmd_applaunch(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid item ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: applaunch launch <id>");
+                set_exit(1);
             }
         }
         "register" | "add" => {
@@ -67303,9 +68008,11 @@ fn cmd_applaunch(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid item ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: applaunch unregister <id>");
+                set_exit(1);
             }
         }
         "list" => {
@@ -67409,6 +68116,7 @@ fn cmd_sysprofiler(args: &str) {
                 }
             } else {
                 shell_println!("Usage: sysprofiler section <cpu|memory|storage|...>");
+                set_exit(1);
             }
         }
         "all" => {
@@ -67452,6 +68160,7 @@ fn cmd_sysprofiler(args: &str) {
                 }
             } else {
                 shell_println!("Usage: sysprofiler refresh <section>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -67544,9 +68253,11 @@ fn cmd_clipsync(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid device ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: clipsync remove <device_id>");
+                set_exit(1);
             }
         }
         "copy" => {
@@ -67575,9 +68286,11 @@ fn cmd_clipsync(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid device ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: clipsync sync <device_id>");
+                set_exit(1);
             }
         }
         "devices" | "list" => {
@@ -67630,9 +68343,11 @@ fn cmd_clipsync(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid size");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: clipsync maxsize <bytes>");
+                set_exit(1);
             }
         }
         "allow" | "deny" => {
@@ -67650,6 +68365,7 @@ fn cmd_clipsync(args: &str) {
                 }
             } else {
                 shell_println!("Usage: clipsync allow|deny <text|image|file|richtext|url>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -67744,6 +68460,7 @@ fn cmd_netusage(args: &str) {
                 }
             } else {
                 shell_println!("Usage: netusage connect <app>");
+                set_exit(1);
             }
         }
         "cap" => {
@@ -67792,6 +68509,7 @@ fn cmd_netusage(args: &str) {
                 }
             } else {
                 shell_println!("Usage: netusage app <name>");
+                set_exit(1);
             }
         }
         "top" => {
@@ -67922,9 +68640,11 @@ fn cmd_touchscreen(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid device ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: touchscreen remove <id>");
+                set_exit(1);
             }
         }
         "calibrate" | "cal" => {
@@ -67936,9 +68656,11 @@ fn cmd_touchscreen(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid device ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: touchscreen calibrate <device_id>");
+                set_exit(1);
             }
         }
         "sensitivity" | "sens" => {
@@ -67950,6 +68672,7 @@ fn cmd_touchscreen(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid value (1-100)");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Sensitivity: {}", touchscreen::get_sensitivity());
@@ -67964,6 +68687,7 @@ fn cmd_touchscreen(args: &str) {
                 }
             } else {
                 shell_println!("Usage: touchscreen palm <on|off>");
+                set_exit(1);
             }
         }
         "sound" => {
@@ -67975,6 +68699,7 @@ fn cmd_touchscreen(args: &str) {
                 }
             } else {
                 shell_println!("Usage: touchscreen sound <on|off>");
+                set_exit(1);
             }
         }
         "vibration" | "haptic" => {
@@ -67986,6 +68711,7 @@ fn cmd_touchscreen(args: &str) {
                 }
             } else {
                 shell_println!("Usage: touchscreen vibration <on|off>");
+                set_exit(1);
             }
         }
         "gesture" => {
@@ -68402,6 +69128,7 @@ fn cmd_appdefaults(args: &str) {
                 }
             } else {
                 shell_println!("Usage: appdefaults reset <app>");
+                set_exit(1);
             }
         }
         "remove" => {
@@ -68412,6 +69139,7 @@ fn cmd_appdefaults(args: &str) {
                 }
             } else {
                 shell_println!("Usage: appdefaults remove <app>");
+                set_exit(1);
             }
         }
         "show" => {
@@ -68438,6 +69166,7 @@ fn cmd_appdefaults(args: &str) {
                 }
             } else {
                 shell_println!("Usage: appdefaults show <app>");
+                set_exit(1);
             }
         }
         "apps" | "list" => {
@@ -68463,6 +69192,7 @@ fn cmd_appdefaults(args: &str) {
                 }
             } else {
                 shell_println!("Usage: appdefaults keys <app>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -68559,9 +69289,11 @@ fn cmd_policyengine(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid rule ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: policyengine remove <id>");
+                set_exit(1);
             }
         }
         "list" => {
@@ -68623,6 +69355,7 @@ fn cmd_policyengine(args: &str) {
                 }
             } else {
                 shell_println!("Usage: policyengine enforce <on|off>");
+                set_exit(1);
             }
         }
         "default" => {
@@ -68634,6 +69367,7 @@ fn cmd_policyengine(args: &str) {
                 }
             } else {
                 shell_println!("Usage: policyengine default <allow|deny|audit>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -68721,9 +69455,11 @@ fn cmd_fontpreview(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid font ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: fontpreview preview <id> [size] [sample_text]");
+                set_exit(1);
             }
         }
         "compare" => {
@@ -68775,6 +69511,7 @@ fn cmd_fontpreview(args: &str) {
                 }
             } else {
                 shell_println!("Usage: fontpreview search <query>");
+                set_exit(1);
             }
         }
         "category" | "cat" => {
@@ -68790,6 +69527,7 @@ fn cmd_fontpreview(args: &str) {
                 }
             } else {
                 shell_println!("Usage: fontpreview category <sans|serif|mono|display|hand|symbol>");
+                set_exit(1);
             }
         }
         "list" => {
@@ -68952,6 +69690,7 @@ fn cmd_wifiscan(args: &str) {
                 }
             } else {
                 shell_println!("Usage: wifiscan connect <ssid>");
+                set_exit(1);
             }
         }
         "disconnect" => match wifiscan::disconnect() {
@@ -68966,6 +69705,7 @@ fn cmd_wifiscan(args: &str) {
                 }
             } else {
                 shell_println!("Usage: wifiscan forget <ssid>");
+                set_exit(1);
             }
         }
         "status" => {
@@ -69095,9 +69835,11 @@ fn cmd_splitview(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid split ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: splitview remove <split_id>");
+                set_exit(1);
             }
         }
         "add" => {
@@ -69264,9 +70006,11 @@ fn cmd_iotdevice(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid device ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: iotdevice remove <id>");
+                set_exit(1);
             }
         }
         "set" => {
@@ -69296,9 +70040,11 @@ fn cmd_iotdevice(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid device ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: iotdevice online|offline <id>");
+                set_exit(1);
             }
         }
         "group" => {
@@ -69349,6 +70095,7 @@ fn cmd_iotdevice(args: &str) {
                 }
             } else {
                 shell_println!("Usage: iotdevice room <name>");
+                set_exit(1);
             }
         }
         "list" => {
@@ -69574,6 +70321,7 @@ fn cmd_prochistory(args: &str) {
                 }
             } else {
                 shell_println!("Usage: prochistory search <query>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -69660,9 +70408,11 @@ fn cmd_notiffilter(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid rule ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: notiffilter remove <id>");
+                set_exit(1);
             }
         }
         "enable" | "disable" => {
@@ -69679,9 +70429,11 @@ fn cmd_notiffilter(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid rule ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: notiffilter enable|disable <id>");
+                set_exit(1);
             }
         }
         "eval" | "test-eval" => {
@@ -69805,6 +70557,7 @@ fn cmd_colorblind(args: &str) {
                 }
             } else {
                 shell_println!("Usage: colorblind type <protan|deutan|tritan|...>");
+                set_exit(1);
             }
         }
         "intensity" => {
@@ -69816,6 +70569,7 @@ fn cmd_colorblind(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid value (0-100)");
+                    set_exit(1);
                 }
             } else {
                 let (_, _, intensity, _) = colorblind::current();
@@ -69831,6 +70585,7 @@ fn cmd_colorblind(args: &str) {
                 }
             } else {
                 shell_println!("Usage: colorblind simulate <on|off>");
+                set_exit(1);
             }
         }
         "preset" => {
@@ -69842,9 +70597,11 @@ fn cmd_colorblind(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid preset ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: colorblind preset <id>");
+                set_exit(1);
             }
         }
         "presets" => {
@@ -70038,6 +70795,7 @@ fn cmd_clipaction(args: &str) {
                 "Usage: clipaction <detect|actions|exec|add|remove|list|stats|init|test>"
             );
             shell_println!("Aliases: caction");
+            set_exit(1);
         }
     }
 }
@@ -70218,6 +70976,7 @@ fn cmd_energysaver(args: &str) {
                 "Usage: energysaver <mode|profile|brightness|cpulimit|throttle|unthrottle|throttled|estimate|autoswitch|stats|init|test>"
             );
             shell_println!("Aliases: esaver");
+            set_exit(1);
         }
     }
 }
@@ -70362,6 +71121,7 @@ fn cmd_filerules(args: &str) {
                 "Usage: filerules <list|add|remove|enable|disable|eval|stats|init|test>"
             );
             shell_println!("Aliases: frules");
+            set_exit(1);
         }
     }
 }
@@ -70533,6 +71293,7 @@ fn cmd_secureboot(args: &str) {
                 "Usage: secureboot <status|set|enroll|remove|verify|keys|records|stats|init|test>"
             );
             shell_println!("Aliases: sboot");
+            set_exit(1);
         }
     }
 }
@@ -70707,6 +71468,7 @@ fn cmd_eventlog(args: &str) {
                 "Usage: eventlog <log|recent|errors|source|category|clear|counts|stats|init|test>"
             );
             shell_println!("Aliases: elog");
+            set_exit(1);
         }
     }
 }
@@ -70881,6 +71643,7 @@ fn cmd_systemimage(args: &str) {
                 "Usage: systemimage <list|create|delete|restore|verify|info|stats|init|test>"
             );
             shell_println!("Aliases: simg");
+            set_exit(1);
         }
     }
 }
@@ -71084,6 +71847,7 @@ fn cmd_raidmgr(args: &str) {
                 "Usage: raidmgr <list|create|delete|add|remove|fail|rebuild|info|stats|init|test>"
             );
             shell_println!("Aliases: raid");
+            set_exit(1);
         }
     }
 }
@@ -71321,6 +72085,7 @@ fn cmd_networkbridge(args: &str) {
                 "Usage: networkbridge <list|create|delete|add|remove|up|down|ip|mtu|info|stats|init|test>"
             );
             shell_println!("Aliases: nbridge");
+            set_exit(1);
         }
     }
 }
@@ -71463,6 +72228,7 @@ fn cmd_secureerase(args: &str) {
                 "Usage: secureerase <start|complete|cancel|status|list|stats|init|test>"
             );
             shell_println!("Aliases: serase");
+            set_exit(1);
         }
     }
 }
@@ -71596,6 +72362,7 @@ fn cmd_dnssettings(args: &str) {
                 "Usage: dnssettings <servers|add|remove|resolve|flush|search|stats|init|test>"
             );
             shell_println!("Aliases: dns");
+            set_exit(1);
         }
     }
 }
@@ -71781,6 +72548,7 @@ fn cmd_backupsched(args: &str) {
                 "Usage: backupsched <list|create|delete|enable|disable|run|history|stats|init|test>"
             );
             shell_println!("Aliases: bsched");
+            set_exit(1);
         }
     }
 }
@@ -71990,6 +72758,7 @@ fn cmd_displaycal(args: &str) {
                 "Usage: displaycal <list|add|remove|profile|gamma|whitepoint|calibrate|info|stats|init|test>"
             );
             shell_println!("Aliases: dcal");
+            set_exit(1);
         }
     }
 }
@@ -72168,6 +72937,7 @@ fn cmd_vpnprofile(args: &str) {
                 "Usage: vpnprofile <list|create|delete|connect|disconnect|killswitch|info|stats|init|test>"
             );
             shell_println!("Aliases: vpnp");
+            set_exit(1);
         }
     }
 }
@@ -72307,6 +73077,7 @@ fn cmd_diskhealth(args: &str) {
         _ => {
             shell_println!("Usage: diskhealth <list|check|add|remove|info|stats|init|test>");
             shell_println!("Aliases: dhealth");
+            set_exit(1);
         }
     }
 }
@@ -72422,6 +73193,7 @@ fn cmd_recoverypart(args: &str) {
                 "Usage: recoverypart <status|add|remove|verify|repair|boot|stats|init|test>"
             );
             shell_println!("Aliases: rpart");
+            set_exit(1);
         }
     }
 }
@@ -72633,6 +73405,7 @@ fn cmd_userprofile(args: &str) {
             );
             shell_println!("  home|shell|avatar <id> <path>   Set path (avatar: empty clears)");
             shell_println!("Aliases: uprof");
+            set_exit(1);
         }
     }
 }
@@ -72736,6 +73509,7 @@ fn cmd_diskclean(args: &str) {
         _ => {
             shell_println!("Usage: diskclean <scan|clean|estimate|items|stats|init|test>");
             shell_println!("Aliases: dclean");
+            set_exit(1);
         }
     }
 }
@@ -72804,9 +73578,11 @@ fn cmd_cas(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid hash hex");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: cas get <hash>");
+                set_exit(1);
             }
         }
         "has" => {
@@ -72815,9 +73591,11 @@ fn cmd_cas(args: &str) {
                     shell_println!("{}", if cas::has(&hash) { "yes" } else { "no" });
                 } else {
                     shell_println!("Invalid hash hex");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: cas has <hash>");
+                set_exit(1);
             }
         }
         "release" => {
@@ -72829,9 +73607,11 @@ fn cmd_cas(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid hash hex");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: cas release <hash>");
+                set_exit(1);
             }
         }
         "gc" => {
@@ -72845,6 +73625,7 @@ fn cmd_cas(args: &str) {
                     shell_println!("Max bytes set to {}", max);
                 } else {
                     shell_println!("Invalid number");
+                    set_exit(1);
                 }
             } else {
                 let s = cas::stats();
@@ -72860,6 +73641,7 @@ fn cmd_cas(args: &str) {
             shell_println!("  release <hash>  — decrement refcount");
             shell_println!("  gc              — garbage collect zero-ref blobs");
             shell_println!("  limit [bytes]   — show/set max byte limit");
+            set_exit(1);
         }
     }
 }
@@ -72919,6 +73701,7 @@ fn cmd_logrotate(args: &str) {
                 }
             } else {
                 shell_println!("Usage: logrotate add <path> [compress] [max_archives]");
+                set_exit(1);
             }
         }
         "remove" => {
@@ -72930,9 +73713,11 @@ fn cmd_logrotate(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: logrotate remove <id>");
+                set_exit(1);
             }
         }
         "rotate" => {
@@ -72944,6 +73729,7 @@ fn cmd_logrotate(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                 }
             } else {
                 logrotate::init_defaults();
@@ -72970,6 +73756,7 @@ fn cmd_logrotate(args: &str) {
         }
         _ => {
             shell_println!("Usage: logrotate [stats|list|add|remove|rotate|events]");
+            set_exit(1);
         }
     }
 }
@@ -73048,9 +73835,11 @@ fn cmd_powerwake(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: powerwake cancel <id>");
+                set_exit(1);
             }
         }
         "wol" => match parts.get(1).copied() {
@@ -73063,6 +73852,7 @@ fn cmd_powerwake(args: &str) {
                     }
                 } else {
                     shell_println!("Usage: powerwake wol add <name> <mac>");
+                    set_exit(1);
                 }
             }
             Some("send") => {
@@ -73074,9 +73864,11 @@ fn cmd_powerwake(args: &str) {
                         }
                     } else {
                         shell_println!("Invalid ID");
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Usage: powerwake wol send <id>");
+                    set_exit(1);
                 }
             }
             Some("list") | None => {
@@ -73106,13 +73898,16 @@ fn cmd_powerwake(args: &str) {
                         }
                     } else {
                         shell_println!("Invalid ID");
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Usage: powerwake wol remove <id>");
+                    set_exit(1);
                 }
             }
             _ => {
                 shell_println!("Usage: powerwake wol [list|add|send|remove]");
+                set_exit(1);
             }
         },
         "history" => {
@@ -73128,6 +73923,7 @@ fn cmd_powerwake(args: &str) {
         }
         _ => {
             shell_println!("Usage: powerwake [stats|timers|schedule|cancel|wol|history]");
+            set_exit(1);
         }
     }
 }
@@ -73200,6 +73996,7 @@ fn cmd_diskio(args: &str) {
                 }
             } else {
                 shell_println!("Usage: diskio device <name>");
+                set_exit(1);
             }
         }
         "reset" => {
@@ -73210,10 +74007,12 @@ fn cmd_diskio(args: &str) {
                 }
             } else {
                 shell_println!("Usage: diskio reset <device>");
+                set_exit(1);
             }
         }
         _ => {
             shell_println!("Usage: diskio [stats|list|device|reset]");
+            set_exit(1);
         }
     }
 }
@@ -73266,6 +74065,7 @@ fn cmd_sysuptime(args: &str) {
         }
         _ => {
             shell_println!("Usage: sysuptime [show|history|stats]");
+            set_exit(1);
         }
     }
 }
@@ -73356,6 +74156,7 @@ fn cmd_netspeed(args: &str) {
         }
         _ => {
             shell_println!("Usage: netspeed [stats|test|bandwidth|history]");
+            set_exit(1);
         }
     }
 }
@@ -73454,6 +74255,7 @@ fn cmd_cfreq(args: &str) {
         }
         _ => {
             shell_println!("Usage: cpufreq [list|governor|boost|stats]");
+            set_exit(1);
         }
     }
 }
@@ -73545,9 +74347,11 @@ fn cmd_therm(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid arguments");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: thermal fan <id> <duty%>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -73561,6 +74365,7 @@ fn cmd_therm(args: &str) {
         }
         _ => {
             shell_println!("Usage: thermal [zones|fans|fan|stats]");
+            set_exit(1);
         }
     }
 }
@@ -73633,6 +74438,7 @@ fn cmd_swapmon(args: &str) {
         }
         _ => {
             shell_println!("Usage: swapmon [show|devices|processes|stats]");
+            set_exit(1);
         }
     }
 }
@@ -73668,6 +74474,7 @@ fn cmd_sysctlfs(args: &str) {
                 }
             } else {
                 shell_println!("Usage: sysctlfs get <key>");
+                set_exit(1);
             }
         }
         "set" => {
@@ -73679,6 +74486,7 @@ fn cmd_sysctlfs(args: &str) {
                 }
             } else {
                 shell_println!("Usage: sysctlfs set <key> <value>");
+                set_exit(1);
             }
         }
         "modified" => {
@@ -73703,6 +74511,7 @@ fn cmd_sysctlfs(args: &str) {
         }
         _ => {
             shell_println!("Usage: sysctlfs [list|get|set|modified|stats]");
+            set_exit(1);
         }
     }
 }
@@ -73796,9 +74605,11 @@ fn cmd_cputopo(args: &str) {
                     }
                 } else {
                     shell_println!("Invalid CPU ID");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: cputopo siblings <cpu_id>");
+                set_exit(1);
             }
         }
         "stats" => {
@@ -73813,6 +74624,7 @@ fn cmd_cputopo(args: &str) {
         }
         _ => {
             shell_println!("Usage: cputopo [show|cpus|cache|siblings|stats]");
+            set_exit(1);
         }
     }
 }
@@ -73871,6 +74683,7 @@ fn cmd_memlayout(args: &str) {
         }
         _ => {
             shell_println!("Usage: memlayout [show|regions|stats]");
+            set_exit(1);
         }
     }
 }
@@ -73948,6 +74761,7 @@ fn cmd_lavg(args: &str) {
         }
         _ => {
             shell_println!("Usage: lavg [status|update <tasks>|history|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -74301,6 +75115,7 @@ fn cmd_fwupdate(args: &str) {
         }
         _ => {
             shell_println!("Usage: fwupdate [list|get <id>|check|apply <id>|history|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -74868,6 +75683,7 @@ fn cmd_netmon(args: &str) {
         }
         _ => {
             shell_println!("Usage: netmon [list|get <id>|pid <pid>|close <id>|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -76952,6 +77768,7 @@ fn cmd_numastat(args: &str) {
         }
         _ => {
             shell_println!("Usage: numastat [list|dist|balance|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -77150,6 +77967,7 @@ fn cmd_wqstat(args: &str) {
         }
         _ => {
             shell_println!("Usage: wqstat [list|get <name>|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -77236,6 +78054,7 @@ fn cmd_slabstat(args: &str) {
         }
         _ => {
             shell_println!("Usage: slabstat [list|top [n]|get <name>|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -77309,6 +78128,7 @@ fn cmd_timerq(args: &str) {
         }
         _ => {
             shell_println!("Usage: timerq [list|pending|fire|cleanup|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -77976,6 +78796,7 @@ fn cmd_tlbstat(args: &str) {
         }
         _ => {
             shell_println!("Usage: tlbstat [cpus|shootdowns [n]|hitrate|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -78040,6 +78861,7 @@ fn cmd_pagestat(args: &str) {
         }
         _ => {
             shell_println!("Usage: pagestat [zones|orders|hugepages|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -78118,6 +78940,7 @@ fn cmd_dmastat(args: &str) {
         }
         _ => {
             shell_println!("Usage: dmastat [devices|faults [n]|register <id> <name>|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -78187,6 +79010,7 @@ fn cmd_compstat(args: &str) {
         }
         _ => {
             shell_println!("Usage: compstat [zones|events [n]|rate|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -78255,6 +79079,7 @@ fn cmd_irqstat(args: &str) {
         }
         _ => {
             shell_println!("Usage: irqstat [lines|cpus|register <num> <name>|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -78536,6 +79361,7 @@ fn cmd_softirq(args: &str) {
         }
         _ => {
             shell_println!("Usage: softirq [types|cpus|raise <type>|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -78723,6 +79549,7 @@ fn cmd_schedclass(args: &str) {
         }
         _ => {
             shell_println!("Usage: schedclass [classes|tasks|show <pid>|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -78778,6 +79605,7 @@ fn cmd_cpuidle(args: &str) {
         }
         _ => {
             shell_println!("Usage: cpuidle [cpus|residency|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -78838,6 +79666,7 @@ fn cmd_futexstat(args: &str) {
         }
         _ => {
             shell_println!("Usage: futexstat [hotspots [n]|procs|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79101,6 +79930,7 @@ fn cmd_taskstats(args: &str) {
         "test" => taskstats::self_test(),
         _ => {
             shell_println!("Usage: taskstats [list|top [n]|get <pid>|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79296,6 +80126,7 @@ fn cmd_netsock(args: &str) {
         "test" => netsock::self_test(),
         _ => {
             shell_println!("Usage: netsock [list|tcp|udp|pid <pid>|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79352,6 +80183,7 @@ fn cmd_blkqueue(args: &str) {
         "test" => blkqueue::self_test(),
         _ => {
             shell_println!("Usage: blkqueue [list|device <name>|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79402,6 +80234,7 @@ fn cmd_powerstat(args: &str) {
         "test" => powerstat::self_test(),
         _ => {
             shell_println!("Usage: powerstat [domains|wakes [n]|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79450,6 +80283,7 @@ fn cmd_inodestat(args: &str) {
         "test" => inodestat::self_test(),
         _ => {
             shell_println!("Usage: inodestat [fs|dcache|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79505,6 +80339,7 @@ fn cmd_migstat(args: &str) {
         "test" => migstat::self_test(),
         _ => {
             shell_println!("Usage: migstat [cpus|hot [n]|reasons|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79550,6 +80385,7 @@ fn cmd_pagecache(args: &str) {
         "test" => pagecache::self_test(),
         _ => {
             shell_println!("Usage: pagecache [devices|rate|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79622,6 +80458,7 @@ fn cmd_netdev(args: &str) {
         "test" => netdev::self_test(),
         _ => {
             shell_println!("Usage: netdev [list|get <iface>|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79664,6 +80501,7 @@ fn cmd_cpustat(args: &str) {
         "test" => cpustat::self_test(),
         _ => {
             shell_println!("Usage: cpustat [percpu|util|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79723,6 +80561,7 @@ fn cmd_filelock(args: &str) {
         "test" => filelock::self_test(),
         _ => {
             shell_println!("Usage: filelock [list|pid <pid>|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79782,6 +80621,7 @@ fn cmd_pidstat(args: &str) {
         "test" => pidstat::self_test(),
         _ => {
             shell_println!("Usage: pidstat [list|info <ns_id>|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79819,6 +80659,7 @@ fn cmd_binfmt(args: &str) {
         "test" => binfmt::self_test(),
         _ => {
             shell_println!("Usage: binfmt [formats|errors|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79877,6 +80718,7 @@ fn cmd_pipestat(args: &str) {
         "test" => pipestat::self_test(),
         _ => {
             shell_println!("Usage: pipestat [list|pid <pid>|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79913,6 +80755,7 @@ fn cmd_sockbuf(args: &str) {
         "test" => sockbuf::self_test(),
         _ => {
             shell_println!("Usage: sockbuf [pools|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79969,6 +80812,7 @@ fn cmd_schedlat(args: &str) {
         "test" => schedlat::self_test(),
         _ => {
             shell_println!("Usage: schedlat [percpu|histogram|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -79999,6 +80843,7 @@ fn cmd_mempress(args: &str) {
         "test" => mempress::self_test(),
         _ => {
             shell_println!("Usage: mempress [current|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -80044,6 +80889,7 @@ fn cmd_cpucache(args: &str) {
         "test" => cpucache::self_test(),
         _ => {
             shell_println!("Usage: cpucache [topology|rates|stats|test]");
+            set_exit(1);
         }
     }
 }
@@ -80154,6 +81000,7 @@ fn cmd_aiostat(args: &str) {
             shell_println!("  destroy <ring_id>                  — destroy ring");
             shell_println!("  submit <ring_id> [count]           — submit entries");
             shell_println!("  complete <ring_id> [count]         — complete entries");
+            set_exit(1);
         }
     }
 }
@@ -80259,6 +81106,7 @@ fn cmd_kthread(args: &str) {
             shell_println!("  unregister <id>               — exit kernel thread");
             shell_println!("  state <id> <running|sleeping|idle|parked|exiting>");
             shell_println!("  cpu <cpu_id>                  — list threads on CPU");
+            set_exit(1);
         }
     }
 }
@@ -80379,6 +81227,7 @@ fn cmd_mmapstat(args: &str) {
             );
             shell_println!("  unmap <pid> [size]             — record munmap");
             shell_println!("  protect <pid>                  — record mprotect");
+            set_exit(1);
         }
     }
 }
@@ -80479,6 +81328,7 @@ fn cmd_rqstat(args: &str) {
             shell_println!("  dequeue <cpu>                  — remove task from runqueue");
             shell_println!("  balance <from_cpu> <to_cpu>    — load balance event");
             shell_println!("  wait <cpu> [ns]                — record wait time");
+            set_exit(1);
         }
     }
 }
@@ -80580,6 +81430,7 @@ fn cmd_thpstat(args: &str) {
             shell_println!("  promote [pmd|pud]              — record promotion");
             shell_println!("  demote [pmd|pud]               — record demotion");
             shell_println!("  compact [success|fail|defer|skip] — compaction event");
+            set_exit(1);
         }
     }
 }
@@ -80702,6 +81553,7 @@ fn cmd_cgiostat(args: &str) {
             shell_println!("  create <name> [bw_limit] [iops_limit]  — create cgroup");
             shell_println!("  read <cg_id> [bytes]                    — record read");
             shell_println!("  write <cg_id> [bytes]                   — record write");
+            set_exit(1);
         }
     }
 }
@@ -80816,6 +81668,7 @@ fn cmd_bpfstat(args: &str) {
             );
             shell_println!("  unload <id>                    — unload program");
             shell_println!("  run <id> [ns]                  — record execution");
+            set_exit(1);
         }
     }
 }
@@ -80908,6 +81761,7 @@ fn cmd_pgtable(args: &str) {
             shell_println!("  free <pml4|pdpt|pd|pt>         — free page table page");
             shell_println!("  walk [levels]                   — record page walk");
             shell_println!("  flush [single|range|full|global] — record TLB flush");
+            set_exit(1);
         }
     }
 }
@@ -81016,6 +81870,7 @@ fn cmd_zramstat(args: &str) {
             shell_println!("Usage: zramstat <init|create|remove|write|read|devices|stats|test>");
             shell_println!("  create <name> [size]           — create ZRAM device");
             shell_println!("  write <dev_id> [orig] [compr]  — record compressed write");
+            set_exit(1);
         }
     }
 }
@@ -81099,6 +81954,7 @@ fn cmd_ksmstat(args: &str) {
             shell_println!("Usage: ksmstat <init|register|merge|unmerge|scan|procs|stats|test>");
             shell_println!("  register <pid> <name>          — register process");
             shell_println!("  scan [pages] [full]            — record scan progress");
+            set_exit(1);
         }
     }
 }
@@ -81188,6 +82044,7 @@ fn cmd_clocksrc(args: &str) {
             shell_println!("Usage: clocksrc <init|register|current|list|stats|test>");
             shell_println!("  register <name> [freq] [rating] — add clock source");
             shell_println!("  current [id]                     — get/set current source");
+            set_exit(1);
         }
     }
 }
@@ -81379,6 +82236,7 @@ fn cmd_cputhr(args: &str) {
             shell_println!("  throttle <cpu> [ms]            — record throttle event");
             shell_println!("  cap <cpu> [mhz]                — record freq cap");
             shell_println!("  temp <cpu> [millicelsius]      — set temperature");
+            set_exit(1);
         }
     }
 }
@@ -81485,6 +82343,7 @@ fn cmd_ipcns(args: &str) {
             shell_println!("  shm <ns_id> [bytes]            — record shm segment");
             shell_println!("  sem <ns_id> [count]            — record semaphore set");
             shell_println!("  msg <ns_id> [bytes]            — record message queue");
+            set_exit(1);
         }
     }
 }
@@ -81577,6 +82436,7 @@ fn cmd_netqueue(args: &str) {
             shell_println!("Usage: netqueue <init|register|rx|tx|queues|stats|test>");
             shell_println!("  register <iface> <qid> [rx|tx] — register queue");
             shell_println!("  rx|tx <iface> <qid> [pkts] [bytes] — record packets");
+            set_exit(1);
         }
     }
 }
@@ -81666,6 +82526,7 @@ fn cmd_secmod(args: &str) {
             shell_println!("  check <module> [hook]          — record allow");
             shell_println!("  deny <module> [hook]           — record denial");
             shell_println!("  hooks: file_open|file_perm|inode_create|task_alloc|sock_create|...");
+            set_exit(1);
         }
     }
 }
@@ -81749,6 +82610,7 @@ fn cmd_vmballoon(args: &str) {
             shell_println!("  inflate [pages]                — inflate balloon");
             shell_println!("  deflate [pages]                — deflate balloon");
             shell_println!("  target [pages]                 — set target size");
+            set_exit(1);
         }
     }
 }
@@ -81839,6 +82701,7 @@ fn cmd_devfreq(args: &str) {
             shell_println!("  register <name> [min_khz] [max_khz] — register device");
             shell_println!("  transition <id> <freq_khz>           — frequency change");
             shell_println!("  governor <id> <perf|save|ondemand|simple>");
+            set_exit(1);
         }
     }
 }
@@ -81919,6 +82782,7 @@ fn cmd_hwrng(args: &str) {
                 "  generate [source] [bytes]      — record entropy (rdrand|rdseed|irq|disk|input|jitter)"
             );
             shell_println!("  request [bytes]                 — consume entropy");
+            set_exit(1);
         }
     }
 }
@@ -81992,6 +82856,7 @@ fn cmd_acpistat(args: &str) {
             shell_println!("Usage: acpistat <init|event|gpe|events|gpes|stats|test>");
             shell_println!("  event <power|sleep|lid_open|lid_close|ac_on|battery|thermal>");
             shell_println!("  gpe <num>                      — record GPE (hex: 0x11)");
+            set_exit(1);
         }
     }
 }
@@ -82099,6 +82964,7 @@ fn cmd_userfault(args: &str) {
             shell_println!("  register <pid>                 — register uffd handler");
             shell_println!("  fault <pid> [missing|wp|minor] — record fault");
             shell_println!("  resolve <pid> <ns> [copy|zero] — record resolution");
+            set_exit(1);
         }
     }
 }
@@ -82190,6 +83056,7 @@ fn cmd_ioport(args: &str) {
             shell_println!("  register <name> <base_hex> <len> — register port region");
             shell_println!("  in <port_hex> [size]             — record port read");
             shell_println!("  out <port_hex> [size]            — record port write");
+            set_exit(1);
         }
     }
 }
@@ -82286,6 +83153,7 @@ fn cmd_msivec(args: &str) {
             shell_println!("  free <dev>                           — free vectors");
             shell_println!("  interrupt <dev>                      — record interrupt");
             shell_println!("  target <dev> <cpu>                   — set target CPU");
+            set_exit(1);
         }
     }
 }
@@ -82390,6 +83258,7 @@ fn cmd_cpuset(args: &str) {
             shell_println!("  destroy <id>                             — destroy cpuset");
             shell_println!("  assign <id>                              — assign process to set");
             shell_println!("  affinity <id>                            — record affinity change");
+            set_exit(1);
         }
     }
 }
@@ -82493,6 +83362,7 @@ fn cmd_ftrace(args: &str) {
             );
             shell_println!("  add <func> [func|ret|tp|dyn]   — add probe");
             shell_println!("  hit <func> [ns]                — record probe hit");
+            set_exit(1);
         }
     }
 }
@@ -82596,6 +83466,7 @@ fn cmd_kstack(args: &str) {
             shell_println!("Usage: kstack <init|register|usage|overflow|guard|list|stats|test>");
             shell_println!("  register <cpu> [size]   — register CPU stack");
             shell_println!("  usage <cpu> <bytes>     — record stack usage");
+            set_exit(1);
         }
     }
 }
@@ -82700,6 +83571,7 @@ fn cmd_fnotify(args: &str) {
             shell_println!("Usage: fnotify <init|watch|unwatch|event|drain|list|stats|test>");
             shell_println!("  watch <inotify|fanotify|dnotify>   — add watch");
             shell_println!("  event <type> <create|delete|modify|access|attrib|open|close>");
+            set_exit(1);
         }
     }
 }
@@ -82801,6 +83673,7 @@ fn cmd_netlat(args: &str) {
             shell_println!("  register <iface>             — register interface");
             shell_println!("  rtt <iface> <tcp|udp|icmp> <ns> — record RTT sample");
             shell_println!("  proc <iface> <ns>            — record processing latency");
+            set_exit(1);
         }
     }
 }
@@ -82908,6 +83781,7 @@ fn cmd_diskstat(args: &str) {
             shell_println!("  register <name>              — register device");
             shell_println!("  read <name> <bytes> [ns]     — record read I/O");
             shell_println!("  write <name> <bytes> [ns]    — record write I/O");
+            set_exit(1);
         }
     }
 }
@@ -83019,6 +83893,7 @@ fn cmd_taskio(args: &str) {
             shell_println!("  register <pid>            — register task");
             shell_println!("  read <pid> <bytes>        — record read");
             shell_println!("  write <pid> <bytes>       — record write");
+            set_exit(1);
         }
     }
 }
@@ -83119,6 +83994,7 @@ fn cmd_ttystat(args: &str) {
             shell_println!("Usage: ttystat <init|register|read|write|signal|list|stats|test>");
             shell_println!("  register <name> <console|serial|pty|vt> [bufsize]");
             shell_println!("  read <name> <bytes>       — record read");
+            set_exit(1);
         }
     }
 }
@@ -83241,6 +84117,7 @@ fn cmd_swapact(args: &str) {
             shell_println!("  register <name> <partition|file|zram> <pages> [priority]");
             shell_println!("  in <name> <pages> [ns]    — record swap-in");
             shell_println!("  out <name> <pages> [ns]   — record swap-out");
+            set_exit(1);
         }
     }
 }
@@ -83307,6 +84184,7 @@ fn cmd_schedwait(args: &str) {
         _ => {
             shell_println!("Usage: schedwait <init|wait|reasons|histogram|stats|test>");
             shell_println!("  wait <runqueue|iowait|lock|sleep|ipc|pgfault> <ns>");
+            set_exit(1);
         }
     }
 }
@@ -83402,6 +84280,7 @@ fn cmd_ratestat(args: &str) {
         _ => {
             shell_println!("Usage: ratestat <init|register|allow|deny|refill|list|stats|test>");
             shell_println!("  register <name> <rate/s> <burst>  — register limiter");
+            set_exit(1);
         }
     }
 }
@@ -83497,6 +84376,7 @@ fn cmd_iomem(args: &str) {
         _ => {
             shell_println!("Usage: iomem <init|register|unregister|read|write|list|stats|test>");
             shell_println!("  register <name> <base_hex> <size_hex>  — register region");
+            set_exit(1);
         }
     }
 }
@@ -83605,6 +84485,7 @@ fn cmd_vmzone(args: &str) {
             shell_println!("Usage: vmzone <init|register|alloc|free|reclaim|list|stats|test>");
             shell_println!("  register <name> <dma|dma32|normal|highmem|movable> <pages>");
             shell_println!("  alloc <name> <pages>     — record allocation");
+            set_exit(1);
         }
     }
 }
@@ -83677,6 +84558,7 @@ fn cmd_buddyinfo(args: &str) {
             shell_println!("Usage: buddyinfo <init|register|update|split|list|stats|test>");
             shell_println!("  update <zone> <order> <count>  — set free count");
             shell_println!("  split <zone> <order>           — record buddy split");
+            set_exit(1);
         }
     }
 }
@@ -83779,6 +84661,7 @@ fn cmd_cgmem(args: &str) {
             shell_println!("Usage: cgmem <init|create|remove|charge|uncharge|list|stats|test>");
             shell_println!("  create <name> <limit_pages>        — create cgroup");
             shell_println!("  charge <cg_id> <pages> [rss|cache]");
+            set_exit(1);
         }
     }
 }
@@ -83866,6 +84749,7 @@ fn cmd_vmfrag(args: &str) {
             shell_println!("Usage: vmfrag <init|register|update|compact|list|stats|test>");
             shell_println!("  update <zone> <order> <index_x10>  — set frag index");
             shell_println!("  compact <zone> <ok|fail>            — record compaction");
+            set_exit(1);
         }
     }
 }
@@ -83961,6 +84845,7 @@ fn cmd_pidfd(args: &str) {
             shell_println!("Usage: pidfd <init|create|poll|signal|wait|close|list|stats|test>");
             shell_println!("  create <pid>   — record pidfd creation");
             shell_println!("  signal <pid>   — record signal via pidfd");
+            set_exit(1);
         }
     }
 }
@@ -84384,6 +85269,7 @@ fn cmd_filepicker(args: &str) {
                 shell_println!("  test                    Run self-tests");
                 shell_println!("  stats                   Show statistics");
                 shell_println!("  reset                   Clear all");
+                set_exit(1);
             }
             case();
         }
@@ -84663,6 +85549,7 @@ fn cmd_taskbar(args: &str) {
             shell_println!("  test                                  Run self-tests");
             shell_println!("  stats                                 Show statistics");
             shell_println!("  reset                                 Clear all");
+            set_exit(1);
         }
     }
 }
@@ -84917,6 +85804,7 @@ fn cmd_startmenu(args: &str) {
             shell_println!("  test                           Run self-tests");
             shell_println!("  stats                          Show statistics");
             shell_println!("  reset                          Clear all data");
+            set_exit(1);
         }
     }
 }
@@ -85207,6 +86095,7 @@ fn cmd_systray(args: &str) {
             shell_println!("  test                                Run self-tests");
             shell_println!("  stats                               Show statistics");
             shell_println!("  reset                               Clear all data and stats");
+            set_exit(1);
         }
     }
 }
@@ -85388,6 +86277,7 @@ fn cmd_fflags(args: &str) {
             shell_println!("  Flags: immutable(i), append-only(a), no-delete(d),");
             shell_println!("         compressed(c), no-backup(b), no-index(n),");
             shell_println!("         system(s), hidden(h)");
+            set_exit(1);
         }
     }
 }
@@ -85496,6 +86386,7 @@ fn cmd_preview(args: &str) {
             shell_println!("  reset                   Reset counters");
             shell_println!("");
             shell_println!("Sizes: small (48px), medium (128px), large (256px)");
+            set_exit(1);
         }
     }
 }
@@ -85598,12 +86489,15 @@ fn cmd_template(args: &str) {
                         shell_println!("Removed template {}.", id);
                     } else {
                         shell_println!("Template {} not found.", id);
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Invalid template ID.");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: template remove <id>");
+                set_exit(1);
             }
         }
         "info" => {
@@ -85661,6 +86555,7 @@ fn cmd_template(args: &str) {
             shell_println!("  info <name_or_id>     Show template details");
             shell_println!("  stats                 Show statistics");
             shell_println!("  reset                 Reset counters");
+            set_exit(1);
         }
     }
 }
@@ -85793,6 +86688,7 @@ fn cmd_columnview(args: &str) {
             shell_println!("  prefs                 Show user preferences");
             shell_println!("  stats                 Show statistics");
             shell_println!("  reset                 Reset counters");
+            set_exit(1);
         }
     }
 }
@@ -85912,6 +86808,7 @@ fn cmd_pathbar(args: &str) {
             shell_println!("  normalize <path>     Normalize a path");
             shell_println!("  stats                Show statistics (default)");
             shell_println!("  reset                Clear history and reset");
+            set_exit(1);
         }
     }
 }
@@ -86050,6 +86947,7 @@ fn cmd_viewstate(args: &str) {
             shell_println!("  templates                 Show view templates");
             shell_println!("  stats                     Show statistics (default)");
             shell_println!("  reset                     Clear all states");
+            set_exit(1);
         }
     }
 }
@@ -86361,6 +87259,7 @@ fn cmd_setfacl(args: &str) {
 
         _ => {
             shell_println!("Unknown flag '{}'. Use: -m, -x, -b, --from-mode", parts[0]);
+            set_exit(1);
         }
     }
 }
@@ -88221,6 +89120,7 @@ fn cmd_run(args: &str) {
         }
         Err(e) => {
             shell_println!("run: failed to spawn: {:?}", e);
+            set_exit(1);
         }
     }
 }
@@ -88239,6 +89139,7 @@ fn cmd_mkelf() {
         }
         Err(e) => {
             shell_println!("mkelf: failed to write EXIT.ELF: {:?}", e);
+            set_exit(1);
         }
     }
 
@@ -88253,6 +89154,7 @@ fn cmd_mkelf() {
         }
         Err(e) => {
             shell_println!("mkelf: failed to write HELLO.ELF: {:?}", e);
+            set_exit(1);
         }
     }
     shell_println!("Run them with: run EXIT.ELF / run HELLO.ELF");
@@ -88480,6 +89382,7 @@ fn cmd_audio(args: &str) {
             shell_println!("  play         — play 440 Hz test tone (best available output)");
             shell_println!("  stop         — stop all playback");
             shell_println!("  beep [f] [d] — PC speaker beep (freq Hz, duration ms)");
+            set_exit(1);
         }
     }
 }
@@ -88531,6 +89434,7 @@ fn cmd_mixer(args: &str) {
                 shell_println!("Master volume set to {}%", vol.min(100));
             } else {
                 shell_println!("Usage: mixer vol <0-100>");
+                set_exit(1);
             }
         }
         "mute" => {
@@ -88546,6 +89450,7 @@ fn cmd_mixer(args: &str) {
             shell_println!("  status        — show mixer state and streams");
             shell_println!("  vol [0-100]   — set/show master volume");
             shell_println!("  mute/unmute   — toggle master mute");
+            set_exit(1);
         }
     }
 }
@@ -88679,6 +89584,7 @@ fn cmd_gfx(args: &str) {
         }
         _ => {
             shell_println!("Usage: gfx [status|demo|cursor|clear]");
+            set_exit(1);
         }
     }
 }
@@ -88783,6 +89689,7 @@ fn cmd_gpu(args: &str) {
             shell_println!("  fill    - Fill display with color (red/green/blue/0xAARRGGBB)");
             shell_println!("  flush   - Force display refresh");
             shell_println!("  test    - Draw color bar test pattern");
+            set_exit(1);
         }
     }
 }
@@ -88910,6 +89817,7 @@ fn cmd_usb(args: &str) {
             shell_println!("  devices - List enumerated USB devices");
             shell_println!("  hid     - Show HID interface details");
             shell_println!("  rescan  - Re-enumerate devices");
+            set_exit(1);
         }
     }
 }
@@ -89094,6 +90002,7 @@ fn cmd_router_solicitation() {
         }
         Err(e) => {
             shell_println!("Failed to send RS: {:?}", e);
+            set_exit(1);
         }
     }
 }
@@ -89281,6 +90190,7 @@ fn cmd_udp6(args: &str) {
             shell_println!("Examples:");
             shell_println!("  udp6 send fe80::1 5000 Hello world");
             shell_println!("  udp6 listen 5000 10000");
+            set_exit(1);
         }
     }
 }
@@ -89572,9 +90482,11 @@ fn cmd_firewall(args: &str) {
                         }
                     } else {
                         shell_println!("Usage: firewall remove <index>");
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Usage: firewall remove <index>");
+                    set_exit(1);
                 }
             }
             case(&parts);
@@ -89590,9 +90502,11 @@ fn cmd_firewall(args: &str) {
                         }
                     } else {
                         shell_println!("Usage: firewall remove6 <index>");
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Usage: firewall remove6 <index>");
+                    set_exit(1);
                 }
             }
             case(&parts);
@@ -89797,6 +90711,7 @@ fn cmd_cap_groups(args: &str) {
                 }
             } else {
                 shell_println!("Usage: capgroups create <name>");
+                set_exit(1);
             }
         }
         "remove" | "rm" | "del" => {
@@ -89808,13 +90723,16 @@ fn cmd_cap_groups(args: &str) {
                     }
                 } else {
                     shell_println!("Group '{}' not found", name);
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: capgroups remove <name>");
+                set_exit(1);
             }
         }
         _ => {
             shell_println!("Usage: capgroups [list|create|remove]");
+            set_exit(1);
         }
     }
 }
@@ -89892,6 +90810,7 @@ fn cmd_cap_tags(args: &str) {
                 }
             } else {
                 shell_println!("Usage: captags show <path>");
+                set_exit(1);
             }
         }
         "add" | "tag" => {
@@ -89907,9 +90826,11 @@ fn cmd_cap_tags(args: &str) {
                     }
                 } else {
                     shell_println!("Group '{}' not found", group_name);
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: captags add <path> <group_name>");
+                set_exit(1);
             }
         }
         "remove" | "rm" | "untag" => {
@@ -89925,9 +90846,11 @@ fn cmd_cap_tags(args: &str) {
                     }
                 } else {
                     shell_println!("Group '{}' not found", group_name);
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: captags remove <path> <group_name>");
+                set_exit(1);
             }
         }
         "clear" => {
@@ -89938,6 +90861,7 @@ fn cmd_cap_tags(args: &str) {
                 }
             } else {
                 shell_println!("Usage: captags clear <path>");
+                set_exit(1);
             }
         }
         "check" => {
@@ -90013,6 +90937,7 @@ fn cmd_cap_tags(args: &str) {
         }
         _ => {
             shell_println!("Usage: captags [list|show|add|remove|clear|check]");
+            set_exit(1);
         }
     }
 }
@@ -90075,6 +91000,7 @@ fn cmd_socket_activation(args: &str) {
                 }
             } else {
                 shell_println!("Usage: sockact add <service_name> <spawn_path>");
+                set_exit(1);
             }
         }
         "remove" | "rm" | "del" => {
@@ -90085,6 +91011,7 @@ fn cmd_socket_activation(args: &str) {
                 }
             } else {
                 shell_println!("Usage: sockact remove <service_name>");
+                set_exit(1);
             }
         }
         "reset" => {
@@ -90095,10 +91022,12 @@ fn cmd_socket_activation(args: &str) {
                 }
             } else {
                 shell_println!("Usage: sockact reset <service_name>");
+                set_exit(1);
             }
         }
         _ => {
             shell_println!("Usage: sockact [list|add|remove|reset]");
+            set_exit(1);
         }
     }
 }
@@ -90168,6 +91097,7 @@ fn cmd_service_limits(args: &str) {
                 }
             } else {
                 shell_println!("Usage: slimit show <service_name>");
+                set_exit(1);
             }
         }
         "set" => {
@@ -90226,6 +91156,7 @@ fn cmd_service_limits(args: &str) {
                 }
             } else {
                 shell_println!("Usage: slimit profile <name> <daemon|network|system|sandbox>");
+                set_exit(1);
             }
         }
         "remove" | "rm" | "del" => {
@@ -90236,10 +91167,12 @@ fn cmd_service_limits(args: &str) {
                 }
             } else {
                 shell_println!("Usage: slimit remove <service_name>");
+                set_exit(1);
             }
         }
         _ => {
             shell_println!("Usage: slimit [list|show|set|profile|remove]");
+            set_exit(1);
         }
     }
 }
@@ -90821,6 +91754,7 @@ fn cmd_cgroup(args: &str) {
             shell_println!("  cgroup io ID OPS [BYTES] — set I/O limit (0=unlimited)");
             shell_println!("  cgroup stats ID     — detailed stats");
             shell_println!("  cgroup test         — run self-test");
+            set_exit(1);
         }
     }
 }
@@ -90948,6 +91882,7 @@ fn cmd_pidns(args: &str) {
             shell_println!("  pidns delete ID    — delete empty namespace");
             shell_println!("  pidns stats ID     — detailed stats with PID mappings");
             shell_println!("  pidns test         — run self-test");
+            set_exit(1);
         }
     }
 }
@@ -91143,6 +92078,7 @@ fn cmd_userns(args: &str) {
             shell_println!("  userns gidmap NS I O C         — same for GID");
             shell_println!("  userns stats ID                — detailed stats with mappings");
             shell_println!("  userns test                    — run self-test");
+            set_exit(1);
         }
     }
 }
@@ -91366,6 +92302,7 @@ fn cmd_netns(args: &str) {
                 }
                 _ => {
                     shell_println!("Usage: netns route <ns> [show|add|del]");
+                    set_exit(1);
                 }
             }
         }
@@ -91444,6 +92381,7 @@ fn cmd_netns(args: &str) {
             shell_println!("  netns stats ID                     — detailed stats");
             shell_println!("  netns up|down ID                   — set interface up/down");
             shell_println!("  netns test                         — run self-test");
+            set_exit(1);
         }
     }
 }
@@ -92621,6 +93559,7 @@ fn cmd_container(args: &str) {
                     }
                     Err(_) => {
                         shell_println!("Container {} not found", id);
+                        set_exit(1);
                     }
                 }
             }
@@ -92926,6 +93865,7 @@ fn cmd_container(args: &str) {
                     }
                     (None, None) => {
                         shell_println!("One of <src>/<dest> must be a container ref (ID:/path)");
+                        set_exit(1);
                     }
                 }
             }
@@ -93443,6 +94383,7 @@ fn cmd_container(args: &str) {
                     other => {
                         shell_println!("Unknown volume action '{}'", other);
                         shell_println!("Usage: container volume <create|ls|rm|inspect|prune> ...");
+                        set_exit(1);
                     }
                 }
             }
@@ -96021,6 +96962,7 @@ fn cmd_oci(args: &str) {
                     }
                     Err(e) => {
                         shell_println!("Failed to read Dockerfile '{}': {:?}", dockerfile, e);
+                        set_exit(1);
                     }
                 }
             }
@@ -96171,6 +97113,7 @@ fn cmd_oci(args: &str) {
                     "                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user, --entrypoint/trailing COMMAND override the image entrypoint/cmd)"
                 );
                 shell_println!("  oci test           — run parser self-tests");
+                set_exit(1);
             }
             case();
         }
@@ -96331,6 +97274,7 @@ fn cmd_scfilter(args: &str) {
             shell_println!("  scfilter test                      — run self-test");
             shell_println!();
             shell_println!("Aliases: seccomp");
+            set_exit(1);
         }
     }
 }
@@ -96415,6 +97359,7 @@ fn cmd_cap_request(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("Failed to approve #{}: {:?}", id, e);
+                    set_exit(1);
                 }
             }
         }
@@ -96434,6 +97379,7 @@ fn cmd_cap_request(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("Failed to deny #{}: {:?}", id, e);
+                    set_exit(1);
                 }
             }
         }
@@ -96484,11 +97430,13 @@ fn cmd_cap_request(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("Failed to submit test request: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
         _ => {
             shell_println!("Usage: capreq [list|all|approve ID|deny ID|handler on/off|test]");
+            set_exit(1);
         }
     }
 }
@@ -97342,6 +98290,7 @@ fn cmd_tr_input(args: &str, input: &str) {
         tr_translate(input, set1_or_flag, set2);
     } else {
         shell_println!("Usage: cmd | tr SET1 SET2  or  cmd | tr -d CHARS");
+        set_exit(1);
     }
 }
 
@@ -99034,6 +99983,7 @@ fn cmd_declare(args: &str) {
     }
 
     shell_println!("Usage: declare [-f [NAME]] [-a [NAME]]");
+    set_exit(1);
 }
 
 /// Define or list shell aliases.
@@ -99217,12 +100167,14 @@ fn cmd_truncate(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("truncate: error: {:?}", e);
+                    set_exit(1);
                 }
             }
             let _ = crate::fs::handle::close(handle);
         }
         Err(e) => {
             shell_println!("truncate: cannot open '{}': {:?}", path, e);
+            set_exit(1);
         }
     }
 }
@@ -99247,6 +100199,7 @@ fn cmd_sha256(args: &str) {
         }
         Err(e) => {
             shell_println!("sha256: cannot hash '{}': {:?}", path, e);
+            set_exit(1);
         }
     }
 }
@@ -99292,6 +100245,7 @@ fn cmd_symlink(args: &str) {
         }
         Err(e) => {
             shell_println!("symlink: cannot create '{}': {:?}", link_path, e);
+            set_exit(1);
         }
     }
 }
@@ -99852,6 +100806,7 @@ fn cmd_mktemp(args: &str) {
         }
         Err(e) => {
             shell_println!("mktemp: cannot create temp file in '{}': {:?}", dir, e);
+            set_exit(1);
         }
     }
 }
@@ -99907,6 +100862,7 @@ fn cmd_sysctl(args: &str) {
             }
             None => {
                 shell_println!("sysctl: unknown parameter '{}'", name);
+                set_exit(1);
             }
         }
     } else {
@@ -99926,6 +100882,7 @@ fn cmd_sysctl(args: &str) {
             },
             Err(_) => {
                 shell_println!("sysctl: invalid value '{}'", value_str);
+                set_exit(1);
             }
         }
     }
@@ -99946,6 +100903,7 @@ fn cmd_hostname(args: &str) {
             }
             Err(e) => {
                 shell_println!("hostname: cannot set hostname: {:?}", e);
+                set_exit(1);
             }
         }
     }
@@ -102192,6 +103150,7 @@ fn cmd_irqstorm(args: &str) {
                     shell_println!("IRQ {} force-unmasked.", irq);
                 } else {
                     shell_println!("Usage: irqstorm unmask <irq_number>");
+                    set_exit(1);
                 }
             }
         }
@@ -102599,6 +103558,7 @@ fn cmd_hotplug(args: &str) {
         }
         _ => {
             shell_println!("Usage: hotplug [status|offline <cpu>|online <cpu>]");
+            set_exit(1);
         }
     }
 }
@@ -103202,6 +104162,7 @@ fn cmd_checkpoint(args: &str) {
                 shell_println!("Checkpoint '{}' saved in slot {}", label as char, slot);
             } else {
                 shell_println!("Usage: checkpoint save <A-D>");
+                set_exit(1);
             }
         }
         "diff" => {
@@ -103253,6 +104214,7 @@ fn cmd_checkpoint(args: &str) {
                 None => {
                     shell_println!("Error: one or both checkpoints not found");
                     shell_println!("  Use 'checkpoint list' to see stored checkpoints");
+                    set_exit(1);
                 }
             }
         }
@@ -103304,10 +104266,12 @@ fn cmd_checkpoint(args: &str) {
                     }
                     None => {
                         shell_println!("Error: checkpoint '{}' not found", label as char);
+                        set_exit(1);
                     }
                 }
             } else {
                 shell_println!("Usage: checkpoint show <A-D>");
+                set_exit(1);
             }
         }
         "clear" => {
@@ -103322,6 +104286,7 @@ fn cmd_checkpoint(args: &str) {
             shell_println!("  checkpoint list        — list stored checkpoints");
             shell_println!("  checkpoint show A      — show checkpoint details");
             shell_println!("  checkpoint clear       — clear all");
+            set_exit(1);
         }
     }
 }
@@ -103367,9 +104332,11 @@ fn cmd_strace(args: &str) {
                     }
                 } else {
                     shell_println!("Error: invalid PID number");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: strace pid <N>");
+                set_exit(1);
             }
         }
         "reset" => {
@@ -103677,6 +104644,7 @@ fn cmd_snapshot(args: &str) {
                 None => {
                     shell_println!("Error: one or both snapshots not found");
                     shell_println!("  Use 'snapshot save A' and 'snapshot save B' first");
+                    set_exit(1);
                 }
             }
         }
@@ -103725,6 +104693,7 @@ fn cmd_snapshot(args: &str) {
                 }
                 None => {
                     shell_println!("Snapshot '{}' not found", label as char);
+                    set_exit(1);
                 }
             }
         }
@@ -103740,6 +104709,7 @@ fn cmd_snapshot(args: &str) {
             shell_println!("  snapshot diff A B   — compare A and B");
             shell_println!("  snapshot show A     — show snapshot A details");
             shell_println!("  snapshot clear      — clear both snapshots");
+            set_exit(1);
         }
     }
 }
@@ -103886,6 +104856,7 @@ fn cmd_watchpoint(args: &str) {
                                     "  Address must be kernel-space (>=0xffff800000000000)"
                                 );
                                 shell_println!("  and 8-byte aligned");
+                                set_exit(1);
                             }
                         }
                     }
@@ -103893,6 +104864,7 @@ fn cmd_watchpoint(args: &str) {
                 }
             } else {
                 shell_println!("Usage: watch add <hex_addr> [label]");
+                set_exit(1);
             }
         }
         "list" => {
@@ -103961,12 +104933,15 @@ fn cmd_watchpoint(args: &str) {
                         shell_println!("Watchpoint #{} removed", slot);
                     } else {
                         shell_println!("Error: slot {} not active", slot);
+                        set_exit(1);
                     }
                 } else {
                     shell_println!("Error: invalid slot number");
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: watch del <slot>");
+                set_exit(1);
             }
         }
         "events" => {
@@ -104018,6 +104993,7 @@ fn cmd_watchpoint(args: &str) {
             shell_println!("  watch del <slot>          — remove a watchpoint");
             shell_println!("  watch events              — show change history");
             shell_println!("  watch clear               — remove all");
+            set_exit(1);
         }
     }
 }
@@ -104408,6 +105384,7 @@ fn cmd_fault_inject(args: &str) {
         }
         _ => {
             shell_println!("Usage: faultinject [fail <N> | after <N> | prob <N> | off]");
+            set_exit(1);
         }
     }
 }
@@ -104728,6 +105705,7 @@ fn cmd_irqbalance(args: &str) {
         }
         _ => {
             shell_println!("Usage: irqbalance [status|enable|disable|pin <irq> <cpu>|unpin <irq>]");
+            set_exit(1);
         }
     }
 }
@@ -105821,6 +106799,7 @@ fn cmd_glob(args: &str) {
         }
         Err(e) => {
             shell_println!("glob: error: {:?}", e);
+            set_exit(1);
         }
     }
 }
@@ -111020,6 +111999,7 @@ fn cmd_bench(args: &str) {
         }
         other => {
             shell_println!("Unknown benchmark '{}'. Use 'bench list'.", other);
+            set_exit(1);
         }
     }
 }
@@ -111160,6 +112140,7 @@ fn cmd_diag_report(args: &str) {
                     shell_println!("  system, memory/mem/mm, scheduler/sched, ipc,");
                     shell_println!("  objects/obj, capabilities/cap, migrations/migrate,");
                     shell_println!("  invariants/invar");
+                    set_exit(1);
                 }
             }
         }
@@ -111542,6 +112523,7 @@ fn cmd_tsession(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("Failed to create session: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -111599,9 +112581,11 @@ fn cmd_tsession(args: &str) {
                 Ok(()) => shell_println!("Session {} destroyed", target_id),
                 Err(crate::error::KernelError::InvalidArgument) => {
                     shell_println!("Cannot destroy the active session (switch away first)");
+                    set_exit(1);
                 }
                 Err(crate::error::KernelError::NotFound) => {
                     shell_println!("Session {} not found", target_id);
+                    set_exit(1);
                 }
                 Err(e) => shell_println!("Failed: {:?}", e),
             }
@@ -111639,6 +112623,7 @@ fn cmd_tsession(args: &str) {
         _ => {
             shell_println!("Unknown subcommand: {}", subcmd);
             shell_println!("Usage: tsession <new|list|switch|kill|rename>");
+            set_exit(1);
         }
     }
 }

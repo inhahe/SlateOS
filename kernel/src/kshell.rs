@@ -9508,6 +9508,97 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(awk_split_print_args("\"é,é\"").len(), 1);
     }
 
+    serial_println!("  kshell::self_test 11: archive reports failure as failure");
+    // Every failure path in `archive` used to print a message on stdout and
+    // leave the exit status at the 0 `dispatch` sets on entry, so `archive
+    // create ... && rm -r src` deleted the sources after an archive that was
+    // never written. The worst case was subtler still: an input that could not
+    // be read was a *warning*, and the command went on to write a short
+    // archive under the name the user chose and report "Created" — a loss
+    // discovered only when the archive was finally extracted, by which time
+    // the originals are typically gone.
+    {
+        use crate::fs::vfs::Vfs;
+        fn run(cmd: &str) -> Vec<u8> {
+            let prev = SHELL_OUTPUT.lock().take();
+            capture_start();
+            dispatch(cmd);
+            let out = capture_stop();
+            *SHELL_OUTPUT.lock() = prev;
+            out
+        }
+        let src = "/tmp/kshell_archive_selftest_a";
+        let out = "/tmp/kshell_archive_selftest.zip";
+        let missing = "/tmp/kshell_archive_selftest_absent";
+        Vfs::write_file(src, b"alpha\n")?;
+        let _ = Vfs::remove(out);
+        let _ = Vfs::remove(missing);
+
+        // The success case first, so that the failure assertions below cannot
+        // be satisfied by a command that simply never works.
+        run("archive create zip /tmp/kshell_archive_selftest.zip /tmp/kshell_archive_selftest_a");
+        assert_eq!(last_exit(), 0, "a fully-readable create must succeed");
+        assert!(
+            Vfs::read_file(out).is_ok(),
+            "a successful create must leave an archive behind"
+        );
+        let _ = Vfs::remove(out);
+
+        // The bug: one of several named inputs is unreadable.
+        run("archive create zip /tmp/kshell_archive_selftest.zip \
+             /tmp/kshell_archive_selftest_a /tmp/kshell_archive_selftest_absent");
+        assert_eq!(
+            last_exit(),
+            1,
+            "a named input that could not be read must fail the command"
+        );
+        assert!(
+            Vfs::read_file(out).is_err(),
+            "no archive may be written when an input was unreadable"
+        );
+
+        // No input readable at all.
+        run("archive create zip /tmp/kshell_archive_selftest.zip \
+             /tmp/kshell_archive_selftest_absent");
+        assert_eq!(last_exit(), 1);
+        assert!(Vfs::read_file(out).is_err());
+
+        // Argument errors are errors.
+        run(
+            "archive create nosuchformat /tmp/kshell_archive_selftest.zip \
+             /tmp/kshell_archive_selftest_a",
+        );
+        assert_eq!(last_exit(), 1, "an unknown format must fail");
+        run("archive create zip /tmp/kshell_archive_selftest.zip");
+        assert_eq!(last_exit(), 1, "a create with no inputs must fail");
+
+        // The read side: a file that exists but is not an archive, and a file
+        // that does not exist. Both used to exit 0.
+        run("archive list /tmp/kshell_archive_selftest_a");
+        assert_eq!(last_exit(), 1, "listing a non-archive must fail");
+        run("archive detect /tmp/kshell_archive_selftest_a");
+        assert_eq!(last_exit(), 1, "an undetectable format must fail");
+        run("archive get /tmp/kshell_archive_selftest_a nosuchentry");
+        assert_eq!(last_exit(), 1);
+        run("archive list /tmp/kshell_archive_selftest_absent");
+        assert_eq!(last_exit(), 1, "listing a missing file must fail");
+        run("archive extract /tmp/kshell_archive_selftest_absent");
+        assert_eq!(last_exit(), 1);
+
+        // A mistyped subcommand is a failure; asking for help is not.
+        run("archive nosuchsubcommand");
+        assert_eq!(last_exit(), 1, "an unknown subcommand must fail");
+        run("archive");
+        assert_eq!(last_exit(), 1, "a bare `archive` did nothing, so it failed");
+        run("archive help");
+        assert_eq!(last_exit(), 0, "help was asked for and given");
+        run("archive stats");
+        assert_eq!(last_exit(), 0);
+
+        let _ = Vfs::remove(src);
+        let _ = Vfs::remove(out);
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -17236,7 +17327,8 @@ fn cmd_archive(args: &str) {
     match sub {
         "list" | "ls" | "t" => {
             if parts.len() < 2 {
-                shell_println!("Usage: archive list <file>");
+                crate::console_println!("Usage: archive list <file>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -17258,15 +17350,26 @@ fn cmd_archive(args: &str) {
                             }
                             shell_println!("({} entries)", entries.len());
                         }
-                        Err(e) => shell_println!("Error listing: {:?}", e),
+                        Err(e) => {
+                            crate::console_println!(
+                                "archive: cannot list {}: {}",
+                                path.display(),
+                                e
+                            );
+                            set_exit(1);
+                        }
                     }
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
+                Err(e) => {
+                    crate::console_println!("archive: cannot read {}: {}", path.display(), e);
+                    set_exit(1);
+                }
             }
         }
         "extract" | "x" => {
             if parts.len() < 2 {
-                shell_println!("Usage: archive extract <file> [dest]");
+                crate::console_println!("Usage: archive extract <file> [dest]");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -17282,21 +17385,43 @@ fn cmd_archive(args: &str) {
                         shell_println!("  Files:   {}", result.files_extracted);
                         shell_println!("  Dirs:    {}", result.dirs_created);
                         shell_println!("  Bytes:   {}", result.bytes_written);
+                        // A per-entry failure means the extracted tree is not
+                        // the archive. `extract_all` returns `Ok` because it
+                        // got as far as it could, but the *command* did not do
+                        // what was asked, so it must not report success --
+                        // otherwise `archive extract x && build` proceeds
+                        // against a tree missing the files that failed.
                         if !result.errors.is_empty() {
-                            shell_println!("  Errors ({}):", result.errors.len());
+                            crate::console_println!(
+                                "archive: {} entr{} could not be extracted:",
+                                result.errors.len(),
+                                if result.errors.len() == 1 { "y" } else { "ies" }
+                            );
                             for e in &result.errors {
-                                shell_println!("    ! {}", e);
+                                crate::console_println!("  ! {}", e);
                             }
+                            set_exit(1);
                         }
                     }
-                    Err(e) => shell_println!("Error extracting: {:?}", e),
+                    Err(e) => {
+                        crate::console_println!(
+                            "archive: cannot extract {}: {}",
+                            path.display(),
+                            e
+                        );
+                        set_exit(1);
+                    }
                 },
-                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
+                Err(e) => {
+                    crate::console_println!("archive: cannot read {}: {}", path.display(), e);
+                    set_exit(1);
+                }
             }
         }
         "get" => {
             if parts.len() < 3 {
-                shell_println!("Usage: archive get <archive> <entry_name>");
+                crate::console_println!("Usage: archive get <archive> <entry_name>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -17310,14 +17435,26 @@ fn cmd_archive(args: &str) {
                             shell_println!("(binary data, {} bytes)", content.len());
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        crate::console_println!(
+                            "archive: cannot extract {} from {}: {}",
+                            entry_name,
+                            path.display(),
+                            e
+                        );
+                        set_exit(1);
+                    }
                 },
-                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
+                Err(e) => {
+                    crate::console_println!("archive: cannot read {}: {}", path.display(), e);
+                    set_exit(1);
+                }
             }
         }
         "detect" | "info" => {
             if parts.len() < 2 {
-                shell_println!("Usage: archive detect <file>");
+                crate::console_println!("Usage: archive detect <file>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -17333,20 +17470,36 @@ fn cmd_archive(args: &str) {
                             // Try extension-based detection.
                             match archive::detect_from_extension(&path) {
                                 Some(fmt) => {
-                                    shell_println!("Format (by extension): {}", fmt.label())
+                                    shell_println!("Format (by extension): {}", fmt.label());
                                 }
-                                None => shell_println!("Unknown archive format"),
+                                None => {
+                                    // "I could not tell" is the question's
+                                    // answer being unavailable, not a yes --
+                                    // `archive detect f && archive extract f`
+                                    // must not run the second half.
+                                    crate::console_println!(
+                                        "archive: {}: unknown archive format",
+                                        path.display()
+                                    );
+                                    set_exit(1);
+                                }
                             }
                         }
                     }
                 }
-                Err(e) => shell_println!("Error reading {}: {:?}", path.display(), e),
+                Err(e) => {
+                    crate::console_println!("archive: cannot read {}: {}", path.display(), e);
+                    set_exit(1);
+                }
             }
         }
         "create" => {
             if parts.len() < 4 {
-                shell_println!("Usage: archive create <format> <output> <file1> [file2] ...");
-                shell_println!("Formats: zip, tar, cpio, ar");
+                crate::console_println!(
+                    "Usage: archive create <format> <output> <file1> [file2] ..."
+                );
+                crate::console_println!("Formats: zip, tar, cpio, ar");
+                set_exit(1);
                 return;
             }
             let fmt = match parts[1] {
@@ -17355,12 +17508,23 @@ fn cmd_archive(args: &str) {
                 "cpio" => archive::ArchiveFormat::Cpio,
                 "ar" => archive::ArchiveFormat::Ar,
                 other => {
-                    shell_println!("Unknown format: {}. Use: zip, tar, cpio, ar", other);
+                    crate::console_println!(
+                        "archive: unknown format: {}. Use: zip, tar, cpio, ar",
+                        other
+                    );
+                    set_exit(1);
                     return;
                 }
             };
             let output = resolve_path(parts[2]);
             let mut entries = Vec::new();
+            // A file the user named and did not get is a failure of the
+            // command, not a note in passing. Warning and carrying on left
+            // `archive create out.zip a b c` printing "Created out.zip
+            // (2 entries)" and exiting 0 when `b` was unreadable -- a caller
+            // has no way to tell a complete archive from a short one, and the
+            // loss shows up whenever the archive is finally extracted.
+            let mut unreadable = 0usize;
             for name in &parts[3..] {
                 let path = resolve_path(name);
                 match crate::fs::Vfs::read_file(&path) {
@@ -17372,11 +17536,28 @@ fn cmd_archive(args: &str) {
                             kind: archive::EntryKind::File,
                         });
                     }
-                    Err(e) => shell_println!("Warning: skipping {}: {:?}", path.display(), e),
+                    Err(e) => {
+                        unreadable = unreadable.saturating_add(1);
+                        crate::console_println!("archive: cannot read {}: {}", path.display(), e);
+                    }
                 }
             }
             if entries.is_empty() {
-                shell_println!("No files to archive.");
+                crate::console_println!("archive: no readable files to archive");
+                set_exit(1);
+                return;
+            }
+            // Refuse rather than write a silently-short archive. The user asked
+            // for N files; producing one with fewer under the name they chose
+            // is the outcome that is discovered too late to fix.
+            if unreadable != 0 {
+                crate::console_println!(
+                    "archive: refusing to create {} -- {} of {} input(s) could not be read",
+                    output.display(),
+                    unreadable,
+                    parts.len().saturating_sub(3)
+                );
+                set_exit(1);
                 return;
             }
             match archive::create(fmt, &entries) {
@@ -17387,9 +17568,19 @@ fn cmd_archive(args: &str) {
                         data.len(),
                         entries.len()
                     ),
-                    Err(e) => shell_println!("Error writing {}: {:?}", output.display(), e),
+                    Err(e) => {
+                        crate::console_println!(
+                            "archive: error writing {}: {}",
+                            output.display(),
+                            e
+                        );
+                        set_exit(1);
+                    }
                 },
-                Err(e) => shell_println!("Error creating archive: {:?}", e),
+                Err(e) => {
+                    crate::console_println!("archive: error creating archive: {}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -17400,18 +17591,33 @@ fn cmd_archive(args: &str) {
             shell_println!("  Creations:   {}", creates);
         }
         _ => {
-            shell_println!("Usage: archive <command> [args]");
-            shell_println!();
-            shell_println!("Commands:");
-            shell_println!("  list <file>                        List archive contents");
-            shell_println!("  extract <file> [dest]              Extract all to directory");
-            shell_println!("  get <archive> <entry>              Extract single entry to stdout");
-            shell_println!("  detect <file>                      Detect archive format");
-            shell_println!("  create <fmt> <output> <files...>   Create archive");
-            shell_println!("  stats                              Show operation counts");
-            shell_println!();
-            shell_println!("Supported formats: ZIP, TAR, CPIO, AR, RAR5, 7z");
-            shell_println!("Create supports: zip, tar, cpio, ar");
+            // Reached both for a bare `archive` and for a misspelled
+            // subcommand. Either way nothing was done, so the exit status has
+            // to say so; a `help` subcommand is the way to ask for this text
+            // deliberately, and it exits 0.
+            if !sub.is_empty() && sub != "help" {
+                crate::console_println!("archive: unknown command: {}", sub);
+            }
+            crate::console_println!("Usage: archive <command> [args]");
+            crate::console_println!();
+            crate::console_println!("Commands:");
+            crate::console_println!("  list <file>                        List archive contents");
+            crate::console_println!(
+                "  extract <file> [dest]              Extract all to directory"
+            );
+            crate::console_println!(
+                "  get <archive> <entry>              Extract single entry to stdout"
+            );
+            crate::console_println!("  detect <file>                      Detect archive format");
+            crate::console_println!("  create <fmt> <output> <files...>   Create archive");
+            crate::console_println!("  stats                              Show operation counts");
+            crate::console_println!("  help                               Show this text");
+            crate::console_println!();
+            crate::console_println!("Supported formats: ZIP, TAR, CPIO, AR, RAR5, 7z");
+            crate::console_println!("Create supports: zip, tar, cpio, ar");
+            if sub != "help" {
+                set_exit(1);
+            }
         }
     }
 }

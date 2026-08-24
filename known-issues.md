@@ -72709,6 +72709,27 @@ they leaned on was weaker than believed.
 - `zip` has three more statusless bails of its own (`need at least an archive
   name and one file`, `'{}' is a directory (use -r)`, `no input files`) — the
   sites that revealed the bail gate had leaked.
+- **`cmp` and `diff` never put their verdict in their status** (found
+  2026-08-24 while reviewing the bail sweep's chosen sites; `cmd_cmp` at
+  kshell.rs 94885, `cmd_diff` at 94951). Both print the answer and exit 0
+  whichever answer it is:
+  - `cmp` prints `a b differ: byte 7, …` and exits 0. So does `a and b are
+    identical`. The idiom `cmp -s a b && echo same` therefore always says
+    "same", and `cmp a b || rebuild` never rebuilds.
+  - `diff` is the same, and additionally exits 0 after `diff: files too large
+    for line diff` — refusing to compare reads as "identical". (That last one
+    *is* in the queued bail sweep; the same/differ verdict is not.)
+
+  This is the fourth shape — the verdict-carrying checker — in the two commands
+  where the status is not merely *a* channel for the answer but the
+  *conventional* one. Unlike `syshealth`, both sides are trivially testable
+  from a self-test, so the fix comes with a rung asserting all three of
+  identical→0, differ→1, error→1. Follow the tree's flat-`1` convention rather
+  than POSIX `cmp`'s 0/1/2: a half-migrated table is worse than a consistent
+  one (same reasoning as the syntax-error sites above), so "differ" and "could
+  not compare" both report 1. That is a real loss of resolution and it is
+  still strictly better than today, where the dangerous direction — "I did not
+  look" reading as "they match" — is the one currently taken.
 
 ### Known under-sweep, left deliberately
 

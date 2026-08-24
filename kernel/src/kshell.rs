@@ -5615,9 +5615,39 @@ fn split_array_words(input: &str) -> Vec<String> {
 ///
 /// Handles alias expansion, pipe/redirect parsing, and dispatch.
 fn execute_single(line: &str) {
+    if execute_single_inner(line) == Handled::Here {
+        // The ERR trap belongs to the command line, not to the one shape of
+        // command line that happened to fall out of the bottom of the
+        // dispatcher. It used to be fired only next to the final `dispatch`
+        // call, which every other path -- pipeline, output redirect, input
+        // redirect, here-string, heredoc, the five builtins -- reaches by an
+        // early `return` that skipped it. A `trap '…' ERR` therefore saw a
+        // failing `cmd` but not a failing `cmd > f`, which is the shape a
+        // script is most likely to be trapping on.
+        if last_exit() != 0 {
+            fire_trap("ERR");
+        }
+    }
+}
+
+/// Whether [`execute_single_inner`] ran the command itself, or handed the line
+/// to another `execute*` call that has already applied the ERR trap to it.
+///
+/// Without the distinction, `VAR=x failing-cmd` and `eval failing-cmd` would
+/// fire the trap twice: once for the inner execution and once for the outer
+/// one that delegated to it.
+#[derive(PartialEq, Eq)]
+enum Handled {
+    Here,
+    Delegated,
+}
+
+/// The body of [`execute_single`]: alias expansion, pipe/redirect parsing and
+/// dispatch. Returns whether the ERR trap still needs firing for this line.
+fn execute_single_inner(line: &str) -> Handled {
     let line = line.trim();
     if line.is_empty() {
-        return;
+        return Handled::Here;
     }
 
     // Expand aliases (first word only).
@@ -5645,7 +5675,7 @@ fn execute_single(line: &str) {
                 set_exit(0);
             }
         }
-        return;
+        return Handled::Here;
     }
 
     // `(( EXPR ))` arithmetic command — evaluates expression, sets exit
@@ -5661,7 +5691,7 @@ fn execute_single(line: &str) {
             let val = eval_arithmetic(inner);
             set_exit(if val == 0 { 1 } else { 0 });
         }
-        return;
+        return Handled::Here;
     }
 
     // `eval` re-parses its arguments as a command line — must be handled
@@ -5672,7 +5702,7 @@ fn execute_single(line: &str) {
         if !eval_args.is_empty() {
             execute(eval_args);
         }
-        return;
+        return Handled::Delegated;
     }
 
     // Inline variable assignment: `VAR=value command args...`
@@ -5692,7 +5722,7 @@ fn execute_single(line: &str) {
                 env_remove(&inline.name);
             }
         }
-        return;
+        return Handled::Delegated;
     }
 
     // Bare variable assignment: `VAR=value` (no command follows).
@@ -5700,7 +5730,7 @@ fn execute_single(line: &str) {
     if let Some((name, value)) = parse_bare_assignment(line) {
         env_set(&name, &value);
         set_exit(0);
-        return;
+        return Handled::Here;
     }
 
     // Check for `export`/`unset`/`alias`/`unalias` before
@@ -5710,31 +5740,37 @@ fn execute_single(line: &str) {
         let mut parts = line.splitn(2, ' ');
         let cmd = parts.next().unwrap_or("");
         let args = parts.next().unwrap_or("").trim();
+        // These five run here rather than through `dispatch` (they must not be
+        // piped), so nothing else establishes the 0 baseline for them. It is
+        // stamped *before* the call, not after: stamping afterwards discarded
+        // the failure the builtin had just printed a message about, so
+        // `unalias nosuch || echo "no such alias"` could never fire and
+        // `export =oops` reported success while setting nothing.
         match cmd {
             "export" => {
-                cmd_export(args);
                 set_exit(0);
-                return;
+                cmd_export(args);
+                return Handled::Here;
             }
             "set" => {
-                cmd_set(args);
                 set_exit(0);
-                return;
+                cmd_set(args);
+                return Handled::Here;
             }
             "unset" => {
-                cmd_unset(args);
                 set_exit(0);
-                return;
+                cmd_unset(args);
+                return Handled::Here;
             }
             "alias" => {
-                cmd_alias(args);
                 set_exit(0);
-                return;
+                cmd_alias(args);
+                return Handled::Here;
             }
             "unalias" => {
-                cmd_unalias(args);
                 set_exit(0);
-                return;
+                cmd_unalias(args);
+                return Handled::Here;
             }
             _ => {}
         }
@@ -5746,7 +5782,7 @@ fn execute_single(line: &str) {
     let pipe_segments = split_pipes(line);
     if pipe_segments.len() > 1 {
         execute_pipe_chain(&pipe_segments);
-        return;
+        return Handled::Here;
     }
 
     // Check for output redirection (> file, >> file).
@@ -5755,28 +5791,24 @@ fn execute_single(line: &str) {
         // the write failed). Stamping 0 over it here made `grep pat f > out ||
         // echo "no match"` unreachable and `$?` a constant.
         execute_redirect(redir.command, redir.path, redir.append);
-        return;
+        return Handled::Here;
     }
 
     // Check for here-string (cmd <<< word).
     if let Some((command, word)) = parse_here_string(line) {
         let input = alloc::format!("{}\n", word);
         dispatch_with_input(command, input.as_bytes());
-        return;
+        return Handled::Here;
     }
 
     // Check for input redirection (cmd < file).
     if let Some((command, path)) = parse_input_redirect(line) {
         execute_input_redirect(command, path);
-        return;
+        return Handled::Here;
     }
 
     dispatch(line);
-
-    // Fire ERR trap if the command failed.
-    if last_exit() != 0 {
-        fire_trap("ERR");
-    }
+    Handled::Here
 }
 
 /// Output redirection descriptor.
@@ -6006,9 +6038,8 @@ fn execute_input_redirect(command: &str, path: &str) {
         let output = capture_stop();
         if !output.is_empty() {
             if let Err(e) = redirect_write(redir.path, &output, redir.append) {
-                crate::console_println!("Redirect error: {:?}", e);
+                crate::console_println!("{}: cannot write: {:?}", redir.path, e);
                 set_exit(1);
-                return;
             }
         }
     } else {
@@ -9725,6 +9756,97 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
 
         env_remove("KSHELL_STATUS_PROBE");
+        let _ = Vfs::remove(src);
+        let _ = Vfs::remove(out);
+    }
+
+    serial_println!("  kshell::self_test 13: builtins report failure, and ERR sees it");
+    {
+        use crate::fs::vfs::Vfs;
+        fn run(cmd: &str) {
+            let prev = SHELL_OUTPUT.lock().take();
+            capture_start();
+            execute(cmd);
+            let _ = capture_stop();
+            *SHELL_OUTPUT.lock() = prev;
+        }
+        let src = "/tmp/kshell_trap_selftest.txt";
+        let out = "/tmp/kshell_trap_selftest.out";
+        Vfs::write_file(src, b"alpha\n")?;
+        let _ = Vfs::remove(out);
+
+        // The five builtins `execute_single` runs outside `dispatch`. Their
+        // caller stamped 0 *after* the call, so the failure each of them had
+        // just printed a message about was overwritten by a success.
+        env_remove("KSHELL_BUILTIN_PROBE");
+        run("export KSHELL_BUILTIN_PROBE=set");
+        assert_eq!(last_exit(), 0, "a well-formed export succeeds");
+        assert_eq!(env_get("KSHELL_BUILTIN_PROBE").as_deref(), Some("set"));
+        run("export =oops");
+        assert_eq!(last_exit(), 1, "an empty variable name is a failure");
+
+        run("unset KSHELL_BUILTIN_PROBE");
+        assert_eq!(last_exit(), 0);
+        run("unset KSHELL_BUILTIN_PROBE");
+        assert_eq!(
+            last_exit(),
+            1,
+            "the status must agree with the message this shell prints"
+        );
+
+        run("alias kshell_selftest_alias=echo");
+        assert_eq!(last_exit(), 0);
+        run("unalias kshell_selftest_alias");
+        assert_eq!(last_exit(), 0);
+        run("unalias kshell_selftest_alias");
+        assert_eq!(last_exit(), 1, "removing an alias that is gone must fail");
+
+        // The ERR trap was fired next to the final `dispatch` call, which every
+        // other command shape reaches by an early `return` that skipped it. So
+        // a script trapping ERR saw a failing `cmd` but not a failing `cmd > f`
+        // -- the shape it is most likely to be trapping on.
+        run("trap 'KSHELL_TRAP_PROBE=fired' ERR");
+        assert_eq!(last_exit(), 0, "setting the trap must itself succeed");
+
+        for shape in [
+            "grep zeta /tmp/kshell_trap_selftest.txt",
+            "grep zeta /tmp/kshell_trap_selftest.txt > /tmp/kshell_trap_selftest.out",
+            "cat /tmp/kshell_trap_selftest.txt | grep zeta",
+            "grep zeta < /tmp/kshell_trap_selftest.txt",
+            "unalias kshell_selftest_absent_alias",
+        ] {
+            env_remove("KSHELL_TRAP_PROBE");
+            run(shape);
+            assert_eq!(
+                env_get("KSHELL_TRAP_PROBE").as_deref(),
+                Some("fired"),
+                "ERR must fire for every shape of failing command line"
+            );
+        }
+
+        // ...and only for failures.
+        env_remove("KSHELL_TRAP_PROBE");
+        run("grep alpha /tmp/kshell_trap_selftest.txt | head 1");
+        assert_eq!(
+            env_get("KSHELL_TRAP_PROBE"),
+            None,
+            "a line that succeeded must not fire ERR"
+        );
+
+        // A handler that itself fails must not re-enter its own trap. Without
+        // the guard in `fire_trap` this recurses until the kernel stack is
+        // gone, so reaching the next line at all is the assertion.
+        run("trap 'grep zeta /tmp/kshell_trap_selftest.txt' ERR");
+        run("grep zeta /tmp/kshell_trap_selftest.txt");
+        assert_eq!(last_exit(), 1, "the failing line still reports its status");
+
+        run("trap - ERR");
+        assert!(
+            TRAP_HANDLERS.lock().get("ERR").is_none(),
+            "the self-test must not leave a trap armed behind it"
+        );
+        env_remove("KSHELL_TRAP_PROBE");
+        env_remove("KSHELL_BUILTIN_PROBE");
         let _ = Vfs::remove(src);
         let _ = Vfs::remove(out);
     }
@@ -96699,11 +96821,24 @@ fn cmd_trap(args: &str) {
     }
 }
 
+/// Set while a trap handler is running, so a handler that fails cannot
+/// re-enter its own trap.
+///
+/// `trap 'false' ERR` would otherwise recurse without bound, and this shell
+/// runs in ring 0 where exhausting the stack is a double fault rather than a
+/// segfault. The guard covers *all* signals, not just the one being fired,
+/// matching bash: a handler is not itself trapped.
+static TRAP_FIRING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// Execute any trap handler registered for the given signal.
 fn fire_trap(signal: &str) {
     let cmd = TRAP_HANDLERS.lock().get(signal).cloned();
     if let Some(cmd) = cmd {
+        if TRAP_FIRING.swap(true, core::sync::atomic::Ordering::Acquire) {
+            return;
+        }
         execute(&cmd);
+        TRAP_FIRING.store(false, core::sync::atomic::Ordering::Release);
     }
 }
 
@@ -96734,6 +96869,7 @@ fn cmd_export(args: &str) {
         let value = args.get(eq_pos.saturating_add(1)..).unwrap_or("").trim();
         if name.is_empty() {
             crate::console_println!("export: invalid variable name");
+            set_exit(1);
             return;
         }
         env_set(name, value);
@@ -96744,6 +96880,7 @@ fn cmd_export(args: &str) {
         let value = parts.next().unwrap_or("").trim();
         if name.is_empty() {
             crate::console_println!("export: invalid variable name");
+            set_exit(1);
             return;
         }
         env_set(name, value);
@@ -96861,8 +96998,16 @@ fn cmd_local(args: &str) {
 fn cmd_unset(args: &str) {
     if args.is_empty() {
         crate::console_println!("Usage: unset [-f] NAME [NAME ...]");
+        set_exit(1);
         return;
     }
+
+    // Note this is stricter than bash, where unsetting a name that is not set
+    // is not an error. The choice is made by the diagnostics below, which this
+    // shell has always printed: a message on the console saying a name was not
+    // found, beside a status saying the command succeeded, is the exact
+    // inconsistency the surrounding change exists to remove. Either both go or
+    // neither does, and a caller that does not care can use `unset x || true`.
 
     // `unset -f NAME` removes a function definition.
     if args.starts_with("-f ") || args.starts_with("-f\t") {
@@ -96870,6 +97015,7 @@ fn cmd_unset(args: &str) {
         for name in names.split_whitespace() {
             if FUNCTIONS.lock().remove(name).is_none() {
                 crate::console_println!("unset: function '{}': not defined", name);
+                set_exit(1);
             }
         }
         return;
@@ -96892,6 +97038,7 @@ fn cmd_unset(args: &str) {
         // Try removing as array first, then as scalar.
         if !array_remove(name) && !env_remove(name) {
             crate::console_println!("unset: '{}': not set", name);
+            set_exit(1);
         }
     }
 }
@@ -97146,6 +97293,7 @@ fn cmd_alias(args: &str) {
         let value = strip_quotes(value);
         if name.is_empty() {
             crate::console_println!("alias: invalid alias name");
+            set_exit(1);
             return;
         }
         alias_set(name, value);
@@ -97156,6 +97304,7 @@ fn cmd_alias(args: &str) {
         let value = parts.next().unwrap_or("").trim();
         if name.is_empty() {
             crate::console_println!("alias: invalid alias name");
+            set_exit(1);
             return;
         }
         if value.is_empty() {
@@ -97163,7 +97312,10 @@ fn cmd_alias(args: &str) {
             if let Some(v) = alias_get(name) {
                 crate::console_println!("alias {}='{}'", name, v);
             } else {
+                // A query for a name that does not exist: the question was
+                // asked and could not be answered, which is bash's exit 1 too.
                 crate::console_println!("alias: '{}': not found", name);
+                set_exit(1);
             }
         } else {
             alias_set(name, value);
@@ -97177,6 +97329,7 @@ fn cmd_alias(args: &str) {
 fn cmd_unalias(args: &str) {
     if args.is_empty() {
         crate::console_println!("Usage: unalias [-a] NAME [NAME ...]");
+        set_exit(1);
         return;
     }
     if args.trim() == "-a" {
@@ -97184,8 +97337,12 @@ fn cmd_unalias(args: &str) {
         return;
     }
     for name in args.split_whitespace() {
+        // As in bash: removing an alias that is not defined is an error. The
+        // status is not reset by a later name that does succeed, so a batch
+        // reports its worst outcome rather than its last one.
         if !alias_remove(name) {
             crate::console_println!("unalias: '{}': not found", name);
+            set_exit(1);
         }
     }
 }

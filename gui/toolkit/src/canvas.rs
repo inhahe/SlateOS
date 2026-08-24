@@ -745,7 +745,7 @@ mod tests {
     #[test]
     fn nearest_resize_to_zero_is_empty_rather_than_a_panic() {
         assert!(coords(4, 4).resize_nearest(0, 5).is_empty());
-        assert!(Canvas::empty().resize_nearest(4, 4).pixels().len() == 16);
+        assert_eq!(Canvas::empty().resize_nearest(4, 4).pixels().len(), 16);
     }
 
     #[test]

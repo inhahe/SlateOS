@@ -67,6 +67,7 @@ pub mod svg;
 pub mod table;
 pub mod tabs;
 pub mod text;
+pub mod textedit;
 pub mod textview;
 pub mod theme;
 pub mod tree;

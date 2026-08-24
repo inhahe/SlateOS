@@ -33665,6 +33665,129 @@ its own event synthesis, focus rules and tests — all of which get deleted when
 the real device lands. That is exactly the band-aid accumulation `CLAUDE.md`
 names. This entry stays open and honest instead.
 
+**Update 2026-08-24 — both halves are built. Closed here; one dependency
+remains, and it is lane B's.**
+
+Lane A landed the kernel half on 2026-08-21
+(`requests/a-c-evdev-input-devices-exist-and-they-need-a-capability.md`): real
+`/dev/input/event0` and `event1`, 24-byte `input_event` records, `EV_KEY`/
+`EV_REL`/`EV_MSC`/`EV_SYN`, `SYN_DROPPED` with a per-fd cursor, the full
+`EVIOC*` interrogation sequence, and — more than was asked for — the set-1 →
+Linux-keycode translation done kernel-side, so the offer above to own that table
+in lane C was not taken up.
+
+Lane C has now landed the compositor half:
+
+* **`gui/compositor/src/present/evdev.rs`** and its `uapi`/`sys` submodules —
+  the client. Split three ways for the same reason `present/drm.rs` is: `uapi`
+  is the wire format and the keycode table with no fds and no `unsafe`, `sys` is
+  the four syscalls behind a trait, and the parent file holds every decision and
+  is generic over that trait. Every bug this module can have is a protocol or
+  policy bug, and none of them need a keyboard to find — but all of them would
+  be invisible if the module were behind `#[cfg(target_os = "linux")]`, because
+  the machine this tree is compiled on is not Linux.
+* **`present::Paired`** — the answer to the "alongside `DrmScanout` rather than
+  inside it" question this entry raised. `Paired<S, I>` is a `Present` made of a
+  screen and an `InputSource`: frames and monitors go to the screen, events come
+  from the source, and the screen alone decides when the session ends (a
+  keyboard being unplugged is not a reason to end it). It also keeps
+  `InputSource::set_bounds` current, which is how monitor hotplug reaches the
+  pointer. `Server::run_with` is unchanged.
+* **`main.rs`** pairs the two on the SlateOS target, and prints each node that
+  opened with its `EVIOCGNAME`.
+
+Three things the kernel deliberately does not do are done here, and are listed
+in the module docs so nobody later builds a second one: key repeat (synthesised
+from key-down/up timing at the user's own `input.yaml` delay/interval, capped
+per tick, modifiers excluded, and hardware autorepeat passed through in a way
+that pushes our timer out of the way rather than doubling with it); absolute
+pointer position (integration, the user's speed and acceleration profile,
+clamping, and the sub-pixel remainder without which a 0.25× speed setting is
+immovable); and `SYN_DROPPED` resync via `EVIOCGKEY`, reconciled *both* ways —
+releasing what is no longer held, which is the stuck-Shift bug, and pressing
+what is held and was missed, which is the Ctrl that stops making shortcuts.
+
+**Tested:** 66 tests across `evdev/tests.rs`, `uapi.rs` and `present.rs`, all
+driven by a fake device that scripts a real byte stream, so none of them need
+the capability. Proved non-vacuous by `scripts/reintro-evdev.py`, which puts 54
+one-line defects back one at a time — `REL_Y` counting upwards, the scroll axes
+crossed, `packet.scan` read instead of taken, the per-device check dropped from
+resync, `MSC_SCAN` consulted before the keycode table — and records the test
+that has to name each one.
+
+**The one dependency left is not lane C's and cannot be made so.**
+`open("/dev/input/event*")` returns `EACCES` until the compositor holds a
+`(ResourceType::InputDevice, 0, Rights::READ)` capability, which is obtainable
+only at spawn or by inheritance from an ancestor — init / the service manager,
+lane B's tree, filed as
+`requests/a-b-the-compositor-needs-an-inputdevice-capability-to-inherit.md`.
+`EvdevError::Denied` is its own variant so that this reports itself in those
+words rather than as a missing file, and the compositor prints the fix and the
+request filename on the way past, then carries on without local input. **Nothing
+here changes when that grant lands** — the code path is the one the tests
+exercise, with `sys::Devices` in place of the fake. Reply to lane A:
+`requests/c-a-the-compositor-now-reads-your-evdev-nodes-and-is-waiting-only-on-the-capability.md`.
+
+**Still open, and tracked separately:** a `ReloadInput` request reaches
+`Compositor::reload_input`, which adopts only `double_click_ms` — it has no way
+to reach `EvdevInput::set_settings`, so a pointer-speed change made in Settings
+does not take effect until the next login. See
+`TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER`.
+
+## TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER (lane C, 2026-08-24)
+
+**In short:** the Settings → Mouse page can change the pointer speed, the
+acceleration profile, the button mapping and the key-repeat rate, and the file
+it writes is read by the compositor — but only one setting out of that file is
+adopted while the desktop is running. The rest take effect at the next login. A
+user who drags the speed slider sees nothing happen.
+
+**What.** `Compositor::reload_input` (`gui/compositor/src/lib.rs`) is what a
+`ReloadInput` request lands in. It does:
+
+```rust
+let settings = inputsettings::InputFile::load().settings;
+self.set_double_click_ms(settings.mouse.double_click_ms);
+```
+
+Everything else in `InputSettings` — `mouse.speed`, `accel_profile`,
+`accel_gain`, `accel_threshold`, `natural_scroll`, `scroll_speed`,
+`button_mapping`, and the whole of `keyboard` — is used by
+`present::evdev::EvdevInput`, which has a `set_settings` for exactly this
+purpose and no caller. `reload_input` cannot reach it: the `EvdevInput` lives
+inside a `Paired` inside the `Present` that `Server::run_with` holds, and
+`Compositor` has no reference to its own display.
+
+**Why it was not fixed in the same change.** It is not a missing line; it is a
+missing direction. `Compositor` is deliberately display-agnostic — that is what
+lets the same compositor run headless, into a recording, onto a Win32 window and
+onto a DRM card — so "the compositor tells the display to reload" needs a route
+that does not put a display type into `Compositor`. The route that fits the
+existing shapes is for `Server::run_with` to notice the request instead: it
+already owns both the compositor and the `&mut dyn Present`, and it already
+drives the loop that would apply it.
+
+**The proper fix.** Add a `Present::reload_input(&mut self, settings:
+&InputSettings)` with an empty default body — the same pattern
+`Present::monitors` already uses for a capability only one implementor has —
+have `Paired` forward it to `InputSource`, add the matching
+`InputSource::reload_input` forwarding to `EvdevInput::set_settings`, and have
+`Server::run_with` call it when the tick reports that a `ReloadInput` was
+handled. `Compositor::reload_input` then returns the loaded `InputSettings`
+rather than swallowing them, so the file is read once rather than twice.
+
+**How to reproduce.** Not reproducible on the dev machine today, because the
+capability grant is not landed and there is no `EvdevInput` to reload. On
+hardware: set Settings → Mouse → pointer speed to its maximum, apply, and move
+the mouse. The double-click interval will have changed (that one setting works);
+the pointer speed will not, until the desktop is restarted.
+
+**Severity.** Medium. The setting is not lost — it is in `input.yaml` and is
+honoured at the next start — so this is a latency bug, not a data bug. But a
+slider that appears to do nothing is indistinguishable to a user from a slider
+that is broken, and it is the *second* time this exact shape has been found in
+this area (`TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING` was the first).
+
 ## TD-COMPOSITOR-COPIES-EVERY-FRAME-TWICE (lane C, 2026-08-21)
 
 **In short:** every frame the desktop draws is copied one extra time on its way
@@ -73294,7 +73417,32 @@ converted only 11 of 15 sites — the rewriter matched `&out`, and four captures
 are bound to other names (`0ddfaa5bc`). A mechanical sweep's own coverage is
 worth re-deriving from the source rather than from the count the sweep reported.
 
-## TD-C-TWO-TOOLKIT-TEXT-FIELDS-DRAW-NO-CARET-AT-ALL (lane C, 2026-08-24) — **open**
+## TD-C-TWO-TOOLKIT-TEXT-FIELDS-DRAW-NO-CARET-AT-ALL — RESOLVED 2026-08-24
+
+**Both fields are done.** `WidgetKind::TextInput` and `InputDialog` now share one
+implementation of a single-line field's caret, selection and scrolling —
+`gui/toolkit/src/textedit.rs`, written for this fix precisely so that the five
+text fields in the tree stop each having their own answer. `InputDialog`
+converts its offsets through `drawn_offset` first, so a password field's caret
+and selection are measured in mask characters and never leak the secret's byte
+length. Reasoning in `design-decisions.md` §546.
+
+**One piece is deliberately not done: clicking in an `InputDialog` does not move
+its caret.** It cannot, and the reason is a separate defect —
+`TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED` below. The widget
+text field does support click-to-place, because a `Widget` has a layout box.
+
+The original report follows.
+
+---
+
+**`WidgetKind::TextInput` was done first**: it now has a focus, a caret gated on it, a
+selection anchor with Shift+Arrow and painted selection boxes, click-to-place-
+caret, and a horizontal scroll offset that keeps the caret inside the box. See
+`design-decisions.md` §546, and the twenty tests from
+`a_focused_field_draws_a_caret_and_an_unfocused_one_does_not` onwards in
+`gui/toolkit/src/widget.rs`. **`InputDialog` in `gui/toolkit/src/modal.rs` is
+still untreated** — the rest of this entry is about it.
 
 `WidgetKind::TextInput` (`gui/toolkit/src/widget.rs`, render arm at ~line 618)
 and `InputDialog` (`gui/toolkit/src/modal.rs`, ~line 1376) both **track** a
@@ -73350,6 +73498,106 @@ caret/selection/scrolling implementation into the change that moved five
 fields' arrows would have made a reviewable diff unreviewable. Nothing depends
 on it: `pathbar` is the toolkit field the shell actually uses for typing.
 
+## TD-C-THE-LOCK-SCREEN-THROWS-AWAY-THE-ANSWER-TO-THE-ONLY-QUESTION-IT-ASKS — RESOLVED 2026-08-24
+
+**Lane C, found 2026-08-24 while planning the `authlib` rework.**
+
+**RESOLVED 2026-08-24.** Fixed exactly as the plan at the bottom of this
+entry describes, and the plan is left in place because it is the record of
+what was done. `submit_password` returns `AuthOutcome`; `unlock_requested`
+is a real field collected by `take_unlock_request()`; `PasswordAuthority`
+is the trait the verdict arrives through and `PasswordValidator` is now
+one interim implementor of it rather than the only way to get an answer.
+Eight tests drive `handle_event` and the mouse path instead of calling
+`submit_password` directly, including one that presses Enter with the
+right password and asserts an unlock was authorised — which is the
+assertion whose absence let this ship.
+
+Two things deliberately *not* done here, both recorded rather than
+silently decided:
+
+- **The `NoPassword` policy is unchanged**, so a passwordless account's
+  screen still opens on Enter as it always has. Refusing is the secure
+  answer and also locks the real user out forever; it is now one function
+  (`LockScreen::unlocks_for`) and one question in `open-questions.md`.
+  Changing who can unlock a machine is not something to slip into a
+  commit about interface shape.
+- **`PasswordValidator` is still here**, because `logind` answers
+  `system.logind.Error.UnknownCaller` to everyone until lane A can tell a
+  service who is calling it
+  (`requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`). Its
+  `PasswordAuthority` impl carries the note; when that lands the impl is
+  deleted and a bus connection is constructed in its place, and nothing
+  else in the file moves.
+
+`apps/lockscreen/src/main.rs` — `LockScreen::submit_password` returns `bool`,
+and **both of its call sites discard it**:
+
+```rust
+Key::Enter => {
+    let _ = self.submit_password();      // :1025
+    EventResult::Consumed
+}
+// and on the submit button, :1064
+```
+
+So typing the correct password and pressing Enter runs the key derivation,
+clears the buffer, resets the failure count — and reports nothing to anybody.
+There is no path by which the screen can unlock.
+
+**What makes this worse than a missing line is the comment above it.**
+`handle_event`'s doc says:
+
+> Special return: if the screen should unlock, this is signaled by the
+> `unlock_requested` flag on the struct (checked separately).
+
+There is no `unlock_requested` field. `grep -rn unlock_requested apps/` matches
+that sentence and nothing else. The comment does not describe a mechanism that
+broke; it describes one that was never written, and it is the only
+documentation the first caller of `handle_event` will read. That caller will
+look for the flag, not find it, and have to reverse-engineer the fact that the
+verdict is unreachable — which is the `days_in_month` failure shape again: a
+second answer justified by a false statement about the first.
+
+### Why the tests are all green
+
+Every test calls `submit_password()` **directly** and asserts on its return
+(`assert!(ls.submit_password())`, `:1887`). Not one of them goes in through
+`handle_event`, which is the only path a user has. The unit under test is
+correct; the wiring between it and the world is absent, and nothing looks at
+the wiring.
+
+### Why it has not bitten yet
+
+`apps/lockscreen` has `fn main() {}` — it is a library wearing a binary's
+clothes, with no compositor session driving it. So this is not a live
+"correct password rejected" bug today; it is a trap set for whoever writes the
+first driver. That is exactly when it is cheapest to fix.
+
+### The proper fix — and it lands with the `authlib` rework, not before
+
+The return type is changing anyway. `requests/b-c-desktop-password-checks-go-through-a-privileged-verifier.md`
+asks for the verdict to arrive from *outside* the screen as a four-way outcome
+rather than a `bool` computed in-process, so both changes touch the same
+signature and splitting them would mean editing every call site twice:
+
+- `AuthOutcome` mirroring `authlib::Outcome` and logind's `OUTCOME_*` wire
+  codes — `Accepted` / `Rejected` / `Locked` / `NoPassword` / `Unusable` /
+  `RateLimited { retry_after_secs }`. Lane B's point that this is not a `bool`
+  is the same point as this entry: `Unusable` means the *system* is broken and
+  must reach an administrator rather than be counted as a typo.
+- A `PasswordAuthority` trait with `authenticate(&mut self, username, password)
+  -> AuthOutcome`. `PasswordValidator` implements it as the interim local path
+  and is deleted when logind can identify its callers (blocked on
+  `requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`, which is lane
+  A's — until it lands, a real bus call gets a refusal rather than a verdict).
+- `submit_password() -> AuthOutcome`, and a real `unlock_requested` flag with a
+  `take_unlock_request()` accessor, so the comment above becomes true by
+  construction rather than aspirationally.
+- **A test that drives `handle_event` rather than `submit_password`** — typing
+  the password a character at a time and pressing Enter. Without it the new
+  wiring is exactly as untested as the old, and the whole entry recurs.
+
 ## TD-A-BOOT-HISTORY-IS-A-TRACKED-FILE-EVERY-BOOT-DIRTIES (lane A, 2026-08-24) — **open**
 
 `bench/boot-history.jsonl` is committed to git *and* appended to by every run of
@@ -73388,6 +73636,99 @@ Either of these removes the hazard; the first is smaller and probably right:
 Never run `git checkout --`, `git restore`, or `git stash` against
 `bench/boot-history.jsonl`. If it is dirty before a merge, **commit it**, do not
 clear it.
+
+## TD-C-EVERY-KEYSTROKE-WENT-TO-THE-LAST-TEXT-FIELD-IN-THE-WINDOW — RESOLVED 2026-08-24
+
+**Lane C, found 2026-08-24 while adding a caret to `WidgetKind::TextInput`.**
+
+The toolkit had no concept of keyboard focus. `Widget::handle_event`
+(`gui/toolkit/src/widget.rs`) walked its children back to front and gave the
+event to the first one that consumed it — and it did that for **key** events as
+well as for mouse events, where the back-to-front walk is correct because it
+means "topmost under the pointer". A key event has no pointer, so "the first
+child that takes it, searched back to front" resolves to *the last text field in
+the tree*, unconditionally.
+
+So on any form with two text fields, everything the user typed went into the
+second one, whatever they had clicked. The click itself was delivered correctly
+— to the field under the pointer — which made the symptom look like a rendering
+fault rather than a routing one.
+
+### Why no test caught it
+
+Every text-input test in the file built a tree with exactly *one* text field, so
+"the field the user clicked" and "the last field in the tree" were the same
+widget and no test could tell them apart. The regression test that does is
+`typing_goes_to_the_field_that_was_clicked_and_not_the_last_one_in_the_tree`,
+which uses two fields and clicks the first.
+
+### The fix
+
+A focus, introduced properly rather than as a flag on the key path — see
+`design-decisions.md` §546 for the four choices it involved. The line that
+closes the bug is the guard in `Widget::handle_event`:
+
+```rust
+Event::Key(key) if self.focused => self.handle_key(key),
+```
+
+with `WidgetTree::handle_event` moving the focus on a mouse press (by hit-test,
+before the click is dispatched) and consuming Tab / Shift+Tab to step it.
+
+### What it means for callers
+
+`WidgetTree` now swallows typing until something is focused, where before it
+delivered it to an arbitrary widget. A window that wants a field ready to type
+into on open must say so with `WidgetTree::focus_first()`. That is a behaviour
+change, but not one that breaks any current caller: no app in the tree routes
+events through `WidgetTree::handle_event` today — they were all doing their own
+key handling, which is itself a sign that this path was not usable.
+
+## TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED (lane C, 2026-08-24) — **open**
+
+`ModalOverlay` has a `content_rect` — the dialog's own rectangle, which
+`handle_mouse` tests a click against to decide whether it landed outside the
+dialog and should dismiss it. **Nothing ever sets it.** The only callers of
+`set_content_rect` in the tree are two unit tests (`gui/toolkit/src/modal.rs`);
+no dialog calls it, so every live dialog carries `(0.0, 0.0, 0.0, 0.0)` and
+`point_in_content` answers `false` for every point on the screen.
+
+### What breaks
+
+- **`dismiss_on_click_outside` dismisses on a click *anywhere*, including on the
+  dialog's own buttons.** `ModalOverlay::new()` turns it on by default, so this
+  is the behaviour of any dialog that does not turn it off. `InputDialog` and
+  `ProgressDialog` set it to `false` in their constructors and are unaffected;
+  `AlertDialog` and `NonModalDialog` need checking, and the default itself is
+  the trap for whatever is written next.
+- **No dialog can hit-test anything inside itself.** That is why `InputDialog`
+  has a caret it can place with the arrows but not with the mouse: the geometry
+  it would need is computed inside `render(&self, parent_width, parent_height,
+  …)` from the parent's size, discarded when that call returns, and unavailable
+  to `handle_mouse`, which is not told the parent's size at all.
+
+### Why it is a design fault and not a missing call
+
+Adding `self.overlay.set_content_rect(...)` inside `render` is impossible as
+written — `render` takes `&self`. Threading the parent size into `handle_mouse`
+instead would give two independent copies of the layout arithmetic, in two
+methods, that have to agree exactly or the click lands in the wrong place; that
+is the bug it is trying to fix, moved.
+
+### The proper fix
+
+Give the dialogs a **layout step**, as `Widget`/`WidgetTree` already have: a
+`fn layout(&mut self, parent_width: f32, parent_height: f32)` that computes the
+rectangles once, stores them (dialog rect, input-field rect, button rects), and
+is called before `render` and consulted by `handle_mouse`. `render` then draws
+from the stored boxes rather than recomputing them, and `handle_mouse` hit-tests
+against the same numbers that were drawn — which is the property that makes a
+click land where the user aimed it.
+
+Once that exists, `InputDialog` gains click-to-place-caret in a few lines, using
+`text::cursor_at` against the stored field rect exactly as
+`WidgetKind::TextInput` does today, and `dismiss_on_click_outside` starts
+meaning what it says.
 
 ---
 

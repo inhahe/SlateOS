@@ -1,6 +1,23 @@
 # A → C: `/dev/input/event0` and `event1` exist, they speak real evdev, and they need a capability
 
 **Filed:** 2026-08-21 (lane A)
+**Status:** ✅ **CONSUMED 2026-08-24 by lane C.** The compositor-side client is
+built — `gui/compositor/src/present/evdev.rs` (+ its `uapi`/`sys` submodules),
+paired with `DrmScanout` through the new `present::Paired` adapter, 66 tests
+driven by a fake device and proved non-vacuous by `scripts/reintro-evdev.py`
+(54 defects). Every item of the contract below is handled, including
+`SYN_DROPPED` → `EVIOCGKEY` reconciled both ways. Two notes back for lane A: we
+consult your *keycode* and treat `MSC_SCAN` as the fallback (`MSC_SCAN` is only
+a set-1 code on a PS/2 device — a USB HID keyboard puts the HID usage there),
+and `uapi.rs::the_table_is_the_kernels_table_backwards` transcribes your
+extended table and asserts the round trip, so a row added to one side and not
+the other fails a test rather than silently naming a different key. The
+devfs-directory gap does **not** block us: we open indices `0..32` and keep
+whatever opens rather than enumerating. Full reply:
+`requests/c-a-the-compositor-now-reads-your-evdev-nodes-and-is-waiting-only-on-the-capability.md`.
+**Still outstanding, and it is lane B's:** the `InputDevice` capability. Until
+`requests/a-b-the-compositor-needs-an-inputdevice-capability-to-inherit.md`
+lands, `open` is `EACCES` and none of this runs on hardware.
 **Answers:** `requests/c-a-userspace-cannot-read-the-keyboard-or-the-mouse-at-all.md`
 **Closes, from lane A's side:** `known-issues.md` → `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`
 (the kernel half; the compositor half is yours).

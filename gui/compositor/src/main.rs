@@ -339,7 +339,9 @@ fn run_headless(server: &mut Server, options: &Options) -> std::io::Result<()> {
 #[cfg(target_os = "linux")]
 fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
     use compositor::Display;
+    use compositor::present::Paired;
     use compositor::present::drm::DrmScanout;
+    use compositor::present::evdev::{EvdevError, EvdevInput};
 
     if options.headless {
         return run_headless(server, options);
@@ -427,7 +429,46 @@ fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
                     composed.0, composed.1
                 );
             }
-            server.run_with(&mut compositor, &mut screen)
+            // The keyboard and the mouse are different devices from the card,
+            // so they are opened separately and paired with it rather than
+            // being asked of it. The desktop's size is passed in because
+            // `Server::run_with` polls input *before* it shows the first frame:
+            // a pointer that waited for a frame to learn where the edges are
+            // would spend its first tick not knowing.
+            let (composed_w, composed_h) = compositor.frame_size();
+            match EvdevInput::open(
+                inputsettings::InputFile::load().settings,
+                composed_w,
+                composed_h,
+            ) {
+                Ok(input) => {
+                    for (index, name) in input.devices() {
+                        eprintln!(
+                            "compositor: reading input from /dev/input/event{index} ({name})"
+                        );
+                    }
+                    let mut display = Paired::new(screen, input, composed_w, composed_h);
+                    server.run_with(&mut compositor, &mut display)
+                }
+                Err(e) => {
+                    // Not fatal: a desktop that draws and serves remote clients
+                    // is worth having even when nobody can type at it locally.
+                    // `Denied` says what to do about it, because a permission
+                    // error that reads as a missing file is a day lost to the
+                    // wrong hypothesis — and the grant is in the compositor's
+                    // ancestor, not in anything this process can reach.
+                    eprintln!("compositor: no local input ({e})");
+                    if e == EvdevError::Denied {
+                        eprintln!(
+                            "compositor: the fix is a (ResourceType::InputDevice, 0, \
+                             Rights::READ) capability granted to this process or an \
+                             ancestor at spawn; see requests/\
+                             a-b-the-compositor-needs-an-inputdevice-capability-to-inherit.md"
+                        );
+                    }
+                    server.run_with(&mut compositor, &mut screen)
+                }
+            }
         }
         Err(e) => {
             // No card, nothing plugged in, or no permission. Serving remote

@@ -66,35 +66,64 @@ use alloc::vec::Vec;
 /// constraint on the rest of the byte-clean conversion.
 static SHELL_OUTPUT: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
+/// A capture in progress, holding the enclosing capture it displaced.
+///
+/// Captures nest: `$(cat f | grep x)` is a command substitution (which
+/// captures) around a pipeline (whose every stage captures). The nesting is
+/// what this type exists to make safe.
+///
+/// It used to be unsafe, because [`capture_start`] and `capture_stop` were a
+/// bare *set*/*take* pair on the global. Whoever needed to nest had to save
+/// and restore `SHELL_OUTPUT` by hand around them, `capture_command` did,
+/// and the four line-level plumbing functions -- [`execute_redirect`],
+/// [`execute_input_redirect`], [`execute_heredoc`] and [`execute_pipe_chain`]
+/// -- did not. So an inner `capture_stop` left the global `None`, and every
+/// byte the enclosing capture should have received went to the console
+/// instead: `$(cat f | grep x)` evaluated to the empty string while printing
+/// its answer on the physical screen. That is not only a scripting bug --
+/// `capture_command` is what serves remote shells (`net/ssh.rs`,
+/// `net/telnet.rs`), so a remote user's pipeline output was written to the
+/// *host's* console and they received nothing.
+///
+/// One invariant with six hand-written copies and four omissions is a sign
+/// the invariant is in the wrong place, so it now lives here: the captured
+/// bytes are reachable only through [`Capture::finish`], which restores the
+/// displaced capture on the way out. Forgetting the restore is no longer
+/// something a call site can do.
+///
+/// There is deliberately no `Drop`: `finish` consumes `self`, and a kernel
+/// panic halts rather than unwinds, so `#[must_use]` plus a consuming
+/// accessor is the whole discipline.
+#[must_use = "a capture that is never finished leaks the enclosing capture"]
+struct Capture(Option<Vec<u8>>);
+
 /// Begin capturing shell output to an internal buffer.
-fn capture_start() {
-    *SHELL_OUTPUT.lock() = Some(Vec::with_capacity(4096));
+///
+/// The returned [`Capture`] must be handed to [`Capture::finish`] to retrieve
+/// the bytes and reinstate whatever capture was running before.
+fn capture_start() -> Capture {
+    Capture(SHELL_OUTPUT.lock().replace(Vec::with_capacity(4096)))
 }
 
-/// Stop capturing and return the captured bytes.
-fn capture_stop() -> Vec<u8> {
-    SHELL_OUTPUT.lock().take().unwrap_or_default()
+impl Capture {
+    /// Stop capturing, return the captured bytes, and reinstate the capture
+    /// that was running when this one began (if any).
+    fn finish(self) -> Vec<u8> {
+        let mut slot = SHELL_OUTPUT.lock();
+        let output = slot.take().unwrap_or_default();
+        *slot = self.0;
+        output
+    }
 }
 
 /// Execute a command and capture its output as raw bytes.
 ///
-/// Used for `$(command)` substitution.  Handles recursive capture by
-/// saving and restoring the previous capture state (since a command
-/// substitution can appear inside a pipeline or redirect that's already
-/// capturing).
+/// Used for `$(command)` substitution, and by the SSH and telnet servers to
+/// collect the output of a remotely-issued command.
 pub fn capture_command(cmd: &str) -> Vec<u8> {
-    // Save any existing capture state (supports nesting).
-    let prev = SHELL_OUTPUT.lock().take();
-
-    // Start fresh capture.
-    capture_start();
+    let capture = capture_start();
     execute(cmd);
-    let output = capture_stop();
-
-    // Restore previous capture state.
-    *SHELL_OUTPUT.lock() = prev;
-
-    output
+    capture.finish()
 }
 
 /// Write captured shell output to `path`, appending when `append` is set.
@@ -6033,9 +6062,9 @@ fn execute_input_redirect(command: &str, path: &str) {
     // the bytes.  Deciding here would keep a byte-safe consumer from ever
     // seeing a file it could have handled.
     if let Some(redir) = parse_redirect(command) {
-        capture_start();
+        let capture = capture_start();
         dispatch_with_input(redir.command, &data);
-        let output = capture_stop();
+        let output = capture.finish();
         if !output.is_empty() {
             if let Err(e) = redirect_write(redir.path, &output, redir.append) {
                 crate::console_println!("{}: cannot write: {:?}", redir.path, e);
@@ -6104,9 +6133,9 @@ fn split_pipes(line: &str) -> Vec<&str> {
 
 /// Execute a command with its output redirected to a file.
 fn execute_redirect(command: &str, path: &str, append: bool) {
-    capture_start();
+    let capture = capture_start();
     dispatch(command);
-    let output = capture_stop();
+    let output = capture.finish();
 
     if output.is_empty() {
         return;
@@ -6144,9 +6173,9 @@ fn execute_heredoc(command: &str, suffix: &str, body: &str) {
     // Complex case: command has a suffix (pipe or redirect).
     // Capture the command's output with the heredoc body as input,
     // then feed that output through the suffix.
-    capture_start();
+    let capture = capture_start();
     dispatch_with_input(command, body.as_bytes());
-    let output = capture_stop();
+    let output = capture.finish();
 
     // Now execute the suffix with the captured output.
     // The suffix might be "| cmd2" or "> file" or ">> file".
@@ -6212,7 +6241,7 @@ fn execute_pipe_chain(segments: &[&str]) {
     }
 
     // First stage: run with no piped input, capture its output.
-    capture_start();
+    let capture = capture_start();
     // The first segment might have input redirection (cmd < file | ...).
     let first = segments[0];
     if let Some((command, path)) = parse_input_redirect(first) {
@@ -6220,23 +6249,30 @@ fn execute_pipe_chain(segments: &[&str]) {
     } else {
         dispatch(first);
     }
-    let mut piped_data = capture_stop();
+    let mut piped_data = capture.finish();
 
     // Middle stages: each reads from the previous output and captures for
     // the next stage.
     let last_idx = segments.len().saturating_sub(1);
     for seg in segments.get(1..last_idx).unwrap_or(&[]) {
-        capture_start();
+        let capture = capture_start();
         dispatch_with_input(seg, &piped_data);
-        piped_data = capture_stop();
+        piped_data = capture.finish();
     }
 
     // Last stage: may have output redirection; otherwise prints to console.
+    //
+    // Note there is no capture around the un-redirected arm, and that is the
+    // point: by here every intermediate capture has been finished, so the
+    // global is back to whatever enclosed the pipeline. The last stage's
+    // output therefore lands in the enclosing capture when there is one --
+    // which is what makes `$(cat f | grep x)` evaluate to the matched line
+    // rather than to nothing -- and on the console when there is not.
     let last = segments[last_idx];
     if let Some(redir) = parse_redirect(last) {
-        capture_start();
+        let capture = capture_start();
         dispatch_with_input(redir.command, &piped_data);
-        let output = capture_stop();
+        let output = capture.finish();
         if !output.is_empty() {
             if let Err(e) = redirect_write(redir.path, &output, redir.append) {
                 crate::console_println!("{}: cannot write: {:?}", redir.path, e);
@@ -9284,12 +9320,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         /// Mirrors `capture_command`'s nesting discipline: `self_test` itself
         /// may be invoked from a captured context.
         fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
-            let prev = SHELL_OUTPUT.lock().take();
-            capture_start();
+            let capture = capture_start();
             dispatch_with_input(cmd, input);
-            let out = capture_stop();
-            *SHELL_OUTPUT.lock() = prev;
-            out
+            capture.finish()
         }
 
         // `cat` with no argument is the identity on a pipe. Nothing is added,
@@ -9510,12 +9543,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // so `date +'%F café'` printed `cafÃ©`. Driven through the real
         // dispatch so the `+` parsing is covered too.
         fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
-            let prev = SHELL_OUTPUT.lock().take();
-            capture_start();
+            let capture = capture_start();
             dispatch_with_input(cmd, input);
-            let out = capture_stop();
-            *SHELL_OUTPUT.lock() = prev;
-            out
+            capture.finish()
         }
         let out = piped("date +café", b"");
         assert_eq!(
@@ -9573,12 +9603,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     {
         use crate::fs::vfs::Vfs;
         fn run(cmd: &str) -> Vec<u8> {
-            let prev = SHELL_OUTPUT.lock().take();
-            capture_start();
+            let capture = capture_start();
             dispatch(cmd);
-            let out = capture_stop();
-            *SHELL_OUTPUT.lock() = prev;
-            out
+            capture.finish()
         }
         let src = "/tmp/kshell_archive_selftest_a";
         let out = "/tmp/kshell_archive_selftest.zip";
@@ -9664,15 +9691,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // line-level plumbing that only `execute` reaches.
     {
         use crate::fs::vfs::Vfs;
-        fn run(cmd: &str) {
-            // The redirect and pipe paths run their own capture without saving
-            // this one, so nothing may be asserted about the bytes here; the
-            // capture is only to keep the commands' output off the serial log.
-            let prev = SHELL_OUTPUT.lock().take();
-            capture_start();
+        /// Run a whole command line under a capture and return what it wrote.
+        ///
+        /// The bytes are meaningful: every inner capture the line starts --
+        /// per pipeline stage, per redirect -- reinstates this one when it
+        /// finishes, so a pipeline's final output arrives here rather than on
+        /// the console. That was not true before `Capture` existed, and the
+        /// assertions below that inspect the return value are what keep it
+        /// true.
+        fn run(cmd: &str) -> Vec<u8> {
+            let capture = capture_start();
             execute(cmd);
-            let _ = capture_stop();
-            *SHELL_OUTPUT.lock() = prev;
+            capture.finish()
         }
         let src = "/tmp/kshell_status_selftest.txt";
         let out = "/tmp/kshell_status_selftest.out";
@@ -9688,8 +9718,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "no match is failure");
 
         // Through a pipeline: the status is the last stage's, as in POSIX.
-        run("cat /tmp/kshell_status_selftest.txt | grep alpha");
+        let piped = run("cat /tmp/kshell_status_selftest.txt | grep alpha");
         assert_eq!(last_exit(), 0, "a pipeline that ended well succeeded");
+        // ...and the output reaches the *enclosing* capture. This is the
+        // assertion that fails against the pre-`Capture` plumbing: the last
+        // stage used to run with the global left `None` by the stage before
+        // it, so these bytes went to the console and `piped` came back empty.
+        assert_eq!(
+            piped.as_slice(),
+            &b"1:alpha\n"[..],
+            "a pipeline's output belongs to whoever is capturing the pipeline"
+        );
+        // The two halves of grep must also agree byte-for-byte, or `$(grep p f)`
+        // and `$(cat f | grep p)` could not be compared. The piped half used to
+        // print `1: alpha` against the file half's `1:alpha`.
+        assert_eq!(
+            run("grep alpha /tmp/kshell_status_selftest.txt").as_slice(),
+            piped.as_slice(),
+            "`grep p f` and `cat f | grep p` must produce the same bytes"
+        );
         run("cat /tmp/kshell_status_selftest.txt | grep zeta");
         assert_eq!(last_exit(), 1, "a pipeline reports its last stage");
 
@@ -9710,8 +9757,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // `1:alpha`, not `alpha`: this shell's grep defaults `-n` on (and `-i`
         // too). That is a deliberate interactive-convenience default rather
         // than POSIX behaviour -- see `open-questions.md`
-        // -> "kshell's grep defaults differ from POSIX". What is asserted here
-        // is only that the redirect wrote *grep's* bytes, whatever they are.
+        // -> "kshell grep defaults differ from POSIX". What is asserted here is
+        // only that the redirect wrote *grep's* bytes, whatever they are.
         assert_eq!(
             Vfs::read_file(out)?.as_slice(),
             &b"1:alpha\n"[..],
@@ -9769,11 +9816,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     {
         use crate::fs::vfs::Vfs;
         fn run(cmd: &str) {
-            let prev = SHELL_OUTPUT.lock().take();
-            capture_start();
+            // The capture is only here to keep these commands' output off the
+            // serial log; section 13 asserts on status and on the trap probe,
+            // not on bytes.
+            let capture = capture_start();
             execute(cmd);
-            let _ = capture_stop();
-            *SHELL_OUTPUT.lock() = prev;
+            let _ = capture.finish();
         }
         let src = "/tmp/kshell_trap_selftest.txt";
         let out = "/tmp/kshell_trap_selftest.out";
@@ -9852,6 +9900,78 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
         env_remove("KSHELL_TRAP_PROBE");
         env_remove("KSHELL_BUILTIN_PROBE");
+        let _ = Vfs::remove(src);
+        let _ = Vfs::remove(out);
+    }
+
+    serial_println!("  kshell::self_test 14: captures nest, so $(pipeline) has a value");
+    // `capture_command` is the entry point for `$(…)` substitution *and* for
+    // every command issued over SSH (`net/ssh.rs`) or telnet (`net/telnet.rs`).
+    // Anything it fails to capture is not merely lost: it is printed on the
+    // host's physical console, which is where a remote user's output used to
+    // go the moment their command contained a pipe or a redirect.
+    {
+        use crate::fs::vfs::Vfs;
+        let src = "/tmp/kshell_capture_selftest.txt";
+        let out = "/tmp/kshell_capture_selftest.out";
+        Vfs::write_file(src, b"alpha\nbeta\n")?;
+        let _ = Vfs::remove(out);
+
+        // A plain command has always worked -- assert it first so the
+        // interesting cases below cannot pass by capturing nothing at all.
+        assert_eq!(
+            capture_command("cat /tmp/kshell_capture_selftest.txt").as_slice(),
+            &b"alpha\nbeta\n"[..],
+            "a plain command's output is captured"
+        );
+
+        // A pipeline: every stage captures, and each must hand the enclosing
+        // capture back when it is done. This returned empty before `Capture`.
+        assert_eq!(
+            capture_command("cat /tmp/kshell_capture_selftest.txt | grep alpha").as_slice(),
+            &b"1:alpha\n"[..],
+            "a pipeline's output must reach the enclosing capture"
+        );
+
+        // Three stages, so a *middle* capture is exercised too.
+        assert_eq!(
+            capture_command("cat /tmp/kshell_capture_selftest.txt | grep alpha | head 1")
+                .as_slice(),
+            &b"1:alpha\n"[..],
+            "a middle stage must also restore the enclosing capture"
+        );
+
+        // A redirect inside a capture: the redirect's own output goes to the
+        // file, and -- the part that used to break -- the capture survives it,
+        // so a command *after* the redirect is still captured.
+        let captured = capture_command(
+            "grep alpha /tmp/kshell_capture_selftest.txt > /tmp/kshell_capture_selftest.out",
+        );
+        assert_eq!(
+            captured.as_slice(),
+            &b""[..],
+            "a redirected command writes to the file, not to the capture"
+        );
+        assert_eq!(
+            Vfs::read_file(out)?.as_slice(),
+            &b"1:alpha\n"[..],
+            "...and the file must have received it"
+        );
+
+        // An input redirect nested in a capture.
+        assert_eq!(
+            capture_command("grep alpha < /tmp/kshell_capture_selftest.txt").as_slice(),
+            &b"1:alpha\n"[..],
+            "`cmd < file` inside a capture must still be captured"
+        );
+
+        // The capture must be fully unwound afterwards: nothing left running,
+        // or every later command in the shell would be silently swallowed.
+        assert!(
+            SHELL_OUTPUT.lock().is_none(),
+            "capture_command must leave no capture behind"
+        );
+
         let _ = Vfs::remove(src);
         let _ = Vfs::remove(out);
     }

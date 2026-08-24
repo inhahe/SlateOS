@@ -41875,11 +41875,38 @@ everything above them — the wire format, the keycode tables, packet assembly,
 acceleration, repeat, resync — is driven by a fake device that scripts a real
 byte stream. So the whole module is exercised on the Windows development
 machine, and the missing capability blocks the hardware run rather than the
-test suite. 66 tests.
+test suite. 84 tests — 72 driving the module through the fake, 12 on the wire
+format and keycode tables directly.
 
 Because a fake and the code it feeds can agree on the same mistake with nobody
 to contradict them, `scripts/reintro-evdev.py` puts 54 plausible one-line bugs
-back one at a time and records which test must name each. That sweep is what
-found the two tests that were passing vacuously (a missing clamp masked by a
-second clamp downstream, and a divide-by-zero guard masked by a saturating
-clamp further along), neither of which any amount of reading would have shown.
+back one at a time and records which test must name each. 46 were named
+immediately. The other eight are the interesting ones, and they did not all
+mean the same thing:
+
+- **Five were tests passing vacuously**, which is what the sweep is for. A
+  missing clamp masked by a second clamp downstream; a divide-by-zero guard
+  masked by a saturating clamp further along; an idle-device test that never
+  went on to show the device was still being read; and two device-scan tests
+  that put their devices at indices 0 and 1, where the search starts, so
+  neither could tell "scans every index" from "looks at the first two". None
+  of the five would have been found by reading.
+- **One was a self-referential invariant.** The only thing asserting the
+  per-frame read budget was bounded was a test that read the constant and
+  compared it against itself, so changing the constant changed the test with
+  it. That is not a weak test but a misplaced one: it moved into a
+  `const _: () = assert!(...)`, and the harness learned that a build break
+  counts as a catch.
+- **One was a fault in the defect**, not in the test — it inserted a resync
+  before the drain while leaving the after-drain pass in place, which changes
+  nothing, because on entry there is nothing to resync yet.
+- **One was a genuine no-op.** Deleting the resync loop's "skip buttons" guard
+  is unobservable, because no button code has a set-1 scan code, so the guard
+  is reached and redundant. It is recorded as a no-op, and the half that *is*
+  checkable — that the keycode table never grows one — is now pinned by a test
+  sweeping every code from `BTN_MISC` up.
+
+The distinction is worth keeping, because the sweep's value depends on it. A
+harness that reports "eight tests are weak" when five are, one is misplaced,
+one is its own bug and one is not a bug at all is a harness whose output gets
+skimmed.

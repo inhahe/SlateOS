@@ -96,6 +96,24 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("version", Takes::Nothing),
 ];
 
+/// `--quiet` is `--silent` under another name -- both carry `val == 's'` in
+/// GNU's table -- and saying so changes one piece of *output*.
+///
+/// glibc lists an ambiguous prefix's candidates by comparing each match against
+/// `pfound`, the first one, and never against each other. `--silent` is the
+/// first entry here, so a prefix matching both of them drops `--quiet` from the
+/// list as being the same option already named. Measured:
+///
+/// ```text
+/// $ tty --=x
+/// tty: option '--=x' is ambiguous; possibilities: '--silent' '--help' '--version'
+/// ```
+///
+/// The empty prefix matches all four and GNU prints three. Without this map we
+/// would print four -- and, less visibly, `--` followed by a prefix of both
+/// would be refused where GNU resolves it, if such a prefix existed.
+const ALIASES: &[(&str, &str)] = &[("quiet", "silent")];
+
 /// What the command line asked for.
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 enum Request {
@@ -135,7 +153,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     let mut silent = false;
     let mut extra: Option<OsString> = None;
 
-    for item in TTY.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
+    for item in TTY.parse_aliased(args, SHORT_OPTIONS, LONG_OPTIONS, ALIASES) {
         match item? {
             // Recorded rather than refused on the spot: `--help` still wins
             // over an operand that precedes it, because upstream checks
@@ -384,6 +402,22 @@ mod tests {
                 e.message()
             );
         }
+    }
+
+    /// `--quiet` is `--silent` again, and `--silent` is the first entry, so
+    /// glibc drops it from an ambiguous prefix's candidates: four entries in
+    /// the table, three in the message. Measured -- `tty --=x` prints exactly
+    /// this. Without `ALIASES` the list would have four names and be wrong in
+    /// user-visible output.
+    #[test]
+    fn the_ambiguous_list_drops_the_alias_of_the_first_entry() {
+        let e = parse_args(&argv(&["--=x"])).unwrap_err();
+        assert_eq!(e.status, 2);
+        assert_eq!(
+            e.message(),
+            "option '--=x' is ambiguous; possibilities: '--silent' '--help' '--version'\n\
+             Try 'tty --help' for more information."
+        );
     }
 
     #[test]

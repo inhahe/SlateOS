@@ -262,6 +262,14 @@ run_case --silent=1
 run_case --quiet=
 run_case --help=1
 
+# The whole option table, read out loud. The empty prefix matches every entry,
+# so glibc lists them -- but it compares each match against the *first* one and
+# never against each other, so `--quiet` is dropped as being `--silent` again.
+# Four entries, three printed. `ALIASES` in tty.rs is what makes ours agree;
+# without it this is the one case in the file that fails.
+run_case --=x
+run_case ---
+
 # --- help and version --------------------------------------------------------
 xfail_case 'our --help omits the GNU project ancillary block' --help
 xfail_case 'our --version names SlateOS' --version

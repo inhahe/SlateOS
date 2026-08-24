@@ -21,12 +21,23 @@ What this does
 For each bin it parses ``LONG_OPTIONS`` (and ``ALIASES`` if present) out of the
 Rust source, and runs two independent comparisons against the real GNU utility.
 
-**1. The table itself.**  ``<util> --=x`` prints GNU's whole option table: the
-empty prefix matches every entry, so the ambiguity message lists all of them, in
-declaration order.  That is a direct readout of the thing we are copying, so the
-two name lists are compared as *sequences*.  Order is not cosmetic — glibc
-reports ``pfound``, the first entry that matched, so two tables holding the same
-names in different orders name different options in their diagnostics.
+**1. The table itself.**  ``<util> --=x`` prints GNU's option table: the empty
+prefix matches every entry, so the ambiguity message lists them, in declaration
+order.  That is a direct readout of the thing we are copying, so the two name
+lists are compared as *sequences*.  Order is not cosmetic — glibc reports
+``pfound``, the first entry that matched, so two tables holding the same names
+in different orders name different options in their diagnostics.
+
+The readout is *not* quite the table, and the gap is the same ``pfound`` rule.
+glibc lists a match only when it differs from the first one, so an alias of the
+**first** entry is dropped: ``tty``'s four-entry table reads out as three, with
+``--quiet`` missing because ``--silent`` precedes it.  An alias of any *later*
+entry survives, which is why ``rmdir`` lists both ``--path`` and ``--parents``.
+So our side is put through the identical elision (``Table.readout``) before the
+comparison — which makes this a comparison of the two programs' *output*, since
+``resolve_long_aliased`` performs that elision at runtime too.  Comparing the
+raw names instead reports a phantom "LONG_OPTIONS has --quiet, GNU does not",
+and did, for a correct ``tty`` table.
 
 **2. Every abbreviation.**  For each distinct proper prefix of each name, our
 verdict is compared with GNU's:
@@ -141,6 +152,33 @@ class Table:
         if any(self.identity(n) != first for n in hits[1:]):
             return "ambiguous"
         return "resolves"
+
+    def readout(self) -> list[str]:
+        """What ``<util> --=x`` would print for *this* table.
+
+        Not the same list as ``names``, and the difference is the whole reason
+        this method exists.  glibc marks a match as a candidate only when it
+        differs from ``pfound`` — the first match — so an alias of the *first*
+        entry is silently dropped from the possibilities, while an alias of any
+        later one is kept.  ``rmdir`` shows the keeping half: ``--path`` and
+        ``--parents`` are one option, but ``--ignore-fail-on-non-empty`` comes
+        first, so both are listed.  ``tty`` shows the dropping half: ``--silent``
+        *is* first, so its alias ``--quiet`` never appears and a four-entry table
+        reads out as three.
+
+        Comparing ``names`` against the readout therefore reports a phantom
+        "LONG_OPTIONS has --quiet, GNU does not" for every correct table shaped
+        like ``tty``'s.  It did, on the commit that added ``tty``'s.
+        """
+        first, *rest = self.names
+        first_id = self.identity(first)
+        differing = [n for n in rest if self.identity(n) != first_id]
+        if not differing:
+            # Nothing differs from `pfound`, so the prefix resolves and no
+            # ambiguity message is printed at all. `gnu_table` returns None in
+            # that case, and this must be comparable with it.
+            return []
+        return [first, *differing]
 
 
 def slice_body(text: str, start: int) -> str | None:
@@ -257,8 +295,16 @@ def gnu_table(runner: list[str], util: str) -> list[str] | None:
 
 
 def compare_tables(table: Table, theirs: list[str]) -> list[str]:
-    """Ordered comparison of our names against GNU's."""
-    ours = table.names
+    """Ordered comparison of our names against GNU's.
+
+    Both sides are *readouts*, not tables: ``theirs`` is what ``--=x`` printed,
+    so ours has to be put through the same elision — see ``Table.readout`` — or
+    an alias of the first entry is reported as an entry GNU lacks.  Our own
+    ``resolve_long_aliased`` performs the identical elision at runtime, so this
+    is comparing the two programs' output and not two data structures, which is
+    the stronger of the two comparisons anyway.
+    """
+    ours = table.readout()
     if ours == theirs:
         return []
     problems = []
@@ -272,7 +318,8 @@ def compare_tables(table: Table, theirs: list[str]) -> list[str]:
     for n in extra:
         problems.append(
             f"{table.util}: LONG_OPTIONS has --{n}, GNU does not; "
-            f"likely copied from a different release than the reference"
+            f"likely copied from a different release than the reference "
+            f"(or --{n} aliases our first entry and needs an ALIASES row)"
         )
     if not missing and not extra:
         problems.append(

@@ -10707,13 +10707,40 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // A failed resolution, and the same command succeeding, so the test
         // pins the difference rather than just the failing side.
-        let out = capture_command("realpath /zzz_no_such_path");
+        //
+        // The failing path needs **two** components, and the missing one has to
+        // be the parent. A single missing component is not an error at all:
+        // `resolve_inner` lets the *final* component be absent (that is the
+        // open-with-create path), so `realpath /zzz_no_such_path` resolves fine
+        // and exits 0. That is not a VFS quirk to work around -- it is exactly
+        // GNU `realpath`'s default mode, where every component except the last
+        // must exist (`-e` requires the last one too, `-m` requires none).
+        //
+        // This rung asserted the failing behaviour against `/zzz_no_such_path`
+        // and so had never once passed: it was testing the error arm with an
+        // input that takes the success arm. Do not "simplify" the path back to
+        // one component.
+        let out = capture_command("realpath /zzz_no_such_dir/zzz_no_such_path");
         assert_output_starts_with(
             "the failure names the path",
             &out,
-            b"realpath: '/zzz_no_such_path'",
+            b"realpath: '/zzz_no_such_dir/zzz_no_such_path'",
         );
         assert_eq!(last_exit(), 1, "a path that does not resolve is an error");
+
+        // The other side of the same rule, asserted so the success arm above is
+        // pinned as deliberate rather than looking like the bug it isn't.
+        let out = capture_command("realpath /zzz_no_such_path");
+        assert_output_starts_with(
+            "a missing final component still canonicalises",
+            &out,
+            b"/zzz_no_such_path",
+        );
+        assert_eq!(
+            last_exit(),
+            0,
+            "GNU's default mode: only the parents must exist"
+        );
 
         let out = capture_command("realpath /tmp");
         assert_output_starts_with("`realpath /tmp` resolved", &out, b"/tmp");

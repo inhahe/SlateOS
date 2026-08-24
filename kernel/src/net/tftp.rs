@@ -74,6 +74,14 @@ const MAX_SERVER_TRANSFERS: usize = 4;
 /// Server tick interval (nanoseconds) — 500ms.
 const SERVER_TICK_INTERVAL_NS: u64 = 500_000_000;
 
+/// Most requests one tick will take off the listener socket.
+///
+/// Only `MAX_SERVER_TRANSFERS` of them can be accepted anyway, so a larger
+/// batch is mostly error replies. The cap exists to bound how long one tick
+/// runs under a flood; what it does not take stays queued on the socket for
+/// the next tick, 500ms later, which is where it would have waited regardless.
+const MAX_REQUESTS_PER_TICK: usize = 16;
+
 // TFTP opcodes.
 const OP_RRQ: u16 = 1; // Read request
 const OP_WRQ: u16 = 2; // Write request
@@ -895,24 +903,45 @@ fn server_tick() {
     }
     let _ticking = TickGuard;
 
-    // Process incoming requests on port 69. The handlers lock `SERVER_STATE`
-    // themselves in short bursts, so nothing is held across their VFS calls.
-    let listener = SERVER_STATE.lock().listener_handle;
-    if let Some(listener) = listener {
-        while let Some(dgram) = super::udp::recv(listener) {
-            let opcode = parse_opcode(&dgram.data);
-            match opcode {
-                Some(OP_RRQ) => {
-                    handle_rrq(dgram.src_ip, dgram.src_port, &dgram.data);
-                }
-                Some(OP_WRQ) => {
-                    handle_wrq(dgram.src_ip, dgram.src_port, &dgram.data);
-                }
-                _ => {
-                    // Unexpected packet on port 69 — send error.
-                    let err = build_error(ERR_ILLEGAL_OP, "Expected RRQ or WRQ");
-                    let _ = super::udp::send(TFTP_PORT, dgram.src_ip, dgram.src_port, &err);
-                }
+    // Process incoming requests on port 69.
+    //
+    // Drained with the state lock held, dispatched with it dropped. Draining
+    // under the lock is what stops `stop_server` closing the listener between
+    // the handle being read and `recv` being called on it — handle numbers are
+    // recycled, so a `recv` on a stale one could take another socket's traffic.
+    // Dispatching outside it is what keeps the handlers' VFS calls off the
+    // lock, which is the point of the whole arrangement.
+    //
+    // The batch is capped so one tick cannot run unboundedly long against a
+    // flood; the remainder stays queued on the socket for the next tick, which
+    // is where it would have been waiting anyway.
+    let requests: Vec<super::udp::Datagram> = {
+        let state = SERVER_STATE.lock();
+        let mut batch = Vec::new();
+        if let Some(listener) = state.listener_handle {
+            while batch.len() < MAX_REQUESTS_PER_TICK {
+                let Some(dgram) = super::udp::recv(listener) else {
+                    break;
+                };
+                batch.push(dgram);
+            }
+        }
+        batch
+    };
+
+    for dgram in requests {
+        let opcode = parse_opcode(&dgram.data);
+        match opcode {
+            Some(OP_RRQ) => {
+                handle_rrq(dgram.src_ip, dgram.src_port, &dgram.data);
+            }
+            Some(OP_WRQ) => {
+                handle_wrq(dgram.src_ip, dgram.src_port, &dgram.data);
+            }
+            _ => {
+                // Unexpected packet on port 69 — send error.
+                let err = build_error(ERR_ILLEGAL_OP, "Expected RRQ or WRQ");
+                let _ = super::udp::send(TFTP_PORT, dgram.src_ip, dgram.src_port, &err);
             }
         }
     }
@@ -1154,6 +1183,13 @@ fn handle_rrq(client_ip: Ipv4Addr, client_port: u16, data: &[u8]) {
 
     let mut state = SERVER_STATE.lock();
 
+    // `stop_server` may have run while the lock was down for the read above. It
+    // closed every transfer it could see, so installing one now would leave a
+    // socket that no tick will ever service or close.
+    if !SERVER_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+
     // Find a free transfer slot.
     let slot = state.transfers.iter().position(|t| !t.active);
     let idx = match slot {
@@ -1251,6 +1287,12 @@ fn handle_wrq(client_ip: Ipv4Addr, client_port: u16, data: &[u8]) {
     }
 
     let mut state = SERVER_STATE.lock();
+
+    // `stop_server` may have run while the lock was down for the probe above.
+    // See `handle_rrq` for why installing a transfer now would leak a socket.
+    if !SERVER_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
 
     // Find a free slot.
     let slot = state.transfers.iter().position(|t| !t.active);

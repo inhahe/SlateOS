@@ -10745,6 +10745,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let out = capture_command("realpath /tmp");
         assert_output_starts_with("`realpath /tmp` resolved", &out, b"/tmp");
         assert_eq!(last_exit(), 0, "and resolving it is a success");
+
+        // A *relative* argument, which is the only input `realpath` exists for.
+        // It used to be handed to the VFS untouched, and `normalize_path`
+        // prepends `/` to anything it is given -- so this answered `/zzz_rel`
+        // from any working directory, with status 0. Every assertion above
+        // passes an absolute path and so could not have caught it.
+        let _ = capture_command("cd /tmp");
+        let out = capture_command("realpath zzz_rel");
+        assert_output_starts_with(
+            "a relative path resolves against the working directory",
+            &out,
+            b"/tmp/zzz_rel",
+        );
+        // Restore the working directory: later rungs, and the interactive
+        // shell this self-test runs inside, both assume it is still `/`.
+        let _ = capture_command("cd /");
+        assert_output_starts_with("cwd restored", &capture_command("pwd"), b"/\n");
     }
 
     serial_println!("  kshell::self_test 24: refusing to print the file is not printing it");
@@ -107612,6 +107629,22 @@ fn cmd_dirname(args: &str) {
 }
 
 /// `realpath PATH` — resolve a path following all symlinks.
+///
+/// A relative argument is made absolute against the shell's working directory
+/// by [`resolve_path`] *before* the VFS sees it. Handing the raw argument to
+/// `Vfs::resolve_path` looks equivalent and is not: `normalize_path`
+/// unconditionally prepends `/` to whatever it is given, so `realpath foo` from
+/// `/tmp` used to answer `/foo` — the wrong file, reported as a success. Making
+/// a relative path absolute is this command's entire purpose, so that was the
+/// one input it had to get right.
+///
+/// A missing *final* component is a success, deliberately: this is GNU
+/// `realpath`'s default mode, where every component except the last must exist
+/// (`-e` requires the last one as well, `-m` requires none). The VFS spells the
+/// same rule, since it is also what open-with-create needs. So
+/// `realpath /nonexistent` prints the canonical name and exits 0, while
+/// `realpath /nonexistent/child` fails — GNU behaviour, not an oversight.
+/// `-e` and `-m` are not implemented; see `todo.txt`.
 fn cmd_realpath(args: &str) {
     let path = args.trim();
     if path.is_empty() {
@@ -107620,12 +107653,18 @@ fn cmd_realpath(args: &str) {
         return;
     }
 
-    match crate::fs::Vfs::resolve_path(path) {
+    // Resolve against the working directory first, then follow symlinks.
+    let abs = resolve_path(path);
+    match crate::fs::Vfs::resolve_path(&abs) {
         Ok(resolved) => {
             shell_println!("{}", resolved.display());
         }
         Err(e) => {
-            shell_println!("realpath: '{}': {:?}", path, e);
+            // The absolute form, not the operand: when the failure is a
+            // relative path that resolved somewhere unexpected, the working
+            // directory is the very thing the reader needs to see. It also
+            // matches how `cd` and `cmp` report a path in this shell.
+            shell_println!("realpath: '{}': {:?}", abs.display(), e);
             set_exit(1);
         }
     }

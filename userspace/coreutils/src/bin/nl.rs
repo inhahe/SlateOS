@@ -53,13 +53,15 @@
 use coreutils::diag;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{quote, quotef_os};
-use coreutils::stdfd;
+use coreutils::stdfd::{self, Stream};
 use coreutils::xnum;
 use ere::{Regex, bre};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::process::ExitCode;
+
+coreutils::guard_std_fds!();
 
 /// `nl` exits 1 on a bad command line, like almost every utility here.
 /// Measured: `nl --zzz-bogus; echo $?`.
@@ -209,25 +211,39 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match parse_args(&args) {
-        Ok(Request::Help) => {
-            print!("{}", help_text());
-            ExitCode::SUCCESS
-        }
-        Ok(Request::Version) => {
-            println!("nl (SlateOS coreutils) 0.1.0");
-            ExitCode::SUCCESS
-        }
-        Ok(Request::Run(options, files)) => run(&options, &files),
+
+    // Decided before the stream exists, because upstream's `usage` reaches
+    // `atexit (close_stdout)` with nothing buffered on stdout: a usage error
+    // prints its own complaint and no write error after it.
+    let request = match parse_args(&args) {
+        Ok(request) => request,
         Err(e) => {
             // The message may be several lines: the deferred diagnostics are
             // joined into it, and only the first carries a `nl: ` prefix of its
             // own from here — the rest embed theirs. See `Deferred::into_error`.
             diag!("nl: {e}");
-            ExitCode::from(u8::try_from(e.status).unwrap_or(1))
+            return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
-    }
+    };
+
+    // `--help` and `--version` are writes like any other, so they fail like any
+    // other: measured, `nl --help >&-` is `nl: write error: Bad file
+    // descriptor` and exits 1.
+    let mut out = Stream::stdout();
+    let earned = match request {
+        Request::Help => {
+            let _ = out.write_all(help_text().as_bytes());
+            ExitCode::SUCCESS
+        }
+        Request::Version => {
+            let _ = out.write_all(b"nl (SlateOS coreutils) 0.1.0\n");
+            ExitCode::SUCCESS
+        }
+        Request::Run(options, files) => run(&options, &files, &mut out),
+    };
+    stdfd::close_stdout("nl", out, earned)
 }
 
 /// GNU's `--help`, byte for byte, minus the trailing block of URLs naming the
@@ -953,9 +969,7 @@ fn write_bytes(out: &mut impl Write, byte: u8, n: usize) -> io::Result<()> {
 ///
 /// The counter and the current section carry across files, so this is one
 /// [`Numberer`] rather than one per file.
-fn run(options: &Options, files: &[OsString]) -> ExitCode {
-    let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
+fn run(options: &Options, files: &[OsString], out: &mut Stream) -> ExitCode {
     let mut numberer = Numberer::new(options);
     let mut ok = true;
 
@@ -978,14 +992,20 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
                 continue;
             }
         };
-        match number_stream(BufReader::new(reader), &mut numberer, &mut out) {
+        // The only failure `number_stream` can still report is a *read*
+        // failure. It used to write through an `io::Write` and hand back
+        // whichever of the two had gone wrong, so a full disk was announced as
+        // if the input had gone bad — and without the `write error: ` that GNU
+        // puts in front of it. A [`Stream`] records its own failures instead of
+        // returning them, and `close_stdout` words them.
+        match number_stream(BufReader::new(reader), &mut numberer, out) {
             Ok(Outcome::Complete) => {}
             Ok(Outcome::Overflow) => {
                 // Upstream calls `error (EXIT_FAILURE, …)` from inside the
                 // print, so the lines already numbered stay written and
                 // nothing after them is. The flush is what keeps them ahead of
-                // the message; a failure of it is reported by the funnel in
-                // `main`, since this path is already exiting 1 regardless.
+                // the message; a failure of it is reported by `close_stdout`,
+                // since this path is already exiting 1 regardless.
                 let _ = out.flush();
                 diag!("nl: line number overflow");
                 return ExitCode::from(1);
@@ -996,16 +1016,8 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
                 return ExitCode::from(1);
             }
         }
-        if let Err(e) = flush_error(&mut out) {
-            diag!("nl: {}", errno_text(&e));
-            return ExitCode::from(1);
-        }
     }
 
-    if let Err(e) = out.flush() {
-        diag!("nl: {}", errno_text(&e));
-        return ExitCode::from(1);
-    }
     if ok {
         ExitCode::SUCCESS
     } else {
@@ -1051,11 +1063,6 @@ fn number_stream(
         Some(e) => Err(e),
         None => Ok(Outcome::Complete),
     }
-}
-
-/// Surface a write failure that `BufWriter` swallowed until now.
-fn flush_error(out: &mut impl Write) -> io::Result<()> {
-    out.flush()
 }
 
 /// glibc's `strerror` wording for the errors `nl` can print, which is what the

@@ -785,6 +785,32 @@ impl Stream {
         }
     }
 
+    /// Give up on the stream: forget what is still buffered, and forget the
+    /// failure that stopped it.
+    ///
+    /// stdio's `clearerr`, plus the buffer discard glibc performs for free —
+    /// `new_do_write` resets the write pointers whether or not the `write(2)`
+    /// succeeded, so a flush that failed leaves nothing pending and the
+    /// `fclose` behind `close_stream` then succeeds.
+    ///
+    /// # Only for a utility that has already reported the failure itself
+    ///
+    /// `head` is the one. Upstream's `xwrite_stdout` reports a mid-run write
+    /// failure in its own words — `head: error writing 'standard output': …` —
+    /// and then calls `clearerr (stdout)` with the comment "to avoid redundant
+    /// close_stdout diagnostic". Without the discard, [`close_stdout`] would
+    /// re-drain the same bytes at the same full descriptor and say
+    /// `head: write error: …` underneath it. Measured, GNU head 9.4 prints one
+    /// line, not two.
+    ///
+    /// Calling this without having reported anything turns an undelivered
+    /// output into a silent success, which is the whole failure this module
+    /// exists to prevent.
+    pub fn abandon(&mut self) {
+        self.buf.clear();
+        self.error = None;
+    }
+
     /// Flush, and hand back the first failure of the stream's whole life.
     ///
     /// gnulib's `close_stream`, minus the close: a utility calls this instead

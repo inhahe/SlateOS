@@ -28,12 +28,14 @@ use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::quoteaf;
-use coreutils::stdfd;
+use coreutils::stdfd::{self, Stream};
 use coreutils::xnum::xdectoumax;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Write};
 use std::process::ExitCode;
+
+coreutils::guard_std_fds!();
 
 /// Measured: `head --zzz; echo $?` is 1, like almost every utility and unlike
 /// `ls`/`sort`/`grep`.
@@ -132,25 +134,39 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match parse_args(&args) {
-        Ok(Request::Help) => {
-            print!("{}", help_text());
-            ExitCode::SUCCESS
-        }
-        Ok(Request::Version) => {
-            println!("head (SlateOS coreutils) 0.1.0");
-            ExitCode::SUCCESS
-        }
-        Ok(Request::Run(options, files)) => run(&options, &files),
+
+    // Decided before the stream exists, because upstream's `usage` reaches
+    // `atexit (close_stdout)` with nothing buffered on stdout: a usage error
+    // prints its own complaint and no write error after it.
+    let request = match parse_args(&args) {
+        Ok(request) => request,
         Err(e) => {
             // The referral, when there is one, is part of the message, and only
             // the first line carries the `head: ` prefix — which is what GNU
             // prints.
             diag!("head: {e}");
-            ExitCode::from(u8::try_from(e.status).unwrap_or(1))
+            return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
-    }
+    };
+
+    // `--help` and `--version` are writes like any other, so they fail like any
+    // other: measured, `head --help >&-` is `head: write error: Bad file
+    // descriptor` and exits 1.
+    let mut out = Stream::stdout();
+    let earned = match request {
+        Request::Help => {
+            let _ = out.write_all(help_text().as_bytes());
+            ExitCode::SUCCESS
+        }
+        Request::Version => {
+            let _ = out.write_all(b"head (SlateOS coreutils) 0.1.0\n");
+            ExitCode::SUCCESS
+        }
+        Request::Run(options, files) => run(&options, &files, &mut out),
+    };
+    stdfd::close_stdout("head", out, earned)
 }
 
 fn help_text() -> String {
@@ -490,10 +506,52 @@ fn parse_count(text: &[u8], unit: Unit) -> Result<u64, getopt::Error> {
 
 // --------------------------------------------------------------- printing ---
 
+/// Upstream's `xwrite_stdout`, asked after the fact rather than at each
+/// `fwrite`: has the output stopped arriving, and if so what does `head` say
+/// about it?
+///
+/// Two wordings, and which one appears depends only on whether the 4096-byte
+/// buffer filled before the end of the run. Measured, GNU head 9.4:
+///
+/// ```text
+/// $ head -n 10000 big1 big2 >/dev/full
+/// head: error writing 'standard output': No space left on device   # status 1
+/// $ head f >&-                                                     # four bytes
+/// head: write error: Bad file descriptor                           # status 1
+/// ```
+///
+/// The first is this function; the second is [`stdfd::close_stdout`], which is
+/// why the failure is *abandoned* here — upstream calls `clearerr (stdout)`
+/// straight after reporting, "to avoid redundant close_stdout diagnostic", and
+/// [`Stream::abandon`] is that call.
+///
+/// A reader that went away is not a failure to report: GNU dies of `SIGPIPE`
+/// there, silently and with the status it had already earned. See
+/// [`stdfd::reader_gone`].
+fn write_stopped(out: &mut Stream, ok: bool) -> Option<ExitCode> {
+    let complaint = match out.error() {
+        None => return None,
+        Some(e) if stdfd::reader_gone(e) => None,
+        Some(e) => Some(format!(
+            "head: error writing {}: {}",
+            quoteaf(b"standard output"),
+            strerror(e)
+        )),
+    };
+    out.abandon();
+    match complaint {
+        Some(message) => {
+            diag!("{message}");
+            Some(ExitCode::from(1))
+        }
+        // Nothing downstream is listening, so there is nobody to tell and
+        // nothing left to do.
+        None => Some(ExitCode::from(u8::from(!ok))),
+    }
+}
+
 /// Run over every operand, returning the exit status.
-fn run(options: &Options, files: &[OsString]) -> ExitCode {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+fn run(options: &Options, files: &[OsString], out: &mut Stream) -> ExitCode {
     // Whether a banner has been printed yet, which is what decides the blank
     // line that separates them. It counts *printed* banners, not files: a file
     // that fails to open never gets one, so the next file that succeeds is
@@ -510,6 +568,14 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
     };
 
     for name in operands {
+        // Asked *before* the next operand is opened, because upstream's
+        // `error (EXIT_FAILURE, …)` never gets that far: measured,
+        // `head -n 10000 big1 nosuch >/dev/full` reports only the write error
+        // and never complains that `nosuch` does not exist.
+        if let Some(status) = write_stopped(out, ok) {
+            return status;
+        }
+
         let bytes = arg_bytes(name);
         let is_stdin = bytes == b"-";
         let label: &[u8] = if is_stdin { b"standard input" } else { &bytes };
@@ -535,20 +601,21 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
             let sep = if printed_header { "\n" } else { "" };
             // The banner is the raw name, unquoted — upstream quotes it in
             // diagnostics and not here.
-            if write_all(&mut out, sep.as_bytes())
-                .and_then(|()| write_all(&mut out, b"==> "))
-                .and_then(|()| write_all(&mut out, label))
-                .and_then(|()| write_all(&mut out, b" <==\n"))
-                .is_err()
-            {
-                return ExitCode::from(1);
-            }
+            write_all(out, sep.as_bytes());
+            write_all(out, b"==> ");
+            write_all(out, label);
+            write_all(out, b" <==\n");
             printed_header = true;
         }
 
-        if let Err(e) = emit(&mut source, &mut out, options) {
+        // The only failure `emit` can still report is a *read* failure. It used
+        // to take an `io::Write` and hand back whichever of the two had gone
+        // wrong, so `head f >&-` blamed the file it had read perfectly; a
+        // [`Stream`] records its own failures instead of returning them, which
+        // is what makes this attribution honest.
+        if let Err(e) = emit(&mut source, out, options) {
             if e.kind() == ErrorKind::BrokenPipe {
-                // Nothing downstream is listening; there is nothing to report
+                // Standard input went away mid-read; there is nothing to report
                 // and nothing left to do.
                 return ExitCode::from(u8::from(!ok));
             }
@@ -557,8 +624,8 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
         }
     }
 
-    if out.flush().is_err() {
-        return ExitCode::from(1);
+    if let Some(status) = write_stopped(out, ok) {
+        return status;
     }
     if ok {
         ExitCode::SUCCESS
@@ -567,8 +634,10 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
     }
 }
 
-fn write_all(out: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
-    out.write_all(bytes)
+/// The banner writer. A [`Stream`] cannot fail a write — it remembers instead,
+/// and [`write_stopped`] asks — so this is now only a name for the call.
+fn write_all(out: &mut Stream, bytes: &[u8]) {
+    let _ = out.write_all(bytes);
 }
 
 /// How much is read at a time. Only a performance choice — every routine below

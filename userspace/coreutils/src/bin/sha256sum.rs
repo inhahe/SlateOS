@@ -16,6 +16,8 @@
 use coreutils::digest::{Algorithm, Stream};
 use std::process::ExitCode;
 
+coreutils::guard_std_fds!();
+
 /// The `#if HASH_ALGO_SHA256` block of upstream's `digest.c`, as data.
 static SHA256: Algorithm = Algorithm {
     program: "sha256sum",

@@ -26,7 +26,7 @@ use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::filekind;
 use coreutils::getopt::{self, Program, Takes};
-use coreutils::stdfd;
+use coreutils::stdfd::{self, Stream};
 // No `quote` here: every diagnostic `wc` prints names its file with one of the
 // shell-escape styles, so none of them carry §351's curly marks.
 use coreutils::quote::{quoteaf, quoteaf_os, quotef_os};
@@ -34,6 +34,8 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
+
+coreutils::guard_std_fds!();
 
 /// Measured: `wc --zzz-bogus` exits **1**, not 2. `sort` and `ls` exit 2
 /// because they have already given 1 a meaning; `wc` has not.
@@ -189,25 +191,39 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match parse_args(&args) {
-        Ok(Request::Help) => {
-            print!("{}", help_text());
-            ExitCode::SUCCESS
-        }
-        Ok(Request::Version) => {
-            println!("wc (SlateOS coreutils) 0.1.0");
-            ExitCode::SUCCESS
-        }
-        Ok(Request::Run(options, source)) => run(&options, &source),
+
+    // Decided before the stream exists, because upstream's `usage` reaches
+    // `atexit (close_stdout)` with nothing buffered on stdout: a usage error
+    // prints its own complaint and no write error after it.
+    let request = match parse_args(&args) {
+        Ok(request) => request,
         Err(e) => {
             // The referral, when there is one, is part of the message, and only
             // the first line carries the `wc: ` prefix — which is what GNU
             // prints.
             diag!("wc: {e}");
-            ExitCode::from(u8::try_from(e.status).unwrap_or(1))
+            return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
-    }
+    };
+
+    // `--help` and `--version` are writes like any other, so they fail like any
+    // other: `wc --help >&-` is `wc: write error: Bad file descriptor` and
+    // exits 1.
+    let mut out = Stream::stdout();
+    let earned = match request {
+        Request::Help => {
+            let _ = out.write_all(help_text().as_bytes());
+            ExitCode::SUCCESS
+        }
+        Request::Version => {
+            let _ = out.write_all(b"wc (SlateOS coreutils) 0.1.0\n");
+            ExitCode::SUCCESS
+        }
+        Request::Run(options, source) => run(&options, &source, &mut out),
+    };
+    stdfd::close_stdout("wc", out, earned)
 }
 
 fn help_text() -> String {
@@ -721,9 +737,7 @@ fn write_row(
 
 // ------------------------------------------------------------------ running ---
 
-fn run(options: &Options, source: &Source) -> ExitCode {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+fn run(options: &Options, source: &Source, out: &mut Stream) -> ExitCode {
     let mut failed = false;
 
     let inputs = match resolve(source) {
@@ -772,7 +786,7 @@ fn run(options: &Options, source: &Source) -> ExitCode {
         };
         total.add(&c);
         if show_each {
-            write_row(&mut out, &c, options, width, name.as_deref());
+            write_row(out, &c, options, width, name.as_deref());
         }
     }
 
@@ -782,10 +796,12 @@ fn run(options: &Options, source: &Source) -> ExitCode {
         } else {
             Some(b"total")
         };
-        write_row(&mut out, &total, options, width, label);
+        write_row(out, &total, options, width, label);
     }
 
-    let _ = out.flush();
+    // No flush here: the caller's `close_stdout` is the one that both drains
+    // the stream and reads its verdict, and a flush that dropped its own error
+    // on the floor is exactly the bug this file was changed to remove.
     if failed {
         ExitCode::from(1)
     } else {

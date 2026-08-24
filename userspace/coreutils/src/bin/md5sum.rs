@@ -28,6 +28,8 @@
 use coreutils::digest::{Algorithm, Stream};
 use std::process::ExitCode;
 
+coreutils::guard_std_fds!();
+
 /// The `#if HASH_ALGO_MD5` block of upstream's `digest.c`, as data.
 static MD5: Algorithm = Algorithm {
     program: "md5sum",

@@ -352,9 +352,28 @@ def _block_end(lines: list[str], start: int) -> int:
     Counts braces, ignoring those inside a line comment or a string literal.
     Approximate on purpose: a miscount costs a slightly wrong function boundary
     and so a slightly wrong report, never a wrong *file*.
+
+    **A `fn` with no body ends on its own line.** `fn write(fd: i32) -> isize;`
+    inside an `extern "C"` block, and a trait method signature, are both `fn`
+    declarations that never open a brace -- so a scan that just looks for the
+    next `{` runs on and adopts the body of whatever item comes *after* them.
+    That is not a slightly wrong boundary; it attributes a whole unrelated
+    function's contents to a name that callers really do call, and every caller
+    then looks like a reader of every global that function touches. Measured:
+    `coreutils/src/stdfd.rs` declares `fn write(..) -> isize;` in an extern
+    block a few lines above `record_closed_std_fds`, and all six `Stream` tests
+    -- which call `s.write(..)` and touch no global at all -- were reported as
+    racing `CLOSED_AT_STARTUP`.
+
+    The terminator is a `;` reached before any `{`, at zero paren and bracket
+    depth. The depths are what keep `fn f() -> [u8; 4] {` and
+    `fn f(x: [u8; 3]) {}` out of it: those semicolons are inside brackets and
+    are part of an array type, not the end of a declaration.
     """
     depth = 0
     seen_open = False
+    round_depth = 0
+    square_depth = 0
     for i in range(start, len(lines)):
         line = lines[i]
         j = 0
@@ -378,6 +397,22 @@ def _block_end(lines: list[str], start: int) -> int:
                 depth -= 1
                 if seen_open and depth <= 0:
                     return i
+            elif not seen_open and c == "(":
+                round_depth += 1
+            elif not seen_open and c == ")":
+                round_depth -= 1
+            elif not seen_open and c == "[":
+                square_depth += 1
+            elif not seen_open and c == "]":
+                square_depth -= 1
+            elif (
+                not seen_open
+                and c == ";"
+                and round_depth <= 0
+                and square_depth <= 0
+            ):
+                # A declaration, not a definition: it has no body to scan.
+                return i
             j += 1
     return len(lines) - 1
 
@@ -962,6 +997,59 @@ test = false
         manifest_says_no_tests("this is not toml [[[", {"src/main.rs": ""}),
         False,
     )
+
+    # 10. A `fn` with no body must not adopt the next item's body. An
+    #     `extern "C"` declaration and a trait method signature both end at a
+    #     `;`, and a scan that only looks for `{` runs past them into whatever
+    #     comes next -- which makes every caller of the *declaration* look like
+    #     a reader of every global the *following* function touches. Measured
+    #     in `coreutils/src/stdfd.rs`: six `Stream` tests that call `write` and
+    #     name no global at all were reported as racing `CLOSED_AT_STARTUP`.
+    rule("bodyless-fn")
+    got = classify(
+        """
+static mut STATE: u8 = 0;
+unsafe extern "C" {
+    fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+}
+fn record() { unsafe { STATE = 1; } }
+#[test]
+fn a() { unsafe { write(1, b"x".as_ptr(), 1) }; }
+#[test]
+fn b() { unsafe { write(2, b"y".as_ptr(), 1) }; }
+"""
+    )
+    expect("bodyless-fn/extern-decl", sorted(got.get("STATE", ([], []))[0]), [])
+    # The same for a trait method signature, which is the other place a
+    # body-less `fn` appears in this tree.
+    got = classify(
+        """
+static mut STATE: u8 = 0;
+trait Sink {
+    fn put(&mut self, b: u8);
+}
+fn record() { unsafe { STATE = 1; } }
+#[test]
+fn a() { let mut s = V; s.put(1); }
+#[test]
+fn b() { let mut s = V; s.put(2); }
+"""
+    )
+    expect("bodyless-fn/trait-sig", sorted(got.get("STATE", ([], []))[0]), [])
+    # And the terminator must not fire on a `;` that belongs to an array
+    # type, in a signature or a return type -- those are real bodies and the
+    # global they touch is really touched.
+    got = classify(
+        """
+static mut STATE: u8 = 0;
+fn record(_pad: [u8; 3]) -> [u8; 2] { unsafe { STATE = 1; } [0, 0] }
+#[test]
+fn a() { record([0; 3]); }
+#[test]
+fn b() { record([0; 3]); }
+"""
+    )
+    expect("bodyless-fn/array-type", sorted(got.get("STATE", ([], []))[0]), ["a", "b"])
 
     for f in failures:
         print(f"FAIL {f}", file=sys.stderr)

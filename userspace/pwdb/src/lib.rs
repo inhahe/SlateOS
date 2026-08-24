@@ -479,6 +479,37 @@ impl Db {
     pub fn all_groups(&self) -> &[Group] {
         &self.all_groups
     }
+
+    /// glibc's `getgrouplist(name, gid, …)`: every group `name` belongs to.
+    ///
+    /// `gid` is the account's *login* group — `pw_gid`, which is a field of
+    /// the passwd line and so need not appear in any `/etc/group` member list
+    /// at all. It is therefore supplied by the caller rather than looked up,
+    /// and it comes first in the result.
+    ///
+    /// After it come the groups whose member list names `name`, in file order,
+    /// **skipping any whose gid equals `gid`** — that suppression is glibc's
+    /// (`files_initgroups_dyn` compares gids, not names) and it is why an
+    /// account explicitly listed in its own login group is not reported twice.
+    /// Measured against glibc 2.39 on this machine's own database:
+    /// `getgrouplist("inhahe", 1000)` is `[1000, 4, 24, 27, 30, 46, 100,
+    /// 1001]`, and `getgrouplist("inhahe", 4)` is `[4, 24, 27, 30, 46, 100,
+    /// 1001]` — the same account, the same `adm` line, and `4` still appearing
+    /// exactly once because the *passed* gid won.
+    ///
+    /// The result is what `id -G` and `id`'s `groups=` field print, so the
+    /// order is observable and is glibc's rather than sorted.
+    #[must_use]
+    pub fn group_list(&self, name: &[u8], gid: u32) -> Vec<u32> {
+        let mut out = vec![gid];
+        out.extend(
+            self.all_groups
+                .iter()
+                .filter(|g| g.gid != gid && g.members.iter().any(|m| m == name))
+                .map(|g| g.gid),
+        );
+        out
+    }
 }
 
 #[cfg(test)]
@@ -847,5 +878,88 @@ mod tests {
         };
         assert_eq!(u.name, b"m\xff");
         assert_eq!(u.dir, b"/home/\xfe");
+    }
+
+    // ---------------------------------------------------------- group_list ---
+
+    /// The `/etc/group` lines that mention `inhahe` on the machine the
+    /// `getgrouplist` transcript below was taken from, verbatim and in file
+    /// order — the order is what makes the expected lists reproducible.
+    const MEASURED_GROUP_FILE: &[u8] = b"root:x:0:\n\
+        adm:x:4:syslog,inhahe\n\
+        cdrom:x:24:inhahe\n\
+        sudo:x:27:inhahe\n\
+        dip:x:30:inhahe\n\
+        plugdev:x:46:inhahe\n\
+        users:x:100:inhahe\n\
+        inhahe:x:1000:\n\
+        docker:x:1001:inhahe\n";
+
+    fn measured_db() -> Db {
+        Db::from_bytes(
+            b"root:x:0:0:root:/root:/bin/bash\n\
+              inhahe:x:1000:1000:,,,:/home/inhahe:/bin/bash\n",
+            MEASURED_GROUP_FILE,
+        )
+    }
+
+    /// `os.getgrouplist("inhahe", 1000)` on glibc 2.39, against the file above.
+    ///
+    /// Note that the login group `inhahe` (gid 1000) leads the list even though
+    /// its member field is *empty*: the gid is a passwd field, and glibc trusts
+    /// the caller's copy of it rather than searching for it.
+    #[test]
+    fn the_measured_group_list_replays() {
+        assert_eq!(measured_db().group_list(b"inhahe", 1000), vec![
+            1000, 4, 24, 27, 30, 46, 100, 1001
+        ]);
+    }
+
+    /// `os.getgrouplist("inhahe", 4)` — the same account and the same `adm`
+    /// line, with `adm`'s gid passed as the login group. `4` appears exactly
+    /// once, because glibc suppresses a member-list hit whose *gid* matches the
+    /// one it was given.
+    #[test]
+    fn the_passed_gid_suppresses_the_member_list_entry_with_the_same_gid() {
+        assert_eq!(measured_db().group_list(b"inhahe", 4), vec![
+            4, 24, 27, 30, 46, 100, 1001
+        ]);
+    }
+
+    /// `os.getgrouplist("inhahe", 65534)` — a gid belonging to no line at all
+    /// is still reported, and still first. This is why the argument exists: an
+    /// account's login group need not appear in `/etc/group`.
+    #[test]
+    fn a_login_group_with_no_group_line_is_still_first() {
+        assert_eq!(measured_db().group_list(b"inhahe", 65534), vec![
+            65534, 4, 24, 27, 30, 46, 100, 1001
+        ]);
+    }
+
+    /// `os.getgrouplist("root", 0)` — an account in no member list gets a
+    /// one-element list, not an empty one.
+    #[test]
+    fn an_account_in_no_member_list_gets_only_its_login_group() {
+        assert_eq!(measured_db().group_list(b"root", 0), vec![0]);
+        assert_eq!(measured_db().group_list(b"nosuchuser", 7), vec![7]);
+    }
+
+    /// Membership is an exact byte match, not a prefix or a substring: the
+    /// member field is split on commas first, so an account called `in` is not
+    /// a member of a group listing `inhahe`.
+    #[test]
+    fn membership_does_not_match_a_prefix_of_another_member() {
+        let db = measured_db();
+        assert_eq!(db.group_list(b"in", 5), vec![5]);
+        assert_eq!(db.group_list(b"syslog", 5), vec![5, 4]);
+    }
+
+    /// A name that is not UTF-8 is looked up as bytes, like every other name
+    /// in this crate.
+    #[test]
+    fn a_non_utf8_member_is_matched_as_bytes() {
+        let db = Db::from_bytes(b"", b"caf\xe9s:x:9:caf\xe9,other\n");
+        assert_eq!(db.group_list(b"caf\xe9", 1), vec![1, 9]);
+        assert_eq!(db.group_list(b"caf", 1), vec![1]);
     }
 }

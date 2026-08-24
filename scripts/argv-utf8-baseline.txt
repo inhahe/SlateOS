@@ -24,7 +24,6 @@ userspace/coreutils/src/bin/ed.rs:argv-as-string
 userspace/coreutils/src/bin/fetch.rs:argv-as-string
 userspace/coreutils/src/bin/free.rs:argv-as-string
 userspace/coreutils/src/bin/grep.rs:argv-as-string
-userspace/coreutils/src/bin/id.rs:argv-as-string
 userspace/coreutils/src/bin/logger.rs:argv-as-string
 userspace/coreutils/src/bin/md5sum.rs:argv-as-string
 userspace/coreutils/src/bin/more.rs:argv-as-string

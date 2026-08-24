@@ -202,6 +202,36 @@ pub fn parse_user_spec(spec: &[u8], db: &Db) -> Result<(Spec, bool), &'static st
     }
 }
 
+/// The same grammar with the group half switched **off**: the whole operand is
+/// one user, separators and all.
+///
+/// This is gnulib's `gid == NULL` mode, and the switch is easy to miss because
+/// upstream spells it as the nullness of an out-parameter:
+///
+/// ```c
+/// char const *colon = gid ? strchr (spec, ':') : NULL;
+/// ...
+/// if (gid && !colon && error_msg)   /* the '.' fallback */
+/// ```
+///
+/// With no `gid` to write a group into there is no separator and no dot
+/// fallback, so the operand is looked up entire. `id` is the caller — it calls
+/// `parse_user_spec (spec, &euid, NULL, &pw_name, NULL)` — and the consequence
+/// is user-visible and surprising: `id root:root`, `id root.root` and `id
+/// root:` are all `no such user` on a machine where `id root` works, because
+/// each is being looked up as an account whose *name* contains the separator.
+/// All three measured against GNU 9.4.
+///
+/// A leading `+` still suppresses the name lookup, so `id +0` is uid 0 by
+/// number even where an account called `0` exists.
+///
+/// # Errors
+///
+/// `"invalid user"` when the operand names no account and is not a number.
+pub fn parse_user_only(spec: &[u8], db: &Db) -> Result<Spec, &'static str> {
+    parse_with_separator(spec, None, db)
+}
+
 /// `chown-core.c`'s `uid_to_name`: the account's name, or the number when the
 /// database does not know it.
 ///
@@ -403,6 +433,47 @@ mod tests {
     fn spec_dot_fallback_is_skipped_when_a_colon_exists() {
         assert_eq!(spec_err("nosuch.user:staff"), "invalid user");
         assert_eq!(spec_err("a.b.c"), "invalid user");
+    }
+
+    // ---------------- parse_user_only ----------------
+
+    /// `id`'s mode: no separator at all, so a spec that `chown` splits is here
+    /// one account name that does not exist. All measured against GNU 9.4 —
+    /// `id root:root` really is `no such user` on a machine with a root
+    /// account, and that is upstream's behaviour rather than a port artefact.
+    #[test]
+    fn user_only_never_splits_the_operand() {
+        let db = db();
+        assert_eq!(parse_user_only(b"alice", &db).unwrap().uid, Some(1000));
+        assert_eq!(parse_user_only(b"alice:staff", &db), Err("invalid user"));
+        assert_eq!(parse_user_only(b"alice.staff", &db), Err("invalid user"));
+        assert_eq!(parse_user_only(b"alice:", &db), Err("invalid user"));
+        // ...and `a.b` resolves for the ordinary reason, not the fallback.
+        assert_eq!(parse_user_only(b"a.b", &db).unwrap().uid, Some(5000));
+    }
+
+    /// No group half means no gid, ever — not even from a trailing separator,
+    /// which is not a separator in this mode.
+    #[test]
+    fn user_only_never_yields_a_group() {
+        let db = db();
+        let alice = parse_user_only(b"alice", &db).unwrap();
+        assert_eq!(alice.gid, None);
+        assert_eq!(alice.group_name, None);
+        assert_eq!(parse_user_only(b"bob", &db).unwrap().gid, None);
+    }
+
+    /// `+` still suppresses the lookup, so a number is a number even where an
+    /// account wears it as a name. Measured: `id +0` prints root's line.
+    #[test]
+    fn user_only_still_honours_the_plus_escape() {
+        let db = db();
+        assert_eq!(parse_user_only(b"1000", &db).unwrap().uid, Some(4000));
+        let plus = parse_user_only(b"+1000", &db).unwrap();
+        assert_eq!(plus.uid, Some(1000));
+        assert_eq!(plus.user_name, None);
+        // `+0:` is not "uid 0, login group" here -- it is a name with a colon.
+        assert_eq!(parse_user_only(b"+0:", &db), Err("invalid user"));
     }
 
     // ---------------- uid_to_name / gid_to_name ----------------

@@ -66568,7 +66568,7 @@ grep bug: `Path::join` uses the host separator and the target's is `/`. `grep
 foo sub` — recursion's sibling that names no child path — is left unmarked as
 the control that proves the difference is the separator and nothing else.
 
-### TD-B-ID-AND-STAT-STILL-CLAIM-ACCOUNT-NAME-LOOKUP-IS-UNBUILT -- OPEN, user-visible (lane B, 2026-08-23)
+### TD-B-ID-AND-STAT-STILL-CLAIM-ACCOUNT-NAME-LOOKUP-IS-UNBUILT -- HALF FIXED (`id` done, `stat` OPEN), user-visible (lane B, 2026-08-23)
 
 **What.** `id -n` and `stat`'s `%U`/`%G` print numbers where every other system
 prints names, and each says in a comment that the lookup is not available yet:
@@ -66604,3 +66604,84 @@ Delete the comments rather than editing them; there is nothing left to qualify.
 (`id.rs:65`, `stat.rs:657`), so both will be opened for the argv conversion
 anyway. Fix it then -- the conversions keep turning up exactly this shape of
 defect, and that is the argument for doing them rather than the cost of them.
+
+**Update 2026-08-23 -- the `id` half is fixed; `stat` is still open.** `id` was
+rewritten as a port of GNU's `src/id.c` + `src/group-list.c` + gnulib's
+`lib/mgetgroups.c` during its argv conversion, and `-n` now resolves through
+`pwdb::Db` exactly as this entry prescribed. Opening the file turned up three
+further defects beyond the one recorded here, all user-visible, and all now
+fixed in the same rewrite:
+
+* **A USER operand was silently discarded.** `parse_args` inspected only
+  arguments beginning with `-`, so `id alice` printed the *caller's* ids and
+  exited 0. A wrong answer with a success status is worse than a failure.
+* **The default line had its fields in the wrong order** -- `uid= euid= gid=
+  egid=` where every other `id` emits `uid= gid= euid= egid=`. Two unit tests
+  asserted the wrong order, which is how it survived.
+* **There was no `groups=` field at all**, which is most of what the default
+  line is for. It now comes from a new `pwdb::Db::group_list` (glibc's
+  `getgrouplist`, measured against glibc 2.39 and unit-tested against that
+  transcript).
+
+One honest limitation ships with it, documented in the module docs rather than
+papered over: `id` with **no operand** prints only the effective gid in
+`groups=`, because that list is the kernel's (`getgroups(2)`), and
+`posix/src/unistd.rs`'s `getgroups` still returns 0 supplementary groups.
+`id $USER` reads `/etc/group` and prints everything. Making the no-operand case
+read the file too would have `id` vouch for privileges the kernel has not
+granted; gnulib takes the same view, synthesising a list only when `getgroups`
+fails with `ENOSYS`. The real fix is in `getgroups`, not in `id`.
+
+`stat`'s `%U`/`%G` are untouched and this entry stays open for them.
+
+### B-WHOAMI-AND-LOGNAME-TRUST-THE-ENVIRONMENT -- OPEN, security-relevant (lane B, 2026-08-23)
+
+**What.** `whoami` and `logname` both answer from environment variables:
+
+    userspace/coreutils/src/bin/whoami.rs:31   env::var("USER") then env::var("LOGNAME")
+    userspace/coreutils/src/bin/logname.rs:11  env::var("LOGNAME") then env::var("USER")
+
+Neither GNU utility consults the environment at all. Measured against GNU
+coreutils 9.4:
+
+    $ USER=root LOGNAME=root whoami        inhahe          (status 0)
+    $ LOGNAME=root USER=root logname       logname: no login name  (status 1)
+
+`whoami` is `geteuid()` + `getpwuid()`; `logname` is `getlogin()`, the utmp
+login name, and POSIX explicitly specifies it that way rather than as `$LOGNAME`
+precisely so that it cannot be set by the caller.
+
+**Why it matters.** `whoami` is a *privilege check* in idiomatic shell:
+
+    [ "$(whoami)" = root ] || { echo "must be root"; exit 1; }
+
+Ours returns whatever the caller put in `$USER`, so any unprivileged process can
+walk through that gate by exporting one variable. The environment is attacker-
+controlled data on every system; an identity utility is the one place it must
+not be consulted. This is the same class of defect as `id` printing the wrong
+account (`TD-B-ID-AND-STAT-STILL-CLAIM-ACCOUNT-NAME-LOOKUP-IS-UNBUILT`), but
+worse, because `id`'s failure was a wrong answer and this one is a wrong answer
+the caller chooses.
+
+**Found by.** Rewriting `id` against GNU's `src/id.c`. `id` now resolves names
+through `pwdb::Db`; reading its two closest siblings showed both still guessing.
+
+**Also wrong in both, found at the same time.** Neither accepts or rejects
+operands: GNU reports `whoami: extra operand 'x'` with a `Try 'whoami --help'`
+referral and exits 1, ours ignores the operand and prints a name. Neither has
+`--help` or `--version`.
+
+**Proper fix.** `whoami`: `geteuid()`, then `pwdb::Db::load().user_by_uid()`,
+and GNU's exact failure when the database has no entry --
+`whoami: cannot find name for user ID %ju`, status 1. Note this is *not*
+`uid_to_name`'s digits fallback: `whoami` fails rather than printing a number,
+because a number is not a name and a script comparing against one would be
+misled a second time. `logname`: `getlogin()` -- which needs a utmp equivalent,
+so check whether `posix` provides one before assuming; if it does not, the
+honest port fails with `logname: no login name` unconditionally, which is what
+GNU does on this machine anyway. Both need the getopt conversion for
+`--help`/`--version`/`extra operand`.
+
+**Not in the argv-utf8 backlog** -- both take no arguments today, so neither
+will be opened by that sweep. This entry is the only thing that will surface
+them.

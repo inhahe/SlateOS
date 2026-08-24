@@ -65234,8 +65234,11 @@ without doing step 1 and 2 first.
 
 ## TD-A-ACL-NEVER-ENFORCED — POSIX ACLs are stored, listed and formatted, but no VFS operation ever consults them (lane A, 2026-08-23)
 
-**Status:** open. Discovered while converting `kernel/src/fs/acl.rs` to
-byte-clean paths (design-decisions.md §261).
+**Status: RESOLVED 2026-08-23** in `f838b82cb` (the gate),
+`f69f16638` (the checker that keeps it complete) and `befd76f9e` (making
+the gate's fast path affordable). Discovered while converting
+`kernel/src/fs/acl.rs` to byte-clean paths (design-decisions.md §261).
+The original report is kept below, followed by what was actually built.
 
 `fs::acl::check_access` — the function that implements the whole POSIX
 1003.1e evaluation algorithm, all five steps of it — **has no production
@@ -65293,6 +65296,64 @@ operation uses:
 permission checking, or any task that claims POSIX ACL support is done.
 Until then, `getfacl`/`setfacl` should be understood as a database editor
 for a database nothing reads.
+
+### Resolution (2026-08-23)
+
+All four numbered steps above were followed, and step 1's parenthetical
+turned out to be the larger half of the work.
+
+**There was no single point, and the reason there wasn't is instructive.**
+`cap::file_tags::check_access` — the *other* path check, mandatory access
+control by capability tag — was called from sixteen hand-written sites in
+`fs/vfs.rs` plus a seventeenth hand-copied into `fs/handle.rs`. It was also
+*missing* from roughly twenty more entry points: every xattr getter and
+setter, `chmod`/`chown`/`utimes` and their `no_follow` twins, `symlink`,
+`readlink`, `lstat`, `lmetadata`, `truncate_resolved`, `fallocate`,
+`file_identity_resolved` and `readdir_at_resolved`. So the sprinkled hook
+had already decayed exactly the way step 1 predicted a new one would, and
+adding an eighteenth sprinkle would have decayed the same way. Both checks
+now live in one function:
+
+```rust
+check_path_access(path, PathAccess::{Read, Write, Execute, Metadata})
+```
+
+**`PathAccess::Metadata` requires no ACL permission in either direction.**
+That is a deliberate deviation from "gate everything", and both halves of
+it match POSIX: `stat` depends on search permission along the path rather
+than read permission of the target, so requiring `r` would make a file an
+ACL had deliberately left visible-but-unreadable also un-`stat`-able; and
+POSIX ACLs govern a file's *data*, not its inode attributes, so requiring
+`w` would make a mode-`444` file un-`chmod`-able by its own owner.
+Capability tags still apply to metadata operations, since those are
+mandatory access control and deny reaching the object at all.
+
+**The recursion hazard step 2 implies.** The ACL check needs the file's
+owning uid/gid, which means the gate reads metadata — so it must use
+`Vfs::metadata_resolved` (ungated) and never `Vfs::metadata` (gated). The
+checker asserts this as a named rule rather than leaving it to memory.
+
+**Step 4 could not be done as written, and what replaced it is stronger.**
+An end-to-end `kshell` test is impossible from inside the kernel: self-tests
+run as a kernel task with no owning process, so `check_path_access` bypasses
+before any check runs, and a test driven through `Vfs::read_file` could only
+ever observe "allowed" — it would keep passing if the ACL half were deleted
+again. The decision logic was therefore split into a pure
+`path_access_verdict(path, uid, gid, supplementary_gids, want)` that takes
+credentials explicitly, and `vfs::acl_gate_self_test` asserts the **deny**
+direction against it first, exactly as the report demanded. The *call sites*
+— which a unit test cannot cover — are held by
+`scripts/check-vfs-permission-gate.py`, run as a pre-build gate in
+`boot-test.sh`. It is the right tool for this specific failure precisely
+because both checks fail open: a forgotten gate produces no symptom at all
+at runtime, so only a source-level invariant can see it.
+
+**Fast path.** The gate asks `acl::count()` and `file_tags::count()` before
+doing anything, and on a normal system both are zero. `acl.rs` gained an
+atomic count for this; `file_tags::count()` was a mutex plus an O(n) scan of
+the whole table, which was affordable at seventeen call sites and is not at
+thirty-five on a lookup path budgeted at 200–500 ns per component, so it
+gained the same treatment (`befd76f9e`). See design-decisions.md §290.
 
 ---
 

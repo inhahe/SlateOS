@@ -1186,23 +1186,7 @@ impl SoundSettingsUI {
         });
         let tx = x + width - 48.0;
         let bg = if on { p.green } else { p.surface1 };
-        cmds.push(RenderCommand::FillRect {
-            x: tx,
-            y,
-            width: 40.0,
-            height: 20.0,
-            color: bg,
-            corner_radii: CornerRadii::all(10.0),
-        });
-        let knob_x = if on { tx + 22.0 } else { tx + 2.0 };
-        cmds.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: y + 2.0,
-            width: 16.0,
-            height: 16.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        cmds.extend(crate::switch::switch(tx, y, 40.0, 20.0, on, bg));
         y + 26.0
     }
 
@@ -1757,7 +1741,19 @@ mod tests {
                     ("empty", empty_ui as fn(usize) -> SoundSettingsUI),
                 ] {
                     let cmds = draw_all_tabs(make, &p);
-                    assert_drawn_from(&p, &cmds, &[], &format!("sound settings ({what})"));
+                    // A switch knob is `readable_on` its own track — one of the
+                    // two extremes, not a role. The tracks are named rather
+                    // than the extremes, so the exemption stays tied to the
+                    // fill it sits on.
+                    assert_drawn_from(
+                        &p,
+                        &cmds,
+                        &[
+                            appearance::readable_on(p.green),
+                            appearance::readable_on(p.surface1),
+                        ],
+                        &format!("sound settings ({what})"),
+                    );
                 }
             }
         }
@@ -2122,18 +2118,24 @@ mod tests {
                 "a spatial-mode row is in the wrong role"
             );
 
-            // render_toggle_row: pill on, pill off, and the knob, which is the
-            // same colour on both.
+            // render_toggle_row: pill on, pill off, and the knob — which is
+            // `readable_on` whichever pill it sits on, so the on and off knobs
+            // are deliberately *different* inks. See
+            // `switch::the_knob_is_legible_on_every_track_a_panel_can_choose`.
             let inp = draw(&full_ui(1), &p);
+            let pills = vec![p.green, p.surface1, p.green, p.green];
             assert_eq!(
                 fills(&inp, 40.0, 20.0),
-                vec![p.green, p.surface1, p.green, p.green],
+                pills,
                 "the mic toggles' pills are in the wrong roles (light={light})"
             );
             assert_eq!(
                 fills(&inp, 16.0, 16.0),
-                vec![p.text; 4],
-                "a toggle knob is not `text` (light={light})"
+                pills
+                    .iter()
+                    .map(|c| appearance::readable_on(*c))
+                    .collect::<Vec<_>>(),
+                "a toggle knob is not derived from its own pill (light={light})"
             );
 
             // render_volume_bar: the track is a surface in every state.

@@ -532,23 +532,7 @@ impl InputSettingsUI {
         // because it does not report a position. A switch stays on inside a
         // section the user has since collapsed.
         let bg = if on { p.green } else { p.surface1 };
-        cmds.push(RenderCommand::FillRect {
-            x: tx,
-            y,
-            width: 40.0,
-            height: 20.0,
-            color: bg,
-            corner_radii: CornerRadii::all(10.0),
-        });
-        let knob_x = if on { tx + 22.0 } else { tx + 2.0 };
-        cmds.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: y + 2.0,
-            width: 16.0,
-            height: 16.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        cmds.extend(crate::switch::switch(tx, y, 40.0, 20.0, on, bg));
 
         y + 26.0
     }
@@ -955,7 +939,15 @@ mod tests {
             let p = accented(light);
             // The thumb is the one colour here that is in no palette at all;
             // judgement 3 is precisely that it is computed from the fill.
-            let derived = [emphasized(p.accent)];
+            // ...and a switch knob is `readable_on` its own track, which is one
+            // of the two extremes rather than a role. The tracks are named
+            // rather than the extremes, so each exemption stays tied to the
+            // fill it sits on.
+            let derived = [
+                emphasized(p.accent),
+                appearance::readable_on(p.green),
+                appearance::readable_on(p.surface1),
+            ];
             for section in 0..5 {
                 for on in [false, true] {
                     for dirty in [false, true] {
@@ -1090,7 +1082,11 @@ mod tests {
                 );
                 assert_eq!(
                     fills_sized(&cmds, 16.0, 16.0),
-                    vec![p.text],
+                    vec![appearance::readable_on(if on {
+                        p.green
+                    } else {
+                        p.surface1
+                    })],
                     "the knob of a switch that is {on}"
                 );
             }
@@ -1380,31 +1376,56 @@ mod tests {
         }
     }
 
-    /// The knob is the same ink on both pills.
+    /// The knob is legible on both pills — which means it is *not* the same
+    /// ink on both.
     ///
-    /// It marks the switch's position, and a position does not change meaning
-    /// when the state does — so the one thing the knob must not do is follow
-    /// the pill it slides on. That it is *legible* on both is a separate
-    /// question and a real defect: `text` on `green` is two light values. See
-    /// known-issues.md `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`,
-    /// which is being fixed across the shell in one pass rather than module by
-    /// module, so that every switch reaches the same answer.
+    /// This test used to assert the opposite, and the reasoning is worth
+    /// keeping because it was not silly: the knob marks the switch's position,
+    /// a position does not change meaning when the state does, so a knob that
+    /// changed colour looked like a second, redundant state report. What that
+    /// argument missed is that the knob was `text` on *both* pills, and `text`
+    /// on `green` is two light values — 1.35:1 on the stock accent. A mark you
+    /// cannot see does not report a position at all, so the tie between the
+    /// two goals was never even: legibility is the one that makes the control
+    /// work, and consistency of ink is the one that makes it tidy.
+    ///
+    /// So the knob now follows the pill (via [`crate::switch::switch`]), and
+    /// what carries the state is what always carried it — *where* the knob is.
+    /// This asserts both halves: it moves, and it is readable at each end.
+    /// Closes known-issues.md `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`
+    /// for this module.
     #[test]
-    fn the_knob_is_the_same_ink_on_both_pills() {
+    fn the_knob_is_legible_on_both_pills() {
         for light in [false, true] {
             let p = accented(light);
-            let off = fills_sized(
-                &panel(2, false, false).render(&p, 0.0, 0.0, PANEL_W),
-                16.0,
-                16.0,
+            let draw = |on: bool| panel(2, on, false).render(&p, 0.0, 0.0, PANEL_W);
+            let off_ink = fills_sized(&draw(false), 16.0, 16.0);
+            let on_ink = fills_sized(&draw(true), 16.0, 16.0);
+            assert_eq!(
+                off_ink,
+                vec![appearance::readable_on(p.surface1)],
+                "the knob of a switch that is off is not derived from its pill"
             );
-            let on = fills_sized(
-                &panel(2, true, false).render(&p, 0.0, 0.0, PANEL_W),
-                16.0,
-                16.0,
+            assert_eq!(
+                on_ink,
+                vec![appearance::readable_on(p.green)],
+                "the knob of a switch that is on is not derived from its pill"
             );
-            assert_eq!(off, vec![p.text], "the knob of a switch that is off");
-            assert_eq!(on, off, "the knob changes colour with the switch");
+            // And the position — the thing that actually reports the state —
+            // still differs, which is what makes the shared ink dispensable.
+            let knob_x = |on: bool| -> f32 {
+                draw(on)
+                    .iter()
+                    .find_map(|c| match c {
+                        RenderCommand::FillRect { x, width, .. } if *width == 16.0 => Some(*x),
+                        _ => None,
+                    })
+                    .expect("a switch has a knob")
+            };
+            assert!(
+                knob_x(true) > knob_x(false),
+                "the on knob is not right of the off knob, so nothing reports the state"
+            );
         }
     }
 }

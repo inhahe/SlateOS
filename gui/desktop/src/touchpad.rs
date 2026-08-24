@@ -1253,26 +1253,15 @@ impl TouchpadSettingsUI {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        // Toggle track.
         let track_x = x + 250.0;
-        cmds.push(RenderCommand::FillRect {
-            x: track_x,
-            y: y + 1.0,
-            width: 36.0,
-            height: 18.0,
-            color: if value { p.accent } else { p.surface2 },
-            corner_radii: CornerRadii::all(9.0),
-        });
-        // Toggle knob.
-        let knob_x = if value { track_x + 20.0 } else { track_x + 2.0 };
-        cmds.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: y + 3.0,
-            width: 14.0,
-            height: 14.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(7.0),
-        });
+        cmds.extend(crate::switch::switch(
+            track_x,
+            y + 1.0,
+            36.0,
+            18.0,
+            value,
+            if value { p.accent } else { p.surface2 },
+        ));
     }
 
     fn render_slider_label(
@@ -2418,10 +2407,13 @@ mod tests {
         for light in [false, true] {
             let p = Palette::for_mode(light);
             for (ui, mgr, what) in every_state() {
+                // A switch knob is `readable_on` its own track — one of the two
+                // extremes, not a role. The tracks are named rather than the
+                // extremes, so the exemption stays tied to the fill it sits on.
                 assert_drawn_from(
                     &p,
                     &draw(&ui, &mgr, &p),
-                    &[],
+                    &[p.on_accent(), readable_on(p.surface2)],
                     &format!("{what}, light={light}"),
                 );
             }

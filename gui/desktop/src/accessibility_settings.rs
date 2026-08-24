@@ -1057,23 +1057,16 @@ impl AccessibilitySettingsUI {
             overflow: TextOverflow::Ellipsis,
         });
         let sw_x = x + width - 44.0;
-        cmds.push(RenderCommand::FillRect {
-            x: sw_x,
-            y: y + 2.0,
-            width: 40.0,
-            height: 22.0,
-            color: if enabled { p.green } else { p.surface2 },
-            corner_radii: CornerRadii::all(11.0),
-        });
-        let knob_x = if enabled { sw_x + 20.0 } else { sw_x + 2.0 };
-        cmds.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: y + 4.0,
-            width: 18.0,
-            height: 18.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(9.0),
-        });
+        // `green`, not `accent`: on this page "on" means an assistive feature
+        // is doing its job, which is a safety report rather than a selection.
+        cmds.extend(crate::switch::switch(
+            sw_x,
+            y + 2.0,
+            40.0,
+            22.0,
+            enabled,
+            if enabled { p.green } else { p.surface2 },
+        ));
     }
 
     fn render_label_value(
@@ -1290,6 +1283,45 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Every colour [`colors`] would return, minus the switch knobs.
+    ///
+    /// A knob is derived from its pill rather than read from the palette, so
+    /// its value is not a claim this module makes and cannot be judged against
+    /// this module's constants. Located the same structural way [`switches`]
+    /// locates it — the fill *immediately after* a 40x22 pill — so it excludes
+    /// a position, not a colour. See
+    /// [`none_of_the_nine_deleted_constants_is_still_drawn`] for why that
+    /// distinction is the whole point.
+    fn colors_outside_the_switch_knobs(cmds: &[RenderCommand]) -> Vec<Color> {
+        let mut knobs = Vec::new();
+        for (i, pair) in cmds.windows(2).enumerate() {
+            if let (
+                RenderCommand::FillRect {
+                    width: pw,
+                    height: ph,
+                    ..
+                },
+                RenderCommand::FillRect { width: kw, .. },
+            ) = (&pair[0], &pair[1])
+                && *pw == 40.0
+                && *ph == 22.0
+                && *kw == 18.0
+            {
+                knobs.push(i + 1);
+            }
+        }
+        cmds.iter()
+            .enumerate()
+            .filter(|(i, _)| !knobs.contains(i))
+            .filter_map(|(_, c)| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The colours of the 15pt Bold runs, which is what a section heading is.
@@ -1644,7 +1676,14 @@ mod tests {
                 for mut ui in [AccessibilitySettingsUI::new(), busy()] {
                     ui.set_tab(tab);
                     let cmds = ui.render(&p, 600.0, 800.0);
-                    assert_drawn_from(&p, &cmds, &[p.on_accent()], "accessibility_settings");
+                    // The switch knobs add the `green`/`surface2` pair: this
+                    // page's switches ride a green track, not the accent.
+                    assert_drawn_from(
+                        &p,
+                        &cmds,
+                        &[p.on_accent(), readable_on(p.green), readable_on(p.surface2)],
+                        "accessibility_settings",
+                    );
                 }
             }
         }
@@ -1661,13 +1700,25 @@ mod tests {
     /// Naming the nine deleted values explicitly closes that, and the
     /// fixture's accent is dark (see [`accented`]) so near-black is never the
     /// right answer anywhere else here.
+    ///
+    /// **Except at a switch knob**, which is why the scan skips them. A knob
+    /// is `readable_on` its own pill, and on Latte `green` that answer is
+    /// `#11111B` — the same value as Mocha `CRUST`, because the two extremes
+    /// [`readable_on`] chooses between *are* roles of the opposite palette.
+    /// The knobs are skipped **by position**, using the same structural
+    /// locator [`switches`] uses, rather than by adding `#11111B` to an
+    /// allow-list: an allowed value is allowed everywhere, which would put
+    /// back exactly the hole this test was written to close.
     #[test]
     fn none_of_the_nine_deleted_constants_is_still_drawn() {
         let p = accented(true);
+        let mut skipped = 0;
         for &tab in &A11yTab::ALL {
             let mut ui = busy();
             ui.set_tab(tab);
-            for c in colors(&ui.render(&p, 600.0, 800.0)) {
+            let cmds = ui.render(&p, 600.0, 800.0);
+            skipped += switches(&cmds).len();
+            for c in colors_outside_the_switch_knobs(&cmds) {
                 let rgb = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
                 for (hex, name) in DELETED {
                     assert_ne!(
@@ -1678,6 +1729,16 @@ mod tests {
                 }
             }
         }
+        // The exclusion is only sound while it is actually finding the knobs.
+        // A locator that silently stopped matching would turn this test into a
+        // scan of everything — which would pass loudly and prove nothing about
+        // the thing it skips.
+        assert!(
+            skipped > 0,
+            "no switch knob was excluded, so the structural locator has \
+             stopped matching and this test is no longer skipping what its \
+             doc comment says it skips"
+        );
     }
 
     /// Every site draws the role it claims, in the order it claims it.
@@ -1704,10 +1765,14 @@ mod tests {
             for _ in 0..5 {
                 want.extend([p.subtext0, p.text]);
             }
-            // Reduce Motion is on in `busy()`; the other two are off.
-            want.extend([p.text, p.green, p.text]);
-            want.extend([p.text, p.surface2, p.text]);
-            want.extend([p.text, p.surface2, p.text]);
+            // Reduce Motion is on in `busy()`; the other two are off. Each
+            // switch is (label, pill, knob), and the knob is `readable_on` its
+            // own pill — so the on and off knobs are different inks, and this
+            // ordered pin is where a knob that stopped following its pill
+            // would show up as a swap rather than as a missing colour.
+            want.extend([p.text, p.green, readable_on(p.green)]);
+            want.extend([p.text, p.surface2, readable_on(p.surface2)]);
+            want.extend([p.text, p.surface2, readable_on(p.surface2)]);
             // Focus Indicator, Text Cursor.
             for _ in 0..2 {
                 want.extend([p.subtext0, p.text]);
@@ -1731,15 +1796,15 @@ mod tests {
             }
             // Visual Alerts, Flash Screen, Mono Audio — all off by default.
             for _ in 0..3 {
-                want.extend([p.text, p.surface2, p.text]);
+                want.extend([p.text, p.surface2, readable_on(p.surface2)]);
             }
             // The "Captions" heading sits between the switches, which is the
             // position a heading-shaped permutation would move.
             want.push(p.lavender);
-            want.extend([p.text, p.surface2, p.text]);
+            want.extend([p.text, p.surface2, readable_on(p.surface2)]);
             want.extend([p.subtext0, p.text]);
             // `caption_background` is the one audio default that is on.
-            want.extend([p.text, p.green, p.text]);
+            want.extend([p.text, p.green, readable_on(p.green)]);
             assert_eq!(
                 colors(&ui.render(&p, 600.0, 800.0)),
                 want,
@@ -1847,9 +1912,24 @@ mod tests {
             assert_eq!(sw.len(), 3, "the Visual tab has three switches");
             assert_eq!(sw[0].0, magenta.green, "Reduce Motion is on and not green");
             assert_eq!(sw[1].0, magenta.surface2, "an off switch is not surface2");
-            assert!(
-                sw.iter().all(|(_, knob)| *knob == magenta.text),
-                "a switch knob is not p.text"
+            // The knob follows its own pill, so it too is independent of the
+            // accent — which is the claim this test is making. Asserting it
+            // against the *mauve* render rather than against `readable_on` is
+            // deliberate: comparing to the helper would only restate the
+            // implementation, whereas comparing the two accents' renders asks
+            // the question the test is named for.
+            let knobs =
+                |c: &[RenderCommand]| -> Vec<Color> { switches(c).iter().map(|s| s.1).collect() };
+            assert_eq!(
+                knobs(&with_magenta),
+                knobs(&with_mauve),
+                "a switch knob changed colour because the accent changed, so \
+                 \"on\" and \"chosen\" have been conflated"
+            );
+            assert_ne!(
+                sw[0].1, sw[1].1,
+                "the on and off knobs are the same ink, so at least one of \
+                 them is not derived from the pill it sits on"
             );
 
             // The selected tab, by contrast, must move with the accent.

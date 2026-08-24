@@ -133,6 +133,12 @@ pub mod snap;
 pub mod sound_settings;
 pub mod startup_settings;
 pub mod storage_settings;
+/// The on/off switch every settings panel draws, in one place.
+///
+/// Seventeen panels drew it by hand and all seventeen filled the knob with
+/// `p.text`, which on an accent track is 1.35:1 against it. The knob is now
+/// derived from the track it sits on.
+pub mod switch;
 pub mod taskbar;
 pub mod taskbar_autohide;
 pub mod touchpad;

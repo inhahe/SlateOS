@@ -1341,28 +1341,14 @@ impl NetworkSettingsUI {
             // Toggle indicator
             let toggle_x = x + width - 56.0;
             let toggle_bg = if *enabled { p.accent } else { p.surface2 };
-            cmds.push(RenderCommand::FillRect {
-                x: toggle_x,
-                y: row_y + 8.0,
-                width: 40.0,
-                height: 20.0,
-                color: toggle_bg,
-                corner_radii: CornerRadii::all(10.0),
-            });
-
-            let knob_x = if *enabled {
-                toggle_x + 22.0
-            } else {
-                toggle_x + 2.0
-            };
-            cmds.push(RenderCommand::FillRect {
-                x: knob_x,
-                y: row_y + 10.0,
-                width: 16.0,
-                height: 16.0,
-                color: p.text,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            cmds.extend(crate::switch::switch(
+                toggle_x,
+                row_y + 8.0,
+                40.0,
+                20.0,
+                *enabled,
+                toggle_bg,
+            ));
 
             row_y += 44.0;
         }
@@ -3477,7 +3463,15 @@ mod tests {
         for light in [false, true] {
             let p = Palette::for_mode(light);
             for (ui, what) in every_state() {
-                assert_drawn_from(&p, &render(&ui, &p), &[], &format!("{what}, light={light}"));
+                // A switch knob is `readable_on` its own track — one of the two
+                // extremes, not a role. The tracks are named rather than the
+                // extremes, so the exemption stays tied to the fill it sits on.
+                assert_drawn_from(
+                    &p,
+                    &render(&ui, &p),
+                    &[p.on_accent(), readable_on(p.surface2)],
+                    &format!("{what}, light={light}"),
+                );
             }
         }
     }

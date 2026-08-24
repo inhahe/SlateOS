@@ -1050,27 +1050,14 @@ impl OsdSettingsUI {
         } else {
             p.subtext0
         };
-        commands.push(RenderCommand::FillRect {
-            x: x + padding,
-            y: cy,
-            width: 40.0,
-            height: 20.0,
-            color: enable_color,
-            corner_radii: CornerRadii::all(10.0),
-        });
-        let toggle_x = if self.config.enabled {
-            x + padding + 22.0
-        } else {
-            x + padding + 2.0
-        };
-        commands.push(RenderCommand::FillRect {
-            x: toggle_x,
-            y: cy + 2.0,
-            width: 16.0,
-            height: 16.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        commands.extend(crate::switch::switch(
+            x + padding,
+            cy,
+            40.0,
+            20.0,
+            self.config.enabled,
+            enable_color,
+        ));
         commands.push(RenderCommand::Text {
             x: x + padding + 52.0,
             y: cy + 2.0,
@@ -3022,13 +3009,14 @@ mod tests {
                 vec![rgb(p.subtext0)],
                 "the enable pill, off"
             );
-            // T3: the pill's knob.
+            // T3: the pill's knob — `readable_on` the pill it sits on, not a
+            // role. `s` is the enabled fixture, so the pill is `green`.
             assert_eq!(
                 fills(&s, 16.0, 16.0)
                     .iter()
                     .map(|c| rgb(*c))
                     .collect::<Vec<_>>(),
-                vec![rgb(p.text)],
+                vec![rgb(appearance::readable_on(p.green))],
                 "the pill knob"
             );
             // T6: the position dots — one selected, four not.

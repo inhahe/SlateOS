@@ -1152,23 +1152,14 @@ impl DateTimeSettingsUI {
             overflow: TextOverflow::Ellipsis,
         });
         let sw_x = x + width - 44.0;
-        cmds.push(RenderCommand::FillRect {
-            x: sw_x,
-            y: y + 2.0,
-            width: 40.0,
-            height: 22.0,
-            color: if enabled { p.accent } else { p.surface2 },
-            corner_radii: CornerRadii::all(11.0),
-        });
-        let knob_x = if enabled { sw_x + 20.0 } else { sw_x + 2.0 };
-        cmds.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: y + 4.0,
-            width: 18.0,
-            height: 18.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(9.0),
-        });
+        cmds.extend(crate::switch::switch(
+            sw_x,
+            y + 2.0,
+            40.0,
+            22.0,
+            enabled,
+            if enabled { p.accent } else { p.surface2 },
+        ));
     }
 
     fn render_label_value(
@@ -1867,7 +1858,15 @@ mod tests {
         for light in [false, true] {
             let p = Palette::for_mode(light);
             for (ui, what) in every_state() {
-                assert_drawn_from(&p, &render(&ui, &p), &[], &format!("{what}, light={light}"));
+                // A switch knob is `readable_on` its own track — one of the two
+                // extremes, not a role. The tracks are named rather than the
+                // extremes, so the exemption stays tied to the fill it sits on.
+                assert_drawn_from(
+                    &p,
+                    &render(&ui, &p),
+                    &[p.on_accent(), readable_on(p.surface2)],
+                    &format!("{what}, light={light}"),
+                );
             }
         }
     }

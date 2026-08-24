@@ -893,23 +893,7 @@ impl PrivacySettingsUI {
         });
         let tx = x + width - 48.0;
         let bg = if on { p.green } else { p.surface1 };
-        cmds.push(RenderCommand::FillRect {
-            x: tx,
-            y,
-            width: 40.0,
-            height: 20.0,
-            color: bg,
-            corner_radii: CornerRadii::all(10.0),
-        });
-        let knob_x = if on { tx + 22.0 } else { tx + 2.0 };
-        cmds.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: y + 2.0,
-            width: 16.0,
-            height: 16.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        cmds.extend(crate::switch::switch(tx, y, 40.0, 20.0, on, bg));
     }
 }
 
@@ -1456,7 +1440,19 @@ mod tests {
                 pal.accent = accent;
                 for (what, ui) in every_state() {
                     let cmds = ui.render(&pal, 0.0, 0.0, 500.0);
-                    assert_drawn_from(&pal, &cmds, &[], &format!("{what} (dark={dark})"));
+                    // A switch knob is `readable_on` its own track — one of the
+                    // two extremes, not a role. The tracks are named rather
+                    // than the extremes, so the exemption stays tied to the
+                    // fill it sits on.
+                    assert_drawn_from(
+                        &pal,
+                        &cmds,
+                        &[
+                            appearance::readable_on(pal.green),
+                            appearance::readable_on(pal.surface1),
+                        ],
+                        &format!("{what} (dark={dark})"),
+                    );
                 }
             }
         }
@@ -1739,11 +1735,14 @@ mod tests {
                     .all(|c| rgb(*c) == rgb(p.mantle)),
                 "{mode}"
             );
-            // render_toggle: the knob.
+            // render_toggle: the knob, which is `readable_on` its own pill
+            // rather than a role. This fixture has every toggle *on*, so every
+            // knob here rides `green`; the off ink is a different value and is
+            // pinned by the switch module's own tests.
             assert!(
                 fills(&tab2, 16.0, 16.0)
                     .iter()
-                    .all(|c| rgb(*c) == rgb(p.text)),
+                    .all(|c| rgb(*c) == rgb(appearance::readable_on(p.green))),
                 "{mode}"
             );
         }

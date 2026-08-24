@@ -10494,6 +10494,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    serial_println!("  kshell::self_test 20: a reported error is a failed command");
+    // The third and largest shape: `Err(e) => shell_println!("Error: {:?}", e),`
+    // -- an operation failed, the user was told, and the *shell* recorded
+    // success. `cgroup delete` on an id that does not exist takes exactly that
+    // arm, so this fails if the arm ever loses its status again.
+    {
+        let out = capture_command("cgroup delete 4294967295");
+        assert!(
+            out.starts_with(b"Error: "),
+            "deleting a nonexistent cgroup reports an error"
+        );
+        assert_eq!(last_exit(), 1, "an operation that failed did not succeed");
+
+        // The control the other three rungs need: a command that genuinely
+        // worked must still report 0, or `set -e` would stop on everything.
+        let out = capture_command("echo ok");
+        assert_eq!(out.as_slice(), b"ok\n");
+        assert_eq!(last_exit(), 0, "a command that worked reports success");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -13463,7 +13483,10 @@ fn cmd_integrity(args: &str) {
                                         &hex[..12]
                                     );
                                 }
-                                Err(e) => shell_println!("Error: {:?}", e),
+                                Err(e) => {
+                                    shell_println!("Error: {:?}", e);
+                                    set_exit(1);
+                                }
                             }
                         } else if entry.entry_type == crate::fs::EntryType::Directory {
                             // Directory baseline.
@@ -13476,14 +13499,20 @@ fn cmd_integrity(args: &str) {
                                         integrity::baseline_len()
                                     );
                                 }
-                                Err(e) => shell_println!("Error: {:?}", e),
+                                Err(e) => {
+                                    shell_println!("Error: {:?}", e);
+                                    set_exit(1);
+                                }
                             }
                         } else {
                             shell_println!("Error: not a file or directory");
                             set_exit(1);
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 // Default: baseline current directory.
@@ -13497,7 +13526,10 @@ fn cmd_integrity(args: &str) {
                             integrity::baseline_len()
                         );
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -13523,7 +13555,10 @@ fn cmd_integrity(args: &str) {
                                 Err(crate::error::KernelError::NotFound) => {
                                     shell_println!("{}: not in baseline", resolved.display());
                                 }
-                                Err(e) => shell_println!("Error: {:?}", e),
+                                Err(e) => {
+                                    shell_println!("Error: {:?}", e);
+                                    set_exit(1);
+                                }
                             }
                         } else if entry.entry_type == crate::fs::EntryType::Directory {
                             // Directory verify.
@@ -13824,7 +13859,10 @@ fn cmd_fhist(args: &str) {
                 Ok(None) => {
                     shell_println!("No version recorded (file not found or tracking disabled).")
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -14570,7 +14608,10 @@ fn cmd_intercept(args: &str) {
                     id,
                     prefix.display()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -14594,7 +14635,10 @@ fn cmd_intercept(args: &str) {
                     id,
                     prefix.display()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -14615,7 +14659,10 @@ fn cmd_intercept(args: &str) {
                         alloc::format!("{}", prefix.display())
                     }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -14630,7 +14677,10 @@ fn cmd_intercept(args: &str) {
             };
             match intercept::set_active(id, true) {
                 Ok(()) => shell_println!("Interceptor {} enabled.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -14645,7 +14695,10 @@ fn cmd_intercept(args: &str) {
             };
             match intercept::set_active(id, false) {
                 Ok(()) => shell_println!("Interceptor {} disabled.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -14731,7 +14784,10 @@ fn cmd_ulimit(args: &str) {
                             "nofile hard limit set to {}",
                             rlimit::Rlimit::format_value(val)
                         ),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Usage: ulimit -n hard <value|unlimited>");
@@ -14743,7 +14799,10 @@ fn cmd_ulimit(args: &str) {
                         "nofile soft limit set to {}",
                         rlimit::Rlimit::format_value(val)
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Invalid value: {}", parts[1]);
@@ -14765,7 +14824,10 @@ fn cmd_ulimit(args: &str) {
                         "fsize soft limit set to {}",
                         rlimit::Rlimit::format_value(val)
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Invalid value: {}", parts[1]);
@@ -14787,7 +14849,10 @@ fn cmd_ulimit(args: &str) {
                         "locks soft limit set to {}",
                         rlimit::Rlimit::format_value(val)
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Invalid value: {}", parts[1]);
@@ -14906,7 +14971,10 @@ fn cmd_overlay(args: &str) {
             let upper = parts[3];
             match overlay::create(name, lower, upper) {
                 Ok(id) => shell_println!("Overlay '{}' created (id={})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -14919,7 +14987,10 @@ fn cmd_overlay(args: &str) {
             if let Some(id) = overlay::find_by_name(parts[1]) {
                 match overlay::destroy(id) {
                     Ok(()) => shell_println!("Overlay '{}' destroyed.", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
@@ -14963,7 +15034,10 @@ fn cmd_overlay(args: &str) {
                         }
                         shell_println!("({} entries)", entries.len());
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
@@ -14986,7 +15060,10 @@ fn cmd_overlay(args: &str) {
                             shell_println!("(binary data, {} bytes)", data.len());
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
@@ -15004,7 +15081,10 @@ fn cmd_overlay(args: &str) {
                 let data = parts[3..].join(" ");
                 match overlay::write_file(id, parts[2], data.as_bytes()) {
                     Ok(()) => shell_println!("Written {} bytes to overlay.", data.len()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
@@ -15021,7 +15101,10 @@ fn cmd_overlay(args: &str) {
             if let Some(id) = overlay::find_by_name(parts[1]) {
                 match overlay::remove(id, parts[2]) {
                     Ok(()) => shell_println!("Removed from overlay view."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
@@ -15046,7 +15129,10 @@ fn cmd_overlay(args: &str) {
                         };
                         shell_println!("{}: {}", parts[2], desc);
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
@@ -15072,7 +15158,10 @@ fn cmd_overlay(args: &str) {
                             shell_println!("({} whiteouts)", wos.len());
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
@@ -15098,7 +15187,10 @@ fn cmd_overlay(args: &str) {
                         shell_println!("  Writes:       {}", s.writes);
                         shell_println!("  Copy-ups:     {}", s.copyups);
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
@@ -15119,7 +15211,10 @@ fn cmd_overlay(args: &str) {
                         parts[1],
                         removed
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
@@ -15140,7 +15235,10 @@ fn cmd_overlay(args: &str) {
                         parts[1],
                         applied
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Overlay '{}' not found.", parts[1]);
@@ -15200,7 +15298,10 @@ fn cmd_mkfifo(args: &str) {
             id,
             capacity
         ),
-        Err(e) => shell_println!("Error: {:?}", e),
+        Err(e) => {
+            shell_println!("Error: {:?}", e);
+            set_exit(1);
+        }
     }
 }
 
@@ -15296,7 +15397,10 @@ fn cmd_tmpwatch(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -15316,7 +15420,10 @@ fn cmd_tmpwatch(args: &str) {
                         shell_println!("Total: {} bytes", total);
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -15367,7 +15474,10 @@ fn cmd_tmpwatch(args: &str) {
             let dir = resolve_path(parts[1]);
             match tmpwatch::add_watch_dir(&dir) {
                 Ok(()) => shell_println!("Added watch directory: {}", dir.display()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -15786,7 +15896,10 @@ fn cmd_namespace(args: &str) {
             };
             match mount_ns::create(parent, name) {
                 Ok(id) => shell_println!("Namespace '{}' created (id={})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -15799,7 +15912,10 @@ fn cmd_namespace(args: &str) {
             if let Ok(id) = parts[1].parse::<u64>() {
                 match mount_ns::destroy(id) {
                     Ok(()) => shell_println!("Namespace {} destroyed.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Invalid ID: {}", parts[1]);
@@ -15829,7 +15945,10 @@ fn cmd_namespace(args: &str) {
                         }
                         shell_println!("({} mounts)", mounts.len());
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Invalid ID: {}", parts[1]);
@@ -15849,7 +15968,10 @@ fn cmd_namespace(args: &str) {
                     Ok(()) => {
                         shell_println!("Mounted {} ({}) in namespace {}", parts[2], parts[3], id)
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Invalid ID: {}", parts[1]);
@@ -15866,7 +15988,10 @@ fn cmd_namespace(args: &str) {
             if let Ok(id) = parts[1].parse::<u64>() {
                 match mount_ns::ns_unmount(id, parts[2]) {
                     Ok(()) => shell_println!("Unmounted {} from namespace {}", parts[2], id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Invalid ID: {}", parts[1]);
@@ -15890,7 +16015,10 @@ fn cmd_namespace(args: &str) {
                         shell_println!("  Refcount:   {}", i.refcount);
                         shell_println!("  Nested OK:  {}", i.allow_nested);
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Invalid ID: {}", parts[1]);
@@ -15971,7 +16099,10 @@ fn cmd_fssnapshot(args: &str) {
                         shell_println!("Snapshot created: id={}", id.0);
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "restore" => {
@@ -16023,7 +16154,10 @@ fn cmd_fssnapshot(args: &str) {
                         r.errors,
                     );
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -16090,7 +16224,10 @@ fn cmd_fssnapshot(args: &str) {
                         shell_println!("  Children: {}", ids.join(", "));
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "diff" => {
@@ -16138,7 +16275,10 @@ fn cmd_fssnapshot(args: &str) {
                         );
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" => {
@@ -16157,7 +16297,10 @@ fn cmd_fssnapshot(args: &str) {
             };
             match snapshot::delete(id) {
                 Ok(()) => shell_println!("Snapshot {} deleted.", id.0),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "entries" => {
@@ -16197,7 +16340,10 @@ fn cmd_fssnapshot(args: &str) {
                     }
                     shell_println!("{} entries", ents.len());
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         _ => {
@@ -16328,7 +16474,10 @@ fn cmd_fstx(args: &str) {
             };
             match transaction::begin_with_label(&label) {
                 Ok(id) => shell_println!("Transaction {} started.", id.0),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "write" => {
@@ -16349,7 +16498,10 @@ fn cmd_fstx(args: &str) {
             let data = parts[3..].join(" ");
             match transaction::tx_write(id, &path, data.as_bytes()) {
                 Ok(()) => shell_println!("Queued write to {} in tx {}", path.display(), id.0),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
@@ -16369,7 +16521,10 @@ fn cmd_fstx(args: &str) {
             let path = resolve_path(parts[2]);
             match transaction::tx_remove(id, &path) {
                 Ok(()) => shell_println!("Queued removal of {} in tx {}", path.display(), id.0),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "mkdir" => {
@@ -16389,7 +16544,10 @@ fn cmd_fstx(args: &str) {
             let path = resolve_path(parts[2]);
             match transaction::tx_mkdir(id, &path) {
                 Ok(()) => shell_println!("Queued mkdir {} in tx {}", path.display(), id.0),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rename" | "mv" => {
@@ -16415,7 +16573,10 @@ fn cmd_fstx(args: &str) {
                     to.display(),
                     id.0
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "symlink" | "link" => {
@@ -16441,7 +16602,10 @@ fn cmd_fstx(args: &str) {
                     target,
                     id.0
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "commit" => {
@@ -16479,7 +16643,10 @@ fn cmd_fstx(args: &str) {
             };
             match transaction::rollback(id) {
                 Ok(()) => shell_println!("Transaction {} rolled back.", id.0),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "info" | "show" => {
@@ -16510,7 +16677,10 @@ fn cmd_fstx(args: &str) {
                         }
                     );
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" | "ls" => {
@@ -16546,7 +16716,10 @@ fn cmd_fstx(args: &str) {
             };
             match transaction::remove(id) {
                 Ok(()) => shell_println!("Transaction {} removed.", id.0),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         _ => {
@@ -16581,7 +16754,10 @@ fn cmd_changetrack(args: &str) {
             }
             match changetrack::register(parts[1]) {
                 Ok(()) => shell_println!("Cursor '{}' registered.", parts[1]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unregister" | "unreg" | "rm" | "remove" => {
@@ -16592,7 +16768,10 @@ fn cmd_changetrack(args: &str) {
             }
             match changetrack::unregister(parts[1]) {
                 Ok(()) => shell_println!("Cursor '{}' removed.", parts[1]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "changes" | "since" => {
@@ -16638,7 +16817,10 @@ fn cmd_changetrack(args: &str) {
                     }
                     shell_println!("Cursor advanced to seq {}.", result.new_seq);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "peek" | "preview" => {
@@ -16681,7 +16863,10 @@ fn cmd_changetrack(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "reset" | "skip" => {
@@ -16692,7 +16877,10 @@ fn cmd_changetrack(args: &str) {
             }
             match changetrack::reset(parts[1]) {
                 Ok(()) => shell_println!("Cursor '{}' reset to current position.", parts[1]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "info" | "show" => {
@@ -16707,7 +16895,10 @@ fn cmd_changetrack(args: &str) {
                     shell_println!("  Last seq:     {}", i.last_seq);
                     shell_println!("  Advances:     {}", i.advance_count);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" | "ls" | "status" => {
@@ -16723,7 +16914,10 @@ fn cmd_changetrack(args: &str) {
         }
         "flush" | "save" => match changetrack::flush() {
             Ok(()) => shell_println!("Cursors persisted to disk."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         _ => {
             shell_println!(
@@ -16827,7 +17021,10 @@ fn cmd_fcompress(args: &str) {
                     fcompress::set_min_size(n);
                     shell_println!("Min size set to {} bytes.", n);
                 }
-                Err(_) => shell_println!("Invalid number: {}", parts[1]),
+                Err(_) => {
+                    shell_println!("Invalid number: {}", parts[1]);
+                    set_exit(1);
+                }
             }
         }
         "rule" => match parts.get(1).copied().unwrap_or("list") {
@@ -16859,7 +17056,10 @@ fn cmd_fcompress(args: &str) {
                     algorithm: algo,
                 }) {
                     Ok(()) => shell_println!("Rule added: {} -> {}", prefix, algo.name()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             "rm" | "remove" | "del" => {
@@ -17062,7 +17262,10 @@ fn cmd_encrypt(args: &str) {
                 let pass = parts[3..].join(" ");
                 match encrypt::add_key(name, &pass) {
                     Ok(()) => shell_println!("Key '{}' added.", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             "rm" | "remove" | "del" => {
@@ -17073,7 +17276,10 @@ fn cmd_encrypt(args: &str) {
                 }
                 match encrypt::remove_key(parts[2]) {
                     Ok(()) => shell_println!("Key '{}' removed.", parts[2]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             "list" | "ls" => {
@@ -17205,7 +17411,10 @@ fn cmd_encrypt(args: &str) {
                         shell_println!("File: {} (not encrypted)", path.display());
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "status" | "stats" => {
@@ -17270,7 +17479,10 @@ fn cmd_fsearch(args: &str) {
                             shell_println!("  [{}] {:>8} {}", typ, r.size, r.path.display());
                         }
                     }
-                    Err(e) => shell_println!("Search error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Search error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(rest);
@@ -17304,7 +17516,10 @@ fn cmd_fsearch(args: &str) {
                             shell_println!("  [{}] {:>8} {}", typ, r.size, r.path.display());
                         }
                     }
-                    Err(e) => shell_println!("Search error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Search error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(rest);
@@ -17329,7 +17544,10 @@ fn cmd_fsearch(args: &str) {
                             shell_println!("  {:>8} {}", r.size, r.path.display());
                         }
                     }
-                    Err(e) => shell_println!("Search error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Search error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(rest);
@@ -17380,7 +17598,10 @@ fn cmd_fsearch(args: &str) {
                             shell_println!("  {:>8} {}", r.size, r.path.display());
                         }
                     }
-                    Err(e) => shell_println!("Search error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Search error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(rest);
@@ -17414,7 +17635,10 @@ fn cmd_fsearch(args: &str) {
                             shell_println!("  [{}] {:>8} {}", t, r.size, r.path.display());
                         }
                     }
-                    Err(e) => shell_println!("Search error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Search error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(rest);
@@ -18021,7 +18245,10 @@ fn cmd_dirsync(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "sync" => {
@@ -18057,7 +18284,10 @@ fn cmd_dirsync(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -18141,7 +18371,10 @@ fn cmd_backup(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "incr" | "incremental" => {
@@ -18173,7 +18406,10 @@ fn cmd_backup(args: &str) {
                         shell_println!("  Errors: {}", result.errors.len());
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "restore" => {
@@ -18214,7 +18450,10 @@ fn cmd_backup(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" | "ls" => {
@@ -18245,7 +18484,10 @@ fn cmd_backup(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "verify" => {
@@ -18262,7 +18504,10 @@ fn cmd_backup(args: &str) {
                         shell_println!("  FAIL: {}", f);
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -18354,7 +18599,10 @@ fn cmd_undelete(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "recover" | "restore" => {
@@ -18378,7 +18626,10 @@ fn cmd_undelete(args: &str) {
                     shell_println!("No recoverable data found for: {}", path);
                     shell_println!("Tip: use `undelete scan` to see what's available.");
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -18738,7 +18989,10 @@ fn cmd_batch(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "copy" | "cp" => {
@@ -18763,7 +19017,10 @@ fn cmd_batch(args: &str) {
                     r.failed,
                     r.bytes
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "move" | "mv" => {
@@ -18783,7 +19040,10 @@ fn cmd_batch(args: &str) {
             }
             match batch::move_files(&resolved, &dest, &opts) {
                 Ok(r) => shell_println!("{} moved, {} failed", r.succeeded, r.failed),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" | "del" | "rm" => {
@@ -18802,7 +19062,10 @@ fn cmd_batch(args: &str) {
             }
             match batch::delete(&resolved, &opts) {
                 Ok(r) => shell_println!("{} deleted, {} failed", r.succeeded, r.failed),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "glob" => {
@@ -18819,7 +19082,10 @@ fn cmd_batch(args: &str) {
                     }
                     shell_println!("({} matches)", files.len());
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -18905,7 +19171,10 @@ fn cmd_linkcheck(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "broken" => {
@@ -18929,7 +19198,10 @@ fn cmd_linkcheck(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "fix" => {
@@ -18949,7 +19221,10 @@ fn cmd_linkcheck(args: &str) {
                         shell_println!("  ! {}", e);
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -19154,7 +19429,10 @@ fn cmd_fspolicy(args: &str) {
             let value = parts[2];
             match policy::set_setting(key, value) {
                 Ok(()) => shell_println!("Set {} = {}", key, value),
-                Err(e) => shell_println!("Error: {}", e),
+                Err(e) => {
+                    shell_println!("Error: {}", e);
+                    set_exit(1);
+                }
             }
         }
         "presets" | "compare" => {
@@ -19287,7 +19565,10 @@ fn cmd_fsbench(args: &str) {
                         r.throughput_bps() / 1_000_000
                     );
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "write" => {
@@ -19308,7 +19589,10 @@ fn cmd_fsbench(args: &str) {
                         r.throughput_bps() / 1_000_000
                     );
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "meta" => {
@@ -19336,7 +19620,10 @@ fn cmd_fsbench(args: &str) {
                         }
                     );
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "lookup" => {
@@ -19365,7 +19652,10 @@ fn cmd_fsbench(args: &str) {
                         }
                     );
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -19439,7 +19729,10 @@ fn cmd_ionice(args: &str) {
             let prio = IoPriority::new(class, level);
             match ioprio::set_ioprio(task_id, prio) {
                 Ok(()) => shell_println!("Set task {} I/O priority: {}", task_id, prio.display()),
-                Err(e) => shell_println!("Error: {}", e),
+                Err(e) => {
+                    shell_println!("Error: {}", e);
+                    set_exit(1);
+                }
             }
         }
         "clear" => {
@@ -19649,7 +19942,10 @@ fn cmd_prefetch(args: &str) {
                     r.bytes_prefetched,
                     path.display()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" | "show" | "" => {
@@ -19739,7 +20035,10 @@ fn cmd_splice(args: &str) {
                     src.display(),
                     dst.display()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "send" | "sendfile" => {
@@ -19763,7 +20062,10 @@ fn cmd_splice(args: &str) {
                     src.display(),
                     dst.display()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "pipe" | "splice" => {
@@ -19787,7 +20089,10 @@ fn cmd_splice(args: &str) {
                     src.display(),
                     dst.display()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "tee" => {
@@ -19810,7 +20115,10 @@ fn cmd_splice(args: &str) {
                     src.display(),
                     dst.display()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" | "show" | "" => {
@@ -19865,7 +20173,10 @@ fn cmd_directio(args: &str) {
                         );
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "write" => {
@@ -19899,7 +20210,10 @@ fn cmd_directio(args: &str) {
                     r.aligned,
                     r.cache_invalidated
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "register" | "reg" => {
@@ -20119,7 +20433,10 @@ fn cmd_sparse(args: &str) {
                     offset,
                     r.created_hole
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "zero" => {
@@ -20147,7 +20464,10 @@ fn cmd_sparse(args: &str) {
             };
             match sparse::zero_range(&path, offset, length) {
                 Ok(r) => shell_println!("Zeroed {} bytes at offset {}", r.bytes_affected, offset),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "collapse" => {
@@ -20177,7 +20497,10 @@ fn cmd_sparse(args: &str) {
                 Ok(r) => {
                     shell_println!("Collapsed {} bytes at offset {}", r.bytes_affected, offset)
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "insert" => {
@@ -20209,7 +20532,10 @@ fn cmd_sparse(args: &str) {
                     r.bytes_affected,
                     offset
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "map" => {
@@ -20243,7 +20569,10 @@ fn cmd_sparse(args: &str) {
                         );
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" | "tracked" => {
@@ -20390,7 +20719,10 @@ fn cmd_lsplus(args: &str) {
                 shell_println!("  ... ({} more)", result.total_count - result.entries.len());
             }
         }
-        Err(e) => shell_println!("Error: {:?}", e),
+        Err(e) => {
+            shell_println!("Error: {:?}", e);
+            set_exit(1);
+        }
     }
 }
 
@@ -20423,7 +20755,10 @@ fn cmd_fsfreeze(args: &str) {
                         );
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "thaw" | "t" => {
@@ -20449,7 +20784,10 @@ fn cmd_fsfreeze(args: &str) {
                         );
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "force" => {
@@ -20467,7 +20805,10 @@ fn cmd_fsfreeze(args: &str) {
                         r.blocked_writes
                     )
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" | "show" | "" => {
@@ -20547,7 +20888,10 @@ fn cmd_seal(args: &str) {
             }
             match sealing::add_seals(&path, flags) {
                 Ok(total) => shell_println!("Sealed {}: {}", path.display(), total.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "get" | "query" => {
@@ -20862,7 +21206,10 @@ fn cmd_fileinfo(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
     }
@@ -20898,7 +21245,10 @@ fn cmd_fswalk(args: &str) {
                 Ok((files, dirs)) => {
                     shell_println!("{}: {} files, {} dirs", path.display(), files, dirs);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "size" => {
@@ -20915,7 +21265,10 @@ fn cmd_fswalk(args: &str) {
                 Ok(size) => {
                     shell_println!("{}: {} bytes", path.display(), size);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "find" => {
@@ -20945,7 +21298,10 @@ fn cmd_fswalk(args: &str) {
                         shell_println!("\n{} matches.", files.len());
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "" => {
@@ -20989,7 +21345,10 @@ fn cmd_fswalk(args: &str) {
                         shell_println!("(truncated)");
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         _ => {
@@ -21076,7 +21435,10 @@ fn cmd_fswalk(args: &str) {
                         shell_println!("(truncated)");
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
     }
@@ -21100,7 +21462,10 @@ fn cmd_findex(args: &str) {
             shell_println!("Indexing {}  (depth {})...", path.display(), depth);
             match findex::build(&path, depth) {
                 Ok(count) => shell_println!("Indexed {} files.", count),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "add" | "index" => {
@@ -21112,7 +21477,10 @@ fn cmd_findex(args: &str) {
             let path = resolve_path(parts[1]);
             match findex::index_file(&path) {
                 Ok(fields) => shell_println!("Indexed {}: {} fields", path.display(), fields),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
@@ -21367,7 +21735,10 @@ fn cmd_bookmark(args: &str) {
                 .unwrap_or(Category::Favorites);
             match bookmarks::add(name, &path, label, category) {
                 Ok(()) => shell_println!("Bookmark '{}' added: {}", name, path.display()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rm" | "remove" => {
@@ -21378,7 +21749,10 @@ fn cmd_bookmark(args: &str) {
             }
             match bookmarks::remove(parts[1]) {
                 Ok(()) => shell_println!("Bookmark '{}' removed.", parts[1]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "go" | "cd" => {
@@ -21418,7 +21792,10 @@ fn cmd_bookmark(args: &str) {
             }
             match bookmarks::rename(parts[1], parts[2]) {
                 Ok(()) => shell_println!("Renamed '{}' → '{}'", parts[1], parts[2]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "validate" => {
@@ -21472,7 +21849,10 @@ fn cmd_clipboard(args: &str) {
             }
             match clipboard::set_text(text, "kshell") {
                 Ok(()) => shell_println!("Copied to clipboard."),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "paste" | "get" => match clipboard::get_text() {
@@ -21526,7 +21906,10 @@ fn cmd_clipboard(args: &str) {
                 if let Ok(idx) = idx_str.parse::<usize>() {
                     match clipboard::restore_from_history(idx) {
                         Ok(()) => shell_println!("Restored entry {}.", idx),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid index.");
@@ -21541,7 +21924,10 @@ fn cmd_clipboard(args: &str) {
             let label = parts.get(1).copied().unwrap_or("kshell");
             match clipboard::watch(label) {
                 Ok(id) => shell_println!("Watching clipboard (id={}).", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unwatch" => {
@@ -21700,7 +22086,10 @@ fn cmd_contextmenu(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match crate::fs::contextmenu::set_extension_enabled(id, true) {
                     Ok(()) => shell_println!("Extension #{} enabled", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: contextmenu enable <ext-id>");
@@ -21711,7 +22100,10 @@ fn cmd_contextmenu(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match crate::fs::contextmenu::set_extension_enabled(id, false) {
                     Ok(()) => shell_println!("Extension #{} disabled", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: contextmenu disable <ext-id>");
@@ -21722,7 +22114,10 @@ fn cmd_contextmenu(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match crate::fs::contextmenu::unregister_extension(id) {
                     Ok(()) => shell_println!("Extension #{} removed", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: contextmenu remove <ext-id>");
@@ -21771,7 +22166,10 @@ fn cmd_deskicons(args: &str) {
                     let count = crate::fs::deskicons::icon_count();
                     shell_println!("Loaded {} desktop icons from {}", count, dir.display());
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -21821,7 +22219,10 @@ fn cmd_deskicons(args: &str) {
             };
             match crate::fs::deskicons::auto_arrange(sort) {
                 Ok(()) => shell_println!("Icons arranged by {:?}", sort),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "mode" => {
@@ -21837,7 +22238,10 @@ fn cmd_deskicons(args: &str) {
             };
             match crate::fs::deskicons::set_mode(mode) {
                 Ok(()) => shell_println!("Layout mode: {:?}", mode),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "select" => {
@@ -21845,7 +22249,10 @@ fn cmd_deskicons(args: &str) {
                 let exclusive = !parts.contains(&"--add");
                 match crate::fs::deskicons::select(name, exclusive) {
                     Ok(()) => shell_println!("Selected: {}", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: deskicons select <name> [--add]");
@@ -21854,14 +22261,20 @@ fn cmd_deskicons(args: &str) {
         }
         "deselect" => match crate::fs::deskicons::deselect_all() {
             Ok(()) => shell_println!("All icons deselected"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "refresh" => match crate::fs::deskicons::refresh() {
             Ok(()) => shell_println!(
                 "Desktop refreshed ({} icons)",
                 crate::fs::deskicons::icon_count()
             ),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "hit" => {
             if let (Some(x), Some(y)) = (
@@ -21981,12 +22394,18 @@ fn cmd_dragdrop(args: &str) {
                             let text = core::str::from_utf8(&data).unwrap_or("<binary>");
                             shell_println!("Accepted: {}", text);
                         }
-                        Err(e) => shell_println!("Accept error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Accept error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                     dragdrop::finish();
                     shell_println!("Test drag completed.");
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "cancel" => {
@@ -22079,10 +22498,16 @@ fn cmd_fileops(args: &str) {
                                 prog.failed
                             );
                         }
-                        Err(e) => shell_println!("Execution error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Execution error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "move" | "mv" => {
@@ -22132,10 +22557,16 @@ fn cmd_fileops(args: &str) {
                                 prog.failed
                             );
                         }
-                        Err(e) => shell_println!("Execution error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Execution error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" | "del" => {
@@ -22166,10 +22597,16 @@ fn cmd_fileops(args: &str) {
                                 prog.failed
                             );
                         }
-                        Err(e) => shell_println!("Execution error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Execution error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" | "ls" => {
@@ -22196,7 +22633,10 @@ fn cmd_fileops(args: &str) {
                 if let Ok(id) = id_str.parse::<u64>() {
                     match fileops::cancel(id) {
                         Ok(()) => shell_println!("Operation {} cancelled.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid operation ID.");
@@ -22218,7 +22658,10 @@ fn cmd_fileops(args: &str) {
                                 failed
                             );
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid operation ID.");
@@ -22277,14 +22720,20 @@ fn cmd_fileselect(args: &str) {
             };
             match crate::fs::fileselect::create(&dir) {
                 Ok(id) => shell_println!("Created selection set #{} for {}", id, dir.display()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "destroy" => {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match crate::fs::fileselect::destroy(id) {
                     Ok(()) => shell_println!("Destroyed selection set #{}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: fileselect destroy <set-id>");
@@ -22300,7 +22749,10 @@ fn cmd_fileselect(args: &str) {
                 let resolved = resolve_path(path);
                 match crate::fs::fileselect::select_single(id, &resolved, 0) {
                     Ok(()) => shell_println!("Selected: {}", resolved.display()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: fileselect select <set-id> <path>");
@@ -22323,7 +22775,10 @@ fn cmd_fileselect(args: &str) {
                             if sel { "selected" } else { "deselected" }
                         );
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: fileselect toggle <set-id> <path>");
@@ -22334,7 +22789,10 @@ fn cmd_fileselect(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match crate::fs::fileselect::clear(id) {
                     Ok(()) => shell_println!("Selection cleared"),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: fileselect clear <set-id>");
@@ -22353,7 +22811,10 @@ fn cmd_fileselect(args: &str) {
                             }
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 // List all sets.
@@ -22377,7 +22838,10 @@ fn cmd_fileselect(args: &str) {
                         shell_println!("  Files: {}, Dirs: {}", s.files, s.dirs);
                         shell_println!("  Total size: {}", s.size_display);
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: fileselect summary <set-id>");
@@ -22410,7 +22874,10 @@ fn cmd_fileselect(args: &str) {
                                     count
                                 );
                             }
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Cannot read directory for set #{}", id);
@@ -22449,7 +22916,10 @@ fn cmd_fileselect(args: &str) {
                         );
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -22546,7 +23016,10 @@ fn cmd_filetype(args: &str) {
             let exts: Vec<&str> = parts[4..].to_vec();
             match crate::fs::filetype::register_type(mime, desc, icon, &exts) {
                 Ok(()) => shell_println!("Registered: {} ({})", mime, desc),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "ext" => {
@@ -22628,7 +23101,10 @@ fn cmd_openwith(args: &str) {
                             }
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: openw choices <file>");
@@ -22657,7 +23133,10 @@ fn cmd_openwith(args: &str) {
                         shell_println!("  (set as default for this type)");
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "default" => {
@@ -22715,7 +23194,10 @@ fn cmd_openwith(args: &str) {
             let app_name = parts[2..].join(" ");
             match crate::fs::openwith::register_app(app_path, &app_name) {
                 Ok(()) => shell_println!("Registered: {} ({})", app_name, app_path),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "clear" => {
@@ -22853,7 +23335,10 @@ fn cmd_sidebar(args: &str) {
                 };
                 match crate::fs::sidebar::pin_to_quick_access(&resolved, &label) {
                     Ok(()) => shell_println!("Pinned: {} ({})", label, resolved.display()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: sidebar pin <path> [label]");
@@ -22865,7 +23350,10 @@ fn cmd_sidebar(args: &str) {
                 let resolved = resolve_path(path);
                 match crate::fs::sidebar::unpin_from_quick_access(&resolved) {
                     Ok(()) => shell_println!("Unpinned: {}", resolved.display()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: sidebar unpin <path>");
@@ -23170,7 +23658,10 @@ fn cmd_queryable(args: &str) {
             };
             match queryable::set_attr(&path, attr_name, value) {
                 Ok(()) => shell_println!("Set {}={} on {}", attr_name, val_str, path.display()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "get" => {
@@ -23192,7 +23683,10 @@ fn cmd_queryable(args: &str) {
                     };
                     shell_println!("{}={} ({})", attr_name, display, val.type_name());
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rm" | "remove" => {
@@ -23206,7 +23700,10 @@ fn cmd_queryable(args: &str) {
             let path = resolve_path(path_arg);
             match queryable::remove_attr(&path, attr_name) {
                 Ok(()) => shell_println!("Removed {} from {}", attr_name, path.display()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" | "ls" => {
@@ -23236,7 +23733,10 @@ fn cmd_queryable(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "clear" => {
@@ -23249,7 +23749,10 @@ fn cmd_queryable(args: &str) {
             let path = resolve_path(path_arg);
             match queryable::clear_attrs(&path) {
                 Ok(n) => shell_println!("Cleared {} attributes from {}", n, path.display()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "query" | "q" => {
@@ -23335,7 +23838,10 @@ fn cmd_queryable(args: &str) {
                     }
                     match queryable::create_index(attr_name) {
                         Ok(()) => shell_println!("Index created for {}", attr_name),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 "drop" => {
@@ -23347,7 +23853,10 @@ fn cmd_queryable(args: &str) {
                     }
                     match queryable::drop_index(attr_name) {
                         Ok(()) => shell_println!("Index dropped for {}", attr_name),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 "list" | "" => {
@@ -23370,7 +23879,10 @@ fn cmd_queryable(args: &str) {
             match schema_sub {
                 "init" => match queryable::register_builtins() {
                     Ok(()) => shell_println!("Built-in schemas registered"),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 "list" | "" => {
                     let schemas = queryable::list_schemas();
@@ -23470,7 +23982,10 @@ fn cmd_fcomment(args: &str) {
                     path.display(),
                     comment.len()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "get" | "show" => {
@@ -23507,7 +24022,10 @@ fn cmd_fcomment(args: &str) {
                     });
             match fcomment::append(&path, &text) {
                 Ok(()) => shell_println!("Appended to comment on {}", path.display()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rm" | "remove" => {
@@ -23520,7 +24038,10 @@ fn cmd_fcomment(args: &str) {
             let path = resolve_path(path_arg);
             match fcomment::remove(&path) {
                 Ok(()) => shell_println!("Comment removed from {}", path.display()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "search" => {
@@ -23680,7 +24201,10 @@ fn cmd_rundialog(args: &str) {
                     }
                     match rundialog::register_alias(name, path) {
                         Ok(()) => shell_println!("Alias '{}' → '{}'", name, path),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 "rm" => {
@@ -23692,7 +24216,10 @@ fn cmd_rundialog(args: &str) {
                     }
                     match rundialog::remove_alias(name) {
                         Ok(()) => shell_println!("Alias '{}' removed", name),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 "list" | "" => {
@@ -23726,7 +24253,10 @@ fn cmd_rundialog(args: &str) {
                     };
                     match rundialog::add_bookmark(&cmd_text) {
                         Ok(()) => shell_println!("Bookmarked: {}", cmd_text),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 "rm" => {
@@ -23739,7 +24269,10 @@ fn cmd_rundialog(args: &str) {
                     };
                     match rundialog::remove_bookmark(&cmd_text) {
                         Ok(()) => shell_println!("Bookmark removed"),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 "list" | "" => {
@@ -23772,7 +24305,10 @@ fn cmd_rundialog(args: &str) {
                 }
                 "refresh" => match rundialog::refresh_path_cache() {
                     Ok(n) => shell_println!("Found {} executables in PATH", n),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 "clear" => {
                     rundialog::clear_path_cache();
@@ -23783,7 +24319,10 @@ fn cmd_rundialog(args: &str) {
         }
         "init" => match rundialog::init_defaults() {
             Ok(()) => shell_println!("Run dialog defaults initialized"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "test" => match rundialog::self_test() {
             Ok(()) => shell_println!("All run dialog self-tests passed"),
@@ -23912,7 +24451,10 @@ fn cmd_notifcenter(args: &str) {
                     if let Ok(id) = target.parse::<u64>() {
                         match notifcenter::dismiss(id) {
                             Ok(()) => shell_println!("Dismissed #{}", id),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         let count = notifcenter::dismiss_app(target);
@@ -23926,9 +24468,15 @@ fn cmd_notifcenter(args: &str) {
             match id_str.parse::<u64>() {
                 Ok(id) => match notifcenter::remove(id) {
                     Ok(()) => shell_println!("Removed #{}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
-                Err(_) => shell_println!("Usage: notif rm <id>"),
+                Err(_) => {
+                    shell_println!("Usage: notif rm <id>");
+                    set_exit(1);
+                }
             }
         }
         "mute" => {
@@ -23940,7 +24488,10 @@ fn cmd_notifcenter(args: &str) {
             }
             match notifcenter::mute_app(app) {
                 Ok(()) => shell_println!("Muted {}", app),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unmute" => {
@@ -23952,7 +24503,10 @@ fn cmd_notifcenter(args: &str) {
             }
             match notifcenter::unmute_app(app) {
                 Ok(()) => shell_println!("Unmuted {}", app),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "muted" => {
@@ -24064,7 +24618,10 @@ fn cmd_appregistry(args: &str) {
                 installed_ns: now,
             }) {
                 Ok(()) => shell_println!("Registered: {} ({})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unregister" | "unreg" => {
@@ -24076,7 +24633,10 @@ fn cmd_appregistry(args: &str) {
             }
             match appregistry::unregister(id) {
                 Ok(()) => shell_println!("Unregistered: {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "get" | "info" => {
@@ -24387,7 +24947,10 @@ fn cmd_theme(args: &str) {
             let mode = theme::mode();
             match theme::save_custom(name, mode, map) {
                 Ok(()) => shell_println!("Saved custom theme: {}", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "load" | "apply" => {
@@ -24399,7 +24962,10 @@ fn cmd_theme(args: &str) {
             }
             match theme::apply_custom(name) {
                 Ok(()) => shell_println!("Applied theme: {}", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" | "rm" => {
@@ -24411,7 +24977,10 @@ fn cmd_theme(args: &str) {
             }
             match theme::delete_custom(name) {
                 Ok(()) => shell_println!("Deleted theme: {}", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" | "" => {
@@ -24507,7 +25076,10 @@ fn cmd_hotkey(args: &str) {
             };
             match hotkeys::bind(combo, action, &desc, false) {
                 Ok(()) => shell_println!("Bound: {} → {}", combo_str, desc),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unbind" => {
@@ -24527,7 +25099,10 @@ fn cmd_hotkey(args: &str) {
             };
             match hotkeys::unbind(&combo) {
                 Ok(()) => shell_println!("Unbound: {}", combo_str),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" | "disable" => {
@@ -24552,7 +25127,10 @@ fn cmd_hotkey(args: &str) {
                     if enabled { "Enabled" } else { "Disabled" },
                     combo_str
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "dispatch" | "trigger" => {
@@ -24637,7 +25215,10 @@ fn cmd_hotkey(args: &str) {
                 let (total, _, _, _) = hotkeys::stats();
                 shell_println!("Registered default hotkeys ({} total)", total);
             }
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "test" => match hotkeys::self_test() {
             Ok(()) => shell_println!("All hotkey self-tests passed"),
@@ -24688,7 +25269,10 @@ fn cmd_widgets(args: &str) {
                 let y: i32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
                 match widgets::add(kind, x, y) {
                     Ok(id) => shell_println!("Widget added: id={} kind={}", id, kind.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else if !kind_str.is_empty() {
                 // Try as custom type
@@ -24696,7 +25280,10 @@ fn cmd_widgets(args: &str) {
                 let y: i32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
                 match widgets::add_custom(kind_str, x, y) {
                     Ok(id) => shell_println!("Custom widget added: id={}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: widgets add <kind> [x y]");
@@ -24708,7 +25295,10 @@ fn cmd_widgets(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match widgets::remove(id) {
                     Ok(()) => shell_println!("Widget {} removed", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: widgets remove <id>");
@@ -24784,7 +25374,10 @@ fn cmd_widgets(args: &str) {
             if let (Some(id), Some(x), Some(y)) = (id, x, y) {
                 match widgets::move_widget(id, x, y) {
                     Ok(()) => shell_println!("Widget {} moved to ({}, {})", id, x, y),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: widgets move <id> <x> <y>");
@@ -24799,7 +25392,10 @@ fn cmd_widgets(args: &str) {
             if let (Some(id), Some(w), Some(h)) = (id, w, h) {
                 match widgets::resize(id, w, h) {
                     Ok(()) => shell_println!("Widget {} resized to {}x{}", id, w, h),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: widgets resize <id> <width> <height>");
@@ -24810,7 +25406,10 @@ fn cmd_widgets(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match widgets::set_visible(id, true) {
                     Ok(()) => shell_println!("Widget {} shown", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: widgets show <id>");
@@ -24821,7 +25420,10 @@ fn cmd_widgets(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match widgets::set_visible(id, false) {
                     Ok(()) => shell_println!("Widget {} hidden", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: widgets hide <id>");
@@ -24834,7 +25436,10 @@ fn cmd_widgets(args: &str) {
             if let (Some(id), Some(val)) = (id, val) {
                 match widgets::set_opacity(id, val) {
                     Ok(()) => shell_println!("Widget {} opacity set to {}%", id, val.min(100)),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: widgets opacity <id> <0-100>");
@@ -24851,7 +25456,10 @@ fn cmd_widgets(args: &str) {
                 };
                 match widgets::set_data(id, &text) {
                     Ok(()) => shell_println!("Widget {} data set ({} bytes)", id, text.len()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: widgets data <id> [text...]");
@@ -24867,7 +25475,10 @@ fn cmd_widgets(args: &str) {
                 };
                 match widgets::set_title(id, &title) {
                     Ok(()) => shell_println!("Widget {} title set to '{}'", id, title),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: widgets title <id> <title...>");
@@ -24904,7 +25515,10 @@ fn cmd_widgets(args: &str) {
                 let app = parts.get(5).copied().unwrap_or("custom");
                 match widgets::register_type(type_id, name, w, h, app) {
                     Ok(()) => shell_println!("Custom type '{}' registered", type_id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -24915,7 +25529,10 @@ fn cmd_widgets(args: &str) {
             } else {
                 match widgets::unregister_type(type_id) {
                     Ok(()) => shell_println!("Custom type '{}' unregistered", type_id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25026,7 +25643,10 @@ fn cmd_soundmixer(args: &str) {
                 let name = parts[2..].join(" ");
                 match soundmixer::add_device(id, &name) {
                     Ok(()) => shell_println!("Device '{}' added", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25037,7 +25657,10 @@ fn cmd_soundmixer(args: &str) {
             } else {
                 match soundmixer::remove_device(id) {
                     Ok(()) => shell_println!("Device '{}' removed", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25048,7 +25671,10 @@ fn cmd_soundmixer(args: &str) {
             } else {
                 match soundmixer::set_default_device(id) {
                     Ok(()) => shell_println!("Default device: {}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25060,7 +25686,10 @@ fn cmd_soundmixer(args: &str) {
             } else if let Some(v) = vol {
                 match soundmixer::set_device_volume(id, v) {
                     Ok(()) => shell_println!("Device '{}' volume: {}%", id, v.min(100)),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25098,7 +25727,10 @@ fn cmd_soundmixer(args: &str) {
             } else if let Some(v) = vol {
                 match soundmixer::set_app_volume(app, v) {
                     Ok(()) => shell_println!("App '{}' volume: {}%", app, v.min(100)),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25113,7 +25745,10 @@ fn cmd_soundmixer(args: &str) {
                     Ok(()) => {
                         shell_println!("App '{}' {}", app, if muted { "muted" } else { "unmuted" })
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25128,7 +25763,10 @@ fn cmd_soundmixer(args: &str) {
                         let target = dev.unwrap_or("default");
                         shell_println!("App '{}' routed to '{}'", app, target);
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25178,7 +25816,10 @@ fn cmd_soundmixer(args: &str) {
             } else {
                 match soundmixer::register_stream(app_id, name, label, cat) {
                     Ok(id) => shell_println!("Stream registered: id={} app={}", id, app_id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25186,7 +25827,10 @@ fn cmd_soundmixer(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match soundmixer::unregister_stream(id) {
                     Ok(()) => shell_println!("Stream {} unregistered", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: soundmixer unstream <stream_id>");
@@ -25197,7 +25841,10 @@ fn cmd_soundmixer(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match soundmixer::report_activity(id) {
                     Ok(()) => shell_println!("Stream {} now playing", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: soundmixer play <stream_id>");
@@ -25208,7 +25855,10 @@ fn cmd_soundmixer(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match soundmixer::report_inactive(id) {
                     Ok(()) => shell_println!("Stream {} stopped", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: soundmixer stop <stream_id>");
@@ -25356,7 +26006,10 @@ fn cmd_wallpaper(args: &str) {
             } else {
                 match wallpaper::set_image(&path) {
                     Ok(()) => shell_println!("Wallpaper set: {}", path),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25434,17 +26087,26 @@ fn cmd_wallpaper(args: &str) {
                     Ok(()) => {
                         shell_println!("Slideshow: {} images, {}s interval", paths.len(), interval)
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
         "next" => match wallpaper::slideshow_next() {
             Ok(path) => shell_println!("Next: {}", path.display()),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "prev" => match wallpaper::slideshow_prev() {
             Ok(path) => shell_println!("Previous: {}", path.display()),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "pause" => {
             wallpaper::set_slideshow_running(false);
@@ -25474,7 +26136,10 @@ fn cmd_wallpaper(args: &str) {
             } else {
                 match wallpaper::set_animated(&source) {
                     Ok(()) => shell_println!("Animated wallpaper: {}", source),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25489,7 +26154,10 @@ fn cmd_wallpaper(args: &str) {
             } else {
                 match wallpaper::set_dynamic(&source) {
                     Ok(()) => shell_println!("Dynamic wallpaper: {}", source),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25535,7 +26203,10 @@ fn cmd_wallpaper(args: &str) {
             } else {
                 match wallpaper::set_per_monitor(mon, &path) {
                     Ok(()) => shell_println!("Monitor '{}' wallpaper: {}", mon, path),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25582,7 +26253,10 @@ fn cmd_wallpaper(args: &str) {
             } else {
                 match wallpaper::add_exclusion(&pattern) {
                     Ok(()) => shell_println!("Exclusion added: {}", pattern),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25590,7 +26264,10 @@ fn cmd_wallpaper(args: &str) {
             if let Some(idx) = parts.get(1).and_then(|s| s.parse::<usize>().ok()) {
                 match wallpaper::remove_exclusion(idx) {
                     Ok(()) => shell_println!("Exclusion {} removed", idx),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: wallpaper unexclude <index>");
@@ -25739,7 +26416,10 @@ fn cmd_credentials(args: &str) {
             } else {
                 match credentials::store(app, svc, user, secret, kind) {
                     Ok(()) => shell_println!("Credential stored: {}@{}", app, svc),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25760,7 +26440,10 @@ fn cmd_credentials(args: &str) {
                             shell_println!("Label:    {}", c.label);
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25772,7 +26455,10 @@ fn cmd_credentials(args: &str) {
             } else {
                 match credentials::delete(app, svc) {
                     Ok(()) => shell_println!("Deleted: {}@{}", app, svc),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25877,7 +26563,10 @@ fn cmd_credentials(args: &str) {
                 let auto = parts.get(4).copied().unwrap_or("true") != "false";
                 match credentials::add_autofill(app, field, svc, auto) {
                     Ok(()) => shell_println!("Autofill rule added: {}:{} → {}", app, field, svc),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25889,7 +26578,10 @@ fn cmd_credentials(args: &str) {
             } else {
                 match credentials::remove_autofill(app, field) {
                     Ok(()) => shell_println!("Autofill rule removed"),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -25916,7 +26608,10 @@ fn cmd_credentials(args: &str) {
             } else {
                 match credentials::set_label(app, svc, &label) {
                     Ok(()) => shell_println!("Label set"),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -26191,7 +26886,10 @@ fn cmd_display(args: &str) {
             } else {
                 match display::add_monitor(id, name, pw, ph) {
                     Ok(()) => shell_println!("Added monitor '{}'", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -26202,7 +26900,10 @@ fn cmd_display(args: &str) {
             } else {
                 match display::remove_monitor(id) {
                     Ok(()) => shell_println!("Removed '{}'", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -26221,7 +26922,10 @@ fn cmd_display(args: &str) {
                         hz,
                         if pref { " (preferred)" } else { "" }
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: display addmode <id> <w> <h> <hz> [preferred]");
@@ -26295,7 +26999,10 @@ fn cmd_display(args: &str) {
             if let Some(idx) = idx {
                 match display::set_mode(id, idx) {
                     Ok(()) => shell_println!("Mode set to [{}] — confirm within timeout", idx),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: display mode <id> <mode_index>");
@@ -26315,7 +27022,10 @@ fn cmd_display(args: &str) {
                     Ok(()) => {
                         shell_println!("Resolution: {}x{}@{}Hz — confirm within timeout", w, h, hz)
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: display res <id> <w> <h> [hz]");
@@ -26324,11 +27034,17 @@ fn cmd_display(args: &str) {
         }
         "confirm" => match display::confirm_change() {
             Ok(()) => shell_println!("Change confirmed"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "revert" => match display::revert_change() {
             Ok(()) => shell_println!("Change reverted"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "pending" => {
             if let Some(p) = display::pending_change() {
@@ -26348,7 +27064,10 @@ fn cmd_display(args: &str) {
             if let Some(pct) = pct {
                 match display::set_scale(id, pct) {
                     Ok(()) => shell_println!("Scale: {}%", pct.clamp(50, 400)),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else if let Some(m) = display::get_monitor(id) {
                 shell_println!("Scale: {}%", m.scale_percent);
@@ -26361,7 +27080,10 @@ fn cmd_display(args: &str) {
             let id = parts.get(1).copied().unwrap_or("");
             match display::auto_scale(id) {
                 Ok(pct) => shell_println!("Auto scale: {}%", pct),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "pos" | "position" => {
@@ -26371,7 +27093,10 @@ fn cmd_display(args: &str) {
             if let (Some(x), Some(y)) = (x, y) {
                 match display::set_position(id, x, y) {
                     Ok(()) => shell_println!("Position: ({},{})", x, y),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: display pos <id> <x> <y>");
@@ -26390,7 +27115,10 @@ fn cmd_display(args: &str) {
             if let Some(o) = o {
                 match display::set_orientation(id, o) {
                     Ok(()) => shell_println!("Orientation set"),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!(
@@ -26405,7 +27133,10 @@ fn cmd_display(args: &str) {
             } else {
                 match display::set_primary(id) {
                     Ok(()) => shell_println!("Primary: {}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -26413,14 +27144,20 @@ fn cmd_display(args: &str) {
             let id = parts.get(1).copied().unwrap_or("");
             match display::set_enabled(id, true) {
                 Ok(()) => shell_println!("Enabled '{}'", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "disable" => {
             let id = parts.get(1).copied().unwrap_or("");
             match display::set_enabled(id, false) {
                 Ok(()) => shell_println!("Disabled '{}'", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "test" => match display::self_test() {
@@ -26458,7 +27195,10 @@ fn cmd_vdesktop(args: &str) {
             };
             match vdesktop::create(&name) {
                 Ok(id) => shell_println!("Created desktop #{}: {}", id, name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
@@ -26471,7 +27211,10 @@ fn cmd_vdesktop(args: &str) {
             } else {
                 match vdesktop::remove(id) {
                     Ok(()) => shell_println!("Removed desktop #{}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -26490,7 +27233,10 @@ fn cmd_vdesktop(args: &str) {
             } else {
                 match vdesktop::rename(id, &name) {
                     Ok(()) => shell_println!("Renamed #{} → {}", id, name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -26551,17 +27297,26 @@ fn cmd_vdesktop(args: &str) {
             } else {
                 match vdesktop::switch(id) {
                     Ok(()) => shell_println!("Switched to #{}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
         "next" => match vdesktop::next() {
             Ok(()) => shell_println!("Now on #{}", vdesktop::current()),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "prev" => match vdesktop::previous() {
             Ok(()) => shell_println!("Now on #{}", vdesktop::current()),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "current" => {
             shell_println!("Current: #{}", vdesktop::current());
@@ -26580,7 +27335,10 @@ fn cmd_vdesktop(args: &str) {
             } else {
                 match vdesktop::add_window(did, wid) {
                     Ok(()) => shell_println!("Added window {} to desktop #{}", wid, did),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -26598,7 +27356,10 @@ fn cmd_vdesktop(args: &str) {
             } else {
                 match vdesktop::remove_window(did, wid) {
                     Ok(()) => shell_println!("Removed window {} from desktop #{}", wid, did),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -26620,7 +27381,10 @@ fn cmd_vdesktop(args: &str) {
             } else {
                 match vdesktop::move_window(wid, from, to) {
                     Ok(()) => shell_println!("Moved window {} from #{} to #{}", wid, from, to),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -26667,7 +27431,10 @@ fn cmd_vdesktop(args: &str) {
             } else {
                 match vdesktop::pin(wid) {
                     Ok(()) => shell_println!("Pinned window {}", wid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -26700,12 +27467,18 @@ fn cmd_vdesktop(args: &str) {
             } else if path == "clear" {
                 match vdesktop::clear_wallpaper(id) {
                     Ok(()) => shell_println!("Cleared wallpaper for #{}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else if !path.is_empty() {
                 match vdesktop::set_wallpaper(id, path) {
                     Ok(()) => shell_println!("Set wallpaper for #{}: {}", id, path),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else if let Some(d) = vdesktop::get(id) {
                 shell_println!(
@@ -26747,7 +27520,10 @@ fn cmd_vdesktop(args: &str) {
         },
         "init" => match vdesktop::init_defaults() {
             Ok(()) => shell_println!("Initialized default desktops"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "reorder" => {
             let id = parts
@@ -26763,7 +27539,10 @@ fn cmd_vdesktop(args: &str) {
             } else {
                 match vdesktop::reorder(id, pos) {
                     Ok(()) => shell_println!("Reordered #{} to position {}", id, pos),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -26813,7 +27592,10 @@ fn cmd_keylayout(args: &str) {
             } else {
                 match keylayout::create_layout(name, &desc) {
                     Ok(()) => shell_println!("Created layout '{}'", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -26824,7 +27606,10 @@ fn cmd_keylayout(args: &str) {
             } else {
                 match keylayout::remove_layout(name) {
                     Ok(()) => shell_println!("Removed '{}'", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -26879,7 +27664,10 @@ fn cmd_keylayout(args: &str) {
                 Ok(()) => {
                     shell_println!("Active: {}", if name.is_empty() { "(none)" } else { name })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "active" => {
@@ -26898,7 +27686,10 @@ fn cmd_keylayout(args: &str) {
                         keylayout::key_name(t),
                         layout
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: kbl remap <layout> <from_key> <to_key>");
@@ -26911,7 +27702,10 @@ fn cmd_keylayout(args: &str) {
             if let Some(f) = from {
                 match keylayout::unmap(layout, f) {
                     Ok(()) => shell_println!("Unmapped {} in '{}'", keylayout::key_name(f), layout),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: kbl unmap <layout> <key>");
@@ -26924,7 +27718,10 @@ fn cmd_keylayout(args: &str) {
             if let Some(k) = key {
                 match keylayout::disable_key(layout, k) {
                     Ok(()) => shell_println!("Disabled {} in '{}'", keylayout::key_name(k), layout),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: kbl disable <layout> <key>");
@@ -26937,7 +27734,10 @@ fn cmd_keylayout(args: &str) {
             if let Some(k) = key {
                 match keylayout::enable_key(layout, k) {
                     Ok(()) => shell_println!("Enabled {} in '{}'", keylayout::key_name(k), layout),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: kbl enable <layout> <key>");
@@ -26962,7 +27762,10 @@ fn cmd_keylayout(args: &str) {
         }
         "init" => match keylayout::init_defaults() {
             Ok(()) => shell_println!("Initialized default layouts"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "test" => match keylayout::self_test() {
             Ok(()) => shell_println!("All keylayout tests passed"),
@@ -27008,7 +27811,10 @@ fn cmd_screenshot(args: &str) {
                 .unwrap_or(1080);
             match screenshot::capture_full(w, h) {
                 Ok(id) => shell_println!("Captured full screen #{} ({}x{})", id, w, h),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "window" | "win" => {
@@ -27029,7 +27835,10 @@ fn cmd_screenshot(args: &str) {
             } else {
                 match screenshot::capture_window(wid, w, h) {
                     Ok(id) => shell_println!("Captured window #{} ({}x{})", id, w, h),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -27043,7 +27852,10 @@ fn cmd_screenshot(args: &str) {
                     Ok(id) => {
                         shell_println!("Captured region #{} ({}x{} at {},{})", id, w, h, x, y)
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: scap region <x> <y> <w> <h>");
@@ -27065,7 +27877,10 @@ fn cmd_screenshot(args: &str) {
             } else {
                 match screenshot::capture_monitor(mid, w, h) {
                     Ok(id) => shell_println!("Captured monitor '{}' #{}", mid, id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -27130,7 +27945,10 @@ fn cmd_screenshot(args: &str) {
                 .unwrap_or(0);
             match screenshot::delete(id) {
                 Ok(()) => shell_println!("Deleted #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "clear" => {
@@ -27144,7 +27962,10 @@ fn cmd_screenshot(args: &str) {
             } else {
                 match screenshot::set_save_dir(dir) {
                     Ok(()) => shell_println!("Save dir: {}", dir),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -27167,7 +27988,10 @@ fn cmd_screenshot(args: &str) {
                         shell_println!("Filename pattern: screenshot (default)");
                     }
                     Ok(()) => shell_println!("Filename pattern: {}", pat),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -27283,7 +28107,10 @@ fn cmd_a11y(args: &str) {
                     Ok(id) => {
                         shell_println!("Registered tool #{}: {} [{}]", id, name, kind.label())
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!(
@@ -27298,7 +28125,10 @@ fn cmd_a11y(args: &str) {
                 .unwrap_or(0);
             match a11y::unregister_tool(id) {
                 Ok(()) => shell_println!("Unregistered tool #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "tools" => {
@@ -27347,7 +28177,10 @@ fn cmd_a11y(args: &str) {
                     role.label(),
                     wid
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rmelem" => {
@@ -27357,7 +28190,10 @@ fn cmd_a11y(args: &str) {
                 .unwrap_or(0);
             match a11y::remove_element(id) {
                 Ok(()) => shell_println!("Removed element #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "focus" => {
@@ -27367,7 +28203,10 @@ fn cmd_a11y(args: &str) {
                 .unwrap_or(0);
             match a11y::set_focus(id) {
                 Ok(()) => shell_println!("Focused element #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "focused" => match a11y::focused_element() {
@@ -27458,7 +28297,10 @@ fn cmd_a11y(args: &str) {
                 a11y::AnnouncePriority::from_str(prio_s).unwrap_or(a11y::AnnouncePriority::Normal);
             match a11y::announce(&text, prio) {
                 Ok(id) => shell_println!("Announcement #{}: [{}] {}", id, prio.label(), text),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "pending" => {
@@ -27623,7 +28465,10 @@ fn cmd_ime(args: &str) {
             } else {
                 match ime::register_method(id, name, lang, ind, compose) {
                     Ok(()) => shell_println!("Registered '{}' ({} [{}])", id, name, lang),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -27631,7 +28476,10 @@ fn cmd_ime(args: &str) {
             let id = parts.get(1).copied().unwrap_or("");
             match ime::unregister_method(id) {
                 Ok(()) => shell_println!("Unregistered '{}'", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" | "ls" => {
@@ -27661,7 +28509,10 @@ fn cmd_ime(args: &str) {
                     if id.is_empty() { "(none)" } else { id },
                     ime::active_indicator()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "active" => {
@@ -27703,7 +28554,10 @@ fn cmd_ime(args: &str) {
                 .unwrap_or(0);
             match ime::commit_candidate(idx) {
                 Ok(t) => shell_println!("Committed: {}", t),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "cancel" => {
@@ -27786,7 +28640,10 @@ fn cmd_ime(args: &str) {
         },
         "init" => match ime::init_defaults() {
             Ok(()) => shell_println!("IME defaults initialized"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "test" => match ime::self_test() {
             Ok(()) => shell_println!("All IME tests passed"),
@@ -27827,7 +28684,10 @@ fn cmd_netindicator(args: &str) {
             } else {
                 match netindicator::update_interface(name, t, mac) {
                     Ok(()) => shell_println!("Added {} ({})", name, t.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -27835,7 +28695,10 @@ fn cmd_netindicator(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             match netindicator::remove_interface(name) {
                 Ok(()) => shell_println!("Removed {}", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "state" => {
@@ -27846,7 +28709,10 @@ fn cmd_netindicator(args: &str) {
             if let Some(s) = s {
                 match netindicator::set_state(name, s) {
                     Ok(()) => shell_println!("{}: {}", name, s.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: netind state <name> <connected|disconnected|...>");
@@ -27859,7 +28725,10 @@ fn cmd_netindicator(args: &str) {
             let gw = parts.get(3).copied().unwrap_or("");
             match netindicator::set_ip(name, ip, gw) {
                 Ok(()) => shell_println!("{}: ip={} gw={}", name, ip, gw),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "speed" => {
@@ -27870,7 +28739,10 @@ fn cmd_netindicator(args: &str) {
                 .unwrap_or(0);
             match netindicator::set_speed(name, mbps) {
                 Ok(()) => shell_println!("{}: {}Mbps", name, mbps),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" | "ls" => {
@@ -27955,13 +28827,19 @@ fn cmd_netindicator(args: &str) {
             } else {
                 match netindicator::connect_wifi(ssid, pw) {
                     Ok(()) => shell_println!("Connected to {}", ssid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
         "disconnect" => match netindicator::disconnect_wifi() {
             Ok(()) => shell_println!("Disconnected"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "save" => {
             let ssid = parts.get(1).copied().unwrap_or("");
@@ -27976,7 +28854,10 @@ fn cmd_netindicator(args: &str) {
             let ssid = parts.get(1).copied().unwrap_or("");
             match netindicator::forget_profile(ssid) {
                 Ok(()) => shell_println!("Forgot {}", ssid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "profiles" => {
@@ -28155,7 +29036,10 @@ fn cmd_winsnap(args: &str) {
             } else {
                 match winsnap::add_layout(name, &desc) {
                     Ok(()) => shell_println!("Layout '{}' created", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -28163,7 +29047,10 @@ fn cmd_winsnap(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             match winsnap::remove_layout(name) {
                 Ok(()) => shell_println!("Removed layout '{}'", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "addzone" => {
@@ -28190,7 +29077,10 @@ fn cmd_winsnap(args: &str) {
             } else {
                 match winsnap::add_zone(lay, zname, xp, yp, wp, hp) {
                     Ok(()) => shell_println!("Zone '{}' added to '{}'", zname, lay),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -28328,7 +29218,10 @@ fn cmd_colorpicker(args: &str) {
             let alpha = parts.get(2).copied() == Some("alpha");
             match colorpicker::open_picker(c, alpha) {
                 Ok(id) => shell_println!("Picker #{} opened ({})", id, c.to_hex()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rgb" => {
@@ -28341,7 +29234,10 @@ fn cmd_colorpicker(args: &str) {
             let b = parts.get(4).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
             match colorpicker::set_rgb(pid, r, g, b) {
                 Ok(()) => shell_println!("#{}: rgb({},{},{})", pid, r, g, b),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "hsv" => {
@@ -28357,7 +29253,10 @@ fn cmd_colorpicker(args: &str) {
             let v = parts.get(4).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
             match colorpicker::set_hsv(pid, h, s_val, v) {
                 Ok(()) => shell_println!("#{}: hsv({},{},{})", pid, h, s_val, v),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "hsl" => {
@@ -28373,7 +29272,10 @@ fn cmd_colorpicker(args: &str) {
             let l = parts.get(4).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
             match colorpicker::set_hsl(pid, h, s_val, l) {
                 Ok(()) => shell_println!("#{}: hsl({},{},{})", pid, h, s_val, l),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "hex" => {
@@ -28384,7 +29286,10 @@ fn cmd_colorpicker(args: &str) {
             let hex = parts.get(2).copied().unwrap_or("");
             match colorpicker::set_hex(pid, hex) {
                 Ok(()) => shell_println!("#{}: {}", pid, hex),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "alpha" => {
@@ -28398,7 +29303,10 @@ fn cmd_colorpicker(args: &str) {
                 .unwrap_or(255);
             match colorpicker::set_alpha(pid, a) {
                 Ok(()) => shell_println!("#{}: alpha={}", pid, a),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "model" => {
@@ -28412,7 +29320,10 @@ fn cmd_colorpicker(args: &str) {
             if let Some(m) = m {
                 match colorpicker::set_model(pid, m) {
                     Ok(()) => shell_println!("#{}: model={}", pid, m.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Models: rgb, hsv, hsl, hex, cmyk");
@@ -28444,7 +29355,10 @@ fn cmd_colorpicker(args: &str) {
                         p.model.label()
                     );
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "revert" => {
@@ -28454,7 +29368,10 @@ fn cmd_colorpicker(args: &str) {
                 .unwrap_or(0);
             match colorpicker::revert(pid) {
                 Ok(c) => shell_println!("#{}: reverted to {}", pid, c.to_hex()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "confirm" | "ok" => {
@@ -28464,7 +29381,10 @@ fn cmd_colorpicker(args: &str) {
                 .unwrap_or(0);
             match colorpicker::confirm(pid) {
                 Ok(c) => shell_println!("Selected: {}", c.to_hex()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "cancel" => {
@@ -28474,7 +29394,10 @@ fn cmd_colorpicker(args: &str) {
                 .unwrap_or(0);
             match colorpicker::cancel(pid) {
                 Ok(()) => shell_println!("Picker #{} cancelled", pid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "sample" => {
@@ -28506,7 +29429,10 @@ fn cmd_colorpicker(args: &str) {
             } else {
                 match colorpicker::create_palette(name) {
                     Ok(()) => shell_println!("Palette '{}' created", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -28514,7 +29440,10 @@ fn cmd_colorpicker(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             match colorpicker::remove_palette(name) {
                 Ok(()) => shell_println!("Palette '{}' removed", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "paladd" => {
@@ -28523,7 +29452,10 @@ fn cmd_colorpicker(args: &str) {
             if let Some(c) = colorpicker::Color::from_hex(hex) {
                 match colorpicker::palette_add(name, c) {
                     Ok(()) => shell_println!("Added {} to '{}'", hex, name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: cpick paladd <palette> <#rrggbb>");
@@ -28538,7 +29470,10 @@ fn cmd_colorpicker(args: &str) {
                 .unwrap_or(0);
             match colorpicker::palette_remove(name, idx) {
                 Ok(()) => shell_println!("Removed color #{} from '{}'", idx, name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "palettes" | "pals" => {
@@ -28769,12 +29704,18 @@ fn cmd_cursorsettings(args: &str) {
             if name.is_empty() {
                 match cursorsettings::active_theme() {
                     Ok(t) => shell_println!("Active: {} ({})", t.name, t.description),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 match cursorsettings::set_active_theme(name) {
                     Ok(()) => shell_println!("Theme: {}", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -28804,7 +29745,10 @@ fn cmd_cursorsettings(args: &str) {
             } else {
                 match cursorsettings::register_theme(name, &desc, sz, false) {
                     Ok(()) => shell_println!("Theme '{}' created", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -28812,7 +29756,10 @@ fn cmd_cursorsettings(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             match cursorsettings::unregister_theme(name) {
                 Ok(()) => shell_println!("Removed '{}'", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "addcursor" => {
@@ -28829,7 +29776,10 @@ fn cmd_cursorsettings(args: &str) {
                     .unwrap_or(0);
                 match cursorsettings::add_cursor(theme, shape, hx, hy, 1, 0) {
                     Ok(()) => shell_println!("Added {} to '{}'", shape.label(), theme),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: cursor addcursor <theme> <shape> [hotx] [hoty]");
@@ -29122,7 +30072,10 @@ fn cmd_kbsettings(args: &str) {
                     rate,
                     if no_rep { " norepeat" } else { "" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rmoverride" => {
@@ -29132,7 +30085,10 @@ fn cmd_kbsettings(args: &str) {
                 .unwrap_or(0);
             match kbsettings::remove_override(kc) {
                 Ok(()) => shell_println!("Removed override for 0x{:02x}", kc),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "overrides" => {
@@ -29158,7 +30114,10 @@ fn cmd_kbsettings(args: &str) {
             } else {
                 match kbsettings::create_profile(name) {
                     Ok(()) => shell_println!("Profile '{}' created", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -29166,7 +30125,10 @@ fn cmd_kbsettings(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             match kbsettings::remove_profile(name) {
                 Ok(()) => shell_println!("Profile '{}' removed", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "useprofile" => {
@@ -29181,7 +30143,10 @@ fn cmd_kbsettings(args: &str) {
                         cfg.repeat_rate_ms
                     );
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "profiles" => {
@@ -29290,7 +30255,10 @@ fn cmd_detailcols(args: &str) {
                     c.default_width,
                     c.sortable
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "register" => {
@@ -29309,7 +30277,10 @@ fn cmd_detailcols(args: &str) {
             } else {
                 match detailcols::register_column(id, name, ct, cat, 15, true, "shell") {
                     Ok(()) => shell_println!("Registered column '{}'", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -29317,7 +30288,10 @@ fn cmd_detailcols(args: &str) {
             let id = parts.get(1).copied().unwrap_or("");
             match detailcols::unregister_column(id) {
                 Ok(()) => shell_println!("Unregistered '{}'", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "bind" => {
@@ -29328,7 +30302,10 @@ fn cmd_detailcols(args: &str) {
             } else {
                 match detailcols::bind_columns(mime, &col_ids) {
                     Ok(()) => shell_println!("Bound {} columns to {}", col_ids.len(), mime),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -29336,7 +30313,10 @@ fn cmd_detailcols(args: &str) {
             let mime = parts.get(1).copied().unwrap_or("");
             match detailcols::unbind(mime) {
                 Ok(()) => shell_println!("Unbound {}", mime),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "bindings" => {
@@ -29369,7 +30349,10 @@ fn cmd_detailcols(args: &str) {
             } else {
                 match detailcols::set_user_columns(mime, &col_ids) {
                     Ok(()) => shell_println!("User columns set for {}", mime),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -29377,7 +30360,10 @@ fn cmd_detailcols(args: &str) {
             let mime = parts.get(1).copied().unwrap_or("");
             match detailcols::clear_user_columns(mime) {
                 Ok(()) => shell_println!("Cleared user selection for {}", mime),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "userlist" => {
@@ -29466,7 +30452,10 @@ fn cmd_partmgr(args: &str) {
                     false,
                 ) {
                     Ok(id) => shell_println!("Disk #{}: {} {}GB", id, name, gb),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -29477,7 +30466,10 @@ fn cmd_partmgr(args: &str) {
                 .unwrap_or(0);
             match partmgr::unregister_disk(did) {
                 Ok(()) => shell_println!("Disk #{} removed", did),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "table" => {
@@ -29489,7 +30481,10 @@ fn cmd_partmgr(args: &str) {
             if let Some(tt) = tt {
                 match partmgr::set_table_type(did, tt) {
                     Ok(()) => shell_println!("Disk #{}: {}", did, tt.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: pmgr table <disk_id> <gpt|mbr|none>");
@@ -29561,7 +30556,10 @@ fn cmd_partmgr(args: &str) {
                     Ok(id) => {
                         shell_println!("Partition #{} created ({}MB {})", id, size_mb, fs.label())
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -29576,7 +30574,10 @@ fn cmd_partmgr(args: &str) {
                 .unwrap_or(0);
             match partmgr::delete_partition(did, pid) {
                 Ok(()) => shell_println!("Partition deleted"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "resize" => {
@@ -29597,7 +30598,10 @@ fn cmd_partmgr(args: &str) {
             } else {
                 match partmgr::resize_partition(did, pid, new_mb * 1024 * 1024) {
                     Ok(()) => shell_println!("Resized to {}MB", new_mb),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -29614,7 +30618,10 @@ fn cmd_partmgr(args: &str) {
             if let Some(fs) = fs {
                 match partmgr::format_partition(did, pid, fs) {
                     Ok(()) => shell_println!("Formatted as {}", fs.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!(
@@ -29634,7 +30641,10 @@ fn cmd_partmgr(args: &str) {
             let lbl = parts.get(3).copied().unwrap_or("");
             match partmgr::set_label(did, pid, lbl) {
                 Ok(()) => shell_println!("Label: {}", lbl),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "flag" => {
@@ -29651,7 +30661,10 @@ fn cmd_partmgr(args: &str) {
             if let Some(f) = f {
                 match partmgr::set_flag(did, pid, f, v) {
                     Ok(()) => shell_println!("Flag {} = {}", f.label(), v),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!(
@@ -29671,7 +30684,10 @@ fn cmd_partmgr(args: &str) {
             let mp = parts.get(3).copied().unwrap_or("");
             match partmgr::set_mount_point(did, pid, mp) {
                 Ok(()) => shell_println!("Mount: {}", mp),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "free" => {
@@ -29684,7 +30700,10 @@ fn cmd_partmgr(args: &str) {
                     let mb = bytes / (1024 * 1024);
                     shell_println!("Free: {}MB ({}B)", mb, bytes);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "test" => match partmgr::self_test() {
@@ -29721,7 +30740,10 @@ fn cmd_locale(args: &str) {
             } else {
                 match locale::set_language(tag) {
                     Ok(()) => shell_println!("Language: {}", tag),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -29854,7 +30876,10 @@ fn cmd_locale(args: &str) {
                         id,
                         locale::format_utc_offset(locale::timezone_offset_minutes())
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -30010,7 +31035,10 @@ fn cmd_useracct(args: &str) {
                     };
                     match useracct::create_user(name, name, pass, acct_type) {
                         Ok(uid) => shell_println!("Created user '{}' (uid={})", name, uid),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30025,9 +31053,15 @@ fn cmd_useracct(args: &str) {
                     match parts[1].parse::<u64>() {
                         Ok(uid) => match useracct::remove_user(uid) {
                             Ok(()) => shell_println!("Removed user uid={}", uid),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         },
-                        Err(_) => shell_println!("Invalid uid"),
+                        Err(_) => {
+                            shell_println!("Invalid uid");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30074,7 +31108,10 @@ fn cmd_useracct(args: &str) {
                             shell_println!("  Locked:       {}", u.locked);
                             shell_println!("  Groups:       {:?}", u.groups);
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30107,9 +31144,15 @@ fn cmd_useracct(args: &str) {
                     match parts[1].parse::<u64>() {
                         Ok(sid) => match useracct::logout(sid) {
                             Ok(()) => shell_println!("Logged out session {}", sid),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         },
-                        Err(_) => shell_println!("Invalid session id"),
+                        Err(_) => {
+                            shell_println!("Invalid session id");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30144,9 +31187,15 @@ fn cmd_useracct(args: &str) {
                     match parts[1].parse::<u64>() {
                         Ok(uid) => match useracct::change_password(uid, parts[2]) {
                             Ok(()) => shell_println!("Password changed for uid={}", uid),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         },
-                        Err(_) => shell_println!("Invalid uid"),
+                        Err(_) => {
+                            shell_println!("Invalid uid");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30161,9 +31210,15 @@ fn cmd_useracct(args: &str) {
                     match parts[1].parse::<u64>() {
                         Ok(uid) => match useracct::set_enabled(uid, true) {
                             Ok(()) => shell_println!("Enabled uid={}", uid),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         },
-                        Err(_) => shell_println!("Invalid uid"),
+                        Err(_) => {
+                            shell_println!("Invalid uid");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30178,9 +31233,15 @@ fn cmd_useracct(args: &str) {
                     match parts[1].parse::<u64>() {
                         Ok(uid) => match useracct::set_enabled(uid, false) {
                             Ok(()) => shell_println!("Disabled uid={}", uid),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         },
-                        Err(_) => shell_println!("Invalid uid"),
+                        Err(_) => {
+                            shell_println!("Invalid uid");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30195,9 +31256,15 @@ fn cmd_useracct(args: &str) {
                     match parts[1].parse::<u64>() {
                         Ok(uid) => match useracct::unlock(uid) {
                             Ok(()) => shell_println!("Unlocked uid={}", uid),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         },
-                        Err(_) => shell_println!("Invalid uid"),
+                        Err(_) => {
+                            shell_println!("Invalid uid");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30219,10 +31286,16 @@ fn cmd_useracct(args: &str) {
                             };
                             match useracct::set_account_type(uid, acct_type) {
                                 Ok(()) => shell_println!("Set type for uid={}", uid),
-                                Err(e) => shell_println!("Error: {:?}", e),
+                                Err(e) => {
+                                    shell_println!("Error: {:?}", e);
+                                    set_exit(1);
+                                }
                             }
                         }
-                        Err(_) => shell_println!("Invalid uid"),
+                        Err(_) => {
+                            shell_println!("Invalid uid");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30239,10 +31312,16 @@ fn cmd_useracct(args: &str) {
                             let name = parts[2..].join(" ");
                             match useracct::set_display_name(uid, &name) {
                                 Ok(()) => shell_println!("Set display name for uid={}", uid),
-                                Err(e) => shell_println!("Error: {:?}", e),
+                                Err(e) => {
+                                    shell_println!("Error: {:?}", e);
+                                    set_exit(1);
+                                }
                             }
                         }
-                        Err(_) => shell_println!("Invalid uid"),
+                        Err(_) => {
+                            shell_println!("Invalid uid");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30271,7 +31350,10 @@ fn cmd_useracct(args: &str) {
                 };
                 match r {
                     Ok(()) => shell_println!("Set {} for uid={}", sub, uid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(sub, &parts);
@@ -30291,10 +31373,16 @@ fn cmd_useracct(args: &str) {
                                     if on { "enabled" } else { "disabled" },
                                     uid
                                 ),
-                                Err(e) => shell_println!("Error: {:?}", e),
+                                Err(e) => {
+                                    shell_println!("Error: {:?}", e);
+                                    set_exit(1);
+                                }
                             }
                         }
-                        Err(_) => shell_println!("Invalid uid"),
+                        Err(_) => {
+                            shell_println!("Invalid uid");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30325,7 +31413,10 @@ fn cmd_useracct(args: &str) {
                     let desc = parts.get(2).copied().unwrap_or("");
                     match useracct::create_group(parts[1], desc, sys) {
                         Ok(gid) => shell_println!("Created group '{}' (gid={})", parts[1], gid),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30340,9 +31431,15 @@ fn cmd_useracct(args: &str) {
                     match parts[1].parse::<u64>() {
                         Ok(gid) => match useracct::remove_group(gid) {
                             Ok(()) => shell_println!("Removed group gid={}", gid),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         },
-                        Err(_) => shell_println!("Invalid gid"),
+                        Err(_) => {
+                            shell_println!("Invalid gid");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30357,7 +31454,10 @@ fn cmd_useracct(args: &str) {
                     match (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
                         (Ok(uid), Ok(gid)) => match useracct::add_to_group(uid, gid) {
                             Ok(()) => shell_println!("Added uid={} to gid={}", uid, gid),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         },
                         _ => shell_println!("Invalid uid/gid"),
                     }
@@ -30374,7 +31474,10 @@ fn cmd_useracct(args: &str) {
                     match (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
                         (Ok(uid), Ok(gid)) => match useracct::remove_from_group(uid, gid) {
                             Ok(()) => shell_println!("Removed uid={} from gid={}", uid, gid),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         },
                         _ => shell_println!("Invalid uid/gid"),
                     }
@@ -30523,7 +31626,10 @@ fn cmd_progmgr(args: &str) {
                             shell_println!("  Compilable: {}", p.compilable);
                             shell_println!("  Snapshots:  {}", p.snapshots.len());
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30541,7 +31647,10 @@ fn cmd_progmgr(args: &str) {
                         .unwrap_or(0);
                     match progmgr::register(parts[1], parts[2], "1.0.0", parts[3], size) {
                         Ok(()) => shell_println!("Registered '{}'", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30563,7 +31672,10 @@ fn cmd_progmgr(args: &str) {
                     };
                     match progmgr::uninstall(parts[1], opt) {
                         Ok(()) => shell_println!("Uninstalled '{}'", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30587,7 +31699,10 @@ fn cmd_progmgr(args: &str) {
                     };
                     match progmgr::set_priority(parts[1], prio) {
                         Ok(()) => shell_println!("Priority set for '{}'", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30625,7 +31740,10 @@ fn cmd_progmgr(args: &str) {
                     match cap {
                         Some(c) => match progmgr::grant_capability(parts[1], c) {
                             Ok(()) => shell_println!("Granted '{}' to '{}'", parts[2], parts[1]),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         },
                         None => shell_println!("Unknown capability: {}", parts[2]),
                     }
@@ -30660,7 +31778,10 @@ fn cmd_progmgr(args: &str) {
                     match cap {
                         Some(c) => match progmgr::revoke_capability(parts[1], c) {
                             Ok(()) => shell_println!("Revoked '{}' from '{}'", parts[2], parts[1]),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         },
                         None => shell_println!("Unknown capability: {}", parts[2]),
                     }
@@ -30678,7 +31799,10 @@ fn cmd_progmgr(args: &str) {
                         Ok(()) => {
                             shell_println!("Added notification '{}' to '{}'", parts[2], parts[1])
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30698,7 +31822,10 @@ fn cmd_progmgr(args: &str) {
                                 parts[1]
                             )
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30727,7 +31854,10 @@ fn cmd_progmgr(args: &str) {
                                 Ok(()) => {
                                     shell_println!("Set show={} for {}/{}", v, parts[1], parts[2])
                                 }
-                                Err(e) => shell_println!("Error: {:?}", e),
+                                Err(e) => {
+                                    shell_println!("Error: {:?}", e);
+                                    set_exit(1);
+                                }
                             }
                         }
                         "sound" => {
@@ -30747,7 +31877,10 @@ fn cmd_progmgr(args: &str) {
                                         parts[2]
                                     )
                                 }
-                                Err(e) => shell_println!("Error: {:?}", e),
+                                Err(e) => {
+                                    shell_println!("Error: {:?}", e);
+                                    set_exit(1);
+                                }
                             }
                         }
                         "banner" => {
@@ -30763,7 +31896,10 @@ fn cmd_progmgr(args: &str) {
                                 Ok(()) => {
                                     shell_println!("Set banner={} for {}/{}", v, parts[1], parts[2])
                                 }
-                                Err(e) => shell_println!("Error: {:?}", e),
+                                Err(e) => {
+                                    shell_println!("Error: {:?}", e);
+                                    set_exit(1);
+                                }
                             }
                         }
                         "lock" => {
@@ -30782,7 +31918,10 @@ fn cmd_progmgr(args: &str) {
                                     parts[1],
                                     parts[2]
                                 ),
-                                Err(e) => shell_println!("Error: {:?}", e),
+                                Err(e) => {
+                                    shell_println!("Error: {:?}", e);
+                                    set_exit(1);
+                                }
                             }
                         }
                         _ => shell_println!("Unknown field: {}", parts[3]),
@@ -30810,7 +31949,10 @@ fn cmd_progmgr(args: &str) {
                         .unwrap_or(0);
                     match progmgr::create_snapshot(parts[1], parts[2], scope, parent) {
                         Ok(id) => shell_println!("Created snapshot {} for '{}'", id, parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30825,9 +31967,15 @@ fn cmd_progmgr(args: &str) {
                     match parts[2].parse::<u64>() {
                         Ok(id) => match progmgr::delete_snapshot(parts[1], id) {
                             Ok(()) => shell_println!("Deleted snapshot {}", id),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         },
-                        Err(_) => shell_println!("Invalid snapshot id"),
+                        Err(_) => {
+                            shell_println!("Invalid snapshot id");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30861,7 +32009,10 @@ fn cmd_progmgr(args: &str) {
                                 }
                             }
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30882,9 +32033,15 @@ fn cmd_progmgr(args: &str) {
                                     snap.scope
                                 )
                             }
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         },
-                        Err(_) => shell_println!("Invalid snapshot id"),
+                        Err(_) => {
+                            shell_println!("Invalid snapshot id");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30905,7 +32062,10 @@ fn cmd_progmgr(args: &str) {
                         Ok(()) => {
                             shell_println!("Marked '{}' as compilable from {}", parts[1], parts[2])
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30920,7 +32080,10 @@ fn cmd_progmgr(args: &str) {
                     let params = parts[2..].join(" ");
                     match progmgr::set_build_params(parts[1], &params) {
                         Ok(()) => shell_println!("Build params updated for '{}'", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30934,7 +32097,10 @@ fn cmd_progmgr(args: &str) {
                 } else {
                     match progmgr::wipe_data(parts[1]) {
                         Ok(dir) => shell_println!("Wiped data directory: {}", dir.display()),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30950,7 +32116,10 @@ fn cmd_progmgr(args: &str) {
                         Ok(dir) => {
                             shell_println!("Wiped settings directory: {}", dir.display());
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -30964,7 +32133,10 @@ fn cmd_progmgr(args: &str) {
                 } else {
                     match progmgr::set_version(parts[1], parts[2]) {
                         Ok(()) => shell_println!("Version set for '{}'", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -31095,9 +32267,15 @@ fn cmd_scriptlang(args: &str) {
                             shell_println!("  Enabled:     {}", e.enabled);
                             shell_println!("  {}", e.description);
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid engine id"),
+                    Err(_) => {
+                        shell_println!("Invalid engine id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31125,7 +32303,10 @@ fn cmd_scriptlang(args: &str) {
                     parts[1], parts[2], etype, sbox, parts[3], "", false,
                 ) {
                     Ok(id) => shell_println!("Registered '{}' v{} (id={})", parts[1], parts[2], id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31136,9 +32317,15 @@ fn cmd_scriptlang(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match scriptlang::unregister_engine(id) {
                         Ok(()) => shell_println!("Unregistered engine {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid engine id"),
+                    Err(_) => {
+                        shell_println!("Invalid engine id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31149,9 +32336,15 @@ fn cmd_scriptlang(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match scriptlang::set_enabled(id, true) {
                         Ok(()) => shell_println!("Enabled engine {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid engine id"),
+                    Err(_) => {
+                        shell_println!("Invalid engine id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31162,9 +32355,15 @@ fn cmd_scriptlang(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match scriptlang::set_enabled(id, false) {
                         Ok(()) => shell_println!("Disabled engine {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid engine id"),
+                    Err(_) => {
+                        shell_println!("Invalid engine id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31175,9 +32374,15 @@ fn cmd_scriptlang(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match scriptlang::add_extension(id, parts[2]) {
                         Ok(()) => shell_println!("Added extension '{}' to engine {}", parts[2], id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid engine id"),
+                    Err(_) => {
+                        shell_println!("Invalid engine id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31188,9 +32393,15 @@ fn cmd_scriptlang(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match scriptlang::add_mime_type(id, parts[2]) {
                         Ok(()) => shell_println!("Added MIME '{}' to engine {}", parts[2], id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid engine id"),
+                    Err(_) => {
+                        shell_println!("Invalid engine id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31213,7 +32424,10 @@ fn cmd_scriptlang(args: &str) {
                                 mem_mb,
                                 time
                             ),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
                     _ => shell_println!("Invalid arguments"),
@@ -31248,9 +32462,15 @@ fn cmd_scriptlang(args: &str) {
                             id,
                             parts[2]
                         ),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid engine id"),
+                    Err(_) => {
+                        shell_println!("Invalid engine id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31261,9 +32481,15 @@ fn cmd_scriptlang(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(h) => match scriptlang::destroy_context(h) {
                         Ok(()) => shell_println!("Destroyed context {}", h),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid handle"),
+                    Err(_) => {
+                        shell_println!("Invalid handle");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31293,10 +32519,16 @@ fn cmd_scriptlang(args: &str) {
                         let writable = parts.get(4).copied() == Some("rw");
                         match scriptlang::add_binding(h, parts[2], parts[3], writable) {
                             Ok(()) => shell_println!("Bound '{}' in context {}", parts[2], h),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
-                    Err(_) => shell_println!("Invalid handle"),
+                    Err(_) => {
+                        shell_println!("Invalid handle");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31307,9 +32539,15 @@ fn cmd_scriptlang(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(h) => match scriptlang::remove_binding(h, parts[2]) {
                         Ok(()) => shell_println!("Unbound '{}' from context {}", parts[2], h),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid handle"),
+                    Err(_) => {
+                        shell_println!("Invalid handle");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31328,10 +32566,16 @@ fn cmd_scriptlang(args: &str) {
                                     shell_println!("ERR: {}", r.error);
                                 }
                             }
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
-                    Err(_) => shell_println!("Invalid handle"),
+                    Err(_) => {
+                        shell_println!("Invalid handle");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31407,7 +32651,10 @@ fn cmd_osreset(args: &str) {
                 };
                 match osreset::create_checkpoint(parts[1], scope) {
                     Ok(id) => shell_println!("Created checkpoint {} '{}'", id, parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31435,9 +32682,15 @@ fn cmd_osreset(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match osreset::delete_checkpoint(id) {
                         Ok(()) => shell_println!("Deleted checkpoint {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid id"),
+                    Err(_) => {
+                        shell_println!("Invalid id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31467,7 +32720,10 @@ fn cmd_osreset(args: &str) {
                             shell_println!("  Delete:         {} bytes", p.delete_bytes);
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31536,9 +32792,15 @@ fn cmd_osreset(args: &str) {
                                 }
                             }
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid id"),
+                    Err(_) => {
+                        shell_println!("Invalid id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31556,10 +32818,16 @@ fn cmd_osreset(args: &str) {
                                 inc,
                                 pid
                             ),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
-                    Err(_) => shell_println!("Invalid plan id"),
+                    Err(_) => {
+                        shell_println!("Invalid plan id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31570,9 +32838,15 @@ fn cmd_osreset(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match osreset::execute_reset(id) {
                         Ok(()) => shell_println!("Reset plan {} executed", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid id"),
+                    Err(_) => {
+                        shell_println!("Invalid id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31583,9 +32857,15 @@ fn cmd_osreset(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match osreset::cancel_plan(id) {
                         Ok(()) => shell_println!("Cancelled plan {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid id"),
+                    Err(_) => {
+                        shell_println!("Invalid id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31598,9 +32878,15 @@ fn cmd_osreset(args: &str) {
                         Ok(cp) => {
                             shell_println!("Rolling back to '{}' (checkpoint {})", cp.name, cp.id)
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid id"),
+                    Err(_) => {
+                        shell_println!("Invalid id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31621,7 +32907,10 @@ fn cmd_osreset(args: &str) {
                     shell_println!("  ! {}", path);
                 }
             }
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "repair" => match osreset::repair_files() {
             Ok(n) => {
@@ -31631,7 +32920,10 @@ fn cmd_osreset(args: &str) {
                     shell_println!("No problems to repair (run 'osreset scan' first)");
                 }
             }
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (cps, plans, problems, ops) = osreset::stats();
@@ -31751,7 +33043,10 @@ fn cmd_bootcfg(args: &str) {
                     .join(" ");
                 match bootcfg::add_entry(parts[1], kind, parts[2], "", &params, false) {
                     Ok(id) => shell_println!("Added entry '{}' (id={})", parts[1], id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31762,9 +33057,15 @@ fn cmd_bootcfg(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match bootcfg::remove_entry(id) {
                         Ok(()) => shell_println!("Removed entry {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid id"),
+                    Err(_) => {
+                        shell_println!("Invalid id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31775,9 +33076,15 @@ fn cmd_bootcfg(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match bootcfg::set_default(id) {
                         Ok(()) => shell_println!("Set default to entry {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid id"),
+                    Err(_) => {
+                        shell_println!("Invalid id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31790,10 +33097,16 @@ fn cmd_bootcfg(args: &str) {
                         let params = parts[2..].join(" ");
                         match bootcfg::set_parameters(id, &params) {
                             Ok(()) => shell_println!("Set parameters for entry {}", id),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
-                    Err(_) => shell_println!("Invalid id"),
+                    Err(_) => {
+                        shell_println!("Invalid id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31804,9 +33117,15 @@ fn cmd_bootcfg(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match bootcfg::set_hidden(id, true) {
                         Ok(()) => shell_println!("Hidden entry {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid id"),
+                    Err(_) => {
+                        shell_println!("Invalid id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31817,9 +33136,15 @@ fn cmd_bootcfg(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match bootcfg::set_hidden(id, false) {
                         Ok(()) => shell_println!("Unhidden entry {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid id"),
+                    Err(_) => {
+                        shell_println!("Invalid id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31830,9 +33155,15 @@ fn cmd_bootcfg(args: &str) {
                 match parts[1].parse::<u32>() {
                     Ok(s) => match bootcfg::set_timeout(s) {
                         Ok(()) => shell_println!("Timeout set to {}s", s),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid seconds"),
+                    Err(_) => {
+                        shell_println!("Invalid seconds");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31848,7 +33179,10 @@ fn cmd_bootcfg(args: &str) {
                 };
                 match bootcfg::set_console_mode(mode) {
                     Ok(()) => shell_println!("Console mode set to {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31861,7 +33195,10 @@ fn cmd_bootcfg(args: &str) {
                     Ok(()) => {
                         shell_println!("Boot activity listing: {}", if on { "on" } else { "off" })
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31871,7 +33208,10 @@ fn cmd_bootcfg(args: &str) {
             } else {
                 match bootcfg::set_gfx_mode(parts[1]) {
                     Ok(()) => shell_println!("GFX mode set to {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -31887,7 +33227,10 @@ fn cmd_bootcfg(args: &str) {
                 };
                 match bootcfg::set_loader_type(lt) {
                     Ok(()) => shell_println!("Loader type set"),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -32035,10 +33378,16 @@ fn cmd_swapcfg(args: &str) {
                             Ok(id) => {
                                 shell_println!("Added swap '{}' (id={}, {}MB)", parts[1], id, mb)
                             }
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
-                    Err(_) => shell_println!("Invalid size"),
+                    Err(_) => {
+                        shell_println!("Invalid size");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -32049,9 +33398,15 @@ fn cmd_swapcfg(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match swapcfg::remove_swap(id) {
                         Ok(()) => shell_println!("Removed swap {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid id"),
+                    Err(_) => {
+                        shell_println!("Invalid id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -32062,9 +33417,15 @@ fn cmd_swapcfg(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match swapcfg::activate(id) {
                         Ok(()) => shell_println!("Activated swap {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid id"),
+                    Err(_) => {
+                        shell_println!("Invalid id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -32075,9 +33436,15 @@ fn cmd_swapcfg(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match swapcfg::deactivate(id) {
                         Ok(()) => shell_println!("Deactivated swap {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid id"),
+                    Err(_) => {
+                        shell_println!("Invalid id");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -32088,7 +33455,10 @@ fn cmd_swapcfg(args: &str) {
                 match (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
                     (Ok(id), Ok(mb)) => match swapcfg::resize(id, mb * 1024 * 1024) {
                         Ok(()) => shell_println!("Resized swap {} to {}MB", id, mb),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
                     _ => shell_println!("Invalid arguments"),
                 }
@@ -32101,7 +33471,10 @@ fn cmd_swapcfg(args: &str) {
                 match (parts[1].parse::<u64>(), parts[2].parse::<i32>()) {
                     (Ok(id), Ok(p)) => match swapcfg::set_priority(id, p) {
                         Ok(()) => shell_println!("Set priority {} for swap {}", p, id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
                     _ => shell_println!("Invalid arguments"),
                 }
@@ -32114,19 +33487,31 @@ fn cmd_swapcfg(args: &str) {
                 match parts[1].parse::<u32>() {
                     Ok(v) => match swapcfg::set_swappiness(v) {
                         Ok(()) => shell_println!("Swappiness set to {}", v),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid value"),
+                    Err(_) => {
+                        shell_println!("Invalid value");
+                        set_exit(1);
+                    }
                 }
             }
         }
         "enable" => match swapcfg::set_enabled(true) {
             Ok(()) => shell_println!("Swap enabled"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" => match swapcfg::set_enabled(false) {
             Ok(()) => shell_println!("Swap disabled"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "zswap" => {
             if parts.len() < 3 {
@@ -32145,7 +33530,10 @@ fn cmd_swapcfg(args: &str) {
                         algo,
                         pct
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -32273,7 +33661,10 @@ fn cmd_fstune(args: &str) {
                     );
                     shell_println!("Applied:         {}", p.applied);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "create" => {
@@ -32294,14 +33685,20 @@ fn cmd_fstune(args: &str) {
             };
             match fstune::create_profile(name, fs_type, workload) {
                 Ok(id) => shell_println!("Created profile {} (ID {})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
             let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             match fstune::remove_profile(id) {
                 Ok(()) => shell_println!("Removed"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "workload" => {
@@ -32315,7 +33712,10 @@ fn cmd_fstune(args: &str) {
             };
             match fstune::apply_workload(id, wl) {
                 Ok(()) => shell_println!("Applied workload preset"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "blocksize" => {
@@ -32323,7 +33723,10 @@ fn cmd_fstune(args: &str) {
             let sz: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             match fstune::set_block_size(id, sz) {
                 Ok(()) => shell_println!("Block size set to {}", sz),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "journal" => {
@@ -32336,7 +33739,10 @@ fn cmd_fstune(args: &str) {
             };
             match fstune::set_journal_mode(id, mode) {
                 Ok(()) => shell_println!("Journal mode set"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "commit" => {
@@ -32344,7 +33750,10 @@ fn cmd_fstune(args: &str) {
             let secs: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             match fstune::set_commit_interval(id, secs) {
                 Ok(()) => shell_println!("Commit interval set to {}s", secs),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "reserved" => {
@@ -32352,7 +33761,10 @@ fn cmd_fstune(args: &str) {
             let pct: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             match fstune::set_reserved_pct(id, pct) {
                 Ok(()) => shell_println!("Reserved {}%", pct),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "inode" => {
@@ -32360,7 +33772,10 @@ fn cmd_fstune(args: &str) {
             let ratio: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             match fstune::set_inode_ratio(id, ratio) {
                 Ok(()) => shell_println!("Inode ratio set to {}", ratio),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "alloc" => {
@@ -32372,7 +33787,10 @@ fn cmd_fstune(args: &str) {
             };
             match fstune::set_alloc_strategy(id, strat) {
                 Ok(()) => shell_println!("Alloc strategy set"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "discard" => {
@@ -32380,7 +33798,10 @@ fn cmd_fstune(args: &str) {
             let on = parts.get(2).copied().unwrap_or("on") != "off";
             match fstune::set_discard(id, on) {
                 Ok(()) => shell_println!("Discard {}", if on { "enabled" } else { "disabled" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "checksum" => {
@@ -32390,7 +33811,10 @@ fn cmd_fstune(args: &str) {
                 Ok(()) => {
                     shell_println!("Data checksum {}", if on { "enabled" } else { "disabled" })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "compress" => {
@@ -32399,12 +33823,18 @@ fn cmd_fstune(args: &str) {
             if algo == "off" {
                 match fstune::set_compression(id, false, "") {
                     Ok(()) => shell_println!("Compression disabled"),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 match fstune::set_compression(id, true, algo) {
                     Ok(()) => shell_println!("Compression: {}", algo),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -32412,7 +33842,10 @@ fn cmd_fstune(args: &str) {
             let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             match fstune::mark_applied(id) {
                 Ok(()) => shell_println!("Marked as applied"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "tradeoffs" => {
@@ -32546,7 +33979,10 @@ fn cmd_certmgr(args: &str) {
                     shell_println!("Key path:    {}", c.key_path.display());
                     shell_println!("Pinned:      {}", c.pinned);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "import" => {
@@ -32571,14 +34007,20 @@ fn cmd_certmgr(args: &str) {
                 key_path,
             ) {
                 Ok(id) => shell_println!("Imported {} (ID {})", cn, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
             let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             match certmgr::remove_cert(id) {
                 Ok(()) => shell_println!("Removed"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "san" => {
@@ -32586,7 +34028,10 @@ fn cmd_certmgr(args: &str) {
             let name = parts.get(2).copied().unwrap_or("");
             match certmgr::add_san(id, name) {
                 Ok(()) => shell_println!("SAN added: {}", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "service" => {
@@ -32594,7 +34039,10 @@ fn cmd_certmgr(args: &str) {
             let svc = parts.get(2).copied().unwrap_or("");
             match certmgr::set_service(id, svc) {
                 Ok(()) => shell_println!("Service set: {}", svc),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "status" => {
@@ -32608,7 +34056,10 @@ fn cmd_certmgr(args: &str) {
             };
             match certmgr::set_status(id, st) {
                 Ok(()) => shell_println!("Status updated"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "autorenew" => {
@@ -32616,7 +34067,10 @@ fn cmd_certmgr(args: &str) {
             let on = parts.get(2).copied().unwrap_or("on") != "off";
             match certmgr::set_auto_renew(id, on) {
                 Ok(()) => shell_println!("Auto-renew {}", if on { "enabled" } else { "disabled" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "pin" => {
@@ -32624,14 +34078,20 @@ fn cmd_certmgr(args: &str) {
             let on = parts.get(2).copied().unwrap_or("on") != "off";
             match certmgr::set_pinned(id, on) {
                 Ok(()) => shell_println!("{}", if on { "Pinned" } else { "Unpinned" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "renew" => {
             let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             match certmgr::renew_cert(id) {
                 Ok(()) => shell_println!("Renewed"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "threshold" => {
@@ -32641,7 +34101,10 @@ fn cmd_certmgr(args: &str) {
             } else {
                 match certmgr::set_renewal_threshold(days) {
                     Ok(()) => shell_println!("Threshold set to {} days", days),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -32655,14 +34118,20 @@ fn cmd_certmgr(args: &str) {
                 certmgr::ChallengeType::Http01,
             ) {
                 Ok(id) => shell_println!("ACME request {} for {}", id, domain),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "complete" => {
             let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             match certmgr::complete_request(id) {
                 Ok(cid) => shell_println!("Certificate created (ID {})", cid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "requests" => {
@@ -32798,7 +34267,10 @@ fn cmd_installer(args: &str) {
                         set_exit(1);
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "create" => {
@@ -32809,14 +34281,20 @@ fn cmd_installer(args: &str) {
             };
             match installer::create_session(mode) {
                 Ok(id) => shell_println!("Created session {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
             let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             match installer::remove_session(id) {
                 Ok(()) => shell_println!("Removed"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "keyboard" => {
@@ -32825,7 +34303,10 @@ fn cmd_installer(args: &str) {
             let variant = parts.get(3).copied().unwrap_or("");
             match installer::set_keyboard(id, layout, variant) {
                 Ok(()) => shell_println!("Keyboard: {} {}", layout, variant),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "scaling" => {
@@ -32833,7 +34314,10 @@ fn cmd_installer(args: &str) {
             let dpi: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(96);
             match installer::detect_and_set_scaling(id, dpi) {
                 Ok(p) => shell_println!("DPI {} → {:?}", dpi, p),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "workload" => {
@@ -32846,7 +34330,10 @@ fn cmd_installer(args: &str) {
             };
             match installer::set_workload(id, wl) {
                 Ok(()) => shell_println!("Workload set"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "partition" => {
@@ -32870,7 +34357,10 @@ fn cmd_installer(args: &str) {
                 },
             ) {
                 Ok(()) => shell_println!("Partition plan set"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "check" => {
@@ -32888,21 +34378,30 @@ fn cmd_installer(args: &str) {
                         shell_println!("  ERR:  {}", e);
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "install" => {
             let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             match installer::execute_install(id) {
                 Ok(()) => shell_println!("Installation complete — reboot required"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "firstboot" => {
             let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             match installer::start_first_boot(id) {
                 Ok(()) => shell_println!("First-boot setup started"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "timezone" => {
@@ -32910,7 +34409,10 @@ fn cmd_installer(args: &str) {
             let tz = parts.get(2).copied().unwrap_or("UTC");
             match installer::set_timezone(id, tz) {
                 Ok(()) => shell_println!("Timezone: {}", tz),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "user" => {
@@ -32920,7 +34422,10 @@ fn cmd_installer(args: &str) {
             let auto = parts.get(4).copied().unwrap_or("no") == "yes";
             match installer::set_user(id, name, pass, auto) {
                 Ok(()) => shell_println!("User: {}", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "browser" => {
@@ -32933,7 +34438,10 @@ fn cmd_installer(args: &str) {
             };
             match installer::set_browser(id, br) {
                 Ok(()) => shell_println!("Browser set"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "theme" => {
@@ -32941,7 +34449,10 @@ fn cmd_installer(args: &str) {
             let mode = parts.get(2).copied().unwrap_or("dark");
             match installer::set_theme(id, mode) {
                 Ok(()) => shell_println!("Theme: {}", mode),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "wifi" => {
@@ -32950,7 +34461,10 @@ fn cmd_installer(args: &str) {
             let pass = parts.get(3).copied().unwrap_or("yes") == "yes";
             match installer::set_wifi(id, ssid, pass) {
                 Ok(()) => shell_println!("Wifi: {}", ssid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "audio" => {
@@ -32958,14 +34472,20 @@ fn cmd_installer(args: &str) {
             let dev = parts.get(2).copied().unwrap_or("default");
             match installer::set_audio_device(id, dev) {
                 Ok(()) => shell_println!("Audio: {}", dev),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "complete" => {
             let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             match installer::complete_first_boot(id) {
                 Ok(()) => shell_println!("First-boot complete"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -33017,7 +34537,10 @@ fn cmd_timezone(args: &str) {
             let name = parts.get(1).copied().unwrap_or("UTC");
             match timezone::set_timezone(name) {
                 Ok(()) => shell_println!("Timezone: {}", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -33068,14 +34591,20 @@ fn cmd_timezone(args: &str) {
             let lon: f32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
             match timezone::detect_from_location(lat, lon) {
                 Ok(tz) => shell_println!("Detected: {}", tz),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "ntp" => {
             let on = parts.get(1).copied().unwrap_or("on") != "off";
             match timezone::set_ntp_enabled(on) {
                 Ok(()) => shell_println!("NTP {}", if on { "enabled" } else { "disabled" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "servers" => {
@@ -33099,14 +34628,20 @@ fn cmd_timezone(args: &str) {
             let port: u16 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(123);
             match timezone::add_ntp_server(host, port) {
                 Ok(()) => shell_println!("Added {}", host),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rmntp" => {
             let host = parts.get(1).copied().unwrap_or("");
             match timezone::remove_ntp_server(host) {
                 Ok(()) => shell_println!("Removed"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "timefmt" => {
@@ -33248,7 +34783,10 @@ fn cmd_fontmgr(args: &str) {
                     shell_println!("System:   {}", f.system);
                     shell_println!("Enabled:  {}", f.enabled);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "install" => {
@@ -33264,28 +34802,40 @@ fn cmd_fontmgr(args: &str) {
                 0,
             ) {
                 Ok(id) => shell_println!("Installed {} (ID {})", family, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "uninstall" => {
             let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             match fontmgr::uninstall_font(id) {
                 Ok(()) => shell_println!("Uninstalled"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" => {
             let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             match fontmgr::set_enabled(id, true) {
                 Ok(()) => shell_println!("Enabled"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "disable" => {
             let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             match fontmgr::set_enabled(id, false) {
                 Ok(()) => shell_println!("Disabled"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "default" => {
@@ -33307,7 +34857,10 @@ fn cmd_fontmgr(args: &str) {
             } else {
                 match fontmgr::set_default(role, family) {
                     Ok(()) => shell_println!("Default set"),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -33318,7 +34871,10 @@ fn cmd_fontmgr(args: &str) {
             } else {
                 match fontmgr::set_global_size(pt) {
                     Ok(()) => shell_println!("Size: {} pt", pt),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -33346,7 +34902,10 @@ fn cmd_fontmgr(args: &str) {
             } else {
                 match fontmgr::set_dpi(dpi) {
                     Ok(()) => shell_println!("DPI: {}", dpi),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -33482,7 +35041,10 @@ fn cmd_autostart(args: &str) {
             let uid: u64 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
             match autostart::add_item(name, cmd, phase, uid) {
                 Ok(id) => shell_println!("Added autostart item {} (id={}).", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
@@ -33496,7 +35058,10 @@ fn cmd_autostart(args: &str) {
             };
             match autostart::remove_item(id) {
                 Ok(()) => shell_println!("Removed autostart item {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "get" => {
@@ -33526,7 +35091,10 @@ fn cmd_autostart(args: &str) {
                     shell_println!("Launches:    {}", it.launch_count);
                     shell_println!("Avg launch:  {} ms", it.avg_duration_ms);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" => {
@@ -33540,7 +35108,10 @@ fn cmd_autostart(args: &str) {
             };
             match autostart::set_enabled(id, true) {
                 Ok(()) => shell_println!("Enabled item {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "disable" => {
@@ -33554,7 +35125,10 @@ fn cmd_autostart(args: &str) {
             };
             match autostart::set_enabled(id, false) {
                 Ok(()) => shell_println!("Disabled item {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delay" => {
@@ -33581,7 +35155,10 @@ fn cmd_autostart(args: &str) {
             };
             match autostart::set_delay(id, ms) {
                 Ok(()) => shell_println!("Set delay for item {} to {} ms.", id, ms),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "order" => {
@@ -33608,7 +35185,10 @@ fn cmd_autostart(args: &str) {
             };
             match autostart::set_order(id, ord) {
                 Ok(()) => shell_println!("Set order for item {} to {}.", id, ord),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "phase" => {
@@ -33638,7 +35218,10 @@ fn cmd_autostart(args: &str) {
             };
             match autostart::set_phase(id, phase) {
                 Ok(()) => shell_println!("Set phase for item {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "condition" | "cond" => {
@@ -33668,7 +35251,10 @@ fn cmd_autostart(args: &str) {
             };
             match autostart::set_condition(id, cond) {
                 Ok(()) => shell_println!("Set condition for item {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "args" => {
@@ -33688,7 +35274,10 @@ fn cmd_autostart(args: &str) {
             let arg_str = parts[2..].join(" ");
             match autostart::set_arguments(id, &arg_str) {
                 Ok(()) => shell_println!("Set arguments for item {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "desc" => {
@@ -33708,7 +35297,10 @@ fn cmd_autostart(args: &str) {
             let desc_str = parts[2..].join(" ");
             match autostart::set_description(id, &desc_str) {
                 Ok(()) => shell_println!("Set description for item {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "impact" => {
@@ -33738,7 +35330,10 @@ fn cmd_autostart(args: &str) {
             };
             match autostart::set_impact(id, imp) {
                 Ok(()) => shell_println!("Set impact for item {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "launch" => {
@@ -33765,7 +35360,10 @@ fn cmd_autostart(args: &str) {
             };
             match autostart::record_launch(id, dur) {
                 Ok(()) => shell_println!("Recorded launch for item {} ({} ms).", id, dur),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -33932,7 +35530,10 @@ fn cmd_schedtune(args: &str) {
                         shell_println!("Recompile:     {}", p.requires_recompile);
                         shell_println!("Reboot:        {}", p.requires_reboot);
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -33975,7 +35576,10 @@ fn cmd_schedtune(args: &str) {
                 };
                 match schedtune::create_profile(name, workload, model) {
                     Ok(id) => shell_println!("Created profile {} (id={}).", name, id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -33993,7 +35597,10 @@ fn cmd_schedtune(args: &str) {
                 };
                 match schedtune::remove_profile(id) {
                     Ok(()) => shell_println!("Removed profile {}.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34011,7 +35618,10 @@ fn cmd_schedtune(args: &str) {
                 };
                 match schedtune::apply_profile(id) {
                     Ok(()) => shell_println!("Applied profile {}.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34042,7 +35652,10 @@ fn cmd_schedtune(args: &str) {
                 };
                 match schedtune::set_timeslice(id, us) {
                     Ok(()) => shell_println!("Set timeslice to {} us.", us),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34076,7 +35689,10 @@ fn cmd_schedtune(args: &str) {
                 };
                 match schedtune::set_preempt(id, pm) {
                     Ok(()) => shell_println!("Set preemption model."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34107,7 +35723,10 @@ fn cmd_schedtune(args: &str) {
                 };
                 match schedtune::set_target_latency(id, us) {
                     Ok(()) => shell_println!("Set target latency to {} us.", us),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34133,7 +35752,10 @@ fn cmd_schedtune(args: &str) {
                     Ok(()) => {
                         shell_println!("Set interactive boost {}.", if on { "on" } else { "off" })
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34164,7 +35786,10 @@ fn cmd_schedtune(args: &str) {
                 };
                 match schedtune::set_affinity(id, v) {
                     Ok(()) => shell_println!("Set affinity strictness to {}.", v),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34198,7 +35823,10 @@ fn cmd_schedtune(args: &str) {
                 };
                 match schedtune::set_balance_strategy(id, bs) {
                     Ok(()) => shell_println!("Set balance strategy."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34222,7 +35850,10 @@ fn cmd_schedtune(args: &str) {
                 let on = parts[2] == "on" || parts[2] == "true";
                 match schedtune::set_numa_aware(id, on) {
                     Ok(()) => shell_println!("Set NUMA-aware {}.", if on { "on" } else { "off" }),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34252,7 +35883,10 @@ fn cmd_schedtune(args: &str) {
                             shell_println!("  - {}", d);
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34434,7 +36068,10 @@ fn cmd_mmtune(args: &str) {
                         shell_println!("Recompile:     {}", p.requires_recompile);
                         shell_println!("Reboot:        {}", p.requires_reboot);
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34476,7 +36113,10 @@ fn cmd_mmtune(args: &str) {
                 };
                 match mmtune::create_profile(name, workload, alloc) {
                     Ok(id) => shell_println!("Created profile {} (id={}).", name, id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34494,7 +36134,10 @@ fn cmd_mmtune(args: &str) {
                 };
                 match mmtune::remove_profile(id) {
                     Ok(()) => shell_println!("Removed profile {}.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34512,7 +36155,10 @@ fn cmd_mmtune(args: &str) {
                 };
                 match mmtune::apply_profile(id) {
                     Ok(()) => shell_println!("Applied profile {}.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34545,7 +36191,10 @@ fn cmd_mmtune(args: &str) {
                 };
                 match mmtune::set_overcommit(id, mode) {
                     Ok(()) => shell_println!("Set overcommit mode."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34579,7 +36228,10 @@ fn cmd_mmtune(args: &str) {
                 };
                 match mmtune::set_huge_pages(id, mode) {
                     Ok(()) => shell_println!("Set huge page mode."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34613,7 +36265,10 @@ fn cmd_mmtune(args: &str) {
                 };
                 match mmtune::set_compact_level(id, lvl) {
                     Ok(()) => shell_println!("Set compaction level."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34644,7 +36299,10 @@ fn cmd_mmtune(args: &str) {
                 };
                 match mmtune::set_swappiness(id, val) {
                     Ok(()) => shell_println!("Set swappiness to {}.", val),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34688,7 +36346,10 @@ fn cmd_mmtune(args: &str) {
                 }
                 match mmtune::set_dirty_bg_ratio(id, bg) {
                     Ok(()) => shell_println!("Set dirty ratios to {}/{}.", ratio, bg),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34719,7 +36380,10 @@ fn cmd_mmtune(args: &str) {
                 };
                 match mmtune::set_cache_pressure(id, val) {
                     Ok(()) => shell_println!("Set VFS cache pressure to {}.", val),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34743,7 +36407,10 @@ fn cmd_mmtune(args: &str) {
                 let on = parts[2] == "on" || parts[2] == "true";
                 match mmtune::set_zram_enabled(id, on) {
                     Ok(()) => shell_println!("Set ZRAM {}.", if on { "on" } else { "off" }),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34767,7 +36434,10 @@ fn cmd_mmtune(args: &str) {
                 let on = parts[2] == "on" || parts[2] == "true";
                 match mmtune::set_zero_on_free(id, on) {
                     Ok(()) => shell_println!("Set zero-on-free {}.", if on { "on" } else { "off" }),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34801,7 +36471,10 @@ fn cmd_mmtune(args: &str) {
                 };
                 match mmtune::set_reclaim(id, rs) {
                     Ok(()) => shell_println!("Set reclaim strategy."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34831,7 +36504,10 @@ fn cmd_mmtune(args: &str) {
                             shell_println!("  - {}", d);
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34966,7 +36642,10 @@ fn cmd_capsettings(args: &str) {
                             shell_println!("  {:?}", cap);
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -34983,7 +36662,10 @@ fn cmd_capsettings(args: &str) {
                 let desc = parts[2..].join(" ");
                 match capsettings::create_group(name, &desc, &[]) {
                     Ok(id) => shell_println!("Created group {} (id={}).", name, id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -35001,7 +36683,10 @@ fn cmd_capsettings(args: &str) {
                 };
                 match capsettings::remove_group(id) {
                     Ok(()) => shell_println!("Removed group {}.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -35032,7 +36717,10 @@ fn cmd_capsettings(args: &str) {
                 };
                 match capsettings::group_add_cap(gid, cap) {
                     Ok(()) => shell_println!("Added {:?} to group {}.", cap, gid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -35063,7 +36751,10 @@ fn cmd_capsettings(args: &str) {
                 };
                 match capsettings::group_remove_cap(gid, cap) {
                     Ok(()) => shell_println!("Removed {:?} from group {}.", cap, gid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -35125,7 +36816,10 @@ fn cmd_capsettings(args: &str) {
                             Err(e) => shell_println!("Error resolving caps: {:?}", e),
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -35148,7 +36842,10 @@ fn cmd_capsettings(args: &str) {
                 };
                 match capsettings::assign_user(uid, parts[2]) {
                     Ok(id) => shell_println!("Created user assignment (id={}).", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -35179,7 +36876,10 @@ fn cmd_capsettings(args: &str) {
                 };
                 match capsettings::user_add_group(uid, gid) {
                     Ok(()) => shell_println!("Added user {} to group {}.", uid, gid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -35210,7 +36910,10 @@ fn cmd_capsettings(args: &str) {
                 };
                 match capsettings::user_add_cap(uid, cap) {
                     Ok(()) => shell_println!("Added {:?} to user {}.", cap, uid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -35241,7 +36944,10 @@ fn cmd_capsettings(args: &str) {
                 };
                 match capsettings::user_deny_cap(uid, cap) {
                     Ok(()) => shell_println!("Denied {:?} for user {}.", cap, uid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -35265,7 +36971,10 @@ fn cmd_capsettings(args: &str) {
                 match capsettings::check_access(uid, parts[2]) {
                     Ok(true) => shell_println!("Access GRANTED for user {} to {}", uid, parts[2]),
                     Ok(false) => shell_println!("Access DENIED for user {} to {}", uid, parts[2]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -35332,7 +37041,10 @@ fn cmd_capsettings(args: &str) {
                     || parts.get(3).copied() == Some("r");
                 match capsettings::set_path_requirement(parts[1], &[cap], recursive) {
                     Ok(id) => shell_println!("Created path requirement (id={}).", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -35350,7 +37062,10 @@ fn cmd_capsettings(args: &str) {
                 };
                 match capsettings::remove_path_requirement(id) {
                     Ok(()) => shell_println!("Removed path requirement {}.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -35567,7 +37282,10 @@ fn cmd_vpn(args: &str) {
                     shell_println!("Auto connect:  {}", p.auto_connect);
                     shell_println!("Auto reconnect:{}", p.auto_reconnect);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "create" => {
@@ -35601,7 +37319,10 @@ fn cmd_vpn(args: &str) {
             };
             match vpn::create_profile(name, proto, parts[3], port) {
                 Ok(id) => shell_println!("Created VPN profile {} (id={}).", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
@@ -35615,7 +37336,10 @@ fn cmd_vpn(args: &str) {
             };
             match vpn::remove_profile(id) {
                 Ok(()) => shell_println!("Removed VPN profile {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "connect" | "up" => {
@@ -35629,12 +37353,18 @@ fn cmd_vpn(args: &str) {
             };
             match vpn::connect(id) {
                 Ok(()) => shell_println!("Connected to VPN."),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "disconnect" | "down" => match vpn::disconnect() {
             Ok(()) => shell_println!("Disconnected from VPN."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "auth" => {
             if parts.len() < 3 {
@@ -35663,7 +37393,10 @@ fn cmd_vpn(args: &str) {
             };
             match vpn::set_auth(id, auth) {
                 Ok(()) => shell_println!("Set authentication method."),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "transport" => {
@@ -35690,7 +37423,10 @@ fn cmd_vpn(args: &str) {
             };
             match vpn::set_transport(id, t) {
                 Ok(()) => shell_println!("Set transport."),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "killswitch" | "ks" => {
@@ -35712,7 +37448,10 @@ fn cmd_vpn(args: &str) {
                 Ok(()) => {
                     shell_println!("Kill switch {}.", if on { "enabled" } else { "disabled" })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "routeall" => {
@@ -35735,7 +37474,10 @@ fn cmd_vpn(args: &str) {
                     "Route all traffic {}.",
                     if on { "enabled" } else { "disabled" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "autoconnect" | "ac" => {
@@ -35757,7 +37499,10 @@ fn cmd_vpn(args: &str) {
                 Ok(()) => {
                     shell_println!("Auto-connect {}.", if on { "enabled" } else { "disabled" })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "dns" => {
@@ -35776,7 +37521,10 @@ fn cmd_vpn(args: &str) {
             };
             match vpn::add_dns(id, parts[2]) {
                 Ok(()) => shell_println!("Added DNS server {}.", parts[2]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -35884,7 +37632,10 @@ fn cmd_dyndns(args: &str) {
                     shell_println!("Updates:     {}", e.update_count);
                     shell_println!("Failures:    {}", e.fail_count);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "add" => {
@@ -35909,7 +37660,10 @@ fn cmd_dyndns(args: &str) {
             };
             match dyndns::add_entry(parts[1], provider, parts[3], parts[4]) {
                 Ok(id) => shell_println!("Added DDNS entry {} (id={}).", parts[1], id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
@@ -35923,7 +37677,10 @@ fn cmd_dyndns(args: &str) {
             };
             match dyndns::remove_entry(id) {
                 Ok(()) => shell_println!("Removed DDNS entry {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" => {
@@ -35937,7 +37694,10 @@ fn cmd_dyndns(args: &str) {
             };
             match dyndns::set_enabled(id, true) {
                 Ok(()) => shell_println!("Enabled entry {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "disable" => {
@@ -35951,7 +37711,10 @@ fn cmd_dyndns(args: &str) {
             };
             match dyndns::set_enabled(id, false) {
                 Ok(()) => shell_println!("Disabled entry {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "interval" => {
@@ -35978,7 +37741,10 @@ fn cmd_dyndns(args: &str) {
             };
             match dyndns::set_interval(id, secs) {
                 Ok(()) => shell_println!("Set interval to {} s.", secs),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "update" => {
@@ -35997,7 +37763,10 @@ fn cmd_dyndns(args: &str) {
             };
             match dyndns::update_now(id, parts[2]) {
                 Ok(()) => shell_println!("Updated DDNS entry with IP {}.", parts[2]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "forwards" | "fwd" => {
@@ -36067,7 +37836,10 @@ fn cmd_dyndns(args: &str) {
             match dyndns::add_forward(parts[1], ext, int, proto, parts[5], dyndns::NatMethod::Upnp)
             {
                 Ok(id) => shell_println!("Added port forward (id={}).", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rmfwd" => {
@@ -36081,7 +37853,10 @@ fn cmd_dyndns(args: &str) {
             };
             match dyndns::remove_forward(id) {
                 Ok(()) => shell_println!("Removed port forward {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "router" => match dyndns::router_info() {
@@ -36420,7 +38195,10 @@ fn cmd_appnotify(args: &str) {
                             }
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36431,7 +38209,10 @@ fn cmd_appnotify(args: &str) {
                 let name = parts[2..].join(" ");
                 match appnotify::register_app(parts[1], &name) {
                     Ok(()) => shell_println!("Registered: {} ({})", name, parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36441,7 +38222,10 @@ fn cmd_appnotify(args: &str) {
             } else {
                 match appnotify::unregister_app(parts[1]) {
                     Ok(()) => shell_println!("Unregistered: {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36451,7 +38235,10 @@ fn cmd_appnotify(args: &str) {
             } else {
                 match appnotify::set_app_enabled(parts[1], true) {
                     Ok(()) => shell_println!("Enabled: {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36461,7 +38248,10 @@ fn cmd_appnotify(args: &str) {
             } else {
                 match appnotify::set_app_enabled(parts[1], false) {
                     Ok(()) => shell_println!("Disabled: {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36476,7 +38266,10 @@ fn cmd_appnotify(args: &str) {
                 };
                 match appnotify::set_app_sound(parts[1], snd) {
                     Ok(()) => shell_println!("Sound set for {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36499,7 +38292,10 @@ fn cmd_appnotify(args: &str) {
                 };
                 match appnotify::set_app_display_mode(parts[1], mode) {
                     Ok(()) => shell_println!("Display mode set for {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36514,7 +38310,10 @@ fn cmd_appnotify(args: &str) {
                         if allow { "allowed" } else { "denied" },
                         parts[1]
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36525,9 +38324,15 @@ fn cmd_appnotify(args: &str) {
                 match parts[2].parse::<u32>() {
                     Ok(v) => match appnotify::set_rate_limit(parts[1], v) {
                         Ok(()) => shell_println!("Rate limit set to {}/min for {}", v, parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid number"),
+                    Err(_) => {
+                        shell_println!("Invalid number");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36542,7 +38347,10 @@ fn cmd_appnotify(args: &str) {
                         if g { "enabled" } else { "disabled" },
                         parts[1]
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36558,7 +38366,10 @@ fn cmd_appnotify(args: &str) {
                     appnotify::SoundChoice::SystemDefault,
                 ) {
                     Ok(()) => shell_println!("Added type '{}' to {}", parts[2], parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36568,7 +38379,10 @@ fn cmd_appnotify(args: &str) {
             } else {
                 match appnotify::unregister_notification_type(parts[1], parts[2]) {
                     Ok(()) => shell_println!("Removed type '{}' from {}", parts[2], parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36578,7 +38392,10 @@ fn cmd_appnotify(args: &str) {
             } else {
                 match appnotify::set_type_enabled(parts[1], parts[2], true) {
                     Ok(()) => shell_println!("Enabled '{}' for {}", parts[2], parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36588,7 +38405,10 @@ fn cmd_appnotify(args: &str) {
             } else {
                 match appnotify::set_type_enabled(parts[1], parts[2], false) {
                     Ok(()) => shell_println!("Disabled '{}' for {}", parts[2], parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36606,7 +38426,10 @@ fn cmd_appnotify(args: &str) {
                 };
                 match appnotify::set_type_sound(parts[1], parts[2], snd) {
                     Ok(()) => shell_println!("Type sound set for {}:{}", parts[1], parts[2]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36645,7 +38468,10 @@ fn cmd_appnotify(args: &str) {
             } else {
                 match appnotify::register_sound(parts[1], parts[2], parts[3]) {
                     Ok(()) => shell_println!("Added sound: {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36765,7 +38591,10 @@ fn cmd_kernelbuild(args: &str) {
                             }
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36795,7 +38624,10 @@ fn cmd_kernelbuild(args: &str) {
                     match kernelbuild::register_component(parts[1], parts[2], ct, parts[4], output)
                     {
                         Ok(()) => shell_println!("Registered: {}", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -36806,7 +38638,10 @@ fn cmd_kernelbuild(args: &str) {
             } else {
                 match kernelbuild::remove_component(parts[1]) {
                     Ok(()) => shell_println!("Removed: {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36816,7 +38651,10 @@ fn cmd_kernelbuild(args: &str) {
             } else {
                 match kernelbuild::set_param(parts[1], parts[2], parts[3]) {
                     Ok(()) => shell_println!("Set {}={} for {}", parts[2], parts[3], parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36827,7 +38665,10 @@ fn cmd_kernelbuild(args: &str) {
                 let desc = parts[4..].join(" ");
                 match kernelbuild::add_param(parts[1], parts[2], &desc, parts[3], &[], false) {
                     Ok(()) => shell_println!("Added param {} to {}", parts[2], parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36837,7 +38678,10 @@ fn cmd_kernelbuild(args: &str) {
             } else {
                 match kernelbuild::reset_param(parts[1], parts[2]) {
                     Ok(()) => shell_println!("Reset {} for {}", parts[2], parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36847,7 +38691,10 @@ fn cmd_kernelbuild(args: &str) {
             } else {
                 match kernelbuild::reset_all_params(parts[1]) {
                     Ok(()) => shell_println!("Reset all params for {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36869,7 +38716,10 @@ fn cmd_kernelbuild(args: &str) {
                 if let Some(level) = level {
                     match kernelbuild::set_opt_level(parts[1], level) {
                         Ok(()) => shell_println!("Opt level set to {:?} for {}", level, parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -36885,7 +38735,10 @@ fn cmd_kernelbuild(args: &str) {
                         if on { "enabled" } else { "disabled" },
                         parts[1]
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36895,7 +38748,10 @@ fn cmd_kernelbuild(args: &str) {
             } else {
                 match kernelbuild::add_dependency(parts[1], parts[2]) {
                     Ok(()) => shell_println!("Added dep {} → {}", parts[1], parts[2]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -36905,7 +38761,10 @@ fn cmd_kernelbuild(args: &str) {
             } else {
                 match kernelbuild::build(parts[1]) {
                     Ok(()) => shell_println!("Build successful: {}", parts[1]),
-                    Err(e) => shell_println!("Build error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Build error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -37038,11 +38897,17 @@ fn cmd_wakesensor(args: &str) {
         }
         "enable" => match wakesensor::set_globally_enabled(true) {
             Ok(()) => shell_println!("Wake sensors globally enabled"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" => match wakesensor::set_globally_enabled(false) {
             Ok(()) => shell_println!("Wake sensors globally disabled"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "consent" => {
             if parts.len() < 3 {
@@ -37071,7 +38936,10 @@ fn cmd_wakesensor(args: &str) {
                     };
                     match result {
                         Ok(()) => shell_println!("Consent updated for {:?}", sensor),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -37085,7 +38953,10 @@ fn cmd_wakesensor(args: &str) {
                     Ok(()) => {
                         shell_println!("Camera wake {}", if on { "enabled" } else { "disabled" })
                     }
-                    Err(e) => shell_println!("Error: {:?} (consent required?)", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?} (consent required?)", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -37098,7 +38969,10 @@ fn cmd_wakesensor(args: &str) {
                     Ok(()) => {
                         shell_println!("Mic wake {}", if on { "enabled" } else { "disabled" })
                     }
-                    Err(e) => shell_println!("Error: {:?} (consent required?)", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?} (consent required?)", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -37129,7 +39003,10 @@ fn cmd_wakesensor(args: &str) {
                 if let (Some(sensor), Some(sens)) = (sensor, sens) {
                     match wakesensor::set_sensitivity(sensor, sens) {
                         Ok(()) => shell_println!("Sensitivity set to {:?}", sens),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -37150,9 +39027,15 @@ fn cmd_wakesensor(args: &str) {
                     match parts[2].parse::<u32>() {
                         Ok(v) => match wakesensor::set_custom_threshold(sensor, v) {
                             Ok(()) => shell_println!("Threshold set to {}", v.min(100)),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         },
-                        Err(_) => shell_println!("Invalid number"),
+                        Err(_) => {
+                            shell_println!("Invalid number");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -37174,14 +39057,20 @@ fn cmd_wakesensor(args: &str) {
                     if parts[2] == "clear" {
                         match wakesensor::set_active_hours(sensor, None, None) {
                             Ok(()) => shell_println!("Schedule cleared"),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         match (parts[2].parse::<u8>(), parts[3].parse::<u8>()) {
                             (Ok(s), Ok(e)) => {
                                 match wakesensor::set_active_hours(sensor, Some(s), Some(e)) {
                                     Ok(()) => shell_println!("Active hours: {}:00 - {}:00", s, e),
-                                    Err(e) => shell_println!("Error: {:?}", e),
+                                    Err(e) => {
+                                        shell_println!("Error: {:?}", e);
+                                        set_exit(1);
+                                    }
                                 }
                             }
                             _ => shell_println!("Invalid hours"),
@@ -37197,9 +39086,15 @@ fn cmd_wakesensor(args: &str) {
                 match parts[1].parse::<u32>() {
                     Ok(v) => match wakesensor::set_cooldown(v) {
                         Ok(()) => shell_println!("Cooldown set to {} s", v.clamp(1, 300)),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid number"),
+                    Err(_) => {
+                        shell_println!("Invalid number");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -37217,7 +39112,10 @@ fn cmd_wakesensor(args: &str) {
                             "always active"
                         }
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -37377,7 +39275,10 @@ fn cmd_netsettings(args: &str) {
                                 shell_println!("\nWi-Fi:     {}", i.connected_ssid);
                             }
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -37409,7 +39310,10 @@ fn cmd_netsettings(args: &str) {
                         };
                         match netsettings::add_interface(parts[1], parts[1], it, mac) {
                             Ok(()) => shell_println!("Added: {}", parts[1]),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
                 }
@@ -37424,7 +39328,10 @@ fn cmd_netsettings(args: &str) {
                 } else {
                     match netsettings::remove_interface(parts[1]) {
                         Ok(()) => shell_println!("Removed: {}", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -37438,7 +39345,10 @@ fn cmd_netsettings(args: &str) {
                 } else {
                     match netsettings::set_link_state(parts[1], netsettings::LinkState::Up) {
                         Ok(()) => shell_println!("{} up", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -37452,7 +39362,10 @@ fn cmd_netsettings(args: &str) {
                 } else {
                     match netsettings::set_link_state(parts[1], netsettings::LinkState::Down) {
                         Ok(()) => shell_println!("{} down", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -37480,7 +39393,10 @@ fn cmd_netsettings(args: &str) {
                     let gw = parts.get(5).copied().unwrap_or("");
                     match netsettings::set_ipv4(parts[1], method, addr, mask, gw) {
                         Ok(()) => shell_println!("IPv4 set for {}", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -37508,7 +39424,10 @@ fn cmd_netsettings(args: &str) {
                     let gw = parts.get(5).copied().unwrap_or("");
                     match netsettings::set_ipv6(parts[1], method, addr, prefix, gw) {
                         Ok(()) => shell_println!("IPv6 set for {}", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -37522,13 +39441,19 @@ fn cmd_netsettings(args: &str) {
                 } else if parts[2] == "auto" {
                     match netsettings::set_dns(parts[1], true, &[]) {
                         Ok(()) => shell_println!("DNS set to auto for {}", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     let servers: Vec<&str> = parts[2].split(',').collect();
                     match netsettings::set_dns(parts[1], false, &servers) {
                         Ok(()) => shell_println!("DNS servers set for {}", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -37543,7 +39468,10 @@ fn cmd_netsettings(args: &str) {
                     let url = if parts[2] == "off" { "" } else { parts[2] };
                     match netsettings::set_doh(parts[1], url) {
                         Ok(()) => shell_println!("DoH set for {}", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -37558,9 +39486,15 @@ fn cmd_netsettings(args: &str) {
                     match parts[2].parse::<u32>() {
                         Ok(v) => match netsettings::set_mtu(parts[1], v) {
                             Ok(()) => shell_println!("MTU set to {} for {}", v, parts[1]),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         },
-                        Err(_) => shell_println!("Invalid MTU"),
+                        Err(_) => {
+                            shell_println!("Invalid MTU");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -37611,7 +39545,10 @@ fn cmd_netsettings(args: &str) {
                     let pass = parts.get(3).copied().unwrap_or("");
                     match netsettings::connect_wifi(parts[1], parts[2], pass) {
                         Ok(()) => shell_println!("Connected to {}", parts[2]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -37625,7 +39562,10 @@ fn cmd_netsettings(args: &str) {
                 } else {
                     match netsettings::disconnect_wifi(parts[1]) {
                         Ok(()) => shell_println!("Disconnected"),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -37666,7 +39606,10 @@ fn cmd_netsettings(args: &str) {
                 } else {
                     match netsettings::forget_network(parts[1]) {
                         Ok(()) => shell_println!("Forgot: {}", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -38149,9 +40092,15 @@ fn cmd_perfmon(args: &str) {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match perfmon::dismiss_alert(id) {
                         Ok(()) => shell_println!("Alert {} dismissed", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(_) => shell_println!("Invalid ID"),
+                    Err(_) => {
+                        shell_println!("Invalid ID");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -38195,7 +40144,10 @@ fn cmd_perfmon(args: &str) {
                             shell_println!("Interval set to {} ms (clamped from {})", effective, v);
                         }
                     }
-                    Err(_) => shell_println!("Invalid value"),
+                    Err(_) => {
+                        shell_println!("Invalid value");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -38280,7 +40232,10 @@ fn cmd_focusassist(args: &str) {
                         shell_println!("Focus assist ON: {} ({:?})", p.name, p.mode);
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "off" => match focusassist::deactivate() {
@@ -38304,7 +40259,10 @@ fn cmd_focusassist(args: &str) {
                     }
                 }
             }
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "profiles" => {
             let profiles = focusassist::list_profiles();
@@ -38351,7 +40309,10 @@ fn cmd_focusassist(args: &str) {
             };
             match focusassist::create_profile(name, mode) {
                 Ok(id) => shell_println!("Created profile '{}' (id={})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -38366,7 +40327,10 @@ fn cmd_focusassist(args: &str) {
             }
             match focusassist::remove_profile(id) {
                 Ok(()) => shell_println!("Removed profile {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "mode" => {
@@ -38392,7 +40356,10 @@ fn cmd_focusassist(args: &str) {
             };
             match focusassist::set_mode(id, mode) {
                 Ok(()) => shell_println!("Set profile {} mode to {:?}", id, mode),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "addapp" => {
@@ -38408,7 +40375,10 @@ fn cmd_focusassist(args: &str) {
             }
             match focusassist::add_priority_app(id, app_id) {
                 Ok(()) => shell_println!("Added '{}' to profile {} priority apps", app_id, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rmapp" => {
@@ -38424,7 +40394,10 @@ fn cmd_focusassist(args: &str) {
             }
             match focusassist::remove_priority_app(id, app_id) {
                 Ok(()) => shell_println!("Removed '{}' from profile {} priority apps", app_id, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "apps" => {
@@ -38448,7 +40421,10 @@ fn cmd_focusassist(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "reply" => {
@@ -38474,7 +40450,10 @@ fn cmd_focusassist(args: &str) {
                         shell_println!("Cleared auto-reply for profile {}", id);
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "missed" => {
@@ -38581,7 +40560,10 @@ fn cmd_focusassist(args: &str) {
             }
             match focusassist::add_schedule(name, days, sh, sm, eh, em, pid) {
                 Ok(id) => shell_println!("Created schedule '{}' (id={})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rmsched" => {
@@ -38596,7 +40578,10 @@ fn cmd_focusassist(args: &str) {
             }
             match focusassist::remove_schedule(id) {
                 Ok(()) => shell_println!("Removed schedule {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "autofs" => {
@@ -38739,7 +40724,10 @@ fn cmd_storageclean(args: &str) {
                     shell_println!("\n* = recommended for cleanup");
                 }
             }
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "clean" => {
             let cat_name = parts.get(1).copied().unwrap_or("all");
@@ -38775,7 +40763,10 @@ fn cmd_storageclean(args: &str) {
                         );
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rm" => {
@@ -38801,7 +40792,10 @@ fn cmd_storageclean(args: &str) {
                         );
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "items" => {
@@ -38855,7 +40849,10 @@ fn cmd_storageclean(args: &str) {
             if let Some(pct) = parts.get(1).and_then(|s| s.parse::<u8>().ok()) {
                 match storageclean::set_auto_threshold(pct) {
                     Ok(()) => shell_println!("Auto-clean threshold: {}%", pct),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: sclean threshold <0-100>");
@@ -38909,7 +40906,10 @@ fn cmd_storageclean(args: &str) {
             } else {
                 match storageclean::add_exclusion(path) {
                     Ok(()) => shell_println!("Added exclusion: {}", path),
-                    Err(e) => shell_println!("Error: {:?} (exclusions must be absolute paths)", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?} (exclusions must be absolute paths)", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -38920,7 +40920,10 @@ fn cmd_storageclean(args: &str) {
             } else {
                 match storageclean::remove_exclusion(path) {
                     Ok(()) => shell_println!("Removed exclusion: {}", path),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -39023,7 +41026,10 @@ fn cmd_sysdiag(args: &str) {
                                 shell_println!("  All tests passed.");
                             }
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Unknown category: {}", cname);
@@ -39064,7 +41070,10 @@ fn cmd_sysdiag(args: &str) {
                             }
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -39252,15 +41261,24 @@ fn cmd_nightlight(args: &str) {
         }
         "on" => match nightlight::set_enabled(true) {
             Ok(()) => shell_println!("Night light enabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "off" => match nightlight::set_enabled(false) {
             Ok(()) => shell_println!("Night light disabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "toggle" => match nightlight::toggle() {
             Ok(on) => shell_println!("Night light {}.", if on { "enabled" } else { "disabled" }),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "temp" => {
             if let Some(val) = parts.get(1) {
@@ -39270,7 +41288,10 @@ fn cmd_nightlight(args: &str) {
                             "Night temperature set to {}",
                             nightlight::format_temp(t)
                         ),
-                        Err(e) => shell_println!("Error: {:?} (range: 1000-6500)", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?} (range: 1000-6500)", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid temperature: {}", val);
@@ -39288,7 +41309,10 @@ fn cmd_nightlight(args: &str) {
                 if let Ok(t) = val.parse::<u32>() {
                     match nightlight::set_day_temp(t) {
                         Ok(()) => shell_println!("Day temperature set to {}K", t),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid temperature: {}", val);
@@ -39305,20 +41329,29 @@ fn cmd_nightlight(args: &str) {
                     "manual" => {
                         match nightlight::set_schedule_mode(nightlight::ScheduleMode::Manual) {
                             Ok(()) => shell_println!("Schedule mode: Manual"),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
                     "scheduled" | "fixed" => {
                         match nightlight::set_schedule_mode(nightlight::ScheduleMode::Scheduled) {
                             Ok(()) => shell_println!("Schedule mode: Scheduled"),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
                     "sunset" | "sun" | "auto" => {
                         match nightlight::set_schedule_mode(nightlight::ScheduleMode::SunsetSunrise)
                         {
                             Ok(()) => shell_println!("Schedule mode: Sunset/Sunrise"),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
                     _ => {
@@ -39338,7 +41371,10 @@ fn cmd_nightlight(args: &str) {
                 if let Some((h, m)) = parse_time_hhmm(time_str) {
                     match nightlight::set_start_time(h, m) {
                         Ok(()) => shell_println!("Start time set to {:02}:{:02}", h, m),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid time. Use HH:MM format (e.g., 21:00)");
@@ -39354,7 +41390,10 @@ fn cmd_nightlight(args: &str) {
                 if let Some((h, m)) = parse_time_hhmm(time_str) {
                     match nightlight::set_end_time(h, m) {
                         Ok(()) => shell_println!("End time set to {:02}:{:02}", h, m),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid time. Use HH:MM format (e.g., 07:00)");
@@ -39370,7 +41409,10 @@ fn cmd_nightlight(args: &str) {
                 if let (Ok(lat), Ok(lon)) = (lat_str.parse::<i32>(), lon_str.parse::<i32>()) {
                     match nightlight::set_location(lat, lon) {
                         Ok(()) => shell_println!("Location set to lat={}, lon={}", lat, lon),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid coordinates.");
@@ -39387,7 +41429,10 @@ fn cmd_nightlight(args: &str) {
                 if let Ok(mins) = val.parse::<u32>() {
                     match nightlight::set_transition_minutes(mins) {
                         Ok(()) => shell_println!("Transition duration set to {} minutes", mins),
-                        Err(e) => shell_println!("Error: {:?} (max 120)", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?} (max 120)", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid value: {}", val);
@@ -39413,7 +41458,10 @@ fn cmd_nightlight(args: &str) {
                     Ok(()) => {
                         shell_println!("Disable on battery: {}", if disable { "yes" } else { "no" })
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: nlight battery <on|off>");
@@ -39425,7 +41473,10 @@ fn cmd_nightlight(args: &str) {
             let active = matches!(active, "on" | "true" | "yes");
             match nightlight::set_manual_override(active) {
                 Ok(()) => shell_println!("Manual override: {}", if active { "ON" } else { "OFF" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "check" => {
@@ -39591,7 +41642,10 @@ fn cmd_tasksched(args: &str) {
                                     shell_println!("  Description: {}", t.description);
                                 }
                             }
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Invalid task ID: {}", id_str);
@@ -39624,7 +41678,10 @@ fn cmd_tasksched(args: &str) {
                     };
                     match tasksched::create_task(name, cmd, sched_type) {
                         Ok(id) => shell_println!("Created task #{}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!(
@@ -39641,7 +41698,10 @@ fn cmd_tasksched(args: &str) {
                     if let Ok(id) = id_str.parse::<u64>() {
                         match tasksched::remove_task(id) {
                             Ok(()) => shell_println!("Task #{} removed.", id),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Invalid task ID.");
@@ -39664,7 +41724,10 @@ fn cmd_tasksched(args: &str) {
                                 Ok(()) => {
                                     shell_println!("Task #{} time set to {:02}:{:02}", id, h, m)
                                 }
-                                Err(e) => shell_println!("Error: {:?}", e),
+                                Err(e) => {
+                                    shell_println!("Error: {:?}", e);
+                                    set_exit(1);
+                                }
                             }
                         } else {
                             shell_println!("Invalid time format. Use HH:MM");
@@ -39704,7 +41767,10 @@ fn cmd_tasksched(args: &str) {
                                 Ok(()) => {
                                     shell_println!("Task #{} weekday {} = {}", id, day_str, enabled)
                                 }
-                                Err(e) => shell_println!("Error: {:?}", e),
+                                Err(e) => {
+                                    shell_println!("Error: {:?}", e);
+                                    set_exit(1);
+                                }
                             }
                         } else {
                             shell_println!(
@@ -39731,7 +41797,10 @@ fn cmd_tasksched(args: &str) {
                     if let (Ok(id), Ok(mins)) = (id_str.parse::<u64>(), min_str.parse::<u32>()) {
                         match tasksched::set_interval(id, mins) {
                             Ok(()) => shell_println!("Task #{} interval set to {} min", id, mins),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Invalid arguments.");
@@ -39752,7 +41821,10 @@ fn cmd_tasksched(args: &str) {
                         let task_args = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
                         match tasksched::set_arguments(id, &task_args) {
                             Ok(()) => shell_println!("Task #{} arguments set.", id),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Invalid task ID.");
@@ -39773,7 +41845,10 @@ fn cmd_tasksched(args: &str) {
                         let desc = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
                         match tasksched::set_description(id, &desc) {
                             Ok(()) => shell_println!("Task #{} description set.", id),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Invalid task ID.");
@@ -39793,7 +41868,10 @@ fn cmd_tasksched(args: &str) {
                     if let Ok(id) = id_str.parse::<u64>() {
                         match tasksched::enable_task(id) {
                             Ok(()) => shell_println!("Task #{} enabled.", id),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Invalid task ID.");
@@ -39813,7 +41891,10 @@ fn cmd_tasksched(args: &str) {
                     if let Ok(id) = id_str.parse::<u64>() {
                         match tasksched::disable_task(id) {
                             Ok(()) => shell_println!("Task #{} disabled.", id),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Invalid task ID.");
@@ -39866,7 +41947,10 @@ fn cmd_tasksched(args: &str) {
                                 let _ = tasksched::record_complete(id, true, 0);
                                 shell_println!("Task #{} completed.", id);
                             }
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Invalid task ID.");
@@ -40014,7 +42098,10 @@ fn cmd_envvars(args: &str) {
                 let full_value = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
                 match envvars::set_system(name, &full_value) {
                     Ok(()) => shell_println!("{}={}", name, full_value),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: envvars set <NAME> <value...>");
@@ -40025,7 +42112,10 @@ fn cmd_envvars(args: &str) {
             if let Some(name) = parts.get(1) {
                 match envvars::remove_system(name) {
                     Ok(()) => shell_println!("{} removed.", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: envvars rm <NAME>");
@@ -40054,7 +42144,10 @@ fn cmd_envvars(args: &str) {
                                 let val = parts.get(4..).map(|p| p.join(" ")).unwrap_or_default();
                                 match envvars::set_user(uid, name, &val) {
                                     Ok(()) => shell_println!("[uid {}] {}={}", uid, name, val),
-                                    Err(e) => shell_println!("Error: {:?}", e),
+                                    Err(e) => {
+                                        shell_println!("Error: {:?}", e);
+                                        set_exit(1);
+                                    }
                                 }
                             } else {
                                 shell_println!("Usage: envvars user <uid> set <NAME> <value>");
@@ -40076,7 +42169,10 @@ fn cmd_envvars(args: &str) {
                             if let Some(name) = parts.get(3) {
                                 match envvars::remove_user(uid, name) {
                                     Ok(()) => shell_println!("[uid {}] {} removed.", uid, name),
-                                    Err(e) => shell_println!("Error: {:?}", e),
+                                    Err(e) => {
+                                        shell_println!("Error: {:?}", e);
+                                        set_exit(1);
+                                    }
                                 }
                             } else {
                                 shell_println!("Usage: envvars user <uid> rm <NAME>");
@@ -40139,7 +42235,10 @@ fn cmd_envvars(args: &str) {
                     if let Some(dir) = parts.get(2) {
                         match envvars::path_append(dir) {
                             Ok(()) => shell_println!("Appended {} to PATH", dir),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Usage: envvars path append <dir>");
@@ -40150,7 +42249,10 @@ fn cmd_envvars(args: &str) {
                     if let Some(dir) = parts.get(2) {
                         match envvars::path_prepend(dir) {
                             Ok(()) => shell_println!("Prepended {} to PATH", dir),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Usage: envvars path prepend <dir>");
@@ -40161,7 +42263,10 @@ fn cmd_envvars(args: &str) {
                     if let Some(dir) = parts.get(2) {
                         match envvars::path_remove(dir) {
                             Ok(()) => shell_println!("Removed {} from PATH", dir),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Usage: envvars path rm <dir>");
@@ -40274,11 +42379,17 @@ fn cmd_bluetooth(args: &str) {
         }
         "on" => match bluetooth::set_enabled(true) {
             Ok(()) => shell_println!("Bluetooth enabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "off" => match bluetooth::set_enabled(false) {
             Ok(()) => shell_println!("Bluetooth disabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "scan" => match bluetooth::scan() {
             Ok(results) => {
@@ -40299,7 +42410,10 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             }
-            Err(e) => shell_println!("Error: {:?} (is Bluetooth enabled?)", e),
+            Err(e) => {
+                shell_println!("Error: {:?} (is Bluetooth enabled?)", e);
+                set_exit(1);
+            }
         },
         "pair" => {
             // bt pair <address> <name> [type]
@@ -40318,7 +42432,10 @@ fn cmd_bluetooth(args: &str) {
                 };
                 match bluetooth::pair(addr, name, dt) {
                     Ok(()) => shell_println!("Paired with {} ({})", name, addr),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: bt pair <address> <name> [type]");
@@ -40331,7 +42448,10 @@ fn cmd_bluetooth(args: &str) {
             if let Some(addr) = parts.get(1) {
                 match bluetooth::unpair(addr) {
                     Ok(()) => shell_println!("Unpaired {}.", addr),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: bt unpair <address>");
@@ -40342,7 +42462,10 @@ fn cmd_bluetooth(args: &str) {
             if let Some(addr) = parts.get(1) {
                 match bluetooth::connect(addr) {
                     Ok(()) => shell_println!("Connected to {}.", addr),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: bt connect <address>");
@@ -40353,7 +42476,10 @@ fn cmd_bluetooth(args: &str) {
             if let Some(addr) = parts.get(1) {
                 match bluetooth::disconnect(addr) {
                     Ok(()) => shell_println!("Disconnected {}.", addr),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: bt disconnect <address>");
@@ -40365,7 +42491,10 @@ fn cmd_bluetooth(args: &str) {
                 let on = parts.get(2).copied().unwrap_or("on") != "off";
                 match bluetooth::set_trusted(addr, on) {
                     Ok(()) => shell_println!("Trust {}: {}", addr, on),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: bt trust <address> [on|off]");
@@ -40377,7 +42506,10 @@ fn cmd_bluetooth(args: &str) {
                 let on = parts.get(2).copied().unwrap_or("on") != "off";
                 match bluetooth::set_blocked(addr, on) {
                     Ok(()) => shell_println!("Block {}: {}", addr, on),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: bt block <address> [on|off]");
@@ -40406,7 +42538,10 @@ fn cmd_bluetooth(args: &str) {
                         shell_println!("  Profiles:   {}", profiles.join(", "));
                         shell_println!("  Connects:   {}", dev.connect_count);
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: bt info <address>");
@@ -40418,7 +42553,10 @@ fn cmd_bluetooth(args: &str) {
                 let full = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
                 match bluetooth::set_adapter_name(&full) {
                     Ok(()) => shell_println!("Adapter name set to: {}", full),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: bt name <adapter name>");
@@ -40429,7 +42567,10 @@ fn cmd_bluetooth(args: &str) {
             let on = parts.get(1).copied().unwrap_or("on") != "off";
             match bluetooth::set_discoverable(on) {
                 Ok(()) => shell_println!("Discoverable: {}", on),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "addscan" => {
@@ -40447,7 +42588,10 @@ fn cmd_bluetooth(args: &str) {
                     .unwrap_or(-60);
                 match bluetooth::add_scan_result(addr, name, dt, rssi) {
                     Ok(()) => shell_println!("Added scan result: {} {}", addr, name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: bt addscan <addr> <name> [type] [rssi]");
@@ -40546,7 +42690,10 @@ fn cmd_printmgr(args: &str) {
                             shell_println!("  Jobs:      {}", p.total_jobs);
                             shell_println!("  Pages:     {}", p.total_pages);
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid printer ID.");
@@ -40568,7 +42715,10 @@ fn cmd_printmgr(args: &str) {
                 };
                 match printmgr::add_printer(name, name, ptype, uri) {
                     Ok(id) => shell_println!("Added printer #{}: {}", id, name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: lp add <name> <uri> [local|network|virtual|bluetooth]");
@@ -40580,7 +42730,10 @@ fn cmd_printmgr(args: &str) {
                 if let Ok(id) = id_str.parse::<u64>() {
                     match printmgr::remove_printer(id) {
                         Ok(()) => shell_println!("Printer #{} removed.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid printer ID.");
@@ -40596,7 +42749,10 @@ fn cmd_printmgr(args: &str) {
                 if let Ok(id) = id_str.parse::<u64>() {
                     match printmgr::set_default(id) {
                         Ok(()) => shell_println!("Default printer set to #{}.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid printer ID.");
@@ -40628,7 +42784,10 @@ fn cmd_printmgr(args: &str) {
                             pages,
                             copies
                         ),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("No default printer. Use 'lp default <id>' first.");
@@ -40662,7 +42821,10 @@ fn cmd_printmgr(args: &str) {
                 if let Ok(id) = id_str.parse::<u64>() {
                     match printmgr::cancel_job(id) {
                         Ok(()) => shell_println!("Job #{} cancelled.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid job ID.");
@@ -40679,7 +42841,10 @@ fn cmd_printmgr(args: &str) {
                     let success = parts.get(2).copied().unwrap_or("ok") != "fail";
                     match printmgr::complete_job(id, success) {
                         Ok(()) => shell_println!("Job #{} completed (success={}).", id, success),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid job ID.");
@@ -40709,7 +42874,10 @@ fn cmd_printmgr(args: &str) {
         }
         "clear" => match printmgr::clear_completed() {
             Ok(n) => shell_println!("Cleared {} completed/cancelled jobs.", n),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (printers, pending, pages, hist, ops) = printmgr::stats();
@@ -40801,7 +42969,10 @@ fn cmd_screenrec(args: &str) {
                     shell_println!("  Capture begun.");
                 }
             }
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stop" => {
             if let Some(id_str) = parts.get(1) {
@@ -40816,7 +42987,10 @@ fn cmd_screenrec(args: &str) {
                             shell_println!("  Frames:   {}", rec.frame_count);
                             shell_println!("  File:     {}", rec.file_path.display());
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -40832,7 +43006,10 @@ fn cmd_screenrec(args: &str) {
                             r.id,
                             screenrec::format_duration(r.duration_seconds)
                         ),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("No active recording.");
@@ -40844,7 +43021,10 @@ fn cmd_screenrec(args: &str) {
             if let Some(rec) = active.last() {
                 match screenrec::pause_recording(rec.id) {
                     Ok(()) => shell_println!("Recording #{} paused.", rec.id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("No active recording.");
@@ -40855,7 +43035,10 @@ fn cmd_screenrec(args: &str) {
             if let Some(rec) = active.last() {
                 match screenrec::resume_recording(rec.id) {
                     Ok(()) => shell_println!("Recording #{} resumed.", rec.id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("No paused recording.");
@@ -40893,7 +43076,10 @@ fn cmd_screenrec(args: &str) {
                 };
                 match screenrec::set_format(f) {
                     Ok(()) => shell_println!("Format set to: {}", f.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: srec format <webm|mp4|gif>");
@@ -40915,7 +43101,10 @@ fn cmd_screenrec(args: &str) {
                 };
                 match screenrec::set_audio(m) {
                     Ok(()) => shell_println!("Audio mode: {}", m.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: srec audio <none|system|mic|both>");
@@ -40937,7 +43126,10 @@ fn cmd_screenrec(args: &str) {
                 };
                 match screenrec::set_quality(preset) {
                     Ok(()) => shell_println!("Quality: {}", preset.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: srec quality <low|medium|high|lossless>");
@@ -40949,7 +43141,10 @@ fn cmd_screenrec(args: &str) {
                 if let Ok(fps) = val.parse::<u32>() {
                     match screenrec::set_fps(fps) {
                         Ok(()) => shell_println!("FPS set to {}", fps),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid FPS.");
@@ -40970,7 +43165,10 @@ fn cmd_screenrec(args: &str) {
                 if let Ok(s) = val.parse::<u8>() {
                     match screenrec::set_countdown(s) {
                         Ok(()) => shell_println!("Countdown: {}s", s),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid value.");
@@ -40985,7 +43183,10 @@ fn cmd_screenrec(args: &str) {
             if let Some(dir) = parts.get(1) {
                 match screenrec::set_output_dir(dir) {
                     Ok(()) => shell_println!("Output directory: {}", dir),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: srec outdir <path>");
@@ -41108,7 +43309,10 @@ fn cmd_datausage(args: &str) {
                         );
                         shell_println!("  Connections : {}", app.connection_count);
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: datausage app <app_id>");
@@ -41128,7 +43332,10 @@ fn cmd_datausage(args: &str) {
                         datausage::format_bytes(rx),
                         datausage::format_bytes(tx)
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: datausage record <app_id> <rx_bytes> <tx_bytes>");
@@ -41188,18 +43395,27 @@ fn cmd_datausage(args: &str) {
             Some("on") | Some("yes") => {
                 match datausage::set_metered(datausage::MeteredStatus::Metered) {
                     Ok(()) => shell_println!("Connection set to metered."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             Some("off") | Some("no") => {
                 match datausage::set_metered(datausage::MeteredStatus::Unmetered) {
                     Ok(()) => shell_println!("Connection set to unmetered."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             Some("roaming") => match datausage::set_metered(datausage::MeteredStatus::Roaming) {
                 Ok(()) => shell_println!("Connection set to roaming."),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             },
             _ => {
                 shell_println!("Metered: {}", datausage::metered_status().label());
@@ -41221,7 +43437,10 @@ fn cmd_datausage(args: &str) {
                                 datausage::format_bytes(bytes),
                                 days
                             ),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Usage: datausage limit add <name> <bytes> [days]");
@@ -41232,7 +43451,10 @@ fn cmd_datausage(args: &str) {
                     if let Some(name) = parts.get(2) {
                         match datausage::remove_limit(name) {
                             Ok(()) => shell_println!("Limit '{}' removed.", name),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Usage: datausage limit rm <name>");
@@ -41246,7 +43468,10 @@ fn cmd_datausage(args: &str) {
                         let block = matches!(parts[3], "on" | "yes" | "true");
                         match datausage::set_block_on_exceed(name, block) {
                             Ok(()) => shell_println!("Block-on-exceed for '{}': {}", name, block),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Usage: datausage limit block <name> <on|off>");
@@ -41260,7 +43485,10 @@ fn cmd_datausage(args: &str) {
                         let pct: u8 = parts[3].parse().unwrap_or(80);
                         match datausage::set_alert_threshold(name, pct) {
                             Ok(()) => shell_println!("Alert threshold for '{}': {}%", name, pct),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Usage: datausage limit alert <name> <pct>");
@@ -41298,7 +43526,10 @@ fn cmd_datausage(args: &str) {
         }
         "reset" => match datausage::reset_usage() {
             Ok(()) => shell_println!("Usage counters reset."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (apps, daily, rx, tx, limits, ops) = datausage::stats();
@@ -41381,7 +43612,10 @@ fn cmd_mousesettings(args: &str) {
             if let Some(val) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match mousesettings::set_speed(val) {
                     Ok(()) => shell_println!("Speed set to {}.", val),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: mouse speed <1-20>");
@@ -41401,7 +43635,10 @@ fn cmd_mousesettings(args: &str) {
                 if let Ok(f) = v.parse::<u32>() {
                     match mousesettings::set_accel_factor(f) {
                         Ok(()) => shell_println!("Acceleration factor: {}", f),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Usage: mouse accel <flat|adaptive|0-10>");
@@ -41443,7 +43680,10 @@ fn cmd_mousesettings(args: &str) {
                 if let Ok(s) = v.parse::<u32>() {
                     match mousesettings::set_scroll_speed(s) {
                         Ok(()) => shell_println!("Scroll speed: {}", s),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Usage: mouse scroll <wheel|smooth|none|1-20>");
@@ -41456,7 +43696,10 @@ fn cmd_mousesettings(args: &str) {
             if let Some(val) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match mousesettings::set_double_click_ms(val) {
                     Ok(()) => shell_println!("Double-click interval: {} ms", val),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: mouse dblclick <100-1000>");
@@ -41580,7 +43823,10 @@ fn cmd_touchpad(args: &str) {
             if let Some(val) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match touchpad::set_sensitivity(val) {
                     Ok(()) => shell_println!("Sensitivity: {}", val),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: touchpad sensitivity <1-20>");
@@ -41630,7 +43876,10 @@ fn cmd_touchpad(args: &str) {
                 if let Ok(s) = v.parse::<u32>() {
                     match touchpad::set_palm_sensitivity(s) {
                         Ok(()) => shell_println!("Palm sensitivity: {}", s),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Usage: touchpad palm <on|off|1-10>");
@@ -41748,21 +43997,33 @@ fn cmd_powerprofile(args: &str) {
         }
         "balanced" => match powerprofile::set_profile("Balanced") {
             Ok(()) => shell_println!("Switched to Balanced."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "performance" | "perf" => match powerprofile::set_profile("Performance") {
             Ok(()) => shell_println!("Switched to Performance."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "powersaver" | "saver" => match powerprofile::set_profile("Power Saver") {
             Ok(()) => shell_println!("Switched to Power Saver."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "set" => {
             if let Some(name) = parts.get(1) {
                 match powerprofile::set_profile(name) {
                     Ok(()) => shell_println!("Switched to {}.", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: powerprofile set <name>");
@@ -41773,7 +44034,10 @@ fn cmd_powerprofile(args: &str) {
             if let Some(name) = parts.get(1) {
                 match powerprofile::create_profile(name) {
                     Ok(()) => shell_println!("Created profile '{}'.", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: powerprofile create <name>");
@@ -41784,7 +44048,10 @@ fn cmd_powerprofile(args: &str) {
             if let Some(name) = parts.get(1) {
                 match powerprofile::remove_profile(name) {
                     Ok(()) => shell_println!("Removed profile '{}'.", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: powerprofile remove <name>");
@@ -41803,7 +44070,10 @@ fn cmd_powerprofile(args: &str) {
             if let Some(val) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match powerprofile::set_brightness(val) {
                     Ok(()) => shell_println!("Brightness: {}%", val),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: powerprofile brightness <1-100>");
@@ -41925,7 +44195,10 @@ fn cmd_defaultapps(args: &str) {
                 let uid: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
                 match defaultapps::set_default(mime, app, uid) {
                     Ok(()) => shell_println!("{} → {}", mime, app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: defaultapps set <mime> <app> [uid]");
@@ -41937,7 +44210,10 @@ fn cmd_defaultapps(args: &str) {
                 let uid: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
                 match defaultapps::remove_default(mime, uid) {
                     Ok(()) => shell_println!("Removed default for '{}'", mime),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: defaultapps rm <mime> [uid]");
@@ -41966,7 +44242,10 @@ fn cmd_defaultapps(args: &str) {
                 match cat {
                     Some(c) => match defaultapps::set_category_default(c, app, uid) {
                         Ok(()) => shell_println!("{} → {}", c.label(), app),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
                     None => shell_println!(
                         "Unknown category '{}'. Try: browser email files editor terminal image video music pdf archive",
@@ -42092,7 +44371,10 @@ fn cmd_monitors(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match monitors::set_primary(id) {
                     Ok(()) => shell_println!("Primary display: #{}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: monitors primary <id>");
@@ -42119,7 +44401,10 @@ fn cmd_monitors(args: &str) {
                     Ok(id) => {
                         shell_println!("Added monitor #{}: {} {}x{}@{}Hz", id, name, w, h, hz)
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!(
@@ -42131,7 +44416,10 @@ fn cmd_monitors(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match monitors::remove_monitor(id) {
                     Ok(()) => shell_println!("Removed monitor #{}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: monitors rm <id>");
@@ -42147,7 +44435,10 @@ fn cmd_monitors(args: &str) {
                 let hz: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(60);
                 match monitors::set_mode(id, w, h, hz) {
                     Ok(()) => shell_println!("Monitor #{}: {}x{}@{}Hz", id, w, h, hz),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: monitors mode <id> <width> <height> [hz]");
@@ -42161,7 +44452,10 @@ fn cmd_monitors(args: &str) {
                 let y: i32 = parts[3].parse().unwrap_or(0);
                 match monitors::set_position(id, x, y) {
                     Ok(()) => shell_println!("Monitor #{}: position ({},{})", id, x, y),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: monitors pos <id> <x> <y>");
@@ -42174,7 +44468,10 @@ fn cmd_monitors(args: &str) {
                 let pct: u32 = parts[2].parse().unwrap_or(100);
                 match monitors::set_scale(id, pct) {
                     Ok(()) => shell_println!("Monitor #{}: scale {}%", id, pct),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: monitors scale <id> <pct>");
@@ -42193,7 +44490,10 @@ fn cmd_monitors(args: &str) {
                 };
                 match monitors::set_rotation(id, rot) {
                     Ok(()) => shell_println!("Monitor #{}: rotation {}", id, rot.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: monitors rotate <id> <normal|right|inverted|left>");
@@ -42217,7 +44517,10 @@ fn cmd_monitors(args: &str) {
         },
         "arrange" => match monitors::auto_arrange() {
             Ok(()) => shell_println!("Monitors auto-arranged."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "enable" => {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
@@ -42232,7 +44535,10 @@ fn cmd_monitors(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match monitors::set_enabled(id, false) {
                     Ok(()) => shell_println!("Monitor #{} disabled.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: monitors disable <id>");
@@ -42392,7 +44698,10 @@ fn cmd_fwsettings(args: &str) {
                         port,
                         action.label()
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!(
@@ -42404,7 +44713,10 @@ fn cmd_fwsettings(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match fwsettings::remove_rule(id) {
                     Ok(()) => shell_println!("Rule #{} removed.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: firewall rm <id>");
@@ -42573,13 +44885,19 @@ fn cmd_updatemgr(args: &str) {
         }
         "check" => match updatemgr::check_updates() {
             Ok(count) => shell_println!("{} updates pending.", count),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "install" => {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match updatemgr::install_update(id) {
                     Ok(()) => shell_println!("Update #{} installed.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: updates install <id>");
@@ -42590,7 +44908,10 @@ fn cmd_updatemgr(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match updatemgr::download_update(id) {
                     Ok(()) => shell_println!("Download started for update #{}.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: updates download <id>");
@@ -42601,7 +44922,10 @@ fn cmd_updatemgr(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match updatemgr::defer_update(id) {
                     Ok(()) => shell_println!("Update #{} deferred.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: updates defer <id>");
@@ -42631,7 +44955,10 @@ fn cmd_updatemgr(args: &str) {
                             shell_println!("  Desc     : {}", u.description);
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: updates info <id>");
@@ -42696,7 +45023,10 @@ fn cmd_updatemgr(args: &str) {
         }
         "archive" => match updatemgr::archive_completed() {
             Ok(n) => shell_println!("Archived {} completed updates.", n),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (pending, history, version, channel, auto, ops) = updatemgr::stats();
@@ -42919,7 +45249,10 @@ fn cmd_notifprefs(args: &str) {
             if let Some(app) = parts.get(1) {
                 match notifprefs::remove_app_pref(app) {
                     Ok(()) => shell_println!("Preferences removed for '{}'.", app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: notifprefs rm <app_id>");
@@ -42992,7 +45325,10 @@ fn cmd_fileshare(args: &str) {
             if let Some(name) = parts.get(1) {
                 match fileshare::set_hostname(name) {
                     Ok(()) => shell_println!("Hostname: {}", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Hostname: {}", fileshare::hostname());
@@ -43040,7 +45376,10 @@ fn cmd_fileshare(args: &str) {
                     Ok(id) => {
                         shell_println!("Share #{} '{}' created ({}).", id, name, proto.label())
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: share add <name> <path> [smb|nfs|webdav|sftp]");
@@ -43051,7 +45390,10 @@ fn cmd_fileshare(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match fileshare::remove_share(id) {
                     Ok(()) => shell_println!("Share #{} removed.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: share rm <id>");
@@ -43105,7 +45447,10 @@ fn cmd_fileshare(args: &str) {
                         share_name,
                         mount
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: share connect <host> <share> <mountpoint> [proto] [user]");
@@ -43230,7 +45575,10 @@ fn cmd_parental(args: &str) {
             let name = parts[2];
             match parental::create_profile(uid, name) {
                 Ok(()) => shell_println!("Created child profile '{}' (uid={})", name, uid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -43249,7 +45597,10 @@ fn cmd_parental(args: &str) {
             };
             match parental::remove_profile(uid) {
                 Ok(()) => shell_println!("Removed profile for uid={}", uid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" | "disable" => {
@@ -43273,7 +45624,10 @@ fn cmd_parental(args: &str) {
                     if on { "Enabled" } else { "Disabled" },
                     uid
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "filter" => {
@@ -43303,7 +45657,10 @@ fn cmd_parental(args: &str) {
             };
             match parental::set_filter_level(uid, level) {
                 Ok(()) => shell_println!("Set filter to {} for uid={}", level.label(), uid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "blocksite" => {
@@ -43323,7 +45680,10 @@ fn cmd_parental(args: &str) {
             let pattern = parts[2];
             match parental::add_blocked_site(uid, pattern) {
                 Ok(()) => shell_println!("Blocked site '{}' for uid={}", pattern, uid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unblocksite" => {
@@ -43342,7 +45702,10 @@ fn cmd_parental(args: &str) {
             };
             match parental::remove_blocked_site(uid, parts[2]) {
                 Ok(()) => shell_println!("Unblocked site for uid={}", uid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "appmode" => {
@@ -43371,7 +45734,10 @@ fn cmd_parental(args: &str) {
             };
             match parental::set_app_mode(uid, mode) {
                 Ok(()) => shell_println!("Set app mode to {} for uid={}", mode.label(), uid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "blockapp" => {
@@ -43390,7 +45756,10 @@ fn cmd_parental(args: &str) {
             };
             match parental::add_blocked_app(uid, parts[2]) {
                 Ok(()) => shell_println!("Blocked app '{}' for uid={}", parts[2], uid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "allowapp" => {
@@ -43409,7 +45778,10 @@ fn cmd_parental(args: &str) {
             };
             match parental::add_allowed_app(uid, parts[2]) {
                 Ok(()) => shell_println!("Allowed app '{}' for uid={}", parts[2], uid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "limit" => {
@@ -43436,7 +45808,10 @@ fn cmd_parental(args: &str) {
             };
             match parental::set_daily_limit(uid, mins) {
                 Ok(()) => shell_println!("Daily limit set to {} minutes for uid={}", mins, uid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "schedule" => {
@@ -43500,7 +45875,10 @@ fn cmd_parental(args: &str) {
                     max_min,
                     uid
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "check" => {
@@ -43615,7 +45993,10 @@ fn cmd_parental(args: &str) {
                         shell_println!("  Blocked sites: {}", p.blocked_sites.join(", "));
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -43774,7 +46155,10 @@ fn cmd_audiodevice(args: &str) {
             let driver = if parts.len() > 4 { parts[4] } else { "generic" };
             match audiodevice::add_device(name, dev_type, direction, driver) {
                 Ok(id) => shell_println!("Added device '{}' (id={})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -43793,7 +46177,10 @@ fn cmd_audiodevice(args: &str) {
             };
             match audiodevice::remove_device(id) {
                 Ok(()) => shell_println!("Removed device {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "default" => {
@@ -43813,11 +46200,17 @@ fn cmd_audiodevice(args: &str) {
             match parts[1] {
                 "output" | "out" => match audiodevice::set_default_output(id) {
                     Ok(()) => shell_println!("Default output set to device {}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 "input" | "in" => match audiodevice::set_default_input(id) {
                     Ok(()) => shell_println!("Default input set to device {}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 _ => shell_println!("Specify 'output' or 'input'"),
             }
@@ -43846,7 +46239,10 @@ fn cmd_audiodevice(args: &str) {
             };
             match audiodevice::set_device_volume(id, vol) {
                 Ok(()) => shell_println!("Volume for device {} set to {}", id, vol),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "mute" | "unmute" => {
@@ -43866,7 +46262,10 @@ fn cmd_audiodevice(args: &str) {
             let m = sub == "mute";
             match audiodevice::set_device_mute(id, m) {
                 Ok(()) => shell_println!("Device {} {}", id, if m { "muted" } else { "unmuted" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rate" => {
@@ -43900,7 +46299,10 @@ fn cmd_audiodevice(args: &str) {
             };
             match audiodevice::set_sample_rate(id, rate) {
                 Ok(()) => shell_println!("Sample rate for device {} set to {}", id, parts[2]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "autoswitch" => {
@@ -43922,7 +46324,10 @@ fn cmd_audiodevice(args: &str) {
                     "Auto-switch on connect: {}",
                     if on { "enabled" } else { "disabled" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "info" => {
@@ -43957,7 +46362,10 @@ fn cmd_audiodevice(args: &str) {
                     shell_println!("  Latency:    {} ms", d.latency_ms);
                     shell_println!("  Driver:     {}", d.driver);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -44063,7 +46471,10 @@ fn cmd_sessionmgr(args: &str) {
             };
             match sessionmgr::create_session(uid, username, stype, ":0", "tty1") {
                 Ok(id) => shell_println!("Session {} created for {} (uid={})", id, username, uid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "logout" => {
@@ -44082,7 +46493,10 @@ fn cmd_sessionmgr(args: &str) {
             };
             match sessionmgr::destroy_session(id) {
                 Ok(()) => shell_println!("Session {} terminated.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "switch" => {
@@ -44101,12 +46515,18 @@ fn cmd_sessionmgr(args: &str) {
             };
             match sessionmgr::switch_session(id) {
                 Ok(()) => shell_println!("Switched to session {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "lock" => match sessionmgr::lock_session() {
             Ok(()) => shell_println!("Session locked."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "unlock" => {
             if parts.len() < 2 {
@@ -44124,7 +46544,10 @@ fn cmd_sessionmgr(args: &str) {
             };
             match sessionmgr::unlock_session(id) {
                 Ok(()) => shell_println!("Session {} unlocked.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "active" => match sessionmgr::active_session() {
@@ -44153,7 +46576,10 @@ fn cmd_sessionmgr(args: &str) {
             };
             match sessionmgr::set_lock_timeout(secs) {
                 Ok(()) => shell_println!("Lock timeout set to {} seconds.", secs),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "info" => {
@@ -44179,7 +46605,10 @@ fn cmd_sessionmgr(args: &str) {
                     shell_println!("  TTY:     {}", s.tty);
                     shell_println!("  Active:  {}", s.is_active);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -44297,7 +46726,10 @@ fn cmd_crashreport(args: &str) {
                         shell_println!("  Note: {}", r.description);
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" => {
@@ -44316,12 +46748,18 @@ fn cmd_crashreport(args: &str) {
             };
             match crashreport::delete_report(id) {
                 Ok(()) => shell_println!("Report {} deleted.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "clear" => match crashreport::clear_reports() {
             Ok(n) => shell_println!("Cleared {} reports.", n),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "describe" => {
             if parts.len() < 3 {
@@ -44340,7 +46778,10 @@ fn cmd_crashreport(args: &str) {
             let desc = parts[2..].join(" ");
             match crashreport::set_description(id, &desc) {
                 Ok(()) => shell_println!("Description set for report {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" | "disable" => {
@@ -44350,7 +46791,10 @@ fn cmd_crashreport(args: &str) {
                     "Crash reporting {}.",
                     if on { "enabled" } else { "disabled" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "autosubmit" => {
@@ -44364,7 +46808,10 @@ fn cmd_crashreport(args: &str) {
                 Ok(()) => {
                     shell_println!("Auto-submit {}.", if on { "enabled" } else { "disabled" })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "summary" => {
@@ -44474,7 +46921,10 @@ fn cmd_netproxy(args: &str) {
             };
             match netproxy::set_mode(mode) {
                 Ok(()) => shell_println!("Proxy mode set to {}.", mode.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "set" => {
@@ -44506,7 +46956,10 @@ fn cmd_netproxy(args: &str) {
             };
             match netproxy::set_proxy(proto, host, port) {
                 Ok(()) => shell_println!("Proxy set: {} → {}:{}", proto.label(), host, port),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -44529,7 +46982,10 @@ fn cmd_netproxy(args: &str) {
             };
             match netproxy::remove_proxy(proto) {
                 Ok(()) => shell_println!("Proxy removed for {}.", proto.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "pac" => {
@@ -44543,7 +46999,10 @@ fn cmd_netproxy(args: &str) {
             } else {
                 match netproxy::set_pac_url(parts[1]) {
                     Ok(()) => shell_println!("PAC URL set to {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -44561,12 +47020,18 @@ fn cmd_netproxy(args: &str) {
                 };
                 match netproxy::add_bypass(parts[2], &desc) {
                     Ok(()) => shell_println!("Bypass added: {}", parts[2]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else if parts.len() >= 3 && parts[1] == "remove" {
                 match netproxy::remove_bypass(parts[2]) {
                     Ok(()) => shell_println!("Bypass removed: {}", parts[2]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: proxy bypass [add <pattern> [desc] | remove <pattern>]");
@@ -44696,7 +47161,10 @@ fn cmd_fileversion(args: &str) {
                         shell_println!("  Comment:  {}", v.comment);
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "comment" => {
@@ -44716,7 +47184,10 @@ fn cmd_fileversion(args: &str) {
             let text = parts[2..].join(" ");
             match fileversion::set_version_comment(id, &text) {
                 Ok(()) => shell_println!("Comment set on version {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "restore" => {
@@ -44740,7 +47211,10 @@ fn cmd_fileversion(args: &str) {
                     v.path.display(),
                     v.size
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" => {
@@ -44759,7 +47233,10 @@ fn cmd_fileversion(args: &str) {
             };
             match fileversion::delete_version(id) {
                 Ok(()) => shell_println!("Version {} deleted.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "purge" => {
@@ -44770,7 +47247,10 @@ fn cmd_fileversion(args: &str) {
             }
             match fileversion::purge_file_versions(parts[1]) {
                 Ok(n) => shell_println!("Purged {} versions of {}.", n, parts[1]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "watch" => {
@@ -44798,12 +47278,18 @@ fn cmd_fileversion(args: &str) {
                 };
                 match fileversion::add_watch(parts[2], policy) {
                     Ok(()) => shell_println!("Watch added: {} ({})", parts[2], policy.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else if parts.len() >= 3 && parts[1] == "remove" {
                 match fileversion::remove_watch(parts[2]) {
                     Ok(()) => shell_println!("Watch removed: {}", parts[2]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: fver watch [add <path> [policy] | remove <path>]");
@@ -44817,7 +47303,10 @@ fn cmd_fileversion(args: &str) {
                     "File versioning {}.",
                     if on { "enabled" } else { "disabled" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -44929,7 +47418,10 @@ fn cmd_devicemgr(args: &str) {
                     shell_println!("  Enabled:  {}", d.enabled);
                     shell_println!("  Hotplug:  {}", d.hotplugged);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "add" => {
@@ -44971,7 +47463,10 @@ fn cmd_devicemgr(args: &str) {
             let addr = if parts.len() > 5 { parts[5] } else { "auto" };
             match devicemgr::register_device(name, bus, class, 0, 0, vendor, addr, true) {
                 Ok(id) => shell_println!("Registered device '{}' (id={})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -44990,7 +47485,10 @@ fn cmd_devicemgr(args: &str) {
             };
             match devicemgr::remove_device(id) {
                 Ok(()) => shell_println!("Removed device {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "bind" => {
@@ -45010,7 +47508,10 @@ fn cmd_devicemgr(args: &str) {
             let version = if parts.len() > 3 { parts[3] } else { "1.0" };
             match devicemgr::bind_driver(id, parts[2], version) {
                 Ok(()) => shell_println!("Bound driver '{}' to device {}.", parts[2], id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unbind" => {
@@ -45029,7 +47530,10 @@ fn cmd_devicemgr(args: &str) {
             };
             match devicemgr::unbind_driver(id) {
                 Ok(()) => shell_println!("Driver unbound from device {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" | "disable" => {
@@ -45051,7 +47555,10 @@ fn cmd_devicemgr(args: &str) {
                 Ok(()) => {
                     shell_println!("Device {} {}.", id, if on { "enabled" } else { "disabled" })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "nodriver" => {
@@ -45135,7 +47642,10 @@ fn cmd_location(args: &str) {
                     "Location services {}.",
                     if on { "enabled" } else { "disabled" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "update" => {
@@ -45183,7 +47693,10 @@ fn cmd_location(args: &str) {
             };
             match location::update_location(lat, lon, 0, acc, src) {
                 Ok(()) => shell_println!("Location updated."),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "perm" => {
@@ -45217,14 +47730,20 @@ fn cmd_location(args: &str) {
             };
             match location::set_app_permission(app_id, perm) {
                 Ok(()) => shell_println!("Permission for '{}' set to {}.", app_id, perm.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "history" => {
             if parts.len() > 1 && parts[1] == "clear" {
                 match location::clear_history() {
                     Ok(n) => shell_println!("Cleared {} history entries.", n),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else if parts.len() > 1 && (parts[1] == "on" || parts[1] == "off") {
                 let on = parts[1] == "on";
@@ -45233,7 +47752,10 @@ fn cmd_location(args: &str) {
                         "History recording {}.",
                         if on { "enabled" } else { "disabled" }
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 let hist = location::get_history();
@@ -45373,7 +47895,10 @@ fn cmd_diskencrypt(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unlock" => {
@@ -45392,7 +47917,10 @@ fn cmd_diskencrypt(args: &str) {
             };
             match diskencrypt::unlock_volume(id, parts[2]) {
                 Ok(()) => shell_println!("Volume {} unlocked.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "lock" => {
@@ -45411,7 +47939,10 @@ fn cmd_diskencrypt(args: &str) {
             };
             match diskencrypt::lock_volume(id) {
                 Ok(()) => shell_println!("Volume {} locked.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "encrypt" => {
@@ -45449,7 +47980,10 @@ fn cmd_diskencrypt(args: &str) {
                 Ok(()) => {
                     shell_println!("Started encryption of volume {} with {}.", id, alg.label())
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "recovery" => {
@@ -45472,7 +48006,10 @@ fn cmd_diskencrypt(args: &str) {
                     shell_println!("  {}", key);
                     shell_println!("  *** SAVE THIS KEY SECURELY ***");
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "addslot" => {
@@ -45501,7 +48038,10 @@ fn cmd_diskencrypt(args: &str) {
             };
             match diskencrypt::add_key_slot(id, kdf, parts[2]) {
                 Ok(slot) => shell_println!("Added key slot #{} to volume {}.", slot, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -45595,7 +48135,10 @@ fn cmd_pkgmgr(args: &str) {
             };
             match pkgmgr::install(name, version, &desc, pkgmgr::PkgSection::Other, 1024 * 1024) {
                 Ok(()) => shell_println!("Installed '{}' v{}.", name, version),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -45606,7 +48149,10 @@ fn cmd_pkgmgr(args: &str) {
             }
             match pkgmgr::remove(parts[1]) {
                 Ok(()) => shell_println!("Removed '{}'.", parts[1]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "info" => {
@@ -45626,7 +48172,10 @@ fn cmd_pkgmgr(args: &str) {
                     shell_println!("  Repo:      {}", p.repo);
                     shell_println!("  Desc:      {}", p.description);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "search" => {
@@ -45654,12 +48203,18 @@ fn cmd_pkgmgr(args: &str) {
             if parts.len() > 1 {
                 match pkgmgr::upgrade(parts[1]) {
                     Ok(()) => shell_println!("Upgraded '{}'.", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 match pkgmgr::upgrade_all() {
                     Ok(n) => shell_println!("Upgraded {} packages.", n),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -45692,7 +48247,10 @@ fn cmd_pkgmgr(args: &str) {
             }
             match pkgmgr::add_repo(parts[1], parts[2]) {
                 Ok(()) => shell_println!("Added repository '{}'.", parts[1]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -45768,7 +48326,10 @@ fn cmd_remotedesktop(args: &str) {
                     "Remote desktop {}.",
                     if on { "enabled" } else { "disabled" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "port" => {
@@ -45787,7 +48348,10 @@ fn cmd_remotedesktop(args: &str) {
             };
             match remotedesktop::set_port(port) {
                 Ok(()) => shell_println!("Port set to {}.", port),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "connect" => {
@@ -45812,7 +48376,10 @@ fn cmd_remotedesktop(args: &str) {
             };
             match remotedesktop::connect(host, port, proto) {
                 Ok(id) => shell_println!("Connecting to {} (session {})...", host, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "disconnect" => {
@@ -45831,7 +48398,10 @@ fn cmd_remotedesktop(args: &str) {
             };
             match remotedesktop::disconnect(id) {
                 Ok(()) => shell_println!("Session {} disconnected.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "quality" => {
@@ -45853,7 +48423,10 @@ fn cmd_remotedesktop(args: &str) {
             };
             match remotedesktop::set_quality(q) {
                 Ok(()) => shell_println!("Quality set to {}.", q.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -45934,7 +48507,10 @@ fn cmd_restorepoint(args: &str) {
             let rtype = restorepoint::RestoreType::Manual;
             match restorepoint::create(&desc, rtype) {
                 Ok(id) => shell_println!("Restore point {} created.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" => {
@@ -45953,7 +48529,10 @@ fn cmd_restorepoint(args: &str) {
             };
             match restorepoint::delete(id) {
                 Ok(()) => shell_println!("Restore point {} deleted.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "restore" => {
@@ -45972,7 +48551,10 @@ fn cmd_restorepoint(args: &str) {
             };
             match restorepoint::restore(id) {
                 Ok(p) => shell_println!("Restoring from '{}' (point {})...", p.description, p.id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "info" => {
@@ -46000,7 +48582,10 @@ fn cmd_restorepoint(args: &str) {
                     shell_println!("  FS snapshot: {}", p.has_fs_snapshot);
                     shell_println!("  Config snap: {}", p.has_config_snapshot);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "auto" => {
@@ -46014,7 +48599,10 @@ fn cmd_restorepoint(args: &str) {
                 Ok(()) => {
                     shell_println!("Auto-create {}.", if on { "enabled" } else { "disabled" })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -46124,7 +48712,10 @@ fn cmd_battery(args: &str) {
                     shell_println!("  Model:        {}", s.model);
                     shell_println!("  Serial:       {}", s.serial);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "ac" => {
@@ -46139,7 +48730,10 @@ fn cmd_battery(args: &str) {
                     "AC power: {}",
                     if on { "connected" } else { "disconnected" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "alert" => {
@@ -46159,7 +48753,10 @@ fn cmd_battery(args: &str) {
                             a.charge_limit_pct
                         );
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
                 return;
             }
@@ -46211,7 +48808,10 @@ fn cmd_battery(args: &str) {
                 Ok(()) => {
                     shell_println!("Charge limit: {} ({}%)", if on { "on" } else { "off" }, pct)
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -46277,16 +48877,25 @@ fn cmd_dictation(args: &str) {
             let on = sub == "enable";
             match dictation::set_enabled(on) {
                 Ok(()) => shell_println!("Dictation {}.", if on { "enabled" } else { "disabled" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "start" => match dictation::start_listening() {
             Ok(()) => shell_println!("Dictation started — listening..."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stop" => match dictation::stop_listening() {
             Ok(()) => shell_println!("Dictation stopped."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "pause" => {
             dictation::pause().ok();
@@ -46321,7 +48930,10 @@ fn cmd_dictation(args: &str) {
             };
             match dictation::set_language(lang) {
                 Ok(()) => shell_println!("Language set to {}.", lang.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "vocab" => {
@@ -46342,12 +48954,18 @@ fn cmd_dictation(args: &str) {
                 };
                 match dictation::add_vocab(parts[2], &phonetic) {
                     Ok(()) => shell_println!("Added '{}' to vocabulary.", parts[2]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else if parts.len() >= 3 && parts[1] == "remove" {
                 match dictation::remove_vocab(parts[2]) {
                     Ok(()) => shell_println!("Removed '{}' from vocabulary.", parts[2]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: dict vocab [add <word> [phonetic] | remove <word>]");
@@ -46379,7 +48997,10 @@ fn cmd_dictation(args: &str) {
             if parts.len() > 1 && parts[1] == "clear" {
                 match dictation::clear_history() {
                     Ok(n) => shell_println!("Cleared {} transcriptions.", n),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: dict history clear");
@@ -46448,7 +49069,10 @@ fn cmd_screenreader(args: &str) {
                 Ok(()) => {
                     shell_println!("Screen reader {}.", if on { "enabled" } else { "disabled" })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rate" => {
@@ -46471,7 +49095,10 @@ fn cmd_screenreader(args: &str) {
             };
             match screenreader::set_speech_rate(rate) {
                 Ok(()) => shell_println!("Speech rate set to {}.", rate.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "volume" | "vol" => {
@@ -46479,7 +49106,10 @@ fn cmd_screenreader(args: &str) {
                 let cfg = screenreader::get_config();
                 match cfg {
                     Ok(c) => shell_println!("Volume: {}%", c.volume),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
                 return;
             }
@@ -46493,7 +49123,10 @@ fn cmd_screenreader(args: &str) {
             };
             match screenreader::set_volume(vol) {
                 Ok(()) => shell_println!("Volume set to {}%.", vol.min(100)),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "verbosity" | "verb" => {
@@ -46514,7 +49147,10 @@ fn cmd_screenreader(args: &str) {
             };
             match screenreader::set_verbosity(v) {
                 Ok(()) => shell_println!("Verbosity set to {}.", v.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "announce" => {
@@ -46526,7 +49162,10 @@ fn cmd_screenreader(args: &str) {
             let text = parts[1..].join(" ");
             match screenreader::announce(&text) {
                 Ok(()) => shell_println!("Announced: \"{}\"", text),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "elements" | "elems" => {
@@ -46664,7 +49303,10 @@ fn cmd_langpack(args: &str) {
             let kb = parts.get(if rtl { 5 } else { 4 }).copied().unwrap_or(code);
             match langpack::install(code, native, english, rtl, kb) {
                 Ok(()) => shell_println!("Installed language pack: {} ({})", english, code),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" | "uninstall" => {
@@ -46675,7 +49317,10 @@ fn cmd_langpack(args: &str) {
             }
             match langpack::uninstall(parts[1]) {
                 Ok(()) => shell_println!("Removed language pack: {}", parts[1]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "set" | "use" => {
@@ -46686,7 +49331,10 @@ fn cmd_langpack(args: &str) {
             }
             match langpack::set_system_language(parts[1]) {
                 Ok(()) => shell_println!("System language set to {}.", parts[1]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "translate" | "tr" => {
@@ -46707,7 +49355,10 @@ fn cmd_langpack(args: &str) {
             let value = parts[2..].join(" ");
             match langpack::add_translation(parts[1], &value) {
                 Ok(()) => shell_println!("Added: {} = \"{}\"", parts[1], value),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "info" => {
@@ -46727,7 +49378,10 @@ fn cmd_langpack(args: &str) {
                     shell_println!("  Keyboard:     {}", p.keyboard_layout);
                     shell_println!("  RTL:          {}", if p.rtl { "yes" } else { "no" });
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rtl" => {
@@ -46815,7 +49469,10 @@ fn cmd_spellcheck(args: &str) {
             }
             match spellcheck::add_personal(parts[1]) {
                 Ok(()) => shell_println!("Added '{}' to personal dictionary.", parts[1]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -46826,7 +49483,10 @@ fn cmd_spellcheck(args: &str) {
             }
             match spellcheck::remove_personal(parts[1]) {
                 Ok(()) => shell_println!("Removed '{}' from personal dictionary.", parts[1]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "ignore" => {
@@ -46837,7 +49497,10 @@ fn cmd_spellcheck(args: &str) {
             }
             match spellcheck::ignore_word(parts[1]) {
                 Ok(()) => shell_println!("Ignoring '{}'.", parts[1]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "personal" => {
@@ -46869,7 +49532,10 @@ fn cmd_spellcheck(args: &str) {
                 Ok(()) => {
                     shell_println!("Spell checker {}.", if on { "enabled" } else { "disabled" })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -46983,7 +49649,10 @@ fn cmd_screentime(args: &str) {
             };
             match screentime::set_daily_limit(mins) {
                 Ok(()) => shell_println!("Daily limit set to {} min.", mins),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" | "disable" => {
@@ -46993,12 +49662,18 @@ fn cmd_screentime(args: &str) {
                     "Screen time tracking {}.",
                     if on { "enabled" } else { "disabled" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "reset" => match screentime::reset_daily() {
             Ok(()) => shell_println!("Daily counters reset."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (apps, active, idle, switches, focus_events, ops) = screentime::stats();
@@ -47122,7 +49797,10 @@ fn cmd_disksmart(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "check" => {
@@ -47198,7 +49876,10 @@ fn cmd_magnifier(args: &str) {
             let on = sub == "enable";
             match magnifier::set_enabled(on) {
                 Ok(()) => shell_println!("Magnifier {}.", if on { "enabled" } else { "disabled" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "zoom" => {
@@ -47209,11 +49890,17 @@ fn cmd_magnifier(args: &str) {
             match parts[1] {
                 "in" | "+" => match magnifier::zoom_in() {
                     Ok(level) => shell_println!("Zoomed in to {}%.", level),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 "out" | "-" => match magnifier::zoom_out() {
                     Ok(level) => shell_println!("Zoomed out to {}%.", level),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 _ => {
                     let pct: u32 = match parts[1].parse() {
@@ -47226,7 +49913,10 @@ fn cmd_magnifier(args: &str) {
                     };
                     match magnifier::set_zoom(pct) {
                         Ok(()) => shell_println!("Zoom set to {}%.", magnifier::zoom_level()),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -47249,7 +49939,10 @@ fn cmd_magnifier(args: &str) {
             };
             match magnifier::set_mode(mode) {
                 Ok(()) => shell_println!("Mode set to {}.", mode.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "filter" => {
@@ -47275,7 +49968,10 @@ fn cmd_magnifier(args: &str) {
             };
             match magnifier::set_color_filter(f) {
                 Ok(()) => shell_println!("Color filter set to {}.", f.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -47375,7 +50071,10 @@ fn cmd_cloudsync(args: &str) {
             };
             match cloudsync::add_account(provider, parts[2], parts[3], parts[4]) {
                 Ok(id) => shell_println!("Added account #{} ({}).", id, provider.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -47394,7 +50093,10 @@ fn cmd_cloudsync(args: &str) {
             };
             match cloudsync::remove_account(id) {
                 Ok(()) => shell_println!("Removed account #{}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "conflicts" => {
@@ -47488,7 +50190,10 @@ fn cmd_gestures(args: &str) {
             let on = sub == "enable";
             match gestures::set_enabled(on) {
                 Ok(()) => shell_println!("Gestures {}.", if on { "enabled" } else { "disabled" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "natural" => {
@@ -47499,7 +50204,10 @@ fn cmd_gestures(args: &str) {
                         "Natural scroll: {}",
                         if c.natural_scroll { "on" } else { "off" }
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
                 return;
             }
@@ -47509,7 +50217,10 @@ fn cmd_gestures(args: &str) {
                     "Natural scroll {}.",
                     if on { "enabled" } else { "disabled" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -47605,7 +50316,10 @@ fn cmd_soundevents(args: &str) {
             }
             match soundevents::set_scheme(parts[1]) {
                 Ok(()) => shell_println!("Scheme set to {}.", parts[1]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" | "disable" => {
@@ -47614,14 +50328,20 @@ fn cmd_soundevents(args: &str) {
                 Ok(()) => {
                     shell_println!("Sound events {}.", if on { "enabled" } else { "disabled" })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "mute" | "unmute" => {
             let m = sub == "mute";
             match soundevents::set_muted(m) {
                 Ok(()) => shell_println!("Sound events {}.", if m { "muted" } else { "unmuted" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "volume" | "vol" => {
@@ -47640,7 +50360,10 @@ fn cmd_soundevents(args: &str) {
             };
             match soundevents::set_volume(vol) {
                 Ok(()) => shell_println!("Volume set to {}%.", vol.min(100)),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -47761,7 +50484,10 @@ fn cmd_usbmgr(args: &str) {
                     }
                     shell_println!("  Removable:    {}", if d.removable { "yes" } else { "no" });
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "eject" => {
@@ -47788,7 +50514,10 @@ fn cmd_usbmgr(args: &str) {
             };
             match usbmgr::safe_remove(bus, port) {
                 Ok(()) => shell_println!("Device {}:{} safely removed.", bus, port),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "power" => {
@@ -47878,7 +50607,10 @@ fn cmd_cliphistory(args: &str) {
             };
             match cliphistory::paste(id) {
                 Ok(content) => shell_println!("{}", content),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "pin" => {
@@ -47897,7 +50629,10 @@ fn cmd_cliphistory(args: &str) {
             };
             match cliphistory::pin(id) {
                 Ok(()) => shell_println!("Entry #{} pinned.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unpin" => {
@@ -47916,7 +50651,10 @@ fn cmd_cliphistory(args: &str) {
             };
             match cliphistory::unpin(id) {
                 Ok(()) => shell_println!("Entry #{} unpinned.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" => {
@@ -47935,7 +50673,10 @@ fn cmd_cliphistory(args: &str) {
             };
             match cliphistory::delete(id) {
                 Ok(()) => shell_println!("Entry #{} deleted.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "search" => {
@@ -47957,7 +50698,10 @@ fn cmd_cliphistory(args: &str) {
         }
         "clear" => match cliphistory::clear() {
             Ok(n) => shell_println!("Cleared {} entries (pinned entries kept).", n),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (entries, pinned, copies, pastes, size, ops) = cliphistory::stats();
@@ -48076,7 +50820,10 @@ fn cmd_displaycolor(args: &str) {
             };
             match displaycolor::assign_profile(did, pid) {
                 Ok(()) => shell_println!("Assigned profile #{} to display #{}.", pid, did),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "calibrate" => {
@@ -48095,7 +50842,10 @@ fn cmd_displaycolor(args: &str) {
             };
             match displaycolor::mark_calibrated(did) {
                 Ok(()) => shell_println!("Display #{} marked as calibrated.", did),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -48233,12 +50983,18 @@ fn cmd_syslog(args: &str) {
             let msg = parts[2..].join(" ");
             match syslog::log(sev, "kshell", &msg) {
                 Ok(id) => shell_println!("Logged #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "clear" => match syslog::clear() {
             Ok(n) => shell_println!("Cleared {} log entries.", n),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "counts" => {
             let counts = syslog::count_by_severity();
@@ -48609,7 +51365,10 @@ fn cmd_logpersist(args: &str) {
         }
         "flush" => match logpersist::flush() {
             Ok(n) => shell_println!("Flushed {} events to disk", n),
-            Err(e) => shell_println!("Flush error: {:?}", e),
+            Err(e) => {
+                shell_println!("Flush error: {:?}", e);
+                set_exit(1);
+            }
         },
         "prune" => {
             let n = logpersist::prune();
@@ -48809,7 +51568,10 @@ fn cmd_svcstart(args: &str) {
                             "Crash recorded, restart scheduled (backoff: {} ms)",
                             delay / 1_000_000
                         ),
-                        Err(e) => shell_println!("Crash report error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Crash report error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid service ID");
@@ -48928,7 +51690,10 @@ fn cmd_svcstart(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match svcstart::remove_startup_app(id) {
                         Ok(()) => shell_println!("Startup app {} removed", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid app ID");
@@ -49016,7 +51781,10 @@ fn cmd_svcstart(args: &str) {
                         },
                     ) {
                         Ok(id) => shell_println!("Socket activation entry {} registered", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid service ID");
@@ -49033,7 +51801,10 @@ fn cmd_svcstart(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match sockact::unregister(id) {
                         Ok(()) => shell_println!("Socket entry {} removed", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid entry ID");
@@ -49150,7 +51921,10 @@ fn cmd_drvmon(args: &str) {
                 };
                 match drvmon::register(name, name, bus, pid, DriverPolicy::default()) {
                     Ok(id) => shell_println!("Driver '{}' registered (id={})", name, id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: drvmon register <name> <bus> [pid]");
@@ -49162,7 +51936,10 @@ fn cmd_drvmon(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match drvmon::report_crash(id) {
                         Ok(()) => shell_println!("Crash reported for driver {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid driver ID");
@@ -49182,7 +51959,10 @@ fn cmd_drvmon(args: &str) {
                         .unwrap_or(0);
                     match drvmon::restart_driver(id, new_pid) {
                         Ok(()) => shell_println!("Driver {} restarted (pid={})", id, new_pid),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid driver ID");
@@ -49261,7 +52041,10 @@ fn cmd_reslimit(args: &str) {
                 let parent: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
                 match reslimit::create_group(name, parent) {
                     Ok(id) => shell_println!("Created group '{}' (id={})", name, id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: reslimit create <name> [parent-id]");
@@ -49273,7 +52056,10 @@ fn cmd_reslimit(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match reslimit::remove_group(id) {
                         Ok(()) => shell_println!("Removed group {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid group ID");
@@ -49289,7 +52075,10 @@ fn cmd_reslimit(args: &str) {
                 if let (Ok(pid), Ok(gid)) = (pid_str.parse::<u32>(), gid_str.parse::<u32>()) {
                     match reslimit::assign_process(pid, gid) {
                         Ok(()) => shell_println!("Assigned pid {} to group {}", pid, gid),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid pid or group ID");
@@ -49305,7 +52094,10 @@ fn cmd_reslimit(args: &str) {
                 if let Ok(pid) = pid_str.parse::<u32>() {
                     match reslimit::unassign_process(pid) {
                         Ok(()) => shell_println!("Unassigned pid {}", pid),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid pid");
@@ -49342,7 +52134,10 @@ fn cmd_reslimit(args: &str) {
                     };
                     match reslimit::set_memory_limits(gid, limits) {
                         Ok(()) => shell_println!("Memory limits set for group {}", gid),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid group ID");
@@ -49368,7 +52163,10 @@ fn cmd_reslimit(args: &str) {
                     };
                     match reslimit::set_cpu_limits(gid, limits) {
                         Ok(()) => shell_println!("CPU limits set for group {}", gid),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid group ID");
@@ -49407,7 +52205,10 @@ fn cmd_reslimit(args: &str) {
                     };
                     match reslimit::set_io_limits(gid, limits) {
                         Ok(()) => shell_println!("I/O limits set for group {}", gid),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid group ID");
@@ -49445,7 +52246,10 @@ fn cmd_reslimit(args: &str) {
                     };
                     match reslimit::set_process_limits(gid, limits) {
                         Ok(()) => shell_println!("Process limits set for group {}", gid),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid group ID");
@@ -49469,7 +52273,10 @@ fn cmd_reslimit(args: &str) {
                             if on { "enabled" } else { "disabled" },
                             gid
                         ),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid group ID");
@@ -49510,7 +52317,10 @@ fn cmd_reslimit(args: &str) {
                                 g.usage.open_files
                             );
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid group ID");
@@ -49619,7 +52429,10 @@ fn cmd_initproc(args: &str) {
         }
         "start" => match initproc::start() {
             Ok(()) => shell_println!("Init process started, system running"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "shutdown" => {
             let reason = match parts.get(1).copied() {
@@ -49629,7 +52442,10 @@ fn cmd_initproc(args: &str) {
             };
             match initproc::shutdown(reason) {
                 Ok(()) => shell_println!("Shutdown complete"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "tick" => {
@@ -50677,7 +53493,10 @@ fn cmd_httpd(args: &str) {
             }
             match httpd::start(port) {
                 Ok(()) => shell_println!("HTTP server started on port {}", port),
-                Err(e) => shell_println!("Failed to start: {:?}", e),
+                Err(e) => {
+                    shell_println!("Failed to start: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stop" => {
@@ -50694,7 +53513,10 @@ fn cmd_httpd(args: &str) {
             }
             match httpd::start_tls(port) {
                 Ok(()) => shell_println!("HTTPS server started on port {}", port),
-                Err(e) => shell_println!("Failed to start TLS: {:?}", e),
+                Err(e) => {
+                    shell_println!("Failed to start TLS: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "tls-stop" | "tlsstop" => {
@@ -51424,7 +54246,10 @@ fn cmd_mdns(args: &str) {
                     stype,
                     port
                 ),
-                Err(e) => shell_println!("Failed to register: {:?}", e),
+                Err(e) => {
+                    shell_println!("Failed to register: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unregister" => {
@@ -51529,7 +54354,10 @@ fn cmd_telnetd(args: &str) {
         }
         "start" | "init" => match telnet::init() {
             Ok(()) => shell_println!("Telnet server started"),
-            Err(e) => shell_println!("Failed to start: {:?}", e),
+            Err(e) => {
+                shell_println!("Failed to start: {:?}", e);
+                set_exit(1);
+            }
         },
         "stop" | "shutdown" => {
             telnet::shutdown();
@@ -51648,7 +54476,10 @@ fn cmd_sshd(args: &str) {
         }
         "start" | "init" => match ssh::init() {
             Ok(()) => shell_println!("SSH server started"),
-            Err(e) => shell_println!("Failed to start SSH server: {:?}", e),
+            Err(e) => {
+                shell_println!("Failed to start SSH server: {:?}", e);
+                set_exit(1);
+            }
         },
         "stop" | "shutdown" => {
             ssh::shutdown();
@@ -51788,7 +54619,10 @@ fn cmd_tftp(args: &str) {
                         Err(e) => shell_println!("Upload failed: {:?}", e),
                     }
                 }
-                Err(e) => shell_println!("Cannot read {}: {:?}", filename, e),
+                Err(e) => {
+                    shell_println!("Cannot read {}: {:?}", filename, e);
+                    set_exit(1);
+                }
             }
         }
         "get6" => {
@@ -51854,14 +54688,20 @@ fn cmd_tftp(args: &str) {
                         Err(e) => shell_println!("Upload failed: {:?}", e),
                     }
                 }
-                Err(e) => shell_println!("Cannot read {}: {:?}", filename, e),
+                Err(e) => {
+                    shell_println!("Cannot read {}: {:?}", filename, e);
+                    set_exit(1);
+                }
             }
         }
         "serve" | "start" => {
             let root = parts.get(1).copied().unwrap_or("/");
             match tftp::start_server(root) {
                 Ok(()) => shell_println!("TFTP server started (root={})", root),
-                Err(e) => shell_println!("Failed to start: {:?}", e),
+                Err(e) => {
+                    shell_println!("Failed to start: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stop" => {
@@ -51933,7 +54773,10 @@ fn cmd_netsyslog(args: &str) {
         }
         "listen" | "start" => match syslog::start_receiver() {
             Ok(()) => shell_println!("Syslog receiver started"),
-            Err(e) => shell_println!("Failed to start: {:?}", e),
+            Err(e) => {
+                shell_println!("Failed to start: {:?}", e);
+                set_exit(1);
+            }
         },
         "stop" => {
             syslog::stop_receiver();
@@ -53343,7 +56186,10 @@ fn cmd_nat(args: &str) {
                                     cp,
                                     ns
                                 ),
-                                Err(e) => shell_println!("Error: {:?}", e),
+                                Err(e) => {
+                                    shell_println!("Error: {:?}", e);
+                                    set_exit(1);
+                                }
                             }
                         }
                         _ => shell_println!(
@@ -53364,7 +56210,10 @@ fn cmd_nat(args: &str) {
                     if let Some(hp) = parts.get(3).and_then(|s| s.parse::<u16>().ok()) {
                         match crate::net::nat::remove_port_forward(proto, hp) {
                             Ok(()) => shell_println!("Port forward removed: :{}", hp),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Invalid port");
@@ -55255,7 +58104,10 @@ fn cmd_inputa11y(args: &str) {
                 Ok(()) => {
                     shell_println!("Sticky keys {}.", if on { "enabled" } else { "disabled" })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "filter" => {
@@ -55269,7 +58121,10 @@ fn cmd_inputa11y(args: &str) {
                 Ok(()) => {
                     shell_println!("Filter keys {}.", if on { "enabled" } else { "disabled" })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "toggle" => {
@@ -55283,7 +58138,10 @@ fn cmd_inputa11y(args: &str) {
                 Ok(()) => {
                     shell_println!("Toggle keys {}.", if on { "enabled" } else { "disabled" })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "mouse" => {
@@ -55303,7 +58161,10 @@ fn cmd_inputa11y(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "bounce" => {
@@ -55317,7 +58178,10 @@ fn cmd_inputa11y(args: &str) {
                 Ok(()) => {
                     shell_println!("Bounce keys {}.", if on { "enabled" } else { "disabled" })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -55408,7 +58272,10 @@ fn cmd_driverupdate(args: &str) {
                     "User",
                 ) {
                     Ok(id) => shell_println!("Registered driver '{}' v{} (id={})", name, ver, id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -55421,7 +58288,10 @@ fn cmd_driverupdate(args: &str) {
                                 shell_println!("Updated '{}' to v{}", d.name, d.version);
                             }
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -55441,7 +58311,10 @@ fn cmd_driverupdate(args: &str) {
                                 shell_println!("Rolled back '{}' to v{}", d.name, d.version);
                             }
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -55460,7 +58333,10 @@ fn cmd_driverupdate(args: &str) {
             } else if let Ok(id) = id_str.parse::<u32>() {
                 match driverupdate::set_available_update(id, ver) {
                     Ok(()) => shell_println!("Update v{} staged for driver {}", ver, id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Invalid ID.");
@@ -55496,7 +58372,10 @@ fn cmd_driverupdate(args: &str) {
                             shell_println!("  Provider:  {}", d.provider);
                             shell_println!("  Auto-update: {}", d.auto_update);
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -55592,7 +58471,10 @@ fn cmd_netshare(args: &str) {
                     Ok(id) => {
                         shell_println!("Mounted {}:{} at {} (id={})", host, remote, mountpt, id)
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -55601,7 +58483,10 @@ fn cmd_netshare(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match netshare::unmount(id) {
                         Ok(()) => shell_println!("Unmounted share {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -55632,7 +58517,10 @@ fn cmd_netshare(args: &str) {
                                 s.bytes_written
                             );
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -55753,7 +58641,10 @@ fn cmd_startuprepair(args: &str) {
                         );
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "session" | "info" => {
@@ -55777,7 +58668,10 @@ fn cmd_startuprepair(args: &str) {
                                 }
                             }
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -55796,11 +58690,17 @@ fn cmd_startuprepair(args: &str) {
                     shell_println!("Failed boot recorded.");
                 }
             }
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "resetboots" => match startuprepair::reset_failed_boots() {
             Ok(()) => shell_println!("Failed boot counter reset."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (sessions, checks, repairs, failed, ops) = startuprepair::stats();
@@ -55886,7 +58786,10 @@ fn cmd_remoteassist(args: &str) {
                     id,
                     mode.label()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "connect" | "join" => {
@@ -55897,7 +58800,10 @@ fn cmd_remoteassist(args: &str) {
             } else {
                 match remoteassist::connect(code, helper) {
                     Ok(id) => shell_println!("Connected to session {} as '{}'", id, helper),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -55906,7 +58812,10 @@ fn cmd_remoteassist(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match remoteassist::grant_control(id) {
                         Ok(()) => shell_println!("Full control granted for session {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -55922,7 +58831,10 @@ fn cmd_remoteassist(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match remoteassist::revoke_control(id) {
                         Ok(()) => shell_println!("Control revoked for session {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -55938,7 +58850,10 @@ fn cmd_remoteassist(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match remoteassist::pause_session(id) {
                         Ok(()) => shell_println!("Session {} paused", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -55954,7 +58869,10 @@ fn cmd_remoteassist(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match remoteassist::resume_session(id) {
                         Ok(()) => shell_println!("Session {} resumed", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -55970,7 +58888,10 @@ fn cmd_remoteassist(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match remoteassist::end_session(id) {
                         Ok(()) => shell_println!("Session {} ended", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -55991,7 +58912,10 @@ fn cmd_remoteassist(args: &str) {
                         "Clipboard sharing {}",
                         if shared { "enabled" } else { "disabled" }
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: rassist clipboard <id> [on|off]");
@@ -56078,7 +59002,10 @@ fn cmd_taskmon(args: &str) {
                 if let Ok(pid) = pid_str.parse::<u32>() {
                     match taskmon::kill_task(pid) {
                         Ok(()) => shell_println!("Killed task {}", pid),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid PID.");
@@ -56094,7 +59021,10 @@ fn cmd_taskmon(args: &str) {
                 if let Ok(pid) = pid_str.parse::<u32>() {
                     match taskmon::suspend_task(pid) {
                         Ok(()) => shell_println!("Suspended task {}", pid),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid PID.");
@@ -56110,7 +59040,10 @@ fn cmd_taskmon(args: &str) {
                 if let Ok(pid) = pid_str.parse::<u32>() {
                     match taskmon::resume_task(pid) {
                         Ok(()) => shell_println!("Resumed task {}", pid),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid PID.");
@@ -56142,7 +59075,10 @@ fn cmd_taskmon(args: &str) {
                 };
                 match taskmon::set_priority(pid, prio) {
                     Ok(()) => shell_println!("Set PID {} priority to {}", pid, prio.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Invalid PID.");
@@ -56160,7 +59096,10 @@ fn cmd_taskmon(args: &str) {
                     .unwrap_or(0);
                 match taskmon::register_task(name, taskmon::TaskPriority::Normal, ppid, "user") {
                     Ok(pid) => shell_println!("Registered '{}' as PID {}", name, pid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -56183,7 +59122,10 @@ fn cmd_taskmon(args: &str) {
                             shell_println!("  Parent:   {}", t.parent_pid);
                             shell_println!("  User:     {}", t.user);
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid PID.");
@@ -56275,7 +59217,10 @@ fn cmd_printqueue(args: &str) {
                                 }
                             }
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid printer ID.");
@@ -56293,7 +59238,10 @@ fn cmd_printqueue(args: &str) {
             } else {
                 match printqueue::add_printer(name) {
                     Ok(id) => shell_println!("Added printer '{}' (id={})", name, id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -56317,7 +59265,10 @@ fn cmd_printqueue(args: &str) {
                     1024,
                 ) {
                     Ok(jid) => shell_println!("Submitted job {} to printer {}", jid, pid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Invalid printer ID.");
@@ -56333,7 +59284,10 @@ fn cmd_printqueue(args: &str) {
             {
                 match printqueue::cancel_job(pid, jid) {
                     Ok(()) => shell_println!("Cancelled job {}", jid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Invalid ID(s).");
@@ -56349,7 +59303,10 @@ fn cmd_printqueue(args: &str) {
             {
                 match printqueue::complete_job(pid, jid) {
                     Ok(()) => shell_println!("Completed job {}", jid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Invalid ID(s).");
@@ -56361,7 +59318,10 @@ fn cmd_printqueue(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match printqueue::pause_printer(id) {
                         Ok(()) => shell_println!("Paused printer {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -56377,7 +59337,10 @@ fn cmd_printqueue(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match printqueue::resume_printer(id) {
                         Ok(()) => shell_println!("Resumed printer {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -56393,7 +59356,10 @@ fn cmd_printqueue(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match printqueue::clear_completed(id) {
                         Ok(n) => shell_println!("Cleared {} completed jobs.", n),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -56484,7 +59450,10 @@ fn cmd_servicemgr(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match servicemgr::start_service(id) {
                         Ok(()) => shell_println!("Started service {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -56500,7 +59469,10 @@ fn cmd_servicemgr(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match servicemgr::stop_service(id) {
                         Ok(()) => shell_println!("Stopped service {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -56516,7 +59488,10 @@ fn cmd_servicemgr(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match servicemgr::restart_service(id) {
                         Ok(()) => shell_println!("Restarted service {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -56546,7 +59521,10 @@ fn cmd_servicemgr(args: &str) {
                 };
                 match servicemgr::set_startup_type(id, st) {
                     Ok(()) => shell_println!("Set startup type to {}", st.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Invalid ID.");
@@ -56566,7 +59544,10 @@ fn cmd_servicemgr(args: &str) {
                     servicemgr::StartupType::Manual,
                 ) {
                     Ok(id) => shell_println!("Registered service '{}' (id={})", name, id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -56595,7 +59576,10 @@ fn cmd_servicemgr(args: &str) {
                                 shell_println!("  Depends on: {:?}", s.depends_on);
                             }
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -56616,7 +59600,10 @@ fn cmd_servicemgr(args: &str) {
                         s.state.label(),
                         s.startup_type.label()
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: svcmgr find <name>");
@@ -56761,7 +59748,10 @@ fn cmd_hwmonitor(args: &str) {
                         val
                     ),
                     Ok(None) => shell_println!("Sensor {} updated to {}. Status: Normal.", id, val),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Invalid arguments.");
@@ -56783,7 +59773,10 @@ fn cmd_hwmonitor(args: &str) {
                             shell_println!("  Critical: {}", s.critical_threshold);
                             shell_println!("  Status:   {}", s.status.label());
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -56876,7 +59869,10 @@ fn cmd_appsandbox(args: &str) {
                         id,
                         trust.label()
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -56896,7 +59892,10 @@ fn cmd_appsandbox(args: &str) {
                 };
                 match appsandbox::check_access(id, perm) {
                     Ok(d) => shell_println!("Access {}: {}", perm.label(), d.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: sandbox check <id> <permission>");
@@ -56920,7 +59919,10 @@ fn cmd_appsandbox(args: &str) {
                 };
                 match appsandbox::grant_permission(id, perm, "") {
                     Ok(()) => shell_println!("Granted {} to sandbox {}", perm.label(), id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: sandbox grant <id> <permission>");
@@ -56943,7 +59945,10 @@ fn cmd_appsandbox(args: &str) {
                 };
                 match appsandbox::revoke_permission(id, perm) {
                     Ok(()) => shell_println!("Revoked {} from sandbox {}", perm.label(), id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: sandbox revoke <id> <permission>");
@@ -56955,7 +59960,10 @@ fn cmd_appsandbox(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match appsandbox::remove_sandbox(id) {
                         Ok(()) => shell_println!("Removed sandbox {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -57062,7 +60070,10 @@ fn cmd_gamepadinput(args: &str) {
                         id,
                         gtype.label()
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -57071,7 +60082,10 @@ fn cmd_gamepadinput(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match gamepadinput::remove_gamepad(id) {
                         Ok(()) => shell_println!("Removed gamepad {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -57088,7 +60102,10 @@ fn cmd_gamepadinput(args: &str) {
             if let (Ok(id), Ok(val)) = (id_str.parse::<u32>(), val_str.parse::<i32>()) {
                 match gamepadinput::set_dead_zone(id, val) {
                     Ok(()) => shell_println!("Dead zone set to {} for gamepad {}", val, id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: gamepad deadzone <id> <value>");
@@ -57101,7 +60118,10 @@ fn cmd_gamepadinput(args: &str) {
             if let (Ok(id), Ok(val)) = (id_str.parse::<u32>(), val_str.parse::<u32>()) {
                 match gamepadinput::set_rumble(id, val) {
                     Ok(()) => shell_println!("Rumble set to {} for gamepad {}", val, id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: gamepad rumble <id> [intensity]");
@@ -57131,7 +60151,10 @@ fn cmd_gamepadinput(args: &str) {
                             shell_println!("  Connected:  {}", g.connected);
                             shell_println!("  Presses:    {}", g.total_presses);
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -57223,7 +60246,10 @@ fn cmd_sysrestore(args: &str) {
             };
             match sysrestore::create_snapshot(desc, stype, 100_000_000, 500) {
                 Ok(id) => shell_println!("Created snapshot {} ({})", id, desc),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "restore" => {
@@ -57231,7 +60257,10 @@ fn cmd_sysrestore(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match sysrestore::restore_snapshot(id) {
                         Ok(()) => shell_println!("Restored from snapshot {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -57247,7 +60276,10 @@ fn cmd_sysrestore(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match sysrestore::pin_snapshot(id) {
                         Ok(()) => shell_println!("Pinned snapshot {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -57263,7 +60295,10 @@ fn cmd_sysrestore(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match sysrestore::unpin_snapshot(id) {
                         Ok(()) => shell_println!("Unpinned snapshot {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -57279,7 +60314,10 @@ fn cmd_sysrestore(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match sysrestore::delete_snapshot(id) {
                         Ok(()) => shell_println!("Deleted snapshot {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -57292,7 +60330,10 @@ fn cmd_sysrestore(args: &str) {
         }
         "rotate" => match sysrestore::run_rotation() {
             Ok(n) => shell_println!("Rotation removed {} snapshot(s).", n),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "policy" => {
             let policy = sysrestore::get_rotation_policy();
@@ -57405,7 +60446,10 @@ fn cmd_audiomux(args: &str) {
                 let out = parts.get(3).and_then(|s| s.parse::<u32>().ok());
                 match audiomux::create_stream(app, pid, out) {
                     Ok(id) => shell_println!("Created stream {} for '{}'", id, app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -57415,7 +60459,10 @@ fn cmd_audiomux(args: &str) {
             if let (Ok(id), Ok(vol)) = (id_str.parse::<u32>(), vol_str.parse::<u32>()) {
                 match audiomux::set_stream_volume(id, vol) {
                     Ok(()) => shell_println!("Stream {} volume set to {}", id, vol),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: amux volume <stream_id> <0-100>");
@@ -57427,7 +60474,10 @@ fn cmd_audiomux(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match audiomux::set_stream_muted(id, true) {
                         Ok(()) => shell_println!("Muted stream {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -57443,7 +60493,10 @@ fn cmd_audiomux(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match audiomux::set_stream_muted(id, false) {
                         Ok(()) => shell_println!("Unmuted stream {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -57460,7 +60513,10 @@ fn cmd_audiomux(args: &str) {
             if let (Ok(sid), Ok(oid)) = (stream_str.parse::<u32>(), out_str.parse::<u32>()) {
                 match audiomux::reroute_stream(sid, oid) {
                     Ok(()) => shell_println!("Rerouted stream {} to output {}", sid, oid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: amux reroute <stream_id> <output_id>");
@@ -57472,7 +60528,10 @@ fn cmd_audiomux(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match audiomux::set_default_output(id) {
                         Ok(()) => shell_println!("Default output set to {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -57566,7 +60625,10 @@ fn cmd_netthrottle(args: &str) {
             } else {
                 match netthrottle::add_rule(app, down, up, netthrottle::QosPriority::Normal) {
                     Ok(id) => shell_println!("Added rule {} for '{}'", id, app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -57575,7 +60637,10 @@ fn cmd_netthrottle(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match netthrottle::remove_rule(id) {
                         Ok(()) => shell_println!("Removed rule {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -57599,7 +60664,10 @@ fn cmd_netthrottle(args: &str) {
                 };
                 match netthrottle::set_priority(id, prio) {
                     Ok(()) => shell_println!("Priority set to {}", prio.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: nthrottle priority <id> <level>");
@@ -57723,7 +60791,10 @@ fn cmd_dumpanalyzer(args: &str) {
                                 }
                             }
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -57739,7 +60810,10 @@ fn cmd_dumpanalyzer(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match dumpanalyzer::delete_analysis(id) {
                         Ok(()) => shell_println!("Deleted analysis {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -57828,7 +60902,10 @@ fn cmd_memdiag(args: &str) {
                         );
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "tests" | "history" => {
@@ -57960,7 +61037,10 @@ fn cmd_parentaltime(args: &str) {
                         id,
                         daily
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -57975,7 +61055,10 @@ fn cmd_parentaltime(args: &str) {
                     Ok(status) => {
                         shell_println!("Recorded {} min. Status: {}", mins, status.label())
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: ptime use <id> [minutes]");
@@ -58011,7 +61094,10 @@ fn cmd_parentaltime(args: &str) {
             if let Ok(id) = id_str.parse::<u32>() {
                 match parentaltime::set_daily_limit(id, mins) {
                     Ok(()) => shell_println!("Daily limit set to {} min", mins),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: ptime limit <id> <minutes>");
@@ -58039,7 +61125,10 @@ fn cmd_parentaltime(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match parentaltime::remove_config(id) {
                         Ok(()) => shell_println!("Removed config {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -58127,7 +61216,10 @@ fn cmd_mediakeys(args: &str) {
             } else {
                 match mediakeys::register_session(app, pid) {
                     Ok(id) => shell_println!("Registered session {} for '{}'", id, app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -58136,7 +61228,10 @@ fn cmd_mediakeys(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match mediakeys::unregister_session(id) {
                         Ok(()) => shell_println!("Unregistered session {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -58159,7 +61254,10 @@ fn cmd_mediakeys(args: &str) {
             if let Ok(id) = id_str.parse::<u32>() {
                 match mediakeys::update_now_playing(id, title, artist, album, dur) {
                     Ok(()) => shell_println!("Updated now playing for session {}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: mkeys update <id> <title> [artist] [album] [duration_ms]");
@@ -58209,7 +61307,10 @@ fn cmd_mediakeys(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match mediakeys::set_active(id) {
                         Ok(()) => shell_println!("Session {} is now active.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -58328,7 +61429,10 @@ fn cmd_webcam(args: &str) {
                 };
                 match webcam::register_camera(name, conn) {
                     Ok(id) => shell_println!("Registered camera {} '{}'", id, name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -58337,7 +61441,10 @@ fn cmd_webcam(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match webcam::unregister_camera(id) {
                         Ok(()) => shell_println!("Unregistered camera {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -58371,7 +61478,10 @@ fn cmd_webcam(args: &str) {
             } else {
                 match webcam::open_stream(cam_id, app, 0, w, h, fps) {
                     Ok(sid) => shell_println!("Opened stream {} on camera {}", sid, cam_id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -58380,7 +61490,10 @@ fn cmd_webcam(args: &str) {
                 if let Ok(sid) = id_str.parse::<u32>() {
                     match webcam::close_stream(sid) {
                         Ok(()) => shell_println!("Closed stream {}", sid),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID.");
@@ -58406,7 +61519,10 @@ fn cmd_webcam(args: &str) {
                 };
                 match webcam::set_privacy(id, setting) {
                     Ok(()) => shell_println!("Camera {} privacy → {}", id, setting.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: cam privacy <cam_id> <open|prompt|disabled>");
@@ -58420,7 +61536,10 @@ fn cmd_webcam(args: &str) {
             } else {
                 match webcam::block_app(app) {
                     Ok(()) => shell_println!("Blocked '{}'", app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -58431,7 +61550,10 @@ fn cmd_webcam(args: &str) {
             } else {
                 match webcam::unblock_app(app) {
                     Ok(()) => shell_println!("Unblocked '{}'", app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -58450,7 +61572,10 @@ fn cmd_webcam(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match webcam::set_default(id) {
                         Ok(()) => shell_println!("Camera {} is now default.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -58544,7 +61669,10 @@ fn cmd_speechio(args: &str) {
             };
             match speechio::speak(&text, None, 100, 100, 80) {
                 Ok(id) => shell_println!("Queued utterance {} — \"{}\"", id, text),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stop" => {
@@ -58582,7 +61710,10 @@ fn cmd_speechio(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match speechio::cancel_utterance(id) {
                         Ok(()) => shell_println!("Cancelled utterance {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -58603,7 +61734,10 @@ fn cmd_speechio(args: &str) {
             } else {
                 match speechio::add_voice(name, lang, gender) {
                     Ok(id) => shell_println!("Added voice {} '{}'", id, name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -58612,7 +61746,10 @@ fn cmd_speechio(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match speechio::remove_voice(id) {
                         Ok(()) => shell_println!("Removed voice {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -58625,7 +61762,10 @@ fn cmd_speechio(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match speechio::set_default_voice(id) {
                         Ok(()) => shell_println!("Voice {} is now default.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -58654,7 +61794,10 @@ fn cmd_speechio(args: &str) {
                     speechio::set_recognition_enabled(true).ok();
                     match speechio::start_listening() {
                         Ok(()) => shell_println!("Listening..."),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 "stop" | "off" => {
@@ -58763,7 +61906,10 @@ fn cmd_mobilelink(args: &str) {
                 };
                 match mobilelink::start_pairing(name, platform, model) {
                     Ok((id, code)) => shell_println!("Pairing device {}. Code: {}", id, code),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -58773,7 +61919,10 @@ fn cmd_mobilelink(args: &str) {
             if let (Ok(id), Ok(code)) = (id_str.parse::<u32>(), code_str.parse::<u32>()) {
                 match mobilelink::confirm_pairing(id, code) {
                     Ok(()) => shell_println!("Device {} paired successfully.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: mlink confirm <device_id> <code>");
@@ -58785,7 +61934,10 @@ fn cmd_mobilelink(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match mobilelink::disconnect(id) {
                         Ok(()) => shell_println!("Disconnected device {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -58798,7 +61950,10 @@ fn cmd_mobilelink(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match mobilelink::reconnect(id) {
                         Ok(()) => shell_println!("Reconnected device {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -58811,7 +61966,10 @@ fn cmd_mobilelink(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match mobilelink::remove_device(id) {
                         Ok(()) => shell_println!("Removed device {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -58855,7 +62013,10 @@ fn cmd_mobilelink(args: &str) {
                 } else {
                     match mobilelink::send_sms(id, to, &body) {
                         Ok(mid) => shell_println!("Sent SMS {} to {}", mid, to),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -58890,7 +62051,10 @@ fn cmd_mobilelink(args: &str) {
                         if enable { "enabled" } else { "disabled" },
                         id
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: mlink feature <device_id> <feature> [on|off]");
@@ -58970,14 +62134,20 @@ fn cmd_screenlock(args: &str) {
         }
         "lock" => match screenlock::lock() {
             Ok(()) => shell_println!("Screen locked."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "unlock" => {
             let credential = parts.get(1).copied().unwrap_or("");
             match screenlock::authenticate(screenlock::AuthMethod::Password, credential) {
                 Ok(true) => shell_println!("Unlocked."),
                 Ok(false) => shell_println!("Authentication failed."),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "force" => {
@@ -59017,10 +62187,13 @@ fn cmd_screenlock(args: &str) {
             let val = parts.get(2).copied().unwrap_or("on") == "on";
             match screenlock::set_lock_screen_option(opt, val) {
                 Ok(()) => shell_println!("{} → {}", opt, if val { "on" } else { "off" }),
-                Err(e) => shell_println!(
-                    "Error: {:?} (options: notifications, media, clock, require_on_wake)",
-                    e
-                ),
+                Err(e) => {
+                    shell_println!(
+                        "Error: {:?} (options: notifications, media, clock, require_on_wake)",
+                        e
+                    );
+                    set_exit(1);
+                }
             }
         }
         "events" => {
@@ -59135,7 +62308,10 @@ fn cmd_appstore(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match appstore::install(id) {
                         Ok(()) => shell_println!("Installed app {}.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -59148,7 +62324,10 @@ fn cmd_appstore(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match appstore::uninstall(id) {
                         Ok(()) => shell_println!("Uninstalled app {}.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -59161,7 +62340,10 @@ fn cmd_appstore(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match appstore::update_app(id) {
                         Ok(()) => shell_println!("Updated app {}.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -59177,7 +62359,10 @@ fn cmd_appstore(args: &str) {
                     shell_println!("Updates available for: {:?}", ids);
                 }
             }
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "installed" => {
             let installed = appstore::list_installed();
@@ -59217,7 +62402,10 @@ fn cmd_appstore(args: &str) {
                 } else {
                     match appstore::add_review(id, "kshell_user", rating, &comment) {
                         Ok(rid) => shell_println!("Review {} added ({}/5).", rid, rating),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -59246,7 +62434,10 @@ fn cmd_appstore(args: &str) {
             } else {
                 match appstore::add_app(name, dev, "", cat, "1.0.0", 1024) {
                     Ok(id) => shell_println!("Added app {} '{}'.", id, name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -59255,7 +62446,10 @@ fn cmd_appstore(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match appstore::remove_app(id) {
                         Ok(()) => shell_println!("Removed app {}.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -59380,7 +62574,10 @@ fn cmd_wintiling(args: &str) {
             };
             match wintiling::create_workspace(name, layout) {
                 Ok(id) => shell_println!("Created workspace {} '{}'.", id, name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rmws" => {
@@ -59388,7 +62585,10 @@ fn cmd_wintiling(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match wintiling::remove_workspace(id) {
                         Ok(()) => shell_println!("Removed workspace {}.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -59411,7 +62611,10 @@ fn cmd_wintiling(args: &str) {
             } else {
                 match wintiling::add_window(wid, title, ws) {
                     Ok(()) => shell_println!("Added window {} to workspace {}.", wid, ws),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -59420,7 +62623,10 @@ fn cmd_wintiling(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match wintiling::remove_window(id) {
                         Ok(()) => shell_println!("Removed window {}.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -59449,7 +62655,10 @@ fn cmd_wintiling(args: &str) {
             };
             match wintiling::set_layout(ws, layout) {
                 Ok(()) => shell_println!("Workspace {} → {}", ws, layout.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "retile" => {
@@ -59459,7 +62668,10 @@ fn cmd_wintiling(args: &str) {
                 .unwrap_or(1);
             match wintiling::retile(ws) {
                 Ok(()) => shell_println!("Retiled workspace {}.", ws),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "gap" => {
@@ -59499,7 +62711,10 @@ fn cmd_wintiling(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match wintiling::toggle_floating(id) {
                         Ok(f) => shell_println!("Window {} floating: {}", id, f),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -59521,7 +62736,10 @@ fn cmd_wintiling(args: &str) {
             } else {
                 match wintiling::move_to_workspace(wid, ws) {
                     Ok(()) => shell_println!("Moved window {} to workspace {}.", wid, ws),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -59620,7 +62838,10 @@ fn cmd_peninput(args: &str) {
                 };
                 match peninput::register_pen(name, pen_type, caps) {
                     Ok(id) => shell_println!("Registered pen {} '{}'.", id, name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -59629,7 +62850,10 @@ fn cmd_peninput(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match peninput::unregister_pen(id) {
                         Ok(()) => shell_println!("Unregistered pen {}.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -59707,7 +62931,10 @@ fn cmd_peninput(args: &str) {
             } else {
                 match peninput::set_button_mapping(pen_id, btn, action) {
                     Ok(()) => shell_println!("Button {} → '{}'.", btn, action),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -59807,7 +63034,10 @@ fn cmd_brightness(args: &str) {
             } else {
                 match brightness::set_brightness(id, level) {
                     Ok(()) => shell_println!("Brightness → {}%", level),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -59822,7 +63052,10 @@ fn cmd_brightness(args: &str) {
                 .unwrap_or(10);
             match brightness::brightness_up(id, step) {
                 Ok(new) => shell_println!("Brightness → {}%", new),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "down" => {
@@ -59836,7 +63069,10 @@ fn cmd_brightness(args: &str) {
                 .unwrap_or(10);
             match brightness::brightness_down(id, step) {
                 Ok(new) => shell_println!("Brightness → {}%", new),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "mode" => {
@@ -59953,7 +63189,10 @@ fn cmd_quicksettings(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match quicksettings::toggle(id) {
                         Ok(on) => shell_println!("Toggled → {}", if on { "On" } else { "Off" }),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             } else {
@@ -59975,7 +63214,10 @@ fn cmd_quicksettings(args: &str) {
             } else {
                 match quicksettings::set_value(id, val) {
                     Ok(()) => shell_println!("Set to {}%", val),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -59992,7 +63234,10 @@ fn cmd_quicksettings(args: &str) {
             } else {
                 match quicksettings::add_tile(name, name, tile_type) {
                     Ok(id) => shell_println!("Added tile {} '{}'", id, name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -60069,7 +63314,10 @@ fn cmd_volumeosd(args: &str) {
                     level,
                     if muted { " (muted)" } else { "" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "bright" | "brightness" => {
@@ -60079,7 +63327,10 @@ fn cmd_volumeosd(args: &str) {
                 .unwrap_or(50);
             match volumeosd::show_brightness(level) {
                 Ok(id) => shell_println!("OSD {} — Brightness {}%", id, level),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "custom" => {
@@ -60091,7 +63342,10 @@ fn cmd_volumeosd(args: &str) {
             };
             match volumeosd::show(volumeosd::OsdType::Custom, 0, label, &text) {
                 Ok(id) => shell_println!("OSD {} — {}: {}", id, label, text),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "dismiss" => {
@@ -60202,7 +63456,10 @@ fn cmd_netdiag(args: &str) {
                     shell_println!("PING {} — {} ({})us", host, r.status.label(), r.latency_us);
                     shell_println!("{}", r.info);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "trace" | "traceroute" => {
@@ -60222,14 +63479,20 @@ fn cmd_netdiag(args: &str) {
                         );
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "dns" | "lookup" => {
             let name = parts.get(1).copied().unwrap_or("localhost");
             match netdiag::dns_lookup(name) {
                 Ok(r) => shell_println!("{} → {} ({}us)", name, r.resolved, r.latency_us),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "results" => {
@@ -60363,7 +63626,10 @@ fn cmd_sharesheet(args: &str) {
             let data: String = parts[2..].join(" ");
             match sharesheet::share_to(tid, sharesheet::ContentType::Text, &data) {
                 Ok(aid) => shell_println!("Shared action #{} to target #{}", aid, tid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "register" => {
@@ -60375,7 +63641,10 @@ fn cmd_sharesheet(args: &str) {
                 alloc::vec![sharesheet::ContentType::Text, sharesheet::ContentType::Url],
             ) {
                 Ok(id) => shell_println!("Registered target #{}: {}", id, display),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unregister" => {
@@ -60389,7 +63658,10 @@ fn cmd_sharesheet(args: &str) {
             };
             match sharesheet::unregister_target(id) {
                 Ok(()) => shell_println!("Unregistered target #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "history" => {
@@ -60460,7 +63732,10 @@ fn cmd_oobe(args: &str) {
                 step.label(),
                 step.step_number()
             ),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "back" => match oobe::go_back() {
             Ok(step) => shell_println!(
@@ -60468,27 +63743,39 @@ fn cmd_oobe(args: &str) {
                 step.label(),
                 step.step_number()
             ),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "skip" => match oobe::skip() {
             Ok(step) => {
                 shell_println!("Skipped to: {} (step {})", step.label(), step.step_number())
             }
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "lang" => {
             let language = parts.get(1).copied().unwrap_or("en-US");
             let region = parts.get(2).copied().unwrap_or("US");
             match oobe::set_language(language, region) {
                 Ok(()) => shell_println!("Language: {}, Region: {}", language, region),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "keyboard" | "kb" => {
             let layout = parts.get(1).copied().unwrap_or("us");
             match oobe::set_keyboard(layout) {
                 Ok(()) => shell_println!("Keyboard layout: {}", layout),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "user" => {
@@ -60504,7 +63791,10 @@ fn cmd_oobe(args: &str) {
                         hostname
                     }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "network" | "wifi" => {
@@ -60514,7 +63804,10 @@ fn cmd_oobe(args: &str) {
                     "WiFi SSID: {}",
                     if ssid.is_empty() { "(none)" } else { ssid }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "privacy" => {
@@ -60528,14 +63821,20 @@ fn cmd_oobe(args: &str) {
                     loc,
                     upd
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "theme" => {
             let t = parts.get(1).copied().unwrap_or("Default");
             match oobe::set_theme(t) {
                 Ok(()) => shell_println!("Theme: {}", t),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "choices" => match oobe::get_choices() {
@@ -60563,7 +63862,10 @@ fn cmd_oobe(args: &str) {
         },
         "complete" => match oobe::force_complete() {
             Ok(()) => shell_println!("OOBE force-completed"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (step, completed, skipped, ops) = oobe::stats();
@@ -60656,7 +63958,10 @@ fn cmd_hdrdisplay(args: &str) {
             };
             match hdrdisplay::enable_hdr(id, std) {
                 Ok(()) => shell_println!("HDR enabled on display #{}: {}", id, std.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "disable" => {
@@ -60670,7 +63975,10 @@ fn cmd_hdrdisplay(args: &str) {
             };
             match hdrdisplay::disable_hdr(id) {
                 Ok(()) => shell_println!("HDR disabled on display #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "tonemap" | "tm" => {
@@ -60691,7 +63999,10 @@ fn cmd_hdrdisplay(args: &str) {
             };
             match hdrdisplay::set_tone_mapping(id, tm) {
                 Ok(()) => shell_println!("Tone mapping: {}", tm.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "sdrboost" | "boost" => {
@@ -60706,7 +64017,10 @@ fn cmd_hdrdisplay(args: &str) {
             let boost: u32 = parts.get(2).unwrap_or(&"50").parse().unwrap_or(50);
             match hdrdisplay::set_sdr_boost(id, boost) {
                 Ok(()) => shell_println!("SDR boost: {}%", boost.min(100)),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "colorspace" | "cs" => {
@@ -60726,7 +64040,10 @@ fn cmd_hdrdisplay(args: &str) {
             };
             match hdrdisplay::set_color_space(id, cs) {
                 Ok(()) => shell_println!("Color space: {}", cs.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "register" => {
@@ -60738,7 +64055,10 @@ fn cmd_hdrdisplay(args: &str) {
                 alloc::vec![hdrdisplay::HdrStandard::Hdr10, hdrdisplay::HdrStandard::Hlg],
             ) {
                 Ok(id) => shell_println!("Registered display #{}: {} ({} nits)", id, name, nits),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -60814,7 +64134,10 @@ fn cmd_surroundsound(args: &str) {
             };
             match surroundsound::create_config(name, layout) {
                 Ok(id) => shell_println!("Created config #{}: {} ({})", id, name, layout.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "layout" => {
@@ -60836,7 +64159,10 @@ fn cmd_surroundsound(args: &str) {
             };
             match surroundsound::set_layout(id, layout) {
                 Ok(()) => shell_println!("Config #{} → {}", id, layout.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "calibrate" | "cal" => {
@@ -60868,7 +64194,10 @@ fn cmd_surroundsound(args: &str) {
                     trim.clamp(-600, 600),
                     dist
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "virtual" | "vs" => {
@@ -60887,7 +64216,10 @@ fn cmd_surroundsound(args: &str) {
                     id,
                     if enabled { "on" } else { "off" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "crossover" | "xo" => {
@@ -60902,7 +64234,10 @@ fn cmd_surroundsound(args: &str) {
             let hz: u32 = parts.get(2).unwrap_or(&"80").parse().unwrap_or(80);
             match surroundsound::set_crossover(id, hz) {
                 Ok(()) => shell_println!("Crossover #{}: {} Hz", id, hz.clamp(40, 200)),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -60916,7 +64251,10 @@ fn cmd_surroundsound(args: &str) {
             };
             match surroundsound::remove_config(id) {
                 Ok(()) => shell_println!("Removed config #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -61003,7 +64341,10 @@ fn cmd_audioeq(args: &str) {
             };
             match audioeq::set_preset(id, preset) {
                 Ok(()) => shell_println!("EQ #{} → {}", id, preset.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "band" => {
@@ -61019,7 +64360,10 @@ fn cmd_audioeq(args: &str) {
             let gain: i32 = parts.get(3).unwrap_or(&"0").parse().unwrap_or(0);
             match audioeq::set_band_gain(id, band, gain) {
                 Ok(()) => shell_println!("Band {} gain: {} cb", band, gain.clamp(-1200, 1200)),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "preamp" => {
@@ -61034,7 +64378,10 @@ fn cmd_audioeq(args: &str) {
             let gain: i32 = parts.get(2).unwrap_or(&"0").parse().unwrap_or(0);
             match audioeq::set_preamp(id, gain) {
                 Ok(()) => shell_println!("Preamp: {} cb", gain.clamp(-1200, 1200)),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" | "on" => {
@@ -61048,7 +64395,10 @@ fn cmd_audioeq(args: &str) {
             };
             match audioeq::set_enabled(id, true) {
                 Ok(()) => shell_println!("EQ #{} enabled", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "disable" | "off" => {
@@ -61062,14 +64412,20 @@ fn cmd_audioeq(args: &str) {
             };
             match audioeq::set_enabled(id, false) {
                 Ok(()) => shell_println!("EQ #{} disabled", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "create" => {
             let name = parts.get(1).copied().unwrap_or("Device");
             match audioeq::create_config(name) {
                 Ok(id) => shell_println!("Created EQ #{}: {}", id, name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -61083,7 +64439,10 @@ fn cmd_audioeq(args: &str) {
             };
             match audioeq::remove_config(id) {
                 Ok(()) => shell_println!("Removed EQ #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -61147,11 +64506,17 @@ fn cmd_screensaver(args: &str) {
         }
         "activate" => match screensaver::activate() {
             Ok(()) => shell_println!("Screen saver activated"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "deactivate" | "dismiss" => match screensaver::deactivate() {
             Ok(()) => shell_println!("Screen saver deactivated"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "preview" => {
             let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
@@ -61164,7 +64529,10 @@ fn cmd_screensaver(args: &str) {
             };
             match screensaver::preview(id) {
                 Ok(()) => shell_println!("Previewing saver #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "set" => {
@@ -61178,7 +64546,10 @@ fn cmd_screensaver(args: &str) {
             };
             match screensaver::set_active(id) {
                 Ok(()) => shell_println!("Active saver set to #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "timeout" => {
@@ -61193,7 +64564,10 @@ fn cmd_screensaver(args: &str) {
             let secs: u32 = parts.get(2).unwrap_or(&"300").parse().unwrap_or(300);
             match screensaver::set_timeout(id, secs) {
                 Ok(()) => shell_println!("Timeout: {}s", secs.clamp(30, 7200)),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "password" | "pw" => {
@@ -61208,7 +64582,10 @@ fn cmd_screensaver(args: &str) {
             let required = parts.get(2).copied().unwrap_or("on") != "off";
             match screensaver::set_password_required(id, required) {
                 Ok(()) => shell_println!("Password on wake: {}", required),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "register" => {
@@ -61224,7 +64601,10 @@ fn cmd_screensaver(args: &str) {
             };
             match screensaver::register_saver(name, stype) {
                 Ok(id) => shell_println!("Registered saver #{}: {} ({})", id, name, stype.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -61310,7 +64690,10 @@ fn cmd_colortemp(args: &str) {
             let kelvin: u32 = parts.get(2).unwrap_or(&"4000").parse().unwrap_or(4000);
             match colortemp::set_temperature(id, kelvin) {
                 Ok(()) => shell_println!("Temperature: {}K", kelvin.clamp(1000, 10000)),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "mode" => {
@@ -61330,7 +64713,10 @@ fn cmd_colortemp(args: &str) {
             };
             match colortemp::set_mode(id, mode) {
                 Ok(()) => shell_println!("Mode: {}", mode.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "daynight" | "dn" => {
@@ -61350,7 +64736,10 @@ fn cmd_colortemp(args: &str) {
                     day.clamp(1000, 10000),
                     night.clamp(1000, 10000)
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "schedule" => {
@@ -61374,7 +64763,10 @@ fn cmd_colortemp(args: &str) {
                     sunrise % 60,
                     trans
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "update" => {
@@ -61389,14 +64781,20 @@ fn cmd_colortemp(args: &str) {
             let time: u16 = parts.get(2).unwrap_or(&"720").parse().unwrap_or(720);
             match colortemp::update_for_time(id, time) {
                 Ok(k) => shell_println!("Temperature at {:02}:{:02}: {}K", time / 60, time % 60, k),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "create" => {
             let name = parts.get(1).copied().unwrap_or("Profile");
             match colortemp::create_profile(name) {
                 Ok(id) => shell_println!("Created profile #{}: {}", id, name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "active" => {
@@ -61410,7 +64808,10 @@ fn cmd_colortemp(args: &str) {
             };
             match colortemp::set_active(id) {
                 Ok(()) => shell_println!("Active profile: #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -61461,19 +64862,28 @@ fn cmd_gamemode(args: &str) {
             let gid: u32 = parts.get(1).unwrap_or(&"0").parse().unwrap_or(0);
             match gamemode::activate(gid) {
                 Ok(()) => shell_println!("Game mode activated"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "off" | "deactivate" => match gamemode::deactivate() {
             Ok(()) => shell_println!("Game mode deactivated"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "register" => {
             let name = parts.get(1).copied().unwrap_or("Game");
             let proc_name = parts.get(2).copied().unwrap_or("game.exe");
             match gamemode::register_game(name, proc_name) {
                 Ok(id) => shell_println!("Registered game #{}: {} ({})", id, name, proc_name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unregister" => {
@@ -61487,7 +64897,10 @@ fn cmd_gamemode(args: &str) {
             };
             match gamemode::unregister_game(id) {
                 Ok(()) => shell_println!("Unregistered game #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "games" | "list" => {
@@ -61522,14 +64935,20 @@ fn cmd_gamemode(args: &str) {
             let enabled = parts.get(1).copied().unwrap_or("on") != "off";
             match gamemode::set_fps_overlay(enabled) {
                 Ok(()) => shell_println!("FPS overlay: {}", if enabled { "on" } else { "off" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "autodetect" | "auto" => {
             let enabled = parts.get(1).copied().unwrap_or("on") != "off";
             match gamemode::set_auto_detect(enabled) {
                 Ok(()) => shell_println!("Auto-detect: {}", if enabled { "on" } else { "off" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -61601,7 +65020,10 @@ fn cmd_dpiscaling(args: &str) {
             let pct: u32 = parts.get(2).unwrap_or(&"100").parse().unwrap_or(100);
             match dpiscaling::set_scale(id, pct) {
                 Ok(()) => shell_println!("Scale: {}%", pct.clamp(50, 500)),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "method" => {
@@ -61620,7 +65042,10 @@ fn cmd_dpiscaling(args: &str) {
             };
             match dpiscaling::set_method(id, m) {
                 Ok(()) => shell_println!("Method: {}", m.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "register" => {
@@ -61628,7 +65053,10 @@ fn cmd_dpiscaling(args: &str) {
             let dpi: u32 = parts.get(2).unwrap_or(&"96").parse().unwrap_or(96);
             match dpiscaling::register_display(name, dpi) {
                 Ok(id) => shell_println!("Registered display #{}: {} ({}dpi)", id, name, dpi),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "override" => {
@@ -61642,7 +65070,10 @@ fn cmd_dpiscaling(args: &str) {
             let pct: u32 = parts.get(3).unwrap_or(&"0").parse().unwrap_or(0);
             match dpiscaling::set_app_override(app, awareness, pct) {
                 Ok(()) => shell_println!("Override for {}: {} {}%", app, awareness.label(), pct),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "overrides" => {
@@ -61734,7 +65165,10 @@ fn cmd_netprofile(args: &str) {
             };
             match netprofile::create_profile(name, ssid, ntype, netprofile::ConnectionType::WiFi) {
                 Ok(id) => shell_println!("Created profile #{}: {}", id, name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "apply" => {
@@ -61748,7 +65182,10 @@ fn cmd_netprofile(args: &str) {
             };
             match netprofile::apply_profile(id) {
                 Ok(()) => shell_println!("Applied profile #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "type" => {
@@ -61769,7 +65206,10 @@ fn cmd_netprofile(args: &str) {
             };
             match netprofile::set_network_type(id, ntype) {
                 Ok(()) => shell_println!("Type: {}", ntype.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "metered" => {
@@ -61784,7 +65224,10 @@ fn cmd_netprofile(args: &str) {
             let m = parts.get(2).copied().unwrap_or("on") != "off";
             match netprofile::set_metered(id, m) {
                 Ok(()) => shell_println!("Metered: {}", m),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "vpn" => {
@@ -61801,7 +65244,10 @@ fn cmd_netprofile(args: &str) {
                 Ok(()) => {
                     shell_println!("Auto VPN: {}", if vpn.is_empty() { "(none)" } else { vpn })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -61815,7 +65261,10 @@ fn cmd_netprofile(args: &str) {
             };
             match netprofile::remove_profile(id) {
                 Ok(()) => shell_println!("Removed profile #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "find" => {
@@ -61893,7 +65342,10 @@ fn cmd_apppermissions(args: &str) {
             let perm = parse_perm(parts.get(2).copied().unwrap_or("storage"));
             match apppermissions::grant(app, perm) {
                 Ok(()) => shell_println!("Granted {} to {}", perm.label(), app),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "deny" => {
@@ -61901,14 +65353,20 @@ fn cmd_apppermissions(args: &str) {
             let perm = parse_perm(parts.get(2).copied().unwrap_or("storage"));
             match apppermissions::deny(app, perm) {
                 Ok(()) => shell_println!("Denied {} to {}", perm.label(), app),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "revoke" => {
             let app = parts.get(1).copied().unwrap_or("app");
             match apppermissions::revoke_all(app) {
                 Ok(n) => shell_println!("Revoked {} permissions from {}", n, app),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "app" => {
@@ -62032,7 +65490,10 @@ fn cmd_kbshortcuts(args: &str) {
                 kbshortcuts::ShortcutCategory::Custom,
             ) {
                 Ok(id) => shell_println!("Bound #{}: {}+{} → {}", id, mods.label(), key, action),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unbind" => {
@@ -62046,7 +65507,10 @@ fn cmd_kbshortcuts(args: &str) {
             };
             match kbshortcuts::unbind(id) {
                 Ok(()) => shell_println!("Unbound #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "trigger" => {
@@ -62060,7 +65524,10 @@ fn cmd_kbshortcuts(args: &str) {
             };
             match kbshortcuts::trigger(id) {
                 Ok(action) => shell_println!("Triggered: {}", action),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" | "disable" => {
@@ -62079,7 +65546,10 @@ fn cmd_kbshortcuts(args: &str) {
                     id,
                     if enabled { "enabled" } else { "disabled" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "category" | "cat" => {
@@ -62169,7 +65639,10 @@ fn cmd_displayarrange(args: &str) {
             let h: u32 = parts.get(3).unwrap_or(&"1080").parse().unwrap_or(1080);
             match displayarrange::add_display(name, w, h) {
                 Ok(id) => shell_println!("Added display #{}: {} ({}x{})", id, name, w, h),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "pos" | "position" => {
@@ -62185,7 +65658,10 @@ fn cmd_displayarrange(args: &str) {
             let y: i32 = parts.get(3).unwrap_or(&"0").parse().unwrap_or(0);
             match displayarrange::set_position(id, x, y) {
                 Ok(()) => shell_println!("Display #{} at ({}, {})", id, x, y),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "primary" => {
@@ -62199,7 +65675,10 @@ fn cmd_displayarrange(args: &str) {
             };
             match displayarrange::set_primary(id) {
                 Ok(()) => shell_println!("Primary: #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "orient" => {
@@ -62219,7 +65698,10 @@ fn cmd_displayarrange(args: &str) {
             };
             match displayarrange::set_orientation(id, o) {
                 Ok(()) => shell_println!("Orientation: {}", o.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "topology" | "topo" => {
@@ -62230,7 +65712,10 @@ fn cmd_displayarrange(args: &str) {
             };
             match displayarrange::set_topology(t) {
                 Ok(()) => shell_println!("Topology: {}", t.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -62291,24 +65776,36 @@ fn cmd_sysanimations(args: &str) {
         }
         "enable" => match sysanimations::set_global_enabled(true) {
             Ok(()) => shell_println!("Animations enabled"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" => match sysanimations::set_global_enabled(false) {
             Ok(()) => shell_println!("Animations disabled"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "speed" => {
             let pct: u32 = parts.get(1).unwrap_or(&"100").parse().unwrap_or(100);
             match sysanimations::set_speed(pct) {
                 Ok(()) => shell_println!("Speed: {}%", pct.clamp(10, 400)),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "reduce" => {
             let on = parts.get(1).copied().unwrap_or("on") != "off";
             match sysanimations::set_reduce_motion(on) {
                 Ok(()) => shell_println!("Reduce motion: {}", on),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -62374,7 +65871,10 @@ fn cmd_filevault(args: &str) {
             };
             match filevault::create_vault(name, path, password, cipher) {
                 Ok(id) => shell_println!("Created vault #{}: {} ({})", id, name, cipher.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unlock" => {
@@ -62389,7 +65889,10 @@ fn cmd_filevault(args: &str) {
             let password = parts.get(2).copied().unwrap_or("");
             match filevault::unlock(id, password) {
                 Ok(()) => shell_println!("Vault #{} unlocked", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "lock" => {
@@ -62403,7 +65906,10 @@ fn cmd_filevault(args: &str) {
             };
             match filevault::lock(id) {
                 Ok(()) => shell_println!("Vault #{} locked", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "autolock" => {
@@ -62418,7 +65924,10 @@ fn cmd_filevault(args: &str) {
             let secs: u32 = parts.get(2).unwrap_or(&"300").parse().unwrap_or(300);
             match filevault::set_auto_lock(id, secs) {
                 Ok(()) => shell_println!("Auto-lock: {}s", secs),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -62495,7 +66004,10 @@ fn cmd_mousegestures(args: &str) {
             match mousegestures::recognize(&dirs) {
                 Ok(Some(action)) => shell_println!("Recognized: {}", action),
                 Ok(None) => shell_println!("No matching gesture"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "bind" => {
@@ -62516,7 +66028,10 @@ fn cmd_mousegestures(args: &str) {
                 .collect();
             match mousegestures::bind(dirs, action, desc) {
                 Ok(id) => shell_println!("Bound gesture #{}: {} → {}", id, dir_str, action),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unbind" => {
@@ -62530,16 +66045,25 @@ fn cmd_mousegestures(args: &str) {
             };
             match mousegestures::unbind(id) {
                 Ok(()) => shell_println!("Unbound gesture #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" => match mousegestures::set_enabled(true) {
             Ok(()) => shell_println!("Gestures enabled"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" => match mousegestures::set_enabled(false) {
             Ok(()) => shell_println!("Gestures disabled"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (count, gestures, recognized, ops) = mousegestures::stats();
@@ -62619,7 +66143,10 @@ fn cmd_fontsettings(args: &str) {
             };
             match fontsettings::set_antialiasing(aa) {
                 Ok(()) => shell_println!("Antialiasing set to {}.", aa.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "hinting" | "hint" => {
@@ -62637,7 +66164,10 @@ fn cmd_fontsettings(args: &str) {
             };
             match fontsettings::set_hinting(h) {
                 Ok(()) => shell_println!("Hinting set to {}.", h.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "font" => {
@@ -62649,7 +66179,10 @@ fn cmd_fontsettings(args: &str) {
             }
             match fontsettings::set_default_font(&family) {
                 Ok(()) => shell_println!("Default font set to '{}'.", family),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "mono" => {
@@ -62661,7 +66194,10 @@ fn cmd_fontsettings(args: &str) {
             }
             match fontsettings::set_monospace_font(&family) {
                 Ok(()) => shell_println!("Monospace font set to '{}'.", family),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "size" => {
@@ -62669,7 +66205,10 @@ fn cmd_fontsettings(args: &str) {
             match val {
                 Some(v) => match fontsettings::set_default_size(v) {
                     Ok(()) => shell_println!("Default size set to {} dp.", v),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: fontsettings size <decipoints>"),
             }
@@ -62679,7 +66218,10 @@ fn cmd_fontsettings(args: &str) {
             match val {
                 Some(v) => match fontsettings::set_text_scale(v) {
                     Ok(()) => shell_println!("Text scale set to {}%.", v),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: fontsettings scale <percent>"),
             }
@@ -62689,11 +66231,17 @@ fn cmd_fontsettings(args: &str) {
             match val {
                 "on" | "true" => match fontsettings::set_ligatures(true) {
                     Ok(()) => shell_println!("Ligatures enabled."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 "off" | "false" => match fontsettings::set_ligatures(false) {
                     Ok(()) => shell_println!("Ligatures disabled."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 _ => shell_println!("Usage: fontsettings ligatures <on|off>"),
             }
@@ -62766,7 +66314,10 @@ fn cmd_notifbadge(args: &str) {
             }
             match notifbadge::set_count(app, count.unwrap_or(0)) {
                 Ok(()) => shell_println!("Badge for '{}' set to {}.", app, count.unwrap_or(0)),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "inc" | "increment" => {
@@ -62778,7 +66329,10 @@ fn cmd_notifbadge(args: &str) {
             }
             match notifbadge::increment(app) {
                 Ok(c) => shell_println!("Badge for '{}' incremented to {}.", app, c),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "dot" => {
@@ -62792,7 +66346,10 @@ fn cmd_notifbadge(args: &str) {
             let v = vis != "false";
             match notifbadge::set_dot(app, v) {
                 Ok(()) => shell_println!("Dot badge for '{}' set to {}.", app, v),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "progress" | "prog" => {
@@ -62807,7 +66364,10 @@ fn cmd_notifbadge(args: &str) {
                 Ok(()) => {
                     shell_println!("Progress badge for '{}' set to {}%.", app, pct.unwrap_or(0))
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "clear" => {
@@ -62815,12 +66375,18 @@ fn cmd_notifbadge(args: &str) {
             if app.is_empty() {
                 match notifbadge::clear_all() {
                     Ok(()) => shell_println!("All badges cleared."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 match notifbadge::clear(app) {
                     Ok(()) => shell_println!("Badge for '{}' cleared.", app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -62844,11 +66410,17 @@ fn cmd_notifbadge(args: &str) {
         }
         "enable" => match notifbadge::set_global_enabled(true) {
             Ok(()) => shell_println!("Badges enabled globally."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" => match notifbadge::set_global_enabled(false) {
             Ok(()) => shell_println!("Badges disabled globally."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (count, visible, updates, ops) = notifbadge::stats();
@@ -62915,7 +66487,10 @@ fn cmd_lockwallpaper(args: &str) {
             }
             match lockwallpaper::set_image(&path) {
                 Ok(()) => shell_println!("Lock wallpaper set to '{}'.", path),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "mode" => {
@@ -62936,7 +66511,10 @@ fn cmd_lockwallpaper(args: &str) {
             };
             match lockwallpaper::set_mode(mode) {
                 Ok(()) => shell_println!("Lock wallpaper mode set to {}.", mode.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "slideshow" => {
@@ -62952,7 +66530,10 @@ fn cmd_lockwallpaper(args: &str) {
             }
             match lockwallpaper::set_slideshow_dir(dir, interval) {
                 Ok(()) => shell_println!("Slideshow set: dir='{}', interval={}s.", dir, interval),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "addimage" | "add" => {
@@ -62964,12 +66545,18 @@ fn cmd_lockwallpaper(args: &str) {
             }
             match lockwallpaper::add_slideshow_image(&path) {
                 Ok(()) => shell_println!("Added '{}' to slideshow.", path),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rotate" | "next" => match lockwallpaper::rotate() {
             Ok(img) => shell_println!("Rotated to: {}", img),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "fit" => {
             let f = parts.get(1).copied().unwrap_or("");
@@ -62988,7 +66575,10 @@ fn cmd_lockwallpaper(args: &str) {
             };
             match lockwallpaper::set_fit_mode(fit) {
                 Ok(()) => shell_println!("Fit mode set to {}.", fit.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "color" => {
@@ -63000,7 +66590,10 @@ fn cmd_lockwallpaper(args: &str) {
             }
             match lockwallpaper::set_solid_color(c) {
                 Ok(()) => shell_println!("Solid color set to '{}'.", c),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "clock" => {
@@ -63016,7 +66609,10 @@ fn cmd_lockwallpaper(args: &str) {
             };
             match lockwallpaper::set_overlays(clk, notif) {
                 Ok(()) => shell_println!("Overlays set: clock={}, notifications={}.", clk, notif),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "blur" => {
@@ -63024,11 +66620,17 @@ fn cmd_lockwallpaper(args: &str) {
             match val {
                 "on" | "true" => match lockwallpaper::set_blur(true) {
                     Ok(()) => shell_println!("Blur enabled."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 "off" | "false" => match lockwallpaper::set_blur(false) {
                     Ok(()) => shell_println!("Blur disabled."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 _ => shell_println!("Usage: lockwallpaper blur <on|off>"),
             }
@@ -63108,7 +66710,10 @@ fn cmd_systemsounds(args: &str) {
             match systemsounds::play(event) {
                 Ok(Some(path)) => shell_println!("Playing: {}", path.display()),
                 Ok(None) => shell_println!("Sound disabled or not assigned."),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "set" => {
@@ -63131,7 +66736,10 @@ fn cmd_systemsounds(args: &str) {
             }
             match systemsounds::set_sound(event, &path) {
                 Ok(()) => shell_println!("Sound for {} set to '{}'.", event.label(), path),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" => {
@@ -63139,7 +66747,10 @@ fn cmd_systemsounds(args: &str) {
             if event_name.is_empty() {
                 match systemsounds::set_global_enabled(true) {
                     Ok(()) => shell_println!("System sounds enabled globally."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 let event = match parse_sound_event(event_name) {
@@ -63152,7 +66763,10 @@ fn cmd_systemsounds(args: &str) {
                 };
                 match systemsounds::set_event_enabled(event, true) {
                     Ok(()) => shell_println!("Sound for {} enabled.", event.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -63161,7 +66775,10 @@ fn cmd_systemsounds(args: &str) {
             if event_name.is_empty() {
                 match systemsounds::set_global_enabled(false) {
                     Ok(()) => shell_println!("System sounds disabled globally."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 let event = match parse_sound_event(event_name) {
@@ -63174,7 +66791,10 @@ fn cmd_systemsounds(args: &str) {
                 };
                 match systemsounds::set_event_enabled(event, false) {
                     Ok(()) => shell_println!("Sound for {} disabled.", event.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -63186,7 +66806,10 @@ fn cmd_systemsounds(args: &str) {
             } else {
                 match systemsounds::set_scheme(name) {
                     Ok(()) => shell_println!("Scheme set to '{}'.", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -63295,7 +66918,10 @@ fn cmd_hotcorners(args: &str) {
             };
             match hotcorners::set_action(corner, action) {
                 Ok(()) => shell_println!("{} set to {}.", corner.label(), action.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delay" => {
@@ -63312,7 +66938,10 @@ fn cmd_hotcorners(args: &str) {
             match ms {
                 Some(d) => match hotcorners::set_delay(corner, d) {
                     Ok(()) => shell_println!("{} delay set to {}ms.", corner.label(), d),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: hotcorners delay <corner> <ms>"),
             }
@@ -63329,16 +66958,25 @@ fn cmd_hotcorners(args: &str) {
             };
             match hotcorners::trigger(corner) {
                 Ok(action) => shell_println!("Triggered: {}", action.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" => match hotcorners::set_global_enabled(true) {
             Ok(()) => shell_println!("Hot corners enabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" => match hotcorners::set_global_enabled(false) {
             Ok(()) => shell_println!("Hot corners disabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (enabled, triggers, ops) = hotcorners::stats();
@@ -63436,7 +67074,10 @@ fn cmd_dynlock(args: &str) {
             }
             match dynlock::add_device(name, addr) {
                 Ok(()) => shell_println!("Device '{}' [{}] added.", name, addr),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
@@ -63448,23 +67089,35 @@ fn cmd_dynlock(args: &str) {
             }
             match dynlock::remove_device(addr) {
                 Ok(()) => shell_println!("Device removed."),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" => match dynlock::set_enabled(true) {
             Ok(()) => shell_println!("Dynamic lock enabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" => match dynlock::set_enabled(false) {
             Ok(()) => shell_println!("Dynamic lock disabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "grace" => {
             let secs = parts.get(1).and_then(|s| s.parse::<u32>().ok());
             match secs {
                 Some(s) => match dynlock::set_grace(s) {
                     Ok(()) => shell_println!("Grace period set to {}s.", s),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: dynlock grace <seconds>"),
             }
@@ -63474,11 +67127,17 @@ fn cmd_dynlock(args: &str) {
             match val {
                 "on" | "true" => match dynlock::set_auto_unlock(true) {
                     Ok(()) => shell_println!("Auto-unlock enabled."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 "off" | "false" => match dynlock::set_auto_unlock(false) {
                     Ok(()) => shell_println!("Auto-unlock disabled."),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 _ => shell_println!("Usage: dynlock autounlock <on|off>"),
             }
@@ -63486,11 +67145,17 @@ fn cmd_dynlock(args: &str) {
         "check" => match dynlock::check_proximity() {
             Ok(true) => shell_println!("Lock triggered: no device in range."),
             Ok(false) => shell_println!("No lock needed."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "unlock" => match dynlock::manual_unlock() {
             Ok(()) => shell_println!("Manually unlocked."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (devs, locks, unlocks, ops) = dynlock::stats();
@@ -63569,7 +67234,10 @@ fn cmd_snaplayout(args: &str) {
             match id {
                 Some(i) => match snaplayout::set_active(i) {
                     Ok(()) => shell_println!("Active layout set to id {}.", i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: snaplayout use <id>"),
             }
@@ -63588,7 +67256,10 @@ fn cmd_snaplayout(args: &str) {
                         zone.w_pct,
                         zone.h_pct
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 _ => shell_println!("Usage: snaplayout snap <window_id> <zone_id>"),
             }
@@ -63613,7 +67284,10 @@ fn cmd_snaplayout(args: &str) {
             match id {
                 Some(i) => match snaplayout::remove_layout(i) {
                     Ok(()) => shell_println!("Layout {} removed.", i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: snaplayout remove <id>"),
             }
@@ -63722,7 +67396,10 @@ fn cmd_haptfeedback(args: &str) {
             };
             match haptfeedback::add_device(name, dtype) {
                 Ok(id) => shell_println!("Device '{}' added with id {}.", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
@@ -63730,7 +67407,10 @@ fn cmd_haptfeedback(args: &str) {
             match id {
                 Some(i) => match haptfeedback::remove_device(i) {
                     Ok(()) => shell_println!("Device {} removed.", i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: haptfeedback remove <id>"),
             }
@@ -63741,7 +67421,10 @@ fn cmd_haptfeedback(args: &str) {
             match (id, val) {
                 (Some(i), Some(v)) => match haptfeedback::set_intensity(i, v) {
                     Ok(()) => shell_println!("Intensity for device {} set to {}.", i, v),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 _ => shell_println!("Usage: haptfeedback intensity <device_id> <0-100>"),
             }
@@ -63769,7 +67452,10 @@ fn cmd_haptfeedback(args: &str) {
             };
             match haptfeedback::set_event_pattern(event, pattern) {
                 Ok(()) => shell_println!("{} pattern set to {}.", event.label(), pattern.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "fire" => {
@@ -63784,16 +67470,25 @@ fn cmd_haptfeedback(args: &str) {
             };
             match haptfeedback::fire(event) {
                 Ok(p) => shell_println!("Fired: {}", p.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" => match haptfeedback::set_global_enabled(true) {
             Ok(()) => shell_println!("Haptic feedback enabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" => match haptfeedback::set_global_enabled(false) {
             Ok(()) => shell_println!("Haptic feedback disabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (devs, maps, fires, ops) = haptfeedback::stats();
@@ -63890,23 +67585,38 @@ fn cmd_eyeprotect(args: &str) {
         }
         "start" => match eyeprotect::start_break() {
             Ok(()) => shell_println!("Break started."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "end" => match eyeprotect::end_break() {
             Ok(()) => shell_println!("Break ended."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "snooze" => match eyeprotect::snooze() {
             Ok(()) => shell_println!("Break snoozed."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "skip" => match eyeprotect::skip() {
             Ok(()) => shell_println!("Break skipped."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "check" => match eyeprotect::check_break() {
             Ok(state) => shell_println!("State: {}", state.label()),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "interval" => {
             let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
@@ -63914,7 +67624,10 @@ fn cmd_eyeprotect(args: &str) {
             match (id, mins) {
                 (Some(i), Some(m)) => match eyeprotect::set_interval(i, m) {
                     Ok(()) => shell_println!("Interval set to {} minutes.", m),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 _ => shell_println!("Usage: eyeprotect interval <profile_id> <minutes>"),
             }
@@ -63925,7 +67638,10 @@ fn cmd_eyeprotect(args: &str) {
             match (id, secs) {
                 (Some(i), Some(s)) => match eyeprotect::set_break_duration(i, s) {
                     Ok(()) => shell_println!("Break duration set to {} seconds.", s),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 _ => shell_println!("Usage: eyeprotect duration <profile_id> <seconds>"),
             }
@@ -63935,7 +67651,10 @@ fn cmd_eyeprotect(args: &str) {
             match id {
                 Some(i) => match eyeprotect::set_active(i) {
                     Ok(()) => shell_println!("Active profile set to {}.", i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: eyeprotect profile <id>"),
             }
@@ -63948,7 +67667,10 @@ fn cmd_eyeprotect(args: &str) {
             if id > 0 {
                 match eyeprotect::set_profile_enabled(id, true) {
                     Ok(()) => shell_println!("Profile {} enabled.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: eyeprotect enable <profile_id>");
@@ -63963,7 +67685,10 @@ fn cmd_eyeprotect(args: &str) {
             if id > 0 {
                 match eyeprotect::set_profile_enabled(id, false) {
                     Ok(()) => shell_println!("Profile {} disabled.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: eyeprotect disable <profile_id>");
@@ -64063,7 +67788,10 @@ fn cmd_pinnedapps(args: &str) {
             let dname = if display.is_empty() { app } else { &display };
             match pinnedapps::pin(loc, app, dname, format!("/usr/bin/{app}")) {
                 Ok(()) => shell_println!("'{}' pinned to {}.", app, loc.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unpin" => {
@@ -64086,7 +67814,10 @@ fn cmd_pinnedapps(args: &str) {
             }
             match pinnedapps::unpin(loc, app) {
                 Ok(()) => shell_println!("'{}' unpinned from {}.", app, loc.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "move" | "reorder" => {
@@ -64106,7 +67837,10 @@ fn cmd_pinnedapps(args: &str) {
             match pos {
                 Some(p) => match pinnedapps::reorder(loc, app, p) {
                     Ok(()) => shell_println!("'{}' moved to position {}.", app, p),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: pinnedapps move <location> <app> <position>"),
             }
@@ -64142,7 +67876,10 @@ fn cmd_pinnedapps(args: &str) {
             };
             match res {
                 Ok(()) => shell_println!("'{}' {} set to '{}'.", app, sub, path),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "launch" => {
@@ -64154,7 +67891,10 @@ fn cmd_pinnedapps(args: &str) {
             }
             match pinnedapps::record_launch(app) {
                 Ok(c) => shell_println!("Launch recorded for '{}' (count: {}).", app, c),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -64246,7 +67986,10 @@ fn cmd_inputmethod(args: &str) {
             };
             match inputmethod::add_engine(name, etype, lang) {
                 Ok(id) => shell_println!("Engine '{}' added (id={}).", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
@@ -64254,7 +67997,10 @@ fn cmd_inputmethod(args: &str) {
             match id {
                 Some(i) => match inputmethod::remove_engine(i) {
                     Ok(()) => shell_println!("Engine {} removed.", i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: inputmethod remove <id>"),
             }
@@ -64264,14 +68010,20 @@ fn cmd_inputmethod(args: &str) {
             match id {
                 Some(i) => match inputmethod::switch_engine(i) {
                     Ok(()) => shell_println!("Switched to engine {}.", i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: inputmethod switch <id>"),
             }
         }
         "cycle" => match inputmethod::cycle_engine() {
             Ok(name) => shell_println!("Cycled to: {}", name),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "compose" => {
             let text = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
@@ -64290,7 +68042,10 @@ fn cmd_inputmethod(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "select" => {
@@ -64298,18 +68053,27 @@ fn cmd_inputmethod(args: &str) {
             match idx {
                 Some(i) => match inputmethod::select_candidate(i) {
                     Ok(()) => shell_println!("Selected candidate {}.", i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: inputmethod select <index>"),
             }
         }
         "commit" => match inputmethod::commit() {
             Ok(text) => shell_println!("Committed: '{}'", text),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "cancel" => match inputmethod::cancel_composition() {
             Ok(()) => shell_println!("Composition cancelled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (engines, commits, switches, ops) = inputmethod::stats();
@@ -64412,7 +68176,10 @@ fn cmd_storagesense(args: &str) {
                         "Cleanup complete: {} freed.",
                         storagesense::format_bytes(freed)
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 let cat = match parse_cleanup_category(cat_name) {
@@ -64430,7 +68197,10 @@ fn cmd_storagesense(args: &str) {
                         cat.label(),
                         storagesense::format_bytes(freed)
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -64452,7 +68222,10 @@ fn cmd_storagesense(args: &str) {
             };
             match storagesense::set_schedule(schedule) {
                 Ok(()) => shell_println!("Schedule set to {}.", schedule.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" => {
@@ -64467,7 +68240,10 @@ fn cmd_storagesense(args: &str) {
             };
             match storagesense::set_category_enabled(cat, true) {
                 Ok(()) => shell_println!("{} enabled.", cat.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "disable" => {
@@ -64482,7 +68258,10 @@ fn cmd_storagesense(args: &str) {
             };
             match storagesense::set_category_enabled(cat, false) {
                 Ok(()) => shell_println!("{} disabled.", cat.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "age" => {
@@ -64499,14 +68278,20 @@ fn cmd_storagesense(args: &str) {
             match days {
                 Some(d) => match storagesense::set_max_age(cat, d) {
                     Ok(()) => shell_println!("{} max age set to {} days.", cat.label(), d),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: storagesense age <category> <days>"),
             }
         }
         "estimate" => match storagesense::estimate_savings() {
             Ok(est) => shell_println!("Estimated savings: {}", storagesense::format_bytes(est)),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (policies, runs, freed, ops) = storagesense::stats();
@@ -64578,35 +68363,50 @@ fn cmd_autofix(args: &str) {
         }
         "scan" => match autofix::scan() {
             Ok(found) => shell_println!("Scan complete: {} issues found.", found),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "fix" => {
             let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
             match id {
                 Some(i) => match autofix::fix(i) {
                     Ok(()) => shell_println!("Issue {} fixed.", i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: autofix fix <issue_id>"),
             }
         }
         "fixall" => match autofix::fix_all() {
             Ok(count) => shell_println!("{} issues fixed.", count),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "ignore" => {
             let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
             match id {
                 Some(i) => match autofix::ignore(i) {
                     Ok(()) => shell_println!("Issue {} ignored.", i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: autofix ignore <issue_id>"),
             }
         }
         "clear" => match autofix::clear_resolved() {
             Ok(count) => shell_println!("{} resolved issues cleared.", count),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (issues, scans, fixes, ignored, ops) = autofix::stats();
@@ -64684,7 +68484,10 @@ fn cmd_recentsearch(args: &str) {
             };
             match recentsearch::record(&query, source, 0) {
                 Ok(()) => shell_println!("Recorded: '{}'", query),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "suggest" => {
@@ -64713,7 +68516,10 @@ fn cmd_recentsearch(args: &str) {
             }
             match recentsearch::pin(&query) {
                 Ok(()) => shell_println!("Pinned: '{}'", query),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unpin" => {
@@ -64725,7 +68531,10 @@ fn cmd_recentsearch(args: &str) {
             }
             match recentsearch::unpin(&query) {
                 Ok(()) => shell_println!("Unpinned: '{}'", query),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "clear" => {
@@ -64733,7 +68542,10 @@ fn cmd_recentsearch(args: &str) {
             if source.is_empty() {
                 match recentsearch::clear_history() {
                     Ok(c) => shell_println!("{} entries cleared.", c),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 let src = match source {
@@ -64751,17 +68563,26 @@ fn cmd_recentsearch(args: &str) {
                 };
                 match recentsearch::clear_source(src) {
                     Ok(c) => shell_println!("{} {} entries cleared.", c, source),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
         "enable" => match recentsearch::set_enabled(true) {
             Ok(()) => shell_println!("Search history enabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" => match recentsearch::set_enabled(false) {
             Ok(()) => shell_println!("Search history disabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (entries, pinned, searches, suggestions, ops) = recentsearch::stats();
@@ -64824,11 +68645,17 @@ fn cmd_sysmaint(args: &str) {
             match id {
                 Some(i) => match sysmaint::run_task(i) {
                     Ok(()) => shell_println!("Task {} completed.", i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => match sysmaint::run_pending() {
                     Ok(count) => shell_println!("{} maintenance tasks completed.", count),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
             }
         }
@@ -64840,14 +68667,20 @@ fn cmd_sysmaint(args: &str) {
                     shell_println!("{} tasks due: {:?}", due.len(), due);
                 }
             }
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "enable" => {
             let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
             match id {
                 Some(i) => match sysmaint::set_enabled(i, true) {
                     Ok(()) => shell_println!("Task {} enabled.", i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: sysmaint enable <task_id>"),
             }
@@ -64857,7 +68690,10 @@ fn cmd_sysmaint(args: &str) {
             match id {
                 Some(i) => match sysmaint::set_enabled(i, false) {
                     Ok(()) => shell_println!("Task {} disabled.", i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: sysmaint disable <task_id>"),
             }
@@ -64868,7 +68704,10 @@ fn cmd_sysmaint(args: &str) {
             match (id, hours) {
                 (Some(i), Some(h)) => match sysmaint::set_interval(i, h) {
                     Ok(()) => shell_println!("Task {} interval set to {}h.", i, h),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 _ => shell_println!("Usage: sysmaint interval <task_id> <hours>"),
             }
@@ -64946,7 +68785,10 @@ fn cmd_multiclip(args: &str) {
             }
             match multiclip::push(&text, multiclip::ContentType::PlainText) {
                 Ok(id) => shell_println!("Copied (id={}): '{}'", id, text),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "paste" => {
@@ -64956,7 +68798,10 @@ fn cmd_multiclip(args: &str) {
                 .unwrap_or(0);
             match multiclip::paste(idx) {
                 Ok(entry) => shell_println!("{}", entry.content),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "slot" => {
@@ -64988,7 +68833,10 @@ fn cmd_multiclip(args: &str) {
             match id {
                 Some(i) if !name.is_empty() => match multiclip::set_slot(i, name) {
                     Ok(()) => shell_println!("Slot '{}' assigned to entry {}.", name, i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 _ => shell_println!("Usage: multiclip setslot <id> <name>"),
             }
@@ -64998,7 +68846,10 @@ fn cmd_multiclip(args: &str) {
             match id {
                 Some(i) => match multiclip::pin(i) {
                     Ok(()) => shell_println!("Entry {} pinned.", i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: multiclip pin <id>"),
             }
@@ -65008,7 +68859,10 @@ fn cmd_multiclip(args: &str) {
             match id {
                 Some(i) => match multiclip::unpin(i) {
                     Ok(()) => shell_println!("Entry {} unpinned.", i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: multiclip unpin <id>"),
             }
@@ -65018,22 +68872,34 @@ fn cmd_multiclip(args: &str) {
             match id {
                 Some(i) => match multiclip::remove(i) {
                     Ok(()) => shell_println!("Entry {} removed.", i),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Usage: multiclip remove <id>"),
             }
         }
         "clear" => match multiclip::clear_history() {
             Ok(c) => shell_println!("{} entries cleared.", c),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "enable" => match multiclip::set_enabled(true) {
             Ok(()) => shell_println!("Multi-clipboard enabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" => match multiclip::set_enabled(false) {
             Ok(()) => shell_println!("Multi-clipboard disabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (entries, pinned, copies, pastes, ops) = multiclip::stats();
@@ -65076,28 +68942,46 @@ fn cmd_focussession(args: &str) {
             };
             match focussession::start(&task) {
                 Ok(()) => shell_println!("Focus session started: {}", task),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "complete" | "done" => match focussession::complete() {
             Ok(()) => shell_println!("Session completed! Break time."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "abandon" | "stop" => match focussession::abandon() {
             Ok(()) => shell_println!("Session abandoned."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "break" => match focussession::end_break() {
             Ok(()) => shell_println!("Break ended."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "pause" => match focussession::pause() {
             Ok(()) => shell_println!("Session paused."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "resume" => match focussession::resume() {
             Ok(()) => shell_println!("Session resumed."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "status" | "show" => {
             let state = focussession::current_state();
@@ -65117,7 +69001,10 @@ fn cmd_focussession(args: &str) {
             if let Some(m) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match focussession::set_focus_duration(m) {
                     Ok(()) => shell_println!("Focus duration set to {} min", m),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: focussession duration <minutes>");
@@ -65130,7 +69017,10 @@ fn cmd_focussession(args: &str) {
             if let (Some(s), Some(l)) = (short, long) {
                 match focussession::set_break_durations(s, l) {
                     Ok(()) => shell_println!("Breaks set: short={} min, long={} min", s, l),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: focussession breaks <short_mins> <long_mins>");
@@ -65209,7 +69099,10 @@ fn cmd_quicknote(args: &str) {
             };
             match quicknote::create(title, &content) {
                 Ok(id) => shell_println!("Note created: id={}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "edit" => {
@@ -65222,7 +69115,10 @@ fn cmd_quicknote(args: &str) {
                 };
                 match quicknote::edit(id, &content) {
                     Ok(()) => shell_println!("Note {} updated.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: quicknote edit <id> <content>");
@@ -65235,7 +69131,10 @@ fn cmd_quicknote(args: &str) {
             if let (Some(id), Some(t)) = (id, title) {
                 match quicknote::set_title(id, t) {
                     Ok(()) => shell_println!("Title updated for note {}.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: quicknote title <id> <title>");
@@ -65248,7 +69147,10 @@ fn cmd_quicknote(args: &str) {
             if let (Some(id), Some(c)) = (id, color) {
                 match quicknote::set_color(id, c) {
                     Ok(()) => shell_println!("Color set for note {}.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!(
@@ -65260,7 +69162,10 @@ fn cmd_quicknote(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match quicknote::set_pinned(id, true) {
                     Ok(()) => shell_println!("Note {} pinned.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: quicknote pin <id>");
@@ -65271,7 +69176,10 @@ fn cmd_quicknote(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match quicknote::set_pinned(id, false) {
                     Ok(()) => shell_println!("Note {} unpinned.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: quicknote unpin <id>");
@@ -65284,7 +69192,10 @@ fn cmd_quicknote(args: &str) {
             if let (Some(id), Some(t)) = (id, tag) {
                 match quicknote::add_tag(id, t) {
                     Ok(()) => shell_println!("Tag '{}' added to note {}.", t, id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: quicknote tag <id> <tag>");
@@ -65295,7 +69206,10 @@ fn cmd_quicknote(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match quicknote::delete(id) {
                     Ok(()) => shell_println!("Note {} deleted.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: quicknote delete <id>");
@@ -65454,7 +69368,10 @@ fn cmd_uicolorscheme(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match colorscheme::set_scheme(id) {
                     Ok(()) => shell_println!("Scheme set to id={}.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: colorscheme set <id>");
@@ -65463,17 +69380,26 @@ fn cmd_uicolorscheme(args: &str) {
         }
         "light" => match colorscheme::set_mode(colorscheme::ColorMode::Light) {
             Ok(()) => shell_println!("Switched to light mode."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "dark" => match colorscheme::set_mode(colorscheme::ColorMode::Dark) {
             Ok(()) => shell_println!("Switched to dark mode."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "accent" => {
             if let Some(hex) = parts.get(1) {
                 match colorscheme::set_accent(hex) {
                     Ok(()) => shell_println!("Accent set to {}.", hex),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: colorscheme accent <#hex>");
@@ -65486,7 +69412,10 @@ fn cmd_uicolorscheme(args: &str) {
             if let (Some(r), Some(h)) = (role, hex) {
                 match colorscheme::set_color(r, h) {
                     Ok(()) => shell_println!("Color {:?} set to {}.", r, h),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: colorscheme color <role> <#hex>");
@@ -65563,7 +69492,10 @@ fn cmd_appcompat(args: &str) {
             if let (Some(app), Some(lvl)) = (app, level) {
                 match appcompat::set_compat(app, lvl) {
                     Ok(()) => shell_println!("Compat level for '{}' set to {}.", app, lvl.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: appcompat set <app> <current|legacy1|legacy2|max>");
@@ -65579,7 +69511,10 @@ fn cmd_appcompat(args: &str) {
                     if let (Some(app), Some(sh)) = (app, shim) {
                         match appcompat::add_shim(app, sh) {
                             Ok(()) => shell_println!("Shim {} added to '{}'.", sh.label(), app),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Usage: appcompat shim add <app> <shim_name>");
@@ -65590,7 +69525,10 @@ fn cmd_appcompat(args: &str) {
                     if let (Some(app), Some(sh)) = (app, shim) {
                         match appcompat::remove_shim(app, sh) {
                             Ok(()) => shell_println!("Shim {} removed from '{}'.", sh.label(), app),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Usage: appcompat shim remove <app> <shim_name>");
@@ -65648,7 +69586,10 @@ fn cmd_appcompat(args: &str) {
                     Ok(shims) => {
                         shell_println!("Launch recorded for '{}': {} shims activated.", app, shims)
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: appcompat launch <app>");
@@ -65659,7 +69600,10 @@ fn cmd_appcompat(args: &str) {
             if let Some(app) = parts.get(1).copied() {
                 match appcompat::set_profile_enabled(app, true) {
                     Ok(()) => shell_println!("Profile '{}' enabled.", app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: appcompat enable <app>");
@@ -65670,7 +69614,10 @@ fn cmd_appcompat(args: &str) {
             if let Some(app) = parts.get(1).copied() {
                 match appcompat::set_profile_enabled(app, false) {
                     Ok(()) => shell_println!("Profile '{}' disabled.", app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: appcompat disable <app>");
@@ -65681,7 +69628,10 @@ fn cmd_appcompat(args: &str) {
             if let Some(app) = parts.get(1).copied() {
                 match appcompat::remove_profile(app) {
                     Ok(()) => shell_println!("Profile '{}' removed.", app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: appcompat remove <app>");
@@ -65780,7 +69730,10 @@ fn cmd_windowrules(args: &str) {
             if let (Some(mt), Some(v)) = (match_t, value) {
                 match windowrules::add_rule(&name, mt, v) {
                     Ok(id) => shell_println!("Rule created: id={}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: windowrules add <match_type> <value> [name]");
@@ -65802,7 +69755,10 @@ fn cmd_windowrules(args: &str) {
             if let (Some(id), Some(act)) = (id, action) {
                 match windowrules::add_action(id, act, p1, p2) {
                     Ok(()) => shell_println!("Action {} added to rule {}.", act.label(), id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: windowrules action <rule_id> <action> [p1] [p2]");
@@ -65816,7 +69772,10 @@ fn cmd_windowrules(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match windowrules::set_enabled(id, true) {
                     Ok(()) => shell_println!("Rule {} enabled.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: windowrules enable <id>");
@@ -65827,7 +69786,10 @@ fn cmd_windowrules(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match windowrules::set_enabled(id, false) {
                     Ok(()) => shell_println!("Rule {} disabled.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: windowrules disable <id>");
@@ -65838,7 +69800,10 @@ fn cmd_windowrules(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match windowrules::remove_rule(id) {
                     Ok(()) => shell_println!("Rule {} removed.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: windowrules remove <id>");
@@ -65949,17 +69914,26 @@ fn cmd_spatialaudio(args: &str) {
         }
         "enable" => match spatialaudio::set_enabled(true) {
             Ok(()) => shell_println!("Spatial audio enabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" => match spatialaudio::set_enabled(false) {
             Ok(()) => shell_println!("Spatial audio disabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "layout" => {
             if let Some(layout) = parts.get(1).and_then(|s| parse_speaker_layout(s)) {
                 match spatialaudio::set_layout(layout) {
                     Ok(()) => shell_println!("Layout set to {}.", layout.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: spatialaudio layout <stereo|5.1|7.1|atmos|binaural>");
@@ -65970,7 +69944,10 @@ fn cmd_spatialaudio(args: &str) {
             if let Some(room) = parts.get(1).and_then(|s| parse_room_size(s)) {
                 match spatialaudio::set_room_size(room) {
                     Ok(()) => shell_println!("Room set to {}.", room.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: spatialaudio room <none|small|medium|large|hall|arena>");
@@ -65981,7 +69958,10 @@ fn cmd_spatialaudio(args: &str) {
             if let Some(level) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match spatialaudio::set_reverb(level) {
                     Ok(()) => shell_println!("Reverb set to {}%.", level.min(100)),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: spatialaudio reverb <0-100>");
@@ -65994,7 +69974,10 @@ fn cmd_spatialaudio(args: &str) {
                 Ok(()) => {
                     shell_println!("Head tracking {}.", if on { "enabled" } else { "disabled" })
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "doppler" => {
@@ -66004,7 +69987,10 @@ fn cmd_spatialaudio(args: &str) {
                     "Doppler effect {}.",
                     if on { "enabled" } else { "disabled" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "app" => {
@@ -66020,7 +70006,10 @@ fn cmd_spatialaudio(args: &str) {
                         app,
                         if enabled { "enabled" } else { "disabled" }
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: spatialaudio app <name> [on|off]");
@@ -66125,7 +70114,10 @@ fn cmd_filetransfer(args: &str) {
             if let Some(v) = parts.get(1).and_then(|s| parse_visibility(s)) {
                 match filetransfer::set_visibility(v) {
                     Ok(()) => shell_println!("Visibility set to {}.", v.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: filetransfer visibility <hidden|contacts|everyone>");
@@ -66136,7 +70128,10 @@ fn cmd_filetransfer(args: &str) {
             if let Some(path) = parts.get(1) {
                 match filetransfer::set_save_path(path) {
                     Ok(()) => shell_println!("Save path set to '{}'.", path),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: filetransfer savepath <path>");
@@ -66152,7 +70147,10 @@ fn cmd_filetransfer(args: &str) {
                 .unwrap_or(filetransfer::Transport::Auto);
             match filetransfer::discover_device(name, dtype, transport, -50) {
                 Ok(id) => shell_println!("Device discovered: id={}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "send" => {
@@ -66165,7 +70163,10 @@ fn cmd_filetransfer(args: &str) {
             if let (Some(did), Some(fname)) = (device_id, file_name) {
                 match filetransfer::send_file(did, fname, size) {
                     Ok(tid) => shell_println!("Transfer initiated: id={}", tid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: filetransfer send <device_id> <filename> [size]");
@@ -66176,7 +70177,10 @@ fn cmd_filetransfer(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match filetransfer::accept_transfer(id) {
                     Ok(()) => shell_println!("Transfer {} accepted.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: filetransfer accept <transfer_id>");
@@ -66187,7 +70191,10 @@ fn cmd_filetransfer(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match filetransfer::reject_transfer(id) {
                     Ok(()) => shell_println!("Transfer {} rejected.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: filetransfer reject <transfer_id>");
@@ -66198,7 +70205,10 @@ fn cmd_filetransfer(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match filetransfer::cancel_transfer(id) {
                     Ok(()) => shell_println!("Transfer {} cancelled.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: filetransfer cancel <transfer_id>");
@@ -66337,14 +70347,20 @@ fn cmd_startupopt(args: &str) {
                 .unwrap_or(startupopt::StageCategory::Services);
             match startupopt::begin_stage(name, cat) {
                 Ok(()) => shell_println!("Stage '{}' started.", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "end" => {
             if let Some(name) = parts.get(1) {
                 match startupopt::end_stage(name) {
                     Ok(ms) => shell_println!("Stage '{}' completed: {}ms.", name, ms),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: startupopt end <stage_name>");
@@ -66353,7 +70369,10 @@ fn cmd_startupopt(args: &str) {
         }
         "boot" => match startupopt::record_boot() {
             Ok(total) => shell_println!("Boot recorded: total {}ms.", total),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "analyze" => match startupopt::analyze() {
             Ok(count) => {
@@ -66371,13 +70390,19 @@ fn cmd_startupopt(args: &str) {
                     );
                 }
             }
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "apply" => {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match startupopt::apply_suggestion(id) {
                     Ok(()) => shell_println!("Suggestion {} marked as applied.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: startupopt apply <suggestion_id>");
@@ -66386,7 +70411,10 @@ fn cmd_startupopt(args: &str) {
         }
         "clear" => match startupopt::clear_stages() {
             Ok(()) => shell_println!("Stages cleared."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (stages, boots, last_ms, fastest_ms, analyses, ops) = startupopt::stats();
@@ -66476,7 +70504,10 @@ fn cmd_usagetime(args: &str) {
             if let Some(app) = parts.get(1) {
                 match usagetime::app_focused(app) {
                     Ok(()) => shell_println!("Tracking '{}' focus.", app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: usagetime focus <app>");
@@ -66487,7 +70518,10 @@ fn cmd_usagetime(args: &str) {
             if let Some(app) = parts.get(1) {
                 match usagetime::app_blurred(app) {
                     Ok(ms) => shell_println!("'{}' blurred after {}ms.", app, ms),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: usagetime blur <app>");
@@ -66500,7 +70534,10 @@ fn cmd_usagetime(args: &str) {
             if let (Some(app), Some(m)) = (app, mins) {
                 match usagetime::set_limit(app, m * 60_000) {
                     Ok(()) => shell_println!("Limit set for '{}': {} min.", app, m),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: usagetime limit <app> <minutes>");
@@ -66511,7 +70548,10 @@ fn cmd_usagetime(args: &str) {
             if let Some(app) = parts.get(1) {
                 match usagetime::remove_limit(app) {
                     Ok(()) => shell_println!("Limit removed for '{}'.", app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: usagetime unlimit <app>");
@@ -66524,7 +70564,10 @@ fn cmd_usagetime(args: &str) {
             if let (Some(app), Some(c)) = (app, cat) {
                 match usagetime::set_category(app, c) {
                     Ok(()) => shell_println!("Category set for '{}': {}.", app, c.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!(
@@ -66534,15 +70577,24 @@ fn cmd_usagetime(args: &str) {
         }
         "reset" => match usagetime::reset_usage() {
             Ok(()) => shell_println!("Usage data reset."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "enable" => match usagetime::set_tracking(true) {
             Ok(()) => shell_println!("Tracking enabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" => match usagetime::set_tracking(false) {
             Ok(()) => shell_println!("Tracking disabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (apps, sessions, tracked_ms, limited, ops) = usagetime::stats();
@@ -66612,26 +70664,41 @@ fn cmd_voicecontrol(args: &str) {
         }
         "enable" => match voicecontrol::set_enabled(true) {
             Ok(()) => shell_println!("Voice control enabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" => match voicecontrol::set_enabled(false) {
             Ok(()) => shell_println!("Voice control disabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "listen" => match voicecontrol::set_listening(true) {
             Ok(()) => shell_println!("Now listening..."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stop" => match voicecontrol::set_listening(false) {
             Ok(()) => shell_println!("Stopped listening."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "wake" => {
             if let Some(_word) = parts.get(1) {
                 let phrase = parts[1..].join(" ");
                 match voicecontrol::set_wake_word(&phrase) {
                     Ok(()) => shell_println!("Wake word set to '{}'.", phrase),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Wake word: '{}'", voicecontrol::get_wake_word());
@@ -66670,7 +70737,10 @@ fn cmd_voicecontrol(args: &str) {
                     a,
                 ) {
                     Ok(id) => shell_println!("Command added: id={}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: voicecontrol add <phrase> <action>");
@@ -66681,7 +70751,10 @@ fn cmd_voicecontrol(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match voicecontrol::remove_command(id) {
                     Ok(()) => shell_println!("Command {} removed.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: voicecontrol remove <id>");
@@ -66694,7 +70767,10 @@ fn cmd_voicecontrol(args: &str) {
                 match voicecontrol::recognize(&phrase, voicecontrol::Confidence::High) {
                     Ok(Some(action)) => shell_println!("Recognized → {}", action),
                     Ok(None) => shell_println!("Not recognized: '{}'", phrase),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: voicecontrol recognize <phrase>");
@@ -66780,11 +70856,17 @@ fn cmd_devpair(args: &str) {
         }
         "scan" => match devpair::start_scan() {
             Ok(()) => shell_println!("Scanning for devices..."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stopscan" => match devpair::stop_scan() {
             Ok(()) => shell_println!("Scan stopped."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "discover" => {
             let name = parts.get(1).copied().unwrap_or("Device");
@@ -66795,14 +70877,20 @@ fn cmd_devpair(args: &str) {
                 .unwrap_or(devpair::PairDeviceType::Other);
             match devpair::discover(name, addr, dtype, -50) {
                 Ok(id) => shell_println!("Device discovered: id={}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "pair" => {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match devpair::pair(id) {
                     Ok(()) => shell_println!("Pairing device {}...", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: devpair pair <id>");
@@ -66813,7 +70901,10 @@ fn cmd_devpair(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match devpair::confirm_pair(id) {
                     Ok(()) => shell_println!("Device {} paired successfully.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: devpair confirm <id>");
@@ -66824,7 +70915,10 @@ fn cmd_devpair(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match devpair::trust(id, true) {
                     Ok(()) => shell_println!("Device {} trusted.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: devpair trust <id>");
@@ -66835,7 +70929,10 @@ fn cmd_devpair(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match devpair::trust(id, false) {
                     Ok(()) => shell_println!("Device {} untrusted.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: devpair untrust <id>");
@@ -66846,7 +70943,10 @@ fn cmd_devpair(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match devpair::disconnect(id) {
                     Ok(()) => shell_println!("Device {} disconnected.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: devpair disconnect <id>");
@@ -66857,7 +70957,10 @@ fn cmd_devpair(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match devpair::forget(id) {
                     Ok(()) => shell_println!("Device {} forgotten.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: devpair forget <id>");
@@ -66981,14 +71084,20 @@ fn cmd_notifgroup(args: &str) {
             match notifgroup::add_notification(app, title, &body, notifgroup::NotifPriority::Normal)
             {
                 Ok((gid, nid)) => shell_println!("Added: group={}, notif={}", gid, nid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "read" => {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match notifgroup::mark_read(id) {
                     Ok(()) => shell_println!("Notification {} marked read.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: notifgroup read <notif_id>");
@@ -66999,7 +71108,10 @@ fn cmd_notifgroup(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match notifgroup::mark_group_read(id) {
                     Ok(()) => shell_println!("Group {} marked read.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: notifgroup readgroup <group_id>");
@@ -67010,7 +71122,10 @@ fn cmd_notifgroup(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match notifgroup::set_expanded(id, true) {
                     Ok(()) => shell_println!("Group {} expanded.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: notifgroup expand <group_id>");
@@ -67021,7 +71136,10 @@ fn cmd_notifgroup(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match notifgroup::set_expanded(id, false) {
                     Ok(()) => shell_println!("Group {} collapsed.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: notifgroup collapse <group_id>");
@@ -67032,7 +71150,10 @@ fn cmd_notifgroup(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match notifgroup::set_muted(id, true) {
                     Ok(()) => shell_println!("Group {} muted.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: notifgroup mute <group_id>");
@@ -67043,7 +71164,10 @@ fn cmd_notifgroup(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match notifgroup::set_muted(id, false) {
                     Ok(()) => shell_println!("Group {} unmuted.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: notifgroup unmute <group_id>");
@@ -67054,7 +71178,10 @@ fn cmd_notifgroup(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match notifgroup::dismiss_group(id) {
                     Ok(()) => shell_println!("Group {} dismissed.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: notifgroup dismiss <group_id>");
@@ -67063,13 +71190,19 @@ fn cmd_notifgroup(args: &str) {
         }
         "clear" => match notifgroup::dismiss_all() {
             Ok(()) => shell_println!("All notifications dismissed."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "mode" => {
             if let Some(m) = parts.get(1).and_then(|s| parse_grouping_mode(s)) {
                 match notifgroup::set_mode(m) {
                     Ok(()) => shell_println!("Grouping mode set to {}.", m.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 let current = notifgroup::get_mode();
@@ -67148,21 +71281,33 @@ fn cmd_playmedia(args: &str) {
         }
         "play" | "pause" | "pp" => match playmedia::play_pause() {
             Ok(state) => shell_println!("Playback: {}", state.label()),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "next" => match playmedia::next_track() {
             Ok(()) => shell_println!("Next track."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "prev" => match playmedia::prev_track() {
             Ok(()) => shell_println!("Previous track."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "shuffle" => {
             let on = parts.get(1).copied().unwrap_or("on") != "off";
             match playmedia::set_shuffle(on) {
                 Ok(()) => shell_println!("Shuffle {}.", if on { "on" } else { "off" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "repeat" => {
@@ -67177,7 +71322,10 @@ fn cmd_playmedia(args: &str) {
                 .unwrap_or(playmedia::RepeatMode::Off);
             match playmedia::set_repeat(mode) {
                 Ok(()) => shell_println!("Repeat: {}.", mode.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "register" => {
@@ -67195,7 +71343,10 @@ fn cmd_playmedia(args: &str) {
                 .unwrap_or(playmedia::MediaType::Music);
             match playmedia::register_session(app, mtype) {
                 Ok(id) => shell_println!("Session registered: id={}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "track" => {
@@ -67205,7 +71356,10 @@ fn cmd_playmedia(args: &str) {
             if let Some(id) = id {
                 match playmedia::set_track(id, title, artist, "", 300000) {
                     Ok(()) => shell_println!("Track set for session {}.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: playmedia track <session_id> <title> [artist]");
@@ -67294,7 +71448,10 @@ fn cmd_kbmacro(args: &str) {
             };
             match kbmacro::start_recording(&name) {
                 Ok(()) => shell_println!("Recording '{}'. Use 'kbmacro stop' to finish.", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "event" => {
@@ -67308,7 +71465,10 @@ fn cmd_kbmacro(args: &str) {
                     };
                     match kbmacro::record_event(kbmacro::MacroEvent::TypeText(text)) {
                         Ok(()) => shell_println!("TypeText event recorded."),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 "delay" => {
@@ -67318,7 +71478,10 @@ fn cmd_kbmacro(args: &str) {
                         .unwrap_or(100);
                     match kbmacro::record_event(kbmacro::MacroEvent::Delay(ms)) {
                         Ok(()) => shell_println!("Delay {}ms recorded.", ms),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 "key" => {
@@ -67329,7 +71492,10 @@ fn cmd_kbmacro(args: &str) {
                     let _ = kbmacro::record_event(kbmacro::MacroEvent::KeyDown(code));
                     match kbmacro::record_event(kbmacro::MacroEvent::KeyUp(code)) {
                         Ok(()) => shell_println!("Key {} recorded.", code),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 _ => shell_println!("Usage: kbmacro event <type|delay|key> [args]"),
@@ -67337,17 +71503,26 @@ fn cmd_kbmacro(args: &str) {
         }
         "stop" => match kbmacro::stop_recording() {
             Ok(id) => shell_println!("Macro saved: id={}", id),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "cancel" => match kbmacro::cancel_recording() {
             Ok(()) => shell_println!("Recording cancelled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "play" | "run" => {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match kbmacro::play(id) {
                     Ok(count) => shell_println!("Played macro {}: {} events.", id, count),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: kbmacro play <id>");
@@ -67360,7 +71535,10 @@ fn cmd_kbmacro(args: &str) {
             if let (Some(id), Some(k)) = (id, key) {
                 match kbmacro::set_hotkey(id, k) {
                     Ok(()) => shell_println!("Hotkey set for macro {}: {}", id, k),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: kbmacro hotkey <id> <key_combo>");
@@ -67373,7 +71551,10 @@ fn cmd_kbmacro(args: &str) {
             if let (Some(id), Some(c)) = (id, count) {
                 match kbmacro::set_repeat(id, c) {
                     Ok(()) => shell_println!("Repeat count for macro {}: {}x", id, c),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: kbmacro repeat <id> <count>");
@@ -67384,7 +71565,10 @@ fn cmd_kbmacro(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match kbmacro::set_enabled(id, true) {
                     Ok(()) => shell_println!("Macro {} enabled.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -67392,7 +71576,10 @@ fn cmd_kbmacro(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match kbmacro::set_enabled(id, false) {
                     Ok(()) => shell_println!("Macro {} disabled.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -67400,7 +71587,10 @@ fn cmd_kbmacro(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match kbmacro::delete_macro(id) {
                     Ok(()) => shell_println!("Macro {} deleted.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: kbmacro delete <id>");
@@ -67506,7 +71696,10 @@ fn cmd_sysresource(args: &str) {
                         shell_println!("  ALERT: {} threshold exceeded!", a.label());
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "alerts" => {
@@ -67536,7 +71729,10 @@ fn cmd_sysresource(args: &str) {
             if let (Some(r), Some(t)) = (res, threshold) {
                 match sysresource::set_alert(r, t, true) {
                     Ok(()) => shell_println!("Alert set: {} at {}%.", r.label(), t),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!(
@@ -67573,7 +71769,10 @@ fn cmd_sysresource(args: &str) {
         }
         "clear" => match sysresource::clear_history() {
             Ok(()) => shell_println!("History cleared."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (samples, hist_size, alerts, total_alerts, ops) = sysresource::stats();
@@ -67632,11 +71831,17 @@ fn cmd_faceunlock(args: &str) {
         }
         "enable" => match faceunlock::set_enabled(true) {
             Ok(()) => shell_println!("Face unlock enabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" => match faceunlock::set_enabled(false) {
             Ok(()) => shell_println!("Face unlock disabled."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "enroll" => {
             let uid = parts.get(1).and_then(|s| s.parse::<u32>().ok());
@@ -67644,7 +71849,10 @@ fn cmd_faceunlock(args: &str) {
             if let (Some(id), Some(n)) = (uid, name) {
                 match faceunlock::enroll(id, n) {
                     Ok(()) => shell_println!("User {} ({}) enrolled.", id, n),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: faceunlock enroll <user_id> <name>");
@@ -67655,7 +71863,10 @@ fn cmd_faceunlock(args: &str) {
             if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 match faceunlock::unenroll(id) {
                     Ok(()) => shell_println!("User {} unenrolled.", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: faceunlock unenroll <user_id>");
@@ -67670,7 +71881,10 @@ fn cmd_faceunlock(args: &str) {
             let live = parts.get(2).copied().unwrap_or("true") != "false";
             match faceunlock::verify(uid, live) {
                 Ok(result) => shell_println!("Verify result: {}", result.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "security" => {
@@ -67683,7 +71897,10 @@ fn cmd_faceunlock(args: &str) {
             }) {
                 match faceunlock::set_security(level) {
                     Ok(()) => shell_println!("Security set to {}.", level.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Current: {}", faceunlock::get_security().label());
@@ -67697,7 +71914,10 @@ fn cmd_faceunlock(args: &str) {
                     "Liveness detection {}.",
                     if on { "enabled" } else { "disabled" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -67758,7 +71978,10 @@ fn cmd_usbpolicy(args: &str) {
                     pid,
                     d.label()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "add" => {
@@ -67788,7 +72011,10 @@ fn cmd_usbpolicy(args: &str) {
             }
             match usbpolicy::add_rule(name, vid, pid, class, decision) {
                 Ok(id) => shell_println!("Added rule #{}: {} → {}", id, name, decision.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -67796,7 +72022,10 @@ fn cmd_usbpolicy(args: &str) {
                 if let Ok(id) = id_s.parse::<u32>() {
                     match usbpolicy::remove_rule(id) {
                         Ok(()) => shell_println!("Removed rule #{}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid rule ID");
@@ -67812,7 +72041,10 @@ fn cmd_usbpolicy(args: &str) {
                 let decision = parse_usb_decision(d);
                 match usbpolicy::set_default(decision) {
                     Ok(()) => shell_println!("Default decision: {}", decision.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: usbpolicy default <allow|deny|ask|readonly>");
@@ -67824,7 +72056,10 @@ fn cmd_usbpolicy(args: &str) {
                 let block = *v == "on" || *v == "true" || *v == "yes";
                 match usbpolicy::set_block_unknown(block) {
                     Ok(()) => shell_println!("Block unknown: {}", if block { "ON" } else { "OFF" }),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: usbpolicy block <on|off>");
@@ -67969,7 +72204,10 @@ fn cmd_applaunch(args: &str) {
                 if let Ok(id) = id_s.parse::<u32>() {
                     match applaunch::record_launch(id) {
                         Ok(action) => shell_println!("Launched #{}: {}", id, action),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid item ID");
@@ -67996,7 +72234,10 @@ fn cmd_applaunch(args: &str) {
             let icon = if parts.len() > 4 { parts[4] } else { "app" };
             match applaunch::register(name, alloc::vec![], rtype, action, icon) {
                 Ok(id) => shell_println!("Registered '{}' as #{} [{}]", name, id, rtype.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unregister" | "remove" => {
@@ -68004,7 +72245,10 @@ fn cmd_applaunch(args: &str) {
                 if let Ok(id) = id_s.parse::<u32>() {
                     match applaunch::unregister(id) {
                         Ok(()) => shell_println!("Unregistered #{}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid item ID");
@@ -68148,7 +72392,10 @@ fn cmd_sysprofiler(args: &str) {
             let value = parts[3..].join(" ");
             match sysprofiler::set_entry(section, key, &value) {
                 Ok(()) => shell_println!("Set [{}] {} = {}", section.label(), key, value),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "refresh" => {
@@ -68156,7 +72403,10 @@ fn cmd_sysprofiler(args: &str) {
                 let section = parse_profiler_section(name);
                 match sysprofiler::refresh_section(section) {
                     Ok(()) => shell_println!("Refreshed {}", section.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: sysprofiler refresh <section>");
@@ -68218,11 +72468,17 @@ fn cmd_clipsync(args: &str) {
     match sub {
         "enable" | "on" => match clipsync::set_enabled(true) {
             Ok(()) => shell_println!("Clipboard sync enabled"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" | "off" => match clipsync::set_enabled(false) {
             Ok(()) => shell_println!("Clipboard sync disabled"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "status" => {
             let enabled = clipsync::is_enabled();
@@ -68241,7 +72497,10 @@ fn cmd_clipsync(args: &str) {
             let dir = parse_sync_direction(parts[2]);
             match clipsync::add_device(name, dir) {
                 Ok(id) => shell_println!("Added device #{}: {} ({})", id, name, dir.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -68249,7 +72508,10 @@ fn cmd_clipsync(args: &str) {
                 if let Ok(id) = id_s.parse::<u32>() {
                     match clipsync::remove_device(id) {
                         Ok(()) => shell_println!("Removed device #{}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid device ID");
@@ -68274,7 +72536,10 @@ fn cmd_clipsync(args: &str) {
                 Ok(id) => {
                     shell_println!("Queued entry #{} ({}, {} bytes)", id, ctype.label(), size)
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "sync" => {
@@ -68282,7 +72547,10 @@ fn cmd_clipsync(args: &str) {
                 if let Ok(id) = id_s.parse::<u32>() {
                     match clipsync::sync_to_device(id) {
                         Ok(count) => shell_println!("Synced {} entries to device #{}", count, id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid device ID");
@@ -68339,7 +72607,10 @@ fn cmd_clipsync(args: &str) {
                 if let Ok(bytes) = s.parse::<u64>() {
                     match clipsync::set_max_size(bytes) {
                         Ok(()) => shell_println!("Max sync size: {} bytes", bytes),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid size");
@@ -68361,7 +72632,10 @@ fn cmd_clipsync(args: &str) {
                         if allowed { "allowed" } else { "denied" },
                         if allowed { "ON" } else { "OFF" }
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: clipsync allow|deny <text|image|file|richtext|url>");
@@ -68449,14 +72723,20 @@ fn cmd_netusage(args: &str) {
             let bytes = parts[4].parse::<u64>().unwrap_or(0);
             match netusage::record_traffic(app, iface, dir, bytes) {
                 Ok(()) => shell_println!("Recorded {} bytes {} for '{}'", bytes, dir.label(), app),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "connect" => {
             if let Some(app) = parts.get(1) {
                 match netusage::record_connection(app) {
                     Ok(()) => shell_println!("Connection recorded for '{}'", app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: netusage connect <app>");
@@ -68480,7 +72760,10 @@ fn cmd_netusage(args: &str) {
                     Some(b) => shell_println!("Cap for '{}': {} bytes", app, b),
                     None => shell_println!("Cap removed for '{}'", app),
                 },
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "app" | "get" => {
@@ -68557,12 +72840,18 @@ fn cmd_netusage(args: &str) {
             let itype = parse_interface_type(parts[2]);
             match netusage::add_interface(parts[1], itype) {
                 Ok(()) => shell_println!("Added interface '{}' [{}]", parts[1], itype.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "reset" => match netusage::reset_all() {
             Ok(()) => shell_println!("All usage stats reset"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (apps, ifaces, sent, recv, conns, warnings, ops) = netusage::stats();
@@ -68628,7 +72917,10 @@ fn cmd_touchscreen(args: &str) {
                 Ok(id) => {
                     shell_println!("Added touchscreen #{}: {} ({} touches)", id, name, touches)
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -68636,7 +72928,10 @@ fn cmd_touchscreen(args: &str) {
                 if let Ok(id) = id_s.parse::<u32>() {
                     match touchscreen::remove_device(id) {
                         Ok(()) => shell_println!("Removed device #{}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid device ID");
@@ -68652,7 +72947,10 @@ fn cmd_touchscreen(args: &str) {
                 if let Ok(id) = id_s.parse::<u32>() {
                     match touchscreen::calibrate(id) {
                         Ok(()) => shell_println!("Calibrated device #{}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid device ID");
@@ -68668,7 +72966,10 @@ fn cmd_touchscreen(args: &str) {
                 if let Ok(val) = v.parse::<u32>() {
                     match touchscreen::set_sensitivity(val) {
                         Ok(()) => shell_println!("Sensitivity: {}", val),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid value (1-100)");
@@ -68683,7 +72984,10 @@ fn cmd_touchscreen(args: &str) {
                 let on = *v == "on" || *v == "true" || *v == "yes";
                 match touchscreen::set_palm_rejection(on) {
                     Ok(()) => shell_println!("Palm rejection: {}", if on { "ON" } else { "OFF" }),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: touchscreen palm <on|off>");
@@ -68695,7 +72999,10 @@ fn cmd_touchscreen(args: &str) {
                 let on = *v == "on" || *v == "true";
                 match touchscreen::set_touch_sound(on) {
                     Ok(()) => shell_println!("Touch sound: {}", if on { "ON" } else { "OFF" }),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: touchscreen sound <on|off>");
@@ -68707,7 +73014,10 @@ fn cmd_touchscreen(args: &str) {
                 let on = *v == "on" || *v == "true";
                 match touchscreen::set_touch_vibration(on) {
                     Ok(()) => shell_println!("Touch vibration: {}", if on { "ON" } else { "OFF" }),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: touchscreen vibration <on|off>");
@@ -68724,7 +73034,10 @@ fn cmd_touchscreen(args: &str) {
             let action = parts[2..].join(" ");
             match touchscreen::set_gesture(gtype, &action) {
                 Ok(id) => shell_println!("Gesture #{}: {} → {}", id, gtype.label(), action),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "gestures" => {
@@ -68850,7 +73163,10 @@ fn cmd_diskquota(args: &str) {
                     soft,
                     hard
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "files" => {
@@ -68875,7 +73191,10 @@ fn cmd_diskquota(args: &str) {
                     soft,
                     hard
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "check" => {
@@ -68898,7 +73217,10 @@ fn cmd_diskquota(args: &str) {
                     bytes,
                     if allowed { "ALLOWED" } else { "DENIED" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "update" => {
@@ -68928,7 +73250,10 @@ fn cmd_diskquota(args: &str) {
                     bdelta,
                     fdelta
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -68945,7 +73270,10 @@ fn cmd_diskquota(args: &str) {
             };
             match diskquota::remove_quota(name, target) {
                 Ok(()) => shell_println!("Removed quota for {} '{}'", target.label(), name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "get" => {
@@ -69005,11 +73333,17 @@ fn cmd_diskquota(args: &str) {
         }
         "enable" | "on" => match diskquota::set_enabled(true) {
             Ok(()) => shell_println!("Quota enforcement enabled"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" | "off" => match diskquota::set_enabled(false) {
             Ok(()) => shell_println!("Quota enforcement disabled"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (entries, checks, denials, warnings, ops) = diskquota::stats();
@@ -69065,7 +73399,10 @@ fn cmd_appdefaults(args: &str) {
                     v.type_label()
                 ),
                 Ok(None) => shell_println!("  {}.{} not set", parts[1], parts[2]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "set" => {
@@ -69106,7 +73443,10 @@ fn cmd_appdefaults(args: &str) {
             };
             match appdefaults::set(app, key, value) {
                 Ok(()) => shell_println!("Set {}.{} = {}", app, key, raw),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" | "del" => {
@@ -69117,14 +73457,20 @@ fn cmd_appdefaults(args: &str) {
             }
             match appdefaults::delete(parts[1], parts[2]) {
                 Ok(()) => shell_println!("Deleted {}.{}", parts[1], parts[2]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "reset" => {
             if let Some(app) = parts.get(1) {
                 match appdefaults::reset(app) {
                     Ok(()) => shell_println!("Reset all prefs for '{}'", app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: appdefaults reset <app>");
@@ -69135,7 +73481,10 @@ fn cmd_appdefaults(args: &str) {
             if let Some(app) = parts.get(1) {
                 match appdefaults::remove_app(app) {
                     Ok(()) => shell_println!("Removed app '{}'", app),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: appdefaults remove <app>");
@@ -69250,7 +73599,10 @@ fn cmd_policyengine(args: &str) {
                     parts[2],
                     parts[3]
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "add" => {
@@ -69277,7 +73629,10 @@ fn cmd_policyengine(args: &str) {
                     cat.label(),
                     effect.label()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -69285,7 +73640,10 @@ fn cmd_policyengine(args: &str) {
                 if let Ok(id) = id_s.parse::<u32>() {
                     match policyengine::remove_rule(id) {
                         Ok(()) => shell_println!("Removed rule #{}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid rule ID");
@@ -69351,7 +73709,10 @@ fn cmd_policyengine(args: &str) {
                 let on = *v == "on" || *v == "true" || *v == "yes";
                 match policyengine::set_enforcement(on) {
                     Ok(()) => shell_println!("Enforcement: {}", if on { "ON" } else { "OFF" }),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: policyengine enforce <on|off>");
@@ -69363,7 +73724,10 @@ fn cmd_policyengine(args: &str) {
                 let effect = parse_policy_effect(v);
                 match policyengine::set_default(effect) {
                     Ok(()) => shell_println!("Default effect: {}", effect.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: policyengine default <allow|deny|audit>");
@@ -69451,7 +73815,10 @@ fn cmd_fontpreview(args: &str) {
                             shell_println!("  {} {} @ {}pt", p.family, p.style.label(), p.size_pt);
                             shell_println!("  \"{}\"", p.sample_text);
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid font ID");
@@ -69489,7 +73856,10 @@ fn cmd_fontpreview(args: &str) {
                         shell_println!("     \"{}\"", r.sample_text);
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "search" => {
@@ -69568,7 +73938,10 @@ fn cmd_fontpreview(args: &str) {
                 .unwrap_or(0);
             match fontpreview::add_font(parts[1], style, cat, path, version, glyphs) {
                 Ok(id) => shell_println!("Added font #{}: {} {}", id, parts[1], style.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "sample" => {
@@ -69580,7 +73953,10 @@ fn cmd_fontpreview(args: &str) {
             let text = parts[1..].join(" ");
             match fontpreview::set_sample(&text) {
                 Ok(()) => shell_println!("Default sample: \"{}\"", text),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -69652,7 +74028,10 @@ fn cmd_wifiscan(args: &str) {
     match sub {
         "scan" => match wifiscan::scan() {
             Ok(count) => shell_println!("Scan complete: {} networks visible", count),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "discover" => {
             if parts.len() < 6 {
@@ -69679,14 +74058,20 @@ fn cmd_wifiscan(args: &str) {
                     channel,
                     signal
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "connect" => {
             if let Some(ssid) = parts.get(1) {
                 match wifiscan::connect(ssid) {
                     Ok(()) => shell_println!("Connected to '{}'", ssid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: wifiscan connect <ssid>");
@@ -69695,13 +74080,19 @@ fn cmd_wifiscan(args: &str) {
         }
         "disconnect" => match wifiscan::disconnect() {
             Ok(()) => shell_println!("Disconnected"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "forget" => {
             if let Some(ssid) = parts.get(1) {
                 match wifiscan::forget(ssid) {
                     Ok(()) => shell_println!("Forgot '{}'", ssid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: wifiscan forget <ssid>");
@@ -69823,7 +74214,10 @@ fn cmd_splitview(args: &str) {
             };
             match splitview::create_split(orient) {
                 Ok(id) => shell_println!("Created split #{} ({})", id, orient.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -69831,7 +74225,10 @@ fn cmd_splitview(args: &str) {
                 if let Ok(id) = id_s.parse::<u32>() {
                     match splitview::remove_split(id) {
                         Ok(()) => shell_println!("Removed split #{}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid split ID");
@@ -69852,7 +74249,10 @@ fn cmd_splitview(args: &str) {
             let win_id = parts.get(2).and_then(|s| s.parse::<u32>().ok());
             match splitview::add_pane(split_id, win_id) {
                 Ok(pane_id) => shell_println!("Added pane #{} to split #{}", pane_id, split_id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rmpane" => {
@@ -69865,7 +74265,10 @@ fn cmd_splitview(args: &str) {
             let pane_id = parts[2].parse::<u32>().unwrap_or(0);
             match splitview::remove_pane(split_id, pane_id) {
                 Ok(()) => shell_println!("Removed pane #{} from split #{}", pane_id, split_id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "resize" => {
@@ -69879,7 +74282,10 @@ fn cmd_splitview(args: &str) {
             let ratio = parts[3].parse::<u32>().unwrap_or(50);
             match splitview::resize_pane(split_id, pane_id, ratio) {
                 Ok(()) => shell_println!("Resized pane #{} to {}%", pane_id, ratio),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "focus" => {
@@ -69892,7 +74298,10 @@ fn cmd_splitview(args: &str) {
             let pane_id = parts[2].parse::<u32>().unwrap_or(0);
             match splitview::focus_pane(split_id, pane_id) {
                 Ok(()) => shell_println!("Focused pane #{}", pane_id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "orient" => {
@@ -69909,7 +74318,10 @@ fn cmd_splitview(args: &str) {
             };
             match splitview::set_orientation(split_id, orient) {
                 Ok(()) => shell_println!("Split #{}: {}", split_id, orient.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -69994,7 +74406,10 @@ fn cmd_iotdevice(args: &str) {
                     proto.label(),
                     room
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -70002,7 +74417,10 @@ fn cmd_iotdevice(args: &str) {
                 if let Ok(id) = id_s.parse::<u32>() {
                     match iotdevice::remove_device(id) {
                         Ok(()) => shell_println!("Removed device #{}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid device ID");
@@ -70023,7 +74441,10 @@ fn cmd_iotdevice(args: &str) {
             let value = parts[2..].join(" ");
             match iotdevice::set_state(id, &value) {
                 Ok(()) => shell_println!("Device #{} → {}", id, value),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "online" | "offline" => {
@@ -70036,7 +74457,10 @@ fn cmd_iotdevice(args: &str) {
                             id,
                             if online { "ONLINE" } else { "OFFLINE" }
                         ),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid device ID");
@@ -70059,7 +74483,10 @@ fn cmd_iotdevice(args: &str) {
                 .collect();
             match iotdevice::create_group(parts[1], ids) {
                 Ok(id) => shell_println!("Group #{}: {}", id, parts[1]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "gcmd" => {
@@ -70072,7 +74499,10 @@ fn cmd_iotdevice(args: &str) {
             let value = parts[2..].join(" ");
             match iotdevice::group_command(gid, &value) {
                 Ok(count) => shell_println!("Set {} devices to '{}'", count, value),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "room" => {
@@ -70224,7 +74654,10 @@ fn cmd_prochistory(args: &str) {
             };
             match prochistory::record_start(name, pid, &pargs) {
                 Ok(id) => shell_println!("Started #{}: {} (pid={})", id, name, pid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "exit" => {
@@ -70245,7 +74678,10 @@ fn cmd_prochistory(args: &str) {
                 .unwrap_or(0);
             match prochistory::record_exit(pid, code, reason, mem) {
                 Ok(()) => shell_println!("Exited pid={} code={} ({})", pid, code, reason.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "recent" => {
@@ -70396,7 +74832,10 @@ fn cmd_notiffilter(args: &str) {
                     pattern,
                     action.label()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -70404,7 +74843,10 @@ fn cmd_notiffilter(args: &str) {
                 if let Ok(id) = id_s.parse::<u32>() {
                     match notiffilter::remove_rule(id) {
                         Ok(()) => shell_println!("Removed rule #{}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid rule ID");
@@ -70425,7 +74867,10 @@ fn cmd_notiffilter(args: &str) {
                             id,
                             if on { "ENABLED" } else { "DISABLED" }
                         ),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid rule ID");
@@ -70455,7 +74900,10 @@ fn cmd_notiffilter(args: &str) {
             };
             match notiffilter::evaluate(&notif) {
                 Ok(action) => shell_println!("Result: {}", action.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -70542,18 +74990,27 @@ fn cmd_colorblind(args: &str) {
     match sub {
         "enable" | "on" => match colorblind::set_enabled(true) {
             Ok(()) => shell_println!("Color blindness filter enabled"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "disable" | "off" => match colorblind::set_enabled(false) {
             Ok(()) => shell_println!("Color blindness filter disabled"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "type" | "set" => {
             if let Some(t) = parts.get(1) {
                 let cvd = parse_cvd_type(t);
                 match colorblind::set_type(cvd) {
                     Ok(()) => shell_println!("Filter type: {}", cvd.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: colorblind type <protan|deutan|tritan|...>");
@@ -70565,7 +75022,10 @@ fn cmd_colorblind(args: &str) {
                 if let Ok(val) = v.parse::<u32>() {
                     match colorblind::set_intensity(val) {
                         Ok(()) => shell_println!("Intensity: {}%", val),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid value (0-100)");
@@ -70581,7 +75041,10 @@ fn cmd_colorblind(args: &str) {
                 let on = *v == "on" || *v == "true";
                 match colorblind::set_simulate(on) {
                     Ok(()) => shell_println!("Simulation mode: {}", if on { "ON" } else { "OFF" }),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: colorblind simulate <on|off>");
@@ -70593,7 +75056,10 @@ fn cmd_colorblind(args: &str) {
                 if let Ok(id) = id_s.parse::<u32>() {
                     match colorblind::apply_preset(id) {
                         Ok(()) => shell_println!("Applied preset #{}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid preset ID");
@@ -70724,7 +75190,10 @@ fn cmd_clipaction(args: &str) {
             };
             match clipaction::execute_action(id) {
                 Ok(cmd) => shell_println!("Executed action {} → command: {}", id, cmd),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "add" => {
@@ -70738,7 +75207,10 @@ fn cmd_clipaction(args: &str) {
             let command = parts[3..].join(" ");
             match clipaction::add_action(name, ct, &command) {
                 Ok(id) => shell_println!("Added action {} (id={})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -70752,7 +75224,10 @@ fn cmd_clipaction(args: &str) {
             };
             match clipaction::remove_action(id) {
                 Ok(()) => shell_println!("Removed action {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -70828,7 +75303,10 @@ fn cmd_energysaver(args: &str) {
                 let mode = parse_energy_mode(m);
                 match energysaver::set_mode(mode) {
                     Ok(()) => shell_println!("Energy mode set to {}", mode.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 let mode = energysaver::get_mode();
@@ -70859,7 +75337,10 @@ fn cmd_energysaver(args: &str) {
             };
             match energysaver::set_brightness(pct) {
                 Ok(()) => shell_println!("Brightness set to {}%", pct.min(100)),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "cpulimit" => {
@@ -70873,7 +75354,10 @@ fn cmd_energysaver(args: &str) {
             };
             match energysaver::set_cpu_limit(pct) {
                 Ok(()) => shell_println!("CPU limit set to {}%", pct.min(100)),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "throttle" => {
@@ -70893,7 +75377,10 @@ fn cmd_energysaver(args: &str) {
             };
             match energysaver::throttle_app(name, limit) {
                 Ok(()) => shell_println!("Throttled '{}' to {}% CPU", name, limit),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unthrottle" => {
@@ -70907,7 +75394,10 @@ fn cmd_energysaver(args: &str) {
             };
             match energysaver::unthrottle_app(name) {
                 Ok(()) => shell_println!("Unthrottled '{}'", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "throttled" => {
@@ -70931,7 +75421,10 @@ fn cmd_energysaver(args: &str) {
             if let Some(min) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 match energysaver::set_estimate(min) {
                     Ok(()) => shell_println!("Battery estimate set to {} min", min),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 let (_, _, _, est, _) = energysaver::stats();
@@ -70952,7 +75445,10 @@ fn cmd_energysaver(args: &str) {
                     if enabled { "on" } else { "off" },
                     thresh
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -71040,7 +75536,10 @@ fn cmd_filerules(args: &str) {
             };
             match filerules::add_rule(name, cond, pattern, action, &param) {
                 Ok(id) => shell_println!("Added rule '{}' (id={})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -71054,7 +75553,10 @@ fn cmd_filerules(args: &str) {
             };
             match filerules::remove_rule(id) {
                 Ok(()) => shell_println!("Removed rule {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" | "disable" => {
@@ -71073,7 +75575,10 @@ fn cmd_filerules(args: &str) {
                     id,
                     if enabled { "enabled" } else { "disabled" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "eval" => {
@@ -71097,7 +75602,10 @@ fn cmd_filerules(args: &str) {
                         }
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -71191,7 +75699,10 @@ fn cmd_secureboot(args: &str) {
             };
             match secureboot::set_state(state) {
                 Ok(()) => shell_println!("Secure boot state set to {}", state.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enroll" => {
@@ -71205,7 +75716,10 @@ fn cmd_secureboot(args: &str) {
             let fp = parts[3];
             match secureboot::enroll_key(kt, subject, fp) {
                 Ok(id) => shell_println!("Enrolled key '{}' (id={})", subject, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -71219,7 +75733,10 @@ fn cmd_secureboot(args: &str) {
             };
             match secureboot::remove_key(id) {
                 Ok(()) => shell_println!("Removed key {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "verify" => {
@@ -71233,7 +75750,10 @@ fn cmd_secureboot(args: &str) {
             match secureboot::verify_image(image, hash) {
                 Ok(true) => shell_println!("Image '{}' verified OK", image),
                 Ok(false) => shell_println!("Image '{}' REJECTED", image),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "keys" => {
@@ -71334,7 +75854,10 @@ fn cmd_eventlog(args: &str) {
                 Ok(id) => {
                     shell_println!("Logged event #{} [{}] {}: {}", id, sev.label(), source, msg)
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "recent" => {
@@ -71427,12 +75950,18 @@ fn cmd_eventlog(args: &str) {
             if let Some(src) = parts.get(1) {
                 match eventlog::clear_source(src) {
                     Ok(n) => shell_println!("Cleared {} events from '{}'", n, src),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 match eventlog::clear_all() {
                     Ok(n) => shell_println!("Cleared {} events", n),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -71551,7 +76080,10 @@ fn cmd_systemimage(args: &str) {
             let base: Option<u32> = parts.get(5).and_then(|s| s.parse().ok());
             match systemimage::create_image(name, itype, &desc, size, base) {
                 Ok(id) => shell_println!("Created image '{}' (id={})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" => {
@@ -71565,7 +76097,10 @@ fn cmd_systemimage(args: &str) {
             };
             match systemimage::delete_image(id) {
                 Ok(()) => shell_println!("Deleted image {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "restore" => {
@@ -71579,7 +76114,10 @@ fn cmd_systemimage(args: &str) {
             };
             match systemimage::restore_image(id) {
                 Ok(()) => shell_println!("Restored from image {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "verify" => {
@@ -71594,7 +76132,10 @@ fn cmd_systemimage(args: &str) {
             match systemimage::verify_image(id) {
                 Ok(true) => shell_println!("Image {} verified OK", id),
                 Ok(false) => shell_println!("Image {} CORRUPTED", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "info" => {
@@ -71704,7 +76245,10 @@ fn cmd_raidmgr(args: &str) {
             let stripe: u32 = parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(64);
             match raidmgr::create_array(name, level, &disk_ids, size, stripe) {
                 Ok(id) => shell_println!("Created {} array '{}' (id={})", level.label(), name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" => {
@@ -71718,7 +76262,10 @@ fn cmd_raidmgr(args: &str) {
             };
             match raidmgr::delete_array(id) {
                 Ok(()) => shell_println!("Deleted array {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "add" => {
@@ -71748,7 +76295,10 @@ fn cmd_raidmgr(args: &str) {
                     aid,
                     if spare { "spare" } else { "active" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -71767,7 +76317,10 @@ fn cmd_raidmgr(args: &str) {
             };
             match raidmgr::remove_disk(aid, parts[2]) {
                 Ok(()) => shell_println!("Removed {} from array {}", parts[2], aid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "fail" => {
@@ -71786,7 +76339,10 @@ fn cmd_raidmgr(args: &str) {
             };
             match raidmgr::fail_disk(aid, parts[2]) {
                 Ok(()) => shell_println!("Marked {} as failed in array {}", parts[2], aid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rebuild" => {
@@ -71800,7 +76356,10 @@ fn cmd_raidmgr(args: &str) {
             };
             match raidmgr::start_rebuild(aid) {
                 Ok(()) => shell_println!("Rebuild started on array {}", aid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "info" => {
@@ -71911,7 +76470,10 @@ fn cmd_networkbridge(args: &str) {
                     id,
                     mode.label()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" => {
@@ -71925,7 +76487,10 @@ fn cmd_networkbridge(args: &str) {
             };
             match networkbridge::delete_bridge(id) {
                 Ok(()) => shell_println!("Deleted bridge {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "add" => {
@@ -71947,7 +76512,10 @@ fn cmd_networkbridge(args: &str) {
             let mac = parts.get(4).copied().unwrap_or("00:00:00:00:00:00");
             match networkbridge::add_interface(bid, iface, itype, mac) {
                 Ok(()) => shell_println!("Added {} to bridge {}", iface, bid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -71966,7 +76534,10 @@ fn cmd_networkbridge(args: &str) {
             };
             match networkbridge::remove_interface(bid, parts[2]) {
                 Ok(()) => shell_println!("Removed {} from bridge {}", parts[2], bid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "up" | "down" => {
@@ -71985,7 +76556,10 @@ fn cmd_networkbridge(args: &str) {
             };
             match networkbridge::set_state(bid, st) {
                 Ok(()) => shell_println!("Bridge {} set to {}", bid, st.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "ip" => {
@@ -72004,7 +76578,10 @@ fn cmd_networkbridge(args: &str) {
             };
             match networkbridge::set_ip(bid, parts[2], parts[3]) {
                 Ok(()) => shell_println!("Bridge {} IP set to {}/{}", bid, parts[2], parts[3]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "mtu" => {
@@ -72031,7 +76608,10 @@ fn cmd_networkbridge(args: &str) {
             };
             match networkbridge::set_mtu(bid, mtu) {
                 Ok(()) => shell_println!("Bridge {} MTU set to {}", bid, mtu),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "info" => {
@@ -72139,7 +76719,10 @@ fn cmd_secureerase(args: &str) {
                     target,
                     method.label()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "complete" => {
@@ -72153,7 +76736,10 @@ fn cmd_secureerase(args: &str) {
             };
             match secureerase::complete_erase(id) {
                 Ok(()) => shell_println!("Job {} completed", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "cancel" => {
@@ -72167,7 +76753,10 @@ fn cmd_secureerase(args: &str) {
             };
             match secureerase::cancel_erase(id) {
                 Ok(()) => shell_println!("Job {} cancelled", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "status" => {
@@ -72287,7 +76876,10 @@ fn cmd_dnssettings(args: &str) {
             let pri: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(10);
             match dnssettings::add_server(addr, proto, pri) {
                 Ok(()) => shell_println!("Added DNS server {} ({})", addr, proto.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -72301,7 +76893,10 @@ fn cmd_dnssettings(args: &str) {
             };
             match dnssettings::remove_server(addr) {
                 Ok(()) => shell_println!("Removed {}", addr),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "resolve" => {
@@ -72315,18 +76910,27 @@ fn cmd_dnssettings(args: &str) {
             };
             match dnssettings::resolve(name) {
                 Ok(ip) => shell_println!("{} → {}", name, ip),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "flush" => match dnssettings::flush_cache() {
             Ok(n) => shell_println!("Flushed {} cached records", n),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "search" => {
             if let Some(domain) = parts.get(1) {
                 match dnssettings::add_search_domain(domain) {
                     Ok(()) => shell_println!("Added search domain '{}'", domain),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 let domains = dnssettings::list_search_domains();
@@ -72444,7 +77048,10 @@ fn cmd_backupsched(args: &str) {
             let retention: u32 = parts.get(6).and_then(|s| s.parse().ok()).unwrap_or(30);
             match backupsched::create_schedule(name, source, dest, btype, freq, retention) {
                 Ok(id) => shell_println!("Created schedule '{}' (id={})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" => {
@@ -72458,7 +77065,10 @@ fn cmd_backupsched(args: &str) {
             };
             match backupsched::delete_schedule(id) {
                 Ok(()) => shell_println!("Deleted schedule {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" | "disable" => {
@@ -72477,7 +77087,10 @@ fn cmd_backupsched(args: &str) {
                     id,
                     if enabled { "enabled" } else { "disabled" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "run" => {
@@ -72496,7 +77109,10 @@ fn cmd_backupsched(args: &str) {
                 500,
             ) {
                 Ok(()) => shell_println!("Backup run completed for schedule {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "history" => {
@@ -72615,7 +77231,10 @@ fn cmd_displaycal(args: &str) {
             };
             match displaycal::add_monitor(name) {
                 Ok(id) => shell_println!("Added monitor '{}' (id={})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -72629,7 +77248,10 @@ fn cmd_displaycal(args: &str) {
             };
             match displaycal::remove_monitor(id) {
                 Ok(()) => shell_println!("Removed monitor {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "profile" => {
@@ -72649,7 +77271,10 @@ fn cmd_displaycal(args: &str) {
             let ptype = parse_profile_type(parts[2]);
             match displaycal::set_profile(id, ptype) {
                 Ok(()) => shell_println!("Profile set to {} for monitor {}", ptype.label(), id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "gamma" => {
@@ -72673,7 +77298,10 @@ fn cmd_displaycal(args: &str) {
             let b: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(220);
             match displaycal::set_gamma(id, r, g, b) {
                 Ok(()) => shell_println!("Gamma set to {}/{}/{} for monitor {}", r, g, b, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "whitepoint" | "wp" => {
@@ -72700,7 +77328,10 @@ fn cmd_displaycal(args: &str) {
             };
             match displaycal::set_white_point(id, k) {
                 Ok(()) => shell_println!("White point set to {}K for monitor {}", k, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "calibrate" => {
@@ -72714,7 +77345,10 @@ fn cmd_displaycal(args: &str) {
             };
             match displaycal::calibrate(id) {
                 Ok(()) => shell_println!("Monitor {} calibrated", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "info" => {
@@ -72818,7 +77452,10 @@ fn cmd_vpnprofile(args: &str) {
             let port: u16 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(1194);
             match vpnprofile::create_profile(name, proto, server, port) {
                 Ok(id) => shell_println!("Created VPN profile '{}' (id={})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" => {
@@ -72832,7 +77469,10 @@ fn cmd_vpnprofile(args: &str) {
             };
             match vpnprofile::delete_profile(id) {
                 Ok(()) => shell_println!("Deleted profile {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "connect" => {
@@ -72846,7 +77486,10 @@ fn cmd_vpnprofile(args: &str) {
             };
             match vpnprofile::connect(id) {
                 Ok(()) => shell_println!("Connected to VPN {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "disconnect" => {
@@ -72860,7 +77503,10 @@ fn cmd_vpnprofile(args: &str) {
             };
             match vpnprofile::disconnect(id) {
                 Ok(()) => shell_println!("Disconnected from VPN {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "killswitch" => {
@@ -72884,7 +77530,10 @@ fn cmd_vpnprofile(args: &str) {
                     if enabled { "enabled" } else { "disabled" },
                     id
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "info" => {
@@ -72993,7 +77642,10 @@ fn cmd_diskhealth(args: &str) {
             };
             match diskhealth::check_health(id) {
                 Ok(grade) => shell_println!("Disk {} health: {}", id, grade.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "add" => {
@@ -73012,7 +77664,10 @@ fn cmd_diskhealth(args: &str) {
                 .unwrap_or(500_000_000_000);
             match diskhealth::add_disk(name, model, serial, dtype, capacity) {
                 Ok(id) => shell_println!("Added disk '{}' (id={})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -73026,7 +77681,10 @@ fn cmd_diskhealth(args: &str) {
             };
             match diskhealth::remove_disk(id) {
                 Ok(()) => shell_println!("Removed disk {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "info" => {
@@ -73132,7 +77790,10 @@ fn cmd_recoverypart(args: &str) {
                 .unwrap_or(10_000_000);
             match recoverypart::add_tool(name, ttype, version, size) {
                 Ok(id) => shell_println!("Added tool '{}' (id={})", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -73146,13 +77807,19 @@ fn cmd_recoverypart(args: &str) {
             };
             match recoverypart::remove_tool(id) {
                 Ok(()) => shell_println!("Removed tool {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "verify" => match recoverypart::verify_integrity() {
             Ok(true) => shell_println!("Recovery partition integrity OK"),
             Ok(false) => shell_println!("Recovery partition integrity FAILED"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "repair" => {
             let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -73165,12 +77832,18 @@ fn cmd_recoverypart(args: &str) {
             };
             match recoverypart::run_repair(id) {
                 Ok(()) => shell_println!("Repair completed with tool {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "boot" => match recoverypart::boot_recovery() {
             Ok(()) => shell_println!("Booting into recovery environment..."),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "stats" => {
             let (tools, repairs, verifications, boots, ops) = recoverypart::stats();
@@ -73256,7 +77929,10 @@ fn cmd_userprofile(args: &str) {
                 });
             match userprofile::create_profile(username, display, atype) {
                 Ok(id) => shell_println!("Created profile '{}' (id={})", username, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" => {
@@ -73270,7 +77946,10 @@ fn cmd_userprofile(args: &str) {
             };
             match userprofile::delete_profile(id) {
                 Ok(()) => shell_println!("Deleted profile {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "switch" => {
@@ -73284,7 +77963,10 @@ fn cmd_userprofile(args: &str) {
             };
             match userprofile::switch_user(id) {
                 Ok(()) => shell_println!("Switched to user {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "lock" | "unlock" => {
@@ -73303,7 +77985,10 @@ fn cmd_userprofile(args: &str) {
                     id,
                     if locked { "locked" } else { "unlocked" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rename" => {
@@ -73323,7 +78008,10 @@ fn cmd_userprofile(args: &str) {
             let name = parts[2..].join(" ");
             match userprofile::set_display_name(id, &name) {
                 Ok(()) => shell_println!("Renamed profile {} to '{}'", id, name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "whoami" => match userprofile::active_user() {
@@ -73381,7 +78069,10 @@ fn cmd_userprofile(args: &str) {
                     shell_println!("Cleared {} for profile {}", sub, id);
                 }
                 Ok(()) => shell_println!("Profile {} {} set to '{}'", id, sub, path),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -73449,7 +78140,10 @@ fn cmd_diskclean(args: &str) {
                     }
                 }
             }
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "clean" => {
             let cats: Vec<crate::fs::diskclean::CleanCategory> = if parts.len() > 1 {
@@ -73465,7 +78159,10 @@ fn cmd_diskclean(args: &str) {
             };
             match diskclean::clean(&cats) {
                 Ok((items, bytes)) => shell_println!("Cleaned {} items, {}B freed", items, bytes),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "estimate" => {
@@ -73560,7 +78257,10 @@ fn cmd_cas(args: &str) {
                     let hex = cas::hash_to_hex(&hash);
                     shell_println!("Stored: {}", hex);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "get" => {
@@ -73574,7 +78274,10 @@ fn cmd_cas(args: &str) {
                                 shell_println!("({} bytes, binary)", data.len());
                             }
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid hash hex");
@@ -73603,7 +78306,10 @@ fn cmd_cas(args: &str) {
                 if let Some(hash) = cas::hex_to_hash(hex) {
                     match cas::release(&hash) {
                         Ok(()) => shell_println!("Released"),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid hash hex");
@@ -73697,7 +78403,10 @@ fn cmd_logrotate(args: &str) {
                     .unwrap_or(7);
                 match logrotate::add_rule(path, logrotate::RotateTrigger::Daily, compress, max) {
                     Ok(id) => shell_println!("Rule {} added for {}", id, path),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: logrotate add <path> [compress] [max_archives]");
@@ -73709,7 +78418,10 @@ fn cmd_logrotate(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match logrotate::remove_rule(id) {
                         Ok(()) => shell_println!("Rule {} removed", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID");
@@ -73725,7 +78437,10 @@ fn cmd_logrotate(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match logrotate::rotate(id) {
                         Ok(bytes) => shell_println!("Rotated: {} bytes", bytes),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID");
@@ -73735,7 +78450,10 @@ fn cmd_logrotate(args: &str) {
                 logrotate::init_defaults();
                 match logrotate::check_all() {
                     Ok(n) => shell_println!("Rotated {} logs", n),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -73823,7 +78541,10 @@ fn cmd_powerwake(args: &str) {
             let future = crate::hpet::elapsed_ns() + 3_600_000_000_000; // 1 hour
             match powerwake::schedule_wake(future, &reason, false, 0) {
                 Ok(id) => shell_println!("Timer {} scheduled", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "cancel" => {
@@ -73831,7 +78552,10 @@ fn cmd_powerwake(args: &str) {
                 if let Ok(id) = id_str.parse::<u32>() {
                     match powerwake::cancel_timer(id) {
                         Ok(()) => shell_println!("Timer {} cancelled", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid ID");
@@ -73848,7 +78572,10 @@ fn cmd_powerwake(args: &str) {
                     powerwake::init_defaults();
                     match powerwake::add_wol_target(name, mac) {
                         Ok(id) => shell_println!("WoL target {} added: {} ({})", id, name, mac),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Usage: powerwake wol add <name> <mac>");
@@ -73860,7 +78587,10 @@ fn cmd_powerwake(args: &str) {
                     if let Ok(id) = id_str.parse::<u32>() {
                         match powerwake::send_wol(id) {
                             Ok(()) => shell_println!("WoL packet sent"),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Invalid ID");
@@ -73894,7 +78624,10 @@ fn cmd_powerwake(args: &str) {
                     if let Ok(id) = id_str.parse::<u32>() {
                         match powerwake::remove_wol_target(id) {
                             Ok(()) => shell_println!("WoL target {} removed", id),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Invalid ID");
@@ -74003,7 +78736,10 @@ fn cmd_diskio(args: &str) {
             if let Some(name) = parts.get(1) {
                 match diskio::reset_device(name) {
                     Ok(()) => shell_println!("Stats for '{}' reset", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: diskio reset <device>");
@@ -74108,7 +78844,10 @@ fn cmd_netspeed(args: &str) {
                         "Use `netspeed bandwidth` to view real per-interface byte counters."
                     );
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "bandwidth" => {
@@ -74207,7 +78946,10 @@ fn cmd_cfreq(args: &str) {
                 let gov = parse_cpufreq_governor(gov_str);
                 match cpufreq::set_governor(gov) {
                     Ok(()) => shell_println!("Governor set to {}", gov.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else if let Some(gov) = cpufreq::get_governor() {
                 shell_println!("Current governor: {}", gov.label());
@@ -74223,14 +78965,20 @@ fn cmd_cfreq(args: &str) {
                 cpufreq::init_defaults();
                 match cpufreq::set_boost(true) {
                     Ok(()) => shell_println!("Boost enabled"),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             Some("off") | Some("disable") => {
                 cpufreq::init_defaults();
                 match cpufreq::set_boost(false) {
                     Ok(()) => shell_println!("Boost disabled"),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             _ => {
@@ -74343,7 +79091,10 @@ fn cmd_therm(args: &str) {
                     thermal::init_defaults();
                     match thermal::set_fan_duty(id, duty) {
                         Ok(()) => shell_println!("Fan {} set to {}%", id, duty),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Invalid arguments");
@@ -74470,7 +79221,10 @@ fn cmd_sysctlfs(args: &str) {
                 sysctlfs::init_defaults();
                 match sysctlfs::get(key) {
                     Ok(val) => shell_println!("{} = {}", key, val),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: sysctlfs get <key>");
@@ -74482,7 +79236,10 @@ fn cmd_sysctlfs(args: &str) {
                 sysctlfs::init_defaults();
                 match sysctlfs::set(key, val) {
                     Ok(()) => shell_println!("{} = {}", key, val),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: sysctlfs set <key> <value>");
@@ -74805,7 +79562,10 @@ fn cmd_kernlog(args: &str) {
             let level = parse_kernlog_level(level_str);
             match kernlog::log(level, source, &msg) {
                 Ok(seq) => shell_println!("Logged as seq {}", seq),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "tail" => {
@@ -74950,7 +79710,10 @@ fn cmd_coredump(args: &str) {
                 .unwrap_or(4096);
             match coredump::record_dump(pid, name, coredump::DumpReason::Segfault, size, 11) {
                 Ok(id) => shell_println!("Recorded core dump #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" | "rm" => {
@@ -74960,7 +79723,10 @@ fn cmd_coredump(args: &str) {
                 .unwrap_or(0);
             match coredump::delete_dump(id) {
                 Ok(()) => shell_println!("Deleted dump {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "cleanup" => {
@@ -74971,7 +79737,10 @@ fn cmd_coredump(args: &str) {
                 .unwrap_or(10);
             match coredump::cleanup(keep) {
                 Ok(n) => shell_println!("Cleaned up {} old dumps (keeping {}).", n, keep),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" => {
@@ -75063,7 +79832,10 @@ fn cmd_fwupdate(args: &str) {
             fwupdate::init_defaults();
             match fwupdate::check_updates() {
                 Ok(n) => shell_println!("{} firmware update(s) available.", n),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "apply" => {
@@ -75076,7 +79848,10 @@ fn cmd_fwupdate(args: &str) {
                     "Firmware update applied for device {}. Reboot required.",
                     id
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "history" => {
@@ -75166,7 +79941,10 @@ fn cmd_timesync(args: &str) {
             let stratum = parse_timesync_stratum(parts.get(2).copied().unwrap_or("2"));
             match timesync::add_server(addr, stratum) {
                 Ok(id) => shell_println!("Added server #{}: {}", id, addr),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
@@ -75176,7 +79954,10 @@ fn cmd_timesync(args: &str) {
                 .unwrap_or(0);
             match timesync::remove_server(id) {
                 Ok(()) => shell_println!("Removed server {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "sync" => {
@@ -75185,7 +79966,10 @@ fn cmd_timesync(args: &str) {
                 Ok(()) => {
                     shell_println!("Sync completed. Status: {}", timesync::get_status().label())
                 }
-                Err(e) => shell_println!("Sync error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Sync error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "history" => {
@@ -75314,14 +80098,20 @@ fn cmd_kmod(args: &str) {
                 .unwrap_or(4096);
             match kmod::load_module(name, mod_type, size, "user-loaded module") {
                 Ok(()) => shell_println!("Module '{}' loaded.", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unload" | "rmmod" => {
             let name = parts.get(1).copied().unwrap_or("");
             match kmod::unload_module(name) {
                 Ok(()) => shell_println!("Module '{}' unloaded.", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "param" => {
@@ -75333,7 +80123,10 @@ fn cmd_kmod(args: &str) {
             } else {
                 match kmod::set_param(modname, param, value, "user-set parameter") {
                     Ok(()) => shell_println!("Set {}.{} = {}", modname, param, value),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -75410,7 +80203,10 @@ fn cmd_entropy(args: &str) {
             let source = parse_entropy_source(source_str);
             match entropy::add_entropy(source, bits) {
                 Ok(()) => shell_println!("Added {} bits from {}", bits, source.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "drain" => {
@@ -75420,7 +80216,10 @@ fn cmd_entropy(args: &str) {
                 .unwrap_or(32);
             match entropy::drain_entropy(bits) {
                 Ok(got) => shell_println!("Drained {} bits (requested {})", got, bits),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "reseed" => {
@@ -75430,7 +80229,10 @@ fn cmd_entropy(args: &str) {
                     "Reseeded from hardware RNG. Available: {} bits",
                     entropy::available()
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -75521,7 +80323,10 @@ fn cmd_iosched(args: &str) {
             let algo = parse_iosched_algo(algo_str);
             match iosched::set_scheduler(dev, algo) {
                 Ok(()) => shell_println!("Set {} scheduler to {}", dev, algo.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "depth" => {
@@ -75532,7 +80337,10 @@ fn cmd_iosched(args: &str) {
                 .unwrap_or(128);
             match iosched::set_queue_depth(dev, depth) {
                 Ok(()) => shell_println!("Set {} queue depth to {}", dev, depth),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "add" => {
@@ -75541,7 +80349,10 @@ fn cmd_iosched(args: &str) {
             let algo = parse_iosched_algo(parts.get(2).copied().unwrap_or("bfq"));
             match iosched::add_device(name, algo) {
                 Ok(()) => shell_println!("Added device {} with {}", name, algo.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "default" => {
@@ -75549,7 +80360,10 @@ fn cmd_iosched(args: &str) {
             let algo = parse_iosched_algo(parts.get(1).copied().unwrap_or("bfq"));
             match iosched::set_default(algo) {
                 Ok(()) => shell_println!("Default algorithm set to {}", algo.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -75663,7 +80477,10 @@ fn cmd_netmon(args: &str) {
                 .unwrap_or(0);
             match netmon::close_connection(id) {
                 Ok(()) => shell_println!("Connection {} closed.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -75740,7 +80557,10 @@ fn cmd_groupmgr(args: &str) {
             let gtype = parse_groupmgr_type(parts.get(3).copied().unwrap_or("user"));
             match groupmgr::create_group(gid, name, gtype, "User-created group") {
                 Ok(()) => shell_println!("Created group '{}' (GID {})", name, gid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" | "rm" => {
@@ -75750,7 +80570,10 @@ fn cmd_groupmgr(args: &str) {
                 .unwrap_or(0);
             match groupmgr::delete_group(gid) {
                 Ok(()) => shell_println!("Deleted group {}.", gid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "adduser" => {
@@ -75764,7 +80587,10 @@ fn cmd_groupmgr(args: &str) {
                 .unwrap_or(0);
             match groupmgr::add_member(gid, uid) {
                 Ok(()) => shell_println!("Added UID {} to GID {}.", uid, gid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rmuser" => {
@@ -75778,7 +80604,10 @@ fn cmd_groupmgr(args: &str) {
                 .unwrap_or(0);
             match groupmgr::remove_member(gid, uid) {
                 Ok(()) => shell_println!("Removed UID {} from GID {}.", uid, gid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "user" => {
@@ -75852,7 +80681,10 @@ fn cmd_sysrq(args: &str) {
             let key = parts.get(1).and_then(|s| s.chars().next()).unwrap_or('h');
             match sysrq::trigger(key) {
                 Ok(()) => shell_println!("SysRq '{}' triggered.", key),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "register" => {
@@ -75865,28 +80697,40 @@ fn cmd_sysrq(args: &str) {
                 });
             match sysrq::register(key, sysrq::SysRqCategory::Custom, &desc) {
                 Ok(()) => shell_println!("Registered SysRq '{}': {}", key, desc),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unregister" | "rm" => {
             let key = parts.get(1).and_then(|s| s.chars().next()).unwrap_or('z');
             match sysrq::unregister(key) {
                 Ok(()) => shell_println!("Unregistered SysRq '{}'.", key),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" => {
             let key = parts.get(1).and_then(|s| s.chars().next()).unwrap_or('h');
             match sysrq::set_handler_enabled(key, true) {
                 Ok(()) => shell_println!("SysRq '{}' enabled.", key),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "disable" => {
             let key = parts.get(1).and_then(|s| s.chars().next()).unwrap_or('h');
             match sysrq::set_handler_enabled(key, false) {
                 Ok(()) => shell_println!("SysRq '{}' disabled.", key),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "mask" => {
@@ -75895,7 +80739,10 @@ fn cmd_sysrq(args: &str) {
                 let mask = u32::from_str_radix(val.trim_start_matches("0x"), 16).unwrap_or(0x7F);
                 match sysrq::set_enabled_mask(mask) {
                     Ok(()) => shell_println!("SysRq mask set to 0x{:x}", mask),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("SysRq mask: 0x{:x}", sysrq::get_enabled_mask());
@@ -75986,7 +80833,10 @@ fn cmd_telemetry(args: &str) {
                 .unwrap_or(0);
             match telemetry::record(name, value) {
                 Ok(()) => shell_println!("Recorded {}={}", name, value),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "register" => {
@@ -75996,14 +80846,20 @@ fn cmd_telemetry(args: &str) {
             let unit = parts.get(3).copied().unwrap_or("");
             match telemetry::register_metric(name, mtype, telemetry::MetricCategory::Custom, unit) {
                 Ok(()) => shell_println!("Registered metric '{}'", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
             let name = parts.get(1).copied().unwrap_or("");
             match telemetry::remove_metric(name) {
                 Ok(()) => shell_println!("Removed metric '{}'.", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "export" => {
@@ -76015,7 +80871,10 @@ fn cmd_telemetry(args: &str) {
                         shell_println!("  {}={} {}", m.name, m.value, m.unit);
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -76085,7 +80944,10 @@ fn cmd_fscache(args: &str) {
             let pol = parse_fscache_policy(parts.get(2).copied().unwrap_or("wb"));
             match fscache::set_policy(dev, pol) {
                 Ok(()) => shell_println!("Set {} policy to {}", dev, pol.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "readahead" | "ra" => {
@@ -76096,14 +80958,20 @@ fn cmd_fscache(args: &str) {
                 .unwrap_or(128);
             match fscache::set_readahead(dev, pages) {
                 Ok(()) => shell_println!("Set {} read-ahead to {} pages", dev, pages),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "flush" => {
             let dev = parts.get(1).copied().unwrap_or("");
             match fscache::flush(dev) {
                 Ok(n) => shell_println!("Flushed {} dirty pages on {}", n, dev),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -76162,7 +81030,10 @@ fn cmd_nameservice(args: &str) {
             if let Some(name) = parts.get(1) {
                 match nameservice::set_hostname(name) {
                     Ok(()) => shell_println!("Hostname set to '{}'", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("{}", nameservice::get_hostname());
@@ -76197,21 +81068,30 @@ fn cmd_nameservice(args: &str) {
             let name = parts.get(2).copied().unwrap_or("host");
             match nameservice::add_host(addr, name) {
                 Ok(()) => shell_println!("Added {} → {}", addr, name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
             let name = parts.get(1).copied().unwrap_or("");
             match nameservice::remove_host(name) {
                 Ok(()) => shell_println!("Removed '{}'.", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "flush" => {
             nameservice::init_defaults();
             match nameservice::flush_cache() {
                 Ok(n) => shell_println!("Flushed {} cache entries.", n),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "test" => {
@@ -76284,7 +81164,10 @@ fn cmd_oomkiller(args: &str) {
                 .unwrap_or(0);
             match oomkiller::adjust_score(pid, adj) {
                 Ok(()) => shell_println!("Set PID {} adj to {}", pid, adj),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "exempt" => {
@@ -76295,7 +81178,10 @@ fn cmd_oomkiller(args: &str) {
             let exempt = parts.get(2).copied().unwrap_or("true") != "false";
             match oomkiller::set_exempt(pid, exempt) {
                 Ok(()) => shell_println!("PID {} exempt={}", pid, exempt),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "victim" => {
@@ -76320,7 +81206,10 @@ fn cmd_oomkiller(args: &str) {
                 .unwrap_or(0);
             match oomkiller::kill(pid) {
                 Ok(freed) => shell_println!("Killed PID {}, freed {} bytes.", pid, freed),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "policy" => {
@@ -76328,7 +81217,10 @@ fn cmd_oomkiller(args: &str) {
             let pol = parse_oom_policy(parts.get(1).copied().unwrap_or("kill"));
             match oomkiller::set_policy(pol) {
                 Ok(()) => shell_println!("OOM policy set to {}", pol.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "history" => {
@@ -76412,14 +81304,20 @@ fn cmd_blktrace(args: &str) {
             let dev = parts.get(1).copied().unwrap_or("sda");
             match blktrace::start(dev) {
                 Ok(()) => shell_println!("Tracing started for {}", dev),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stop" => {
             let dev = parts.get(1).copied().unwrap_or("sda");
             match blktrace::stop(dev) {
                 Ok(()) => shell_println!("Tracing stopped for {}", dev),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "dump" => {
@@ -76452,7 +81350,10 @@ fn cmd_blktrace(args: &str) {
             let dev = parts.get(1).copied().unwrap_or("sda");
             match blktrace::clear(dev) {
                 Ok(n) => shell_println!("Cleared {} events from {}", n, dev),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -76509,7 +81410,10 @@ fn cmd_cgroupfs(args: &str) {
             cgroupfs::init_defaults();
             match cgroupfs::create_group(path) {
                 Ok(()) => shell_println!("Created cgroup: {}", path),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" => {
@@ -76522,7 +81426,10 @@ fn cmd_cgroupfs(args: &str) {
             cgroupfs::init_defaults();
             match cgroupfs::delete_group(path) {
                 Ok(()) => shell_println!("Deleted cgroup: {}", path),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "cpu" => {
@@ -76537,7 +81444,10 @@ fn cmd_cgroupfs(args: &str) {
             cgroupfs::init_defaults();
             match cgroupfs::set_cpu_weight(path, weight) {
                 Ok(()) => shell_println!("CPU weight set to {} for {}", weight, path),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "mem" => {
@@ -76552,7 +81462,10 @@ fn cmd_cgroupfs(args: &str) {
             cgroupfs::init_defaults();
             match cgroupfs::set_memory_max(path, bytes) {
                 Ok(()) => shell_println!("Memory max set to {} for {}", bytes, path),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "addpid" => {
@@ -76567,7 +81480,10 @@ fn cmd_cgroupfs(args: &str) {
             cgroupfs::init_defaults();
             match cgroupfs::add_pid(path, pid) {
                 Ok(()) => shell_println!("Added PID {} to {}", pid, path),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -76626,7 +81542,10 @@ fn cmd_secpolicy(args: &str) {
                 match mode {
                     Some(m) => match secpolicy::set_mode(m) {
                         Ok(()) => shell_println!("Mode set to: {}", m.label()),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
                     None => shell_println!("Invalid mode. Use: disabled|permissive|enforcing"),
                 }
@@ -76658,7 +81577,10 @@ fn cmd_secpolicy(args: &str) {
                     secpolicy::init_defaults();
                     match secpolicy::check_access(subj, obj, a) {
                         Ok(d) => shell_println!("Decision: {}", d.label()),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 None => shell_println!("Unknown action: {}", act_str),
@@ -76683,7 +81605,10 @@ fn cmd_secpolicy(args: &str) {
             } else {
                 match secpolicy::set_label(id, etype, label) {
                     Ok(()) => shell_println!("Label set for {}:{} = {}", etype, id, label),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -76797,7 +81722,10 @@ fn cmd_procstat(args: &str) {
             procstat::init_defaults();
             match procstat::register(pid, name) {
                 Ok(()) => shell_println!("Registered process {} ({})", pid, name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -76866,7 +81794,10 @@ fn cmd_kernparam(args: &str) {
             kernparam::init_defaults();
             match kernparam::set(key, val) {
                 Ok(()) => shell_println!("Set {}={}", key, val),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -76879,7 +81810,10 @@ fn cmd_kernparam(args: &str) {
             kernparam::init_defaults();
             match kernparam::remove(key) {
                 Ok(()) => shell_println!("Removed: {}", key),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "cmdline" => {
@@ -76948,7 +81882,10 @@ fn cmd_tracemon(args: &str) {
             tracemon::init_defaults();
             match tracemon::enable(name) {
                 Ok(()) => shell_println!("Enabled: {}", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "disable" => {
@@ -76961,21 +81898,30 @@ fn cmd_tracemon(args: &str) {
             tracemon::init_defaults();
             match tracemon::disable(name) {
                 Ok(()) => shell_println!("Disabled: {}", name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "on" => {
             tracemon::init_defaults();
             match tracemon::set_global(true) {
                 Ok(()) => shell_println!("Tracing enabled globally"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "off" => {
             tracemon::init_defaults();
             match tracemon::set_global(false) {
                 Ok(()) => shell_println!("Tracing disabled globally"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "read" => {
@@ -76999,7 +81945,10 @@ fn cmd_tracemon(args: &str) {
             tracemon::init_defaults();
             match tracemon::clear_buffer() {
                 Ok(()) => shell_println!("Trace buffer cleared"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "filter" => {
@@ -77008,13 +81957,19 @@ fn cmd_tracemon(args: &str) {
             if pid_str.is_empty() || pid_str == "none" {
                 match tracemon::set_filter_pid(None) {
                     Ok(()) => shell_println!("PID filter cleared"),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 let pid = pid_str.parse::<u32>().unwrap_or(0);
                 match tracemon::set_filter_pid(Some(pid)) {
                     Ok(()) => shell_println!("Filtering to PID {}", pid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -77088,7 +82043,10 @@ fn cmd_authbroker(args: &str) {
             authbroker::init_defaults();
             match authbroker::authenticate(principal, method) {
                 Ok(r) => shell_println!("Result: {}", r.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unlock" => {
@@ -77101,7 +82059,10 @@ fn cmd_authbroker(args: &str) {
             authbroker::init_defaults();
             match authbroker::unlock(principal) {
                 Ok(()) => shell_println!("Unlocked: {}", principal),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "grant" => {
@@ -77115,7 +82076,10 @@ fn cmd_authbroker(args: &str) {
             authbroker::init_defaults();
             match authbroker::grant_capability(principal, resource, 0) {
                 Ok(id) => shell_println!("Granted cap #{} to {} for {}", id, principal, resource),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "grants" => {
@@ -77138,7 +82102,10 @@ fn cmd_authbroker(args: &str) {
             authbroker::init_defaults();
             match authbroker::revoke_grant(id) {
                 Ok(()) => shell_println!("Revoked grant #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -77215,7 +82182,10 @@ fn cmd_prociso(args: &str) {
             prociso::init_defaults();
             match prociso::create_namespace(ns_type, name, prociso::IsolationLevel::Full, None) {
                 Ok(id) => shell_println!("Created namespace #{}: {}", id, name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" => {
@@ -77229,7 +82199,10 @@ fn cmd_prociso(args: &str) {
             prociso::init_defaults();
             match prociso::delete_namespace(id) {
                 Ok(()) => shell_println!("Deleted namespace #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "attach" => {
@@ -77245,7 +82218,10 @@ fn cmd_prociso(args: &str) {
             prociso::init_defaults();
             match prociso::attach(pid, ns_id) {
                 Ok(()) => shell_println!("Attached PID {} to namespace #{}", pid, ns_id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "detach" => {
@@ -77261,7 +82237,10 @@ fn cmd_prociso(args: &str) {
             prociso::init_defaults();
             match prociso::detach(pid, ns_id) {
                 Ok(()) => shell_println!("Detached PID {} from namespace #{}", pid, ns_id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "container" => {
@@ -77284,7 +82263,10 @@ fn cmd_prociso(args: &str) {
                         ],
                     ) {
                         Ok(id) => shell_println!("Created container #{}: {}", id, name),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 "list" => {
@@ -77307,7 +82289,10 @@ fn cmd_prociso(args: &str) {
                     prociso::init_defaults();
                     match prociso::delete_container(id) {
                         Ok(()) => shell_println!("Deleted container #{}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 _ => shell_println!("Usage: prociso container [create <name>|list|delete <id>]"),
@@ -77415,7 +82400,10 @@ fn cmd_dmevent(args: &str) {
             dmevent::init_defaults();
             match dmevent::notify(event_type, subsystem, devpath, devname, &[]) {
                 Ok(seq) => shell_println!("Event #{}: {} {} {}", seq, ev_str, devname, devpath),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rules" => {
@@ -77439,7 +82427,10 @@ fn cmd_dmevent(args: &str) {
             dmevent::init_defaults();
             match dmevent::clear_events() {
                 Ok(()) => shell_println!("Event log cleared"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -77542,7 +82533,10 @@ fn cmd_pftrack(args: &str) {
             pftrack::init_defaults();
             match pftrack::clear() {
                 Ok(()) => shell_println!("Fault tracking data cleared"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -77661,21 +82655,30 @@ fn cmd_ipclog(args: &str) {
             ipclog::init_defaults();
             match ipclog::set_enabled(true) {
                 Ok(()) => shell_println!("IPC logging enabled"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "off" => {
             ipclog::init_defaults();
             match ipclog::set_enabled(false) {
                 Ok(()) => shell_println!("IPC logging disabled"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "clear" => {
             ipclog::init_defaults();
             match ipclog::clear() {
                 Ok(()) => shell_println!("IPC log cleared"),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -77809,7 +82812,10 @@ fn cmd_shmem(args: &str) {
             shmem::init_defaults();
             match shmem::create(name, size, shmem::ShmPermission::ReadWrite, 1, false) {
                 Ok(id) => shell_println!("Created shared region #{}: {} ({}B)", id, name, size),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" => {
@@ -77823,7 +82829,10 @@ fn cmd_shmem(args: &str) {
             shmem::init_defaults();
             match shmem::delete(id) {
                 Ok(()) => shell_println!("Deleted region #{}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "attach" => {
@@ -77839,7 +82848,10 @@ fn cmd_shmem(args: &str) {
             shmem::init_defaults();
             match shmem::attach(id, pid) {
                 Ok(()) => shell_println!("Attached PID {} to region #{}", pid, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "detach" => {
@@ -77855,7 +82867,10 @@ fn cmd_shmem(args: &str) {
             shmem::init_defaults();
             match shmem::detach(id, pid) {
                 Ok(()) => shell_println!("Detached PID {} from region #{}", pid, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "pid" => {
@@ -78100,14 +83115,20 @@ fn cmd_timerq(args: &str) {
             timerq::init_defaults();
             match timerq::fire_expired() {
                 Ok(n) => shell_println!("Fired {} expired timers", n),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "cleanup" => {
             timerq::init_defaults();
             match timerq::cleanup() {
                 Ok(n) => shell_println!("Cleaned up {} timers", n),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -78189,7 +83210,10 @@ fn cmd_fdtable(args: &str) {
             };
             match fdtable::open(pid, path, fdtable::FdType::RegularFile, flags) {
                 Ok(fd) => shell_println!("Opened fd={} for PID {}: {}", fd, pid, path),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "close" => {
@@ -78205,7 +83229,10 @@ fn cmd_fdtable(args: &str) {
             fdtable::init_defaults();
             match fdtable::close(pid, fd) {
                 Ok(()) => shell_println!("Closed fd={} for PID {}", fd, pid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "dup" => {
@@ -78223,7 +83250,10 @@ fn cmd_fdtable(args: &str) {
                 Ok(new_fd) => {
                     shell_println!("Duplicated fd={} -> fd={} for PID {}", fd, new_fd, pid)
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -78300,7 +83330,10 @@ fn cmd_rcustat(args: &str) {
             };
             match rcustat::begin_gp(flavor) {
                 Ok(id) => shell_println!("Grace period {} started.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "end" => {
@@ -78313,7 +83346,10 @@ fn cmd_rcustat(args: &str) {
                 .unwrap_or(0);
             match rcustat::end_gp(rcustat::RcuFlavor::Preempt, cb) {
                 Ok(()) => shell_println!("Grace period ended ({} callbacks).", cb),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stall" => {
@@ -78326,7 +83362,10 @@ fn cmd_rcustat(args: &str) {
                 .unwrap_or(0);
             match rcustat::report_stall(cpu) {
                 Ok(()) => shell_println!("Stall reported on cpu{}.", cpu),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" | "" => {
@@ -78390,7 +83429,10 @@ fn cmd_kconsole(args: &str) {
                 .unwrap_or(0);
             match kconsole::switch(id) {
                 Ok(()) => shell_println!("Switched to console {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "create" => {
@@ -78410,7 +83452,10 @@ fn cmd_kconsole(args: &str) {
                 .unwrap_or(25);
             match kconsole::create(name, kconsole::ConsoleType::Virtual, cols, rows) {
                 Ok(id) => shell_println!("Created console {} (id={}).", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "resize" => {
@@ -78435,7 +83480,10 @@ fn cmd_kconsole(args: &str) {
                 .unwrap_or(25);
             match kconsole::resize(id, cols, rows) {
                 Ok(()) => shell_println!("Resized console {} to {}x{}.", id, cols, rows),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" | "" => {
@@ -78526,7 +83574,10 @@ fn cmd_signalq(args: &str) {
             };
             match signalq::send(0, target, signal, 0) {
                 Ok(()) => shell_println!("Signal {} sent to pid {}.", signal.label(), target),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "deliver" => {
@@ -78539,7 +83590,10 @@ fn cmd_signalq(args: &str) {
                 .unwrap_or(0);
             match signalq::deliver(pid) {
                 Ok(n) => shell_println!("Delivered {} signals to pid {}.", n, pid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "block" => {
@@ -78559,7 +83613,10 @@ fn cmd_signalq(args: &str) {
             let signal = signalq::Signal::UserDefined(sig_num);
             match signalq::block(pid, signal) {
                 Ok(()) => shell_println!("Signal {} blocked for pid {}.", sig_num, pid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" | "" => {
@@ -78648,7 +83705,10 @@ fn cmd_memcg(args: &str) {
             let path = parts.get(1).copied().unwrap_or("/new");
             match memcg::create(path) {
                 Ok(()) => shell_println!("Created memory cgroup '{}'.", path),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "limit" => {
@@ -78662,7 +83722,10 @@ fn cmd_memcg(args: &str) {
                 .unwrap_or(0);
             match memcg::set_limit(path, limit) {
                 Ok(()) => shell_println!("Set limit for '{}' to {}.", path, limit),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "charge" => {
@@ -78676,7 +83739,10 @@ fn cmd_memcg(args: &str) {
                 .unwrap_or(0);
             match memcg::charge(path, bytes) {
                 Ok(()) => shell_println!("Charged {} bytes to '{}'.", bytes, path),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "uncharge" => {
@@ -78690,7 +83756,10 @@ fn cmd_memcg(args: &str) {
                 .unwrap_or(0);
             match memcg::uncharge(path, bytes) {
                 Ok(()) => shell_println!("Uncharged {} bytes from '{}'.", bytes, path),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "overlimit" => {
@@ -78921,7 +83990,10 @@ fn cmd_dmastat(args: &str) {
             let name = parts.get(2).copied().unwrap_or("devN");
             match dmastat::register_device(id, name, true) {
                 Ok(()) => shell_println!("Registered device {} (id={}).", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" | "" => {
@@ -79061,7 +84133,10 @@ fn cmd_irqstat(args: &str) {
             let name = parts.get(2).copied().unwrap_or("irqN");
             match irqstat::register_irq(num, irqstat::IrqType::Other(num), name, 0xF) {
                 Ok(()) => shell_println!("Registered IRQ{} ({}).", num, name),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" | "" => {
@@ -79120,7 +84195,10 @@ fn cmd_epollstat(args: &str) {
                 .unwrap_or(64);
             match epollstat::create_instance(pid, max) {
                 Ok(id) => shell_println!("Created epoll instance {} for pid {}.", id, pid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "destroy" => {
@@ -79133,7 +84211,10 @@ fn cmd_epollstat(args: &str) {
                 .unwrap_or(0);
             match epollstat::destroy_instance(id) {
                 Ok(()) => shell_println!("Destroyed epoll instance {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "pid" => {
@@ -79250,7 +84331,10 @@ fn cmd_vmmap(args: &str) {
             };
             match vmmap::create_vma(pid, start, size, perm, vmmap::VmaType::Anonymous, "[anon]") {
                 Ok(()) => shell_println!("Mapped {:#x}+{:#x} for pid {}.", start, size, pid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unmap" => {
@@ -79272,7 +84356,10 @@ fn cmd_vmmap(args: &str) {
             .unwrap_or(0);
             match vmmap::remove_vma(pid, start) {
                 Ok(()) => shell_println!("Unmapped {:#x} for pid {}.", start, pid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" | "" => {
@@ -79342,7 +84429,10 @@ fn cmd_softirq(args: &str) {
             };
             match softirq::raise(stype) {
                 Ok(()) => shell_println!("Raised softirq {}.", stype.label()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" | "" => {
@@ -79450,7 +84540,10 @@ fn cmd_netfilter(args: &str) {
                 Ok(id) => {
                     shell_println!("Added rule #{} ({} {}).", id, chain.label(), action.label())
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" | "" => {
@@ -79713,14 +84806,20 @@ fn cmd_writeback(args: &str) {
                 .unwrap_or(100);
             match writeback::record_dirty(dev, pages) {
                 Ok(()) => shell_println!("Recorded {} dirty pages on {}", pages, dev),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "flush" => {
             let dev = parts.get(1).copied().unwrap_or("sda");
             match writeback::start_flush(dev, writeback::FlushReason::Explicit) {
                 Ok(()) => shell_println!("Flush started on {}", dev),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "threshold" => {
@@ -79728,7 +84827,10 @@ fn cmd_writeback(args: &str) {
                 let v = pct.parse::<u32>().unwrap_or(20);
                 match writeback::set_threshold(v) {
                     Ok(()) => shell_println!("Dirty threshold set to {}%", v),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 let (_, _, _, _, thr, _) = writeback::stats();
@@ -79806,7 +84908,10 @@ fn cmd_iolatency(args: &str) {
                 let ns = val.parse::<u64>().unwrap_or(10_000_000);
                 match iolatency::set_threshold(ns) {
                     Ok(()) => shell_println!("Slow I/O threshold set to {}ns", ns),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 let (_, _, _, threshold, _) = iolatency::stats();
@@ -79962,7 +85067,10 @@ fn cmd_kprobes(args: &str) {
             let addr_val = u64::from_str_radix(addr.trim_start_matches("0x"), 16).unwrap_or(0);
             match kprobes::register(kprobes::ProbeType::Kprobe, name, addr_val) {
                 Ok(id) => shell_println!("Registered probe id={}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unregister" | "unreg" => {
@@ -79974,7 +85082,10 @@ fn cmd_kprobes(args: &str) {
                 .unwrap_or(0);
             match kprobes::unregister(id) {
                 Ok(()) => shell_println!("Unregistered probe {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" => {
@@ -79986,7 +85097,10 @@ fn cmd_kprobes(args: &str) {
                 .unwrap_or(0);
             match kprobes::set_enabled(id, true) {
                 Ok(()) => shell_println!("Probe {} enabled", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "disable" => {
@@ -79998,7 +85112,10 @@ fn cmd_kprobes(args: &str) {
                 .unwrap_or(0);
             match kprobes::set_enabled(id, false) {
                 Ok(()) => shell_println!("Probe {} disabled", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "type" => {
@@ -80925,7 +86042,10 @@ fn cmd_aiostat(args: &str) {
                     sq,
                     cq
                 ),
-                Err(e) => shell_println!("aiostat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("aiostat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "destroy" => {
@@ -80935,7 +86055,10 @@ fn cmd_aiostat(args: &str) {
                 .unwrap_or(0);
             match aiostat::destroy_ring(id) {
                 Ok(()) => shell_println!("aiostat: destroyed ring {}", id),
-                Err(e) => shell_println!("aiostat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("aiostat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "submit" => {
@@ -80949,7 +86072,10 @@ fn cmd_aiostat(args: &str) {
                 .unwrap_or(1);
             match aiostat::submit(id, n) {
                 Ok(()) => shell_println!("aiostat: submitted {} to ring {}", n, id),
-                Err(e) => shell_println!("aiostat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("aiostat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "complete" => {
@@ -80963,7 +86089,10 @@ fn cmd_aiostat(args: &str) {
                 .unwrap_or(1);
             match aiostat::complete(id, n) {
                 Ok(()) => shell_println!("aiostat: completed {} from ring {}", n, id),
-                Err(e) => shell_println!("aiostat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("aiostat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rings" => {
@@ -81025,7 +86154,10 @@ fn cmd_kthread(args: &str) {
                 Ok(id) => {
                     shell_println!("kthread: registered '{}' on cpu {} → id {}", name, cpu, id)
                 }
-                Err(e) => shell_println!("kthread: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("kthread: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unregister" => {
@@ -81035,7 +86167,10 @@ fn cmd_kthread(args: &str) {
                 .unwrap_or(0);
             match kthread::unregister(id) {
                 Ok(()) => shell_println!("kthread: unregistered {}", id),
-                Err(e) => shell_println!("kthread: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("kthread: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "state" => {
@@ -81057,7 +86192,10 @@ fn cmd_kthread(args: &str) {
             };
             match kthread::set_state(id, st) {
                 Ok(()) => shell_println!("kthread: {} → {}", id, st.label()),
-                Err(e) => shell_println!("kthread: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("kthread: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -81129,7 +86267,10 @@ fn cmd_mmapstat(args: &str) {
             let name = parts.get(2).copied().unwrap_or("unnamed");
             match mmapstat::register_process(pid, name) {
                 Ok(()) => shell_println!("mmapstat: registered pid {} '{}'", pid, name),
-                Err(e) => shell_println!("mmapstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("mmapstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "map" => {
@@ -81157,7 +86298,10 @@ fn cmd_mmapstat(args: &str) {
                     size,
                     mt.label()
                 ),
-                Err(e) => shell_println!("mmapstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("mmapstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unmap" => {
@@ -81171,7 +86315,10 @@ fn cmd_mmapstat(args: &str) {
                 .unwrap_or(4096);
             match mmapstat::record_unmap(pid, size) {
                 Ok(()) => shell_println!("mmapstat: unmap pid={} size={}", pid, size),
-                Err(e) => shell_println!("mmapstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("mmapstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "protect" => {
@@ -81181,7 +86328,10 @@ fn cmd_mmapstat(args: &str) {
                 .unwrap_or(0);
             match mmapstat::record_protect(pid) {
                 Ok(()) => shell_println!("mmapstat: protect pid={}", pid),
-                Err(e) => shell_println!("mmapstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("mmapstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "types" => {
@@ -81249,7 +86399,10 @@ fn cmd_rqstat(args: &str) {
                 .unwrap_or(0);
             match rqstat::enqueue(cpu) {
                 Ok(()) => shell_println!("rqstat: enqueued on cpu {}", cpu),
-                Err(e) => shell_println!("rqstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("rqstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "dequeue" => {
@@ -81259,7 +86412,10 @@ fn cmd_rqstat(args: &str) {
                 .unwrap_or(0);
             match rqstat::dequeue(cpu) {
                 Ok(()) => shell_println!("rqstat: dequeued from cpu {}", cpu),
-                Err(e) => shell_println!("rqstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("rqstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "balance" => {
@@ -81273,7 +86429,10 @@ fn cmd_rqstat(args: &str) {
                 .unwrap_or(1);
             match rqstat::record_balance(from, to) {
                 Ok(()) => shell_println!("rqstat: balance {} → {}", from, to),
-                Err(e) => shell_println!("rqstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("rqstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "wait" => {
@@ -81287,7 +86446,10 @@ fn cmd_rqstat(args: &str) {
                 .unwrap_or(1000);
             match rqstat::record_wait(cpu, ns) {
                 Ok(()) => shell_println!("rqstat: recorded {}ns wait on cpu {}", ns, cpu),
-                Err(e) => shell_println!("rqstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("rqstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "cpus" => {
@@ -81350,7 +86512,10 @@ fn cmd_thpstat(args: &str) {
             };
             match thpstat::record_promotion(size) {
                 Ok(()) => shell_println!("thpstat: promotion {}", size.label()),
-                Err(e) => shell_println!("thpstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("thpstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "demote" => {
@@ -81360,7 +86525,10 @@ fn cmd_thpstat(args: &str) {
             };
             match thpstat::record_demotion(size) {
                 Ok(()) => shell_println!("thpstat: demotion {}", size.label()),
-                Err(e) => shell_println!("thpstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("thpstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "split" => {
@@ -81370,7 +86538,10 @@ fn cmd_thpstat(args: &str) {
             };
             match thpstat::record_split(size) {
                 Ok(()) => shell_println!("thpstat: split {}", size.label()),
-                Err(e) => shell_println!("thpstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("thpstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "compact" => {
@@ -81382,7 +86553,10 @@ fn cmd_thpstat(args: &str) {
             };
             match thpstat::record_compaction(result) {
                 Ok(()) => shell_println!("thpstat: compaction {}", result.label()),
-                Err(e) => shell_println!("thpstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("thpstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "sizes" => {
@@ -81463,7 +86637,10 @@ fn cmd_cgiostat(args: &str) {
                     bw,
                     iops
                 ),
-                Err(e) => shell_println!("cgiostat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cgiostat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -81473,7 +86650,10 @@ fn cmd_cgiostat(args: &str) {
                 .unwrap_or(0);
             match cgiostat::remove_cgroup(id) {
                 Ok(()) => shell_println!("cgiostat: removed cgroup {}", id),
-                Err(e) => shell_println!("cgiostat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cgiostat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "read" => {
@@ -81487,7 +86667,10 @@ fn cmd_cgiostat(args: &str) {
                 .unwrap_or(4096);
             match cgiostat::record_read(id, bytes) {
                 Ok(()) => shell_println!("cgiostat: read {} bytes cgroup {}", bytes, id),
-                Err(e) => shell_println!("cgiostat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cgiostat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "write" => {
@@ -81501,7 +86684,10 @@ fn cmd_cgiostat(args: &str) {
                 .unwrap_or(4096);
             match cgiostat::record_write(id, bytes) {
                 Ok(()) => shell_println!("cgiostat: write {} bytes cgroup {}", bytes, id),
-                Err(e) => shell_println!("cgiostat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cgiostat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "throttle" => {
@@ -81511,7 +86697,10 @@ fn cmd_cgiostat(args: &str) {
                 .unwrap_or(0);
             match cgiostat::record_throttle(id) {
                 Ok(()) => shell_println!("cgiostat: throttle event cgroup {}", id),
-                Err(e) => shell_println!("cgiostat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cgiostat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -81590,7 +86779,10 @@ fn cmd_bpfstat(args: &str) {
                     insns,
                     id
                 ),
-                Err(e) => shell_println!("bpfstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("bpfstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unload" => {
@@ -81600,7 +86792,10 @@ fn cmd_bpfstat(args: &str) {
                 .unwrap_or(0);
             match bpfstat::unload_program(id) {
                 Ok(()) => shell_println!("bpfstat: unloaded {}", id),
-                Err(e) => shell_println!("bpfstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("bpfstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "run" => {
@@ -81614,7 +86809,10 @@ fn cmd_bpfstat(args: &str) {
                 .unwrap_or(100);
             match bpfstat::record_run(id, ns) {
                 Ok(()) => shell_println!("bpfstat: run id={} {}ns", id, ns),
-                Err(e) => shell_println!("bpfstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("bpfstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "progs" => {
@@ -81692,7 +86890,10 @@ fn cmd_pgtable(args: &str) {
             };
             match pgtable::record_alloc(level) {
                 Ok(()) => shell_println!("pgtable: alloc {}", level.label()),
-                Err(e) => shell_println!("pgtable: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("pgtable: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "free" => {
@@ -81704,7 +86905,10 @@ fn cmd_pgtable(args: &str) {
             };
             match pgtable::record_free(level) {
                 Ok(()) => shell_println!("pgtable: free {}", level.label()),
-                Err(e) => shell_println!("pgtable: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("pgtable: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "walk" => {
@@ -81714,7 +86918,10 @@ fn cmd_pgtable(args: &str) {
                 .unwrap_or(4);
             match pgtable::record_walk(levels) {
                 Ok(()) => shell_println!("pgtable: walk {} levels", levels),
-                Err(e) => shell_println!("pgtable: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("pgtable: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "flush" => {
@@ -81726,7 +86933,10 @@ fn cmd_pgtable(args: &str) {
             };
             match pgtable::record_tlb_flush(scope) {
                 Ok(()) => shell_println!("pgtable: flush {}", scope.label()),
-                Err(e) => shell_println!("pgtable: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("pgtable: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "levels" => {
@@ -81784,7 +86994,10 @@ fn cmd_zramstat(args: &str) {
                 .unwrap_or(2_000_000_000);
             match zramstat::create_device(name, size) {
                 Ok(id) => shell_println!("zramstat: created {} ({}B) → id {}", name, size, id),
-                Err(e) => shell_println!("zramstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("zramstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -81794,7 +87007,10 @@ fn cmd_zramstat(args: &str) {
                 .unwrap_or(0);
             match zramstat::remove_device(id) {
                 Ok(()) => shell_println!("zramstat: removed {}", id),
-                Err(e) => shell_println!("zramstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("zramstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "write" => {
@@ -81814,7 +87030,10 @@ fn cmd_zramstat(args: &str) {
                 Ok(()) => {
                     shell_println!("zramstat: write dev={} orig={} compr={}", id, orig, compr)
                 }
-                Err(e) => shell_println!("zramstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("zramstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "read" => {
@@ -81824,7 +87043,10 @@ fn cmd_zramstat(args: &str) {
                 .unwrap_or(0);
             match zramstat::record_read(id) {
                 Ok(()) => shell_println!("zramstat: read dev={}", id),
-                Err(e) => shell_println!("zramstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("zramstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "devices" => {
@@ -81893,16 +87115,25 @@ fn cmd_ksmstat(args: &str) {
             let name = parts.get(2).copied().unwrap_or("unnamed");
             match ksmstat::register_process(pid, name) {
                 Ok(()) => shell_println!("ksmstat: registered pid {} '{}'", pid, name),
-                Err(e) => shell_println!("ksmstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ksmstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "merge" => match ksmstat::record_merge() {
             Ok(()) => shell_println!("ksmstat: merge recorded"),
-            Err(e) => shell_println!("ksmstat: error: {:?}", e),
+            Err(e) => {
+                shell_println!("ksmstat: error: {:?}", e);
+                set_exit(1);
+            }
         },
         "unmerge" => match ksmstat::record_unmerge() {
             Ok(()) => shell_println!("ksmstat: unmerge recorded"),
-            Err(e) => shell_println!("ksmstat: error: {:?}", e),
+            Err(e) => {
+                shell_println!("ksmstat: error: {:?}", e);
+                set_exit(1);
+            }
         },
         "scan" => {
             let pages = parts
@@ -81916,7 +87147,10 @@ fn cmd_ksmstat(args: &str) {
                     pages,
                     if full { " (full)" } else { "" }
                 ),
-                Err(e) => shell_println!("ksmstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ksmstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "procs" => {
@@ -81990,7 +87224,10 @@ fn cmd_clocksrc(args: &str) {
                     rating.label(),
                     id
                 ),
-                Err(e) => shell_println!("clocksrc: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("clocksrc: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "current" => {
@@ -81998,7 +87235,10 @@ fn cmd_clocksrc(args: &str) {
             if let Some(id) = id {
                 match clocksrc::set_current(id) {
                     Ok(()) => shell_println!("clocksrc: set current → {}", id),
-                    Err(e) => shell_println!("clocksrc: error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("clocksrc: error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else if let Some(c) = clocksrc::current() {
                 shell_println!(
@@ -82080,7 +87320,10 @@ fn cmd_pmcstat(args: &str) {
                 .unwrap_or(1000);
             match pmcstat::record_sample(cpu, event, value) {
                 Ok(()) => shell_println!("pmcstat: cpu={} {}={}", cpu, event.label(), value),
-                Err(e) => shell_println!("pmcstat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("pmcstat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "ipc" => {
@@ -82150,7 +87393,10 @@ fn cmd_cputhr(args: &str) {
                 .unwrap_or(100);
             match cputhr::record_throttle(cpu, ms) {
                 Ok(()) => shell_println!("cputhr: throttle cpu={} {}ms", cpu, ms),
-                Err(e) => shell_println!("cputhr: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cputhr: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "clear" => {
@@ -82160,7 +87406,10 @@ fn cmd_cputhr(args: &str) {
                 .unwrap_or(0);
             match cputhr::clear_throttle(cpu) {
                 Ok(()) => shell_println!("cputhr: cleared cpu {}", cpu),
-                Err(e) => shell_println!("cputhr: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cputhr: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "cap" => {
@@ -82174,7 +87423,10 @@ fn cmd_cputhr(args: &str) {
                 .unwrap_or(2000);
             match cputhr::record_cap(cpu, mhz) {
                 Ok(()) => shell_println!("cputhr: cap cpu={} {}MHz", cpu, mhz),
-                Err(e) => shell_println!("cputhr: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cputhr: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "temp" => {
@@ -82193,7 +87445,10 @@ fn cmd_cputhr(args: &str) {
                     mc / 1000,
                     (mc % 1000) / 100
                 ),
-                Err(e) => shell_println!("cputhr: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cputhr: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "cpus" => {
@@ -82255,7 +87510,10 @@ fn cmd_ipcns(args: &str) {
             let name = parts.get(1).copied().unwrap_or("unnamed");
             match ipcns::create_ns(name) {
                 Ok(id) => shell_println!("ipcns: created '{}' → id {}", name, id),
-                Err(e) => shell_println!("ipcns: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ipcns: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "destroy" => {
@@ -82265,7 +87523,10 @@ fn cmd_ipcns(args: &str) {
                 .unwrap_or(0);
             match ipcns::destroy_ns(id) {
                 Ok(()) => shell_println!("ipcns: destroyed {}", id),
-                Err(e) => shell_println!("ipcns: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ipcns: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "shm" => {
@@ -82279,7 +87540,10 @@ fn cmd_ipcns(args: &str) {
                 .unwrap_or(4096);
             match ipcns::record_shm(id, bytes) {
                 Ok(()) => shell_println!("ipcns: shm ns={} {}B", id, bytes),
-                Err(e) => shell_println!("ipcns: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ipcns: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "sem" => {
@@ -82293,7 +87557,10 @@ fn cmd_ipcns(args: &str) {
                 .unwrap_or(1);
             match ipcns::record_sem(id, count) {
                 Ok(()) => shell_println!("ipcns: sem ns={} count={}", id, count),
-                Err(e) => shell_println!("ipcns: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ipcns: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "msg" => {
@@ -82307,7 +87574,10 @@ fn cmd_ipcns(args: &str) {
                 .unwrap_or(256);
             match ipcns::record_msg(id, bytes) {
                 Ok(()) => shell_println!("ipcns: msg ns={} {}B", id, bytes),
-                Err(e) => shell_println!("ipcns: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ipcns: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -82370,7 +87640,10 @@ fn cmd_netqueue(args: &str) {
             };
             match netqueue::register_queue(iface, qid, dir) {
                 Ok(()) => shell_println!("netqueue: registered {} q{} {}", iface, qid, dir.label()),
-                Err(e) => shell_println!("netqueue: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("netqueue: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rx" | "tx" => {
@@ -82401,7 +87674,10 @@ fn cmd_netqueue(args: &str) {
                     pkts,
                     bytes
                 ),
-                Err(e) => shell_println!("netqueue: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("netqueue: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "queues" => {
@@ -82455,7 +87731,10 @@ fn cmd_secmod(args: &str) {
             let name = parts.get(1).copied().unwrap_or("unnamed");
             match secmod::register_module(name) {
                 Ok(()) => shell_println!("secmod: registered '{}'", name),
-                Err(e) => shell_println!("secmod: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("secmod: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "check" => {
@@ -82472,7 +87751,10 @@ fn cmd_secmod(args: &str) {
             };
             match secmod::record_check(module, hook) {
                 Ok(()) => shell_println!("secmod: check {} {}", module, hook.label()),
-                Err(e) => shell_println!("secmod: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("secmod: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "deny" => {
@@ -82486,7 +87768,10 @@ fn cmd_secmod(args: &str) {
             };
             match secmod::record_deny(module, hook) {
                 Ok(()) => shell_println!("secmod: deny {} {}", module, hook.label()),
-                Err(e) => shell_println!("secmod: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("secmod: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "modules" => {
@@ -82548,7 +87833,10 @@ fn cmd_vmballoon(args: &str) {
                 .unwrap_or(1000);
             match vmballoon::inflate(pages) {
                 Ok(()) => shell_println!("vmballoon: inflated {} pages", pages),
-                Err(e) => shell_println!("vmballoon: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("vmballoon: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "deflate" => {
@@ -82558,7 +87846,10 @@ fn cmd_vmballoon(args: &str) {
                 .unwrap_or(1000);
             match vmballoon::deflate(pages) {
                 Ok(()) => shell_println!("vmballoon: deflated {} pages", pages),
-                Err(e) => shell_println!("vmballoon: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("vmballoon: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "target" => {
@@ -82568,7 +87859,10 @@ fn cmd_vmballoon(args: &str) {
                 .unwrap_or(0);
             match vmballoon::set_target(pages) {
                 Ok(()) => shell_println!("vmballoon: target → {} pages", pages),
-                Err(e) => shell_println!("vmballoon: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("vmballoon: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "status" => {
@@ -82643,7 +87937,10 @@ fn cmd_devfreq(args: &str) {
                     max,
                     id
                 ),
-                Err(e) => shell_println!("devfreq: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("devfreq: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "transition" => {
@@ -82657,7 +87954,10 @@ fn cmd_devfreq(args: &str) {
                 .unwrap_or(500_000);
             match devfreq::record_transition(id, freq) {
                 Ok(()) => shell_println!("devfreq: {} → {} kHz", id, freq),
-                Err(e) => shell_println!("devfreq: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("devfreq: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "governor" => {
@@ -82674,7 +87974,10 @@ fn cmd_devfreq(args: &str) {
             };
             match devfreq::set_governor(id, gov) {
                 Ok(()) => shell_println!("devfreq: {} → {}", id, gov.label()),
-                Err(e) => shell_println!("devfreq: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("devfreq: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -82731,7 +88034,10 @@ fn cmd_hwrng(args: &str) {
                 .unwrap_or(256);
             match hwrng::record_generation(source, bytes) {
                 Ok(()) => shell_println!("hwrng: generated {}B from {}", bytes, source.label()),
-                Err(e) => shell_println!("hwrng: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("hwrng: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "request" => {
@@ -82741,7 +88047,10 @@ fn cmd_hwrng(args: &str) {
                 .unwrap_or(256);
             match hwrng::record_request(bytes) {
                 Ok(()) => shell_println!("hwrng: requested {}B", bytes),
-                Err(e) => shell_println!("hwrng: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("hwrng: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "pool" => {
@@ -82810,7 +88119,10 @@ fn cmd_acpistat(args: &str) {
             };
             match acpistat::record_event(ev) {
                 Ok(()) => shell_println!("acpistat: event {}", ev.label()),
-                Err(e) => shell_println!("acpistat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("acpistat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "gpe" => {
@@ -82826,7 +88138,10 @@ fn cmd_acpistat(args: &str) {
                 .unwrap_or(0);
             match acpistat::record_gpe(num) {
                 Ok(()) => shell_println!("acpistat: GPE 0x{:02x}", num),
-                Err(e) => shell_println!("acpistat: error: {:?}", e),
+                Err(e) => {
+                    shell_println!("acpistat: error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "events" => {
@@ -82878,7 +88193,10 @@ fn cmd_userfault(args: &str) {
                 .unwrap_or(0);
             match userfault::register(pid) {
                 Ok(()) => shell_println!("userfault: registered pid {}", pid),
-                Err(e) => shell_println!("userfault: register error: {:?}", e),
+                Err(e) => {
+                    shell_println!("userfault: register error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unregister" => {
@@ -82888,7 +88206,10 @@ fn cmd_userfault(args: &str) {
                 .unwrap_or(0);
             match userfault::unregister(pid) {
                 Ok(()) => shell_println!("userfault: unregistered pid {}", pid),
-                Err(e) => shell_println!("userfault: unregister error: {:?}", e),
+                Err(e) => {
+                    shell_println!("userfault: unregister error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "fault" => {
@@ -82905,7 +88226,10 @@ fn cmd_userfault(args: &str) {
                 Ok(()) => {
                     shell_println!("userfault: fault recorded pid={} type={}", pid, ft.label())
                 }
-                Err(e) => shell_println!("userfault: fault error: {:?}", e),
+                Err(e) => {
+                    shell_println!("userfault: fault error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "resolve" => {
@@ -82920,7 +88244,10 @@ fn cmd_userfault(args: &str) {
             let is_copy = parts.get(3).copied().unwrap_or("copy") == "copy";
             match userfault::record_resolve(pid, ns, is_copy) {
                 Ok(()) => shell_println!("userfault: resolve recorded pid={} ns={}", pid, ns),
-                Err(e) => shell_println!("userfault: resolve error: {:?}", e),
+                Err(e) => {
+                    shell_println!("userfault: resolve error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -82993,7 +88320,10 @@ fn cmd_ioport(args: &str) {
                 Ok(()) => {
                     shell_println!("ioport: registered {} at 0x{:04x} len={}", name, base, len)
                 }
-                Err(e) => shell_println!("ioport: register error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ioport: register error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "in" => {
@@ -83007,7 +88337,10 @@ fn cmd_ioport(args: &str) {
                 .unwrap_or(1);
             match ioport::record_in(port, size) {
                 Ok(()) => shell_println!("ioport: in port=0x{:04x} size={}", port, size),
-                Err(e) => shell_println!("ioport: in error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ioport: in error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "out" => {
@@ -83021,7 +88354,10 @@ fn cmd_ioport(args: &str) {
                 .unwrap_or(1);
             match ioport::record_out(port, size) {
                 Ok(()) => shell_println!("ioport: out port=0x{:04x} size={}", port, size),
-                Err(e) => shell_println!("ioport: out error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ioport: out error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -83093,21 +88429,30 @@ fn cmd_msivec(args: &str) {
                     dev,
                     cpu
                 ),
-                Err(e) => shell_println!("msivec: alloc error: {:?}", e),
+                Err(e) => {
+                    shell_println!("msivec: alloc error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "free" => {
             let dev = parts.get(1).copied().unwrap_or("");
             match msivec::free_vectors(dev) {
                 Ok(()) => shell_println!("msivec: freed vectors for {}", dev),
-                Err(e) => shell_println!("msivec: free error: {:?}", e),
+                Err(e) => {
+                    shell_println!("msivec: free error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "interrupt" => {
             let dev = parts.get(1).copied().unwrap_or("");
             match msivec::record_interrupt(dev) {
                 Ok(()) => shell_println!("msivec: interrupt recorded for {}", dev),
-                Err(e) => shell_println!("msivec: interrupt error: {:?}", e),
+                Err(e) => {
+                    shell_println!("msivec: interrupt error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "target" => {
@@ -83118,7 +88463,10 @@ fn cmd_msivec(args: &str) {
                 .unwrap_or(0);
             match msivec::set_target_cpu(dev, cpu) {
                 Ok(()) => shell_println!("msivec: {} target cpu set to {}", dev, cpu),
-                Err(e) => shell_println!("msivec: target error: {:?}", e),
+                Err(e) => {
+                    shell_println!("msivec: target error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -83181,7 +88529,10 @@ fn cmd_cpuset(args: &str) {
             let excl = parts.get(4).copied().unwrap_or("") == "excl";
             match cpuset::create(name, cpu_mask, mem_mask, excl) {
                 Ok(id) => shell_println!("cpuset: created '{}' id={}", name, id),
-                Err(e) => shell_println!("cpuset: create error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cpuset: create error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "destroy" => {
@@ -83191,7 +88542,10 @@ fn cmd_cpuset(args: &str) {
                 .unwrap_or(0);
             match cpuset::destroy(id) {
                 Ok(()) => shell_println!("cpuset: destroyed id={}", id),
-                Err(e) => shell_println!("cpuset: destroy error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cpuset: destroy error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "assign" => {
@@ -83201,7 +88555,10 @@ fn cmd_cpuset(args: &str) {
                 .unwrap_or(0);
             match cpuset::assign(id) {
                 Ok(()) => shell_println!("cpuset: process assigned to set {}", id),
-                Err(e) => shell_println!("cpuset: assign error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cpuset: assign error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -83211,7 +88568,10 @@ fn cmd_cpuset(args: &str) {
                 .unwrap_or(0);
             match cpuset::remove_process(id) {
                 Ok(()) => shell_println!("cpuset: process removed from set {}", id),
-                Err(e) => shell_println!("cpuset: remove error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cpuset: remove error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "affinity" => {
@@ -83221,7 +88581,10 @@ fn cmd_cpuset(args: &str) {
                 .unwrap_or(0);
             match cpuset::record_affinity_change(id) {
                 Ok(()) => shell_println!("cpuset: affinity change recorded for set {}", id),
-                Err(e) => shell_println!("cpuset: affinity error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cpuset: affinity error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -83283,28 +88646,40 @@ fn cmd_ftrace(args: &str) {
             };
             match ftrace::add_probe(func, kind) {
                 Ok(()) => shell_println!("ftrace: added probe {} [{}]", func, kind.label()),
-                Err(e) => shell_println!("ftrace: add error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ftrace: add error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
             let func = parts.get(1).copied().unwrap_or("");
             match ftrace::remove_probe(func) {
                 Ok(()) => shell_println!("ftrace: removed probe {}", func),
-                Err(e) => shell_println!("ftrace: remove error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ftrace: remove error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" => {
             let func = parts.get(1).copied().unwrap_or("");
             match ftrace::set_enabled(func, true) {
                 Ok(()) => shell_println!("ftrace: enabled {}", func),
-                Err(e) => shell_println!("ftrace: enable error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ftrace: enable error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "disable" => {
             let func = parts.get(1).copied().unwrap_or("");
             match ftrace::set_enabled(func, false) {
                 Ok(()) => shell_println!("ftrace: disabled {}", func),
-                Err(e) => shell_println!("ftrace: disable error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ftrace: disable error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "hit" => {
@@ -83315,7 +88690,10 @@ fn cmd_ftrace(args: &str) {
                 .unwrap_or(100);
             match ftrace::record_hit(func, ns) {
                 Ok(()) => shell_println!("ftrace: hit recorded {} ({}ns)", func, ns),
-                Err(e) => shell_println!("ftrace: hit error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ftrace: hit error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "on" => {
@@ -83388,7 +88766,10 @@ fn cmd_kstack(args: &str) {
                 .unwrap_or(16384);
             match kstack::register_cpu(cpu, size) {
                 Ok(()) => shell_println!("kstack: registered cpu {} size={}", cpu, size),
-                Err(e) => shell_println!("kstack: register error: {:?}", e),
+                Err(e) => {
+                    shell_println!("kstack: register error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "usage" => {
@@ -83402,7 +88783,10 @@ fn cmd_kstack(args: &str) {
                 .unwrap_or(0);
             match kstack::record_usage(cpu, used) {
                 Ok(()) => shell_println!("kstack: cpu {} usage={}", cpu, used),
-                Err(e) => shell_println!("kstack: usage error: {:?}", e),
+                Err(e) => {
+                    shell_println!("kstack: usage error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "overflow" => {
@@ -83412,7 +88796,10 @@ fn cmd_kstack(args: &str) {
                 .unwrap_or(0);
             match kstack::record_overflow(cpu) {
                 Ok(()) => shell_println!("kstack: overflow on cpu {}", cpu),
-                Err(e) => shell_println!("kstack: overflow error: {:?}", e),
+                Err(e) => {
+                    shell_println!("kstack: overflow error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "guard" => {
@@ -83422,7 +88809,10 @@ fn cmd_kstack(args: &str) {
                 .unwrap_or(0);
             match kstack::record_guard_hit(cpu) {
                 Ok(()) => shell_println!("kstack: guard hit on cpu {}", cpu),
-                Err(e) => shell_println!("kstack: guard error: {:?}", e),
+                Err(e) => {
+                    shell_println!("kstack: guard error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -83489,7 +88879,10 @@ fn cmd_fnotify(args: &str) {
             };
             match fnotify::add_watch(ntype) {
                 Ok(()) => shell_println!("fnotify: watch added for {}", ntype.label()),
-                Err(e) => shell_println!("fnotify: watch error: {:?}", e),
+                Err(e) => {
+                    shell_println!("fnotify: watch error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unwatch" => {
@@ -83500,7 +88893,10 @@ fn cmd_fnotify(args: &str) {
             };
             match fnotify::remove_watch(ntype) {
                 Ok(()) => shell_println!("fnotify: watch removed for {}", ntype.label()),
-                Err(e) => shell_println!("fnotify: unwatch error: {:?}", e),
+                Err(e) => {
+                    shell_println!("fnotify: unwatch error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "event" => {
@@ -83524,7 +88920,10 @@ fn cmd_fnotify(args: &str) {
                 Ok(()) => {
                     shell_println!("fnotify: {} event {} recorded", ntype.label(), kind.label())
                 }
-                Err(e) => shell_println!("fnotify: event error: {:?}", e),
+                Err(e) => {
+                    shell_println!("fnotify: event error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "drain" => {
@@ -83539,7 +88938,10 @@ fn cmd_fnotify(args: &str) {
                 .unwrap_or(10);
             match fnotify::drain_events(ntype, count) {
                 Ok(()) => shell_println!("fnotify: drained {} from {}", count, ntype.label()),
-                Err(e) => shell_println!("fnotify: drain error: {:?}", e),
+                Err(e) => {
+                    shell_println!("fnotify: drain error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -83591,7 +88993,10 @@ fn cmd_netlat(args: &str) {
             let name = parts.get(1).copied().unwrap_or("eth0");
             match netlat::register_iface(name) {
                 Ok(()) => shell_println!("netlat: registered {}", name),
-                Err(e) => shell_println!("netlat: register error: {:?}", e),
+                Err(e) => {
+                    shell_println!("netlat: register error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rtt" => {
@@ -83609,7 +89014,10 @@ fn cmd_netlat(args: &str) {
                 Ok(()) => {
                     shell_println!("netlat: rtt recorded {} {} {}ns", name, proto.label(), ns)
                 }
-                Err(e) => shell_println!("netlat: rtt error: {:?}", e),
+                Err(e) => {
+                    shell_println!("netlat: rtt error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "proc" => {
@@ -83620,7 +89028,10 @@ fn cmd_netlat(args: &str) {
                 .unwrap_or(5000);
             match netlat::record_processing(name, ns) {
                 Ok(()) => shell_println!("netlat: processing recorded {} {}ns", name, ns),
-                Err(e) => shell_println!("netlat: proc error: {:?}", e),
+                Err(e) => {
+                    shell_println!("netlat: proc error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -83692,7 +89103,10 @@ fn cmd_diskstat(args: &str) {
             let name = parts.get(1).copied().unwrap_or("sdb");
             match diskstat::register(name) {
                 Ok(()) => shell_println!("diskstat: registered {}", name),
-                Err(e) => shell_println!("diskstat: register error: {:?}", e),
+                Err(e) => {
+                    shell_println!("diskstat: register error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "read" => {
@@ -83707,7 +89121,10 @@ fn cmd_diskstat(args: &str) {
                 .unwrap_or(1000);
             match diskstat::record_read(name, bytes, ns) {
                 Ok(()) => shell_println!("diskstat: read {} bytes {}ns on {}", bytes, ns, name),
-                Err(e) => shell_println!("diskstat: read error: {:?}", e),
+                Err(e) => {
+                    shell_println!("diskstat: read error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "write" => {
@@ -83722,21 +89139,30 @@ fn cmd_diskstat(args: &str) {
                 .unwrap_or(2000);
             match diskstat::record_write(name, bytes, ns) {
                 Ok(()) => shell_println!("diskstat: write {} bytes {}ns on {}", bytes, ns, name),
-                Err(e) => shell_println!("diskstat: write error: {:?}", e),
+                Err(e) => {
+                    shell_println!("diskstat: write error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "discard" => {
             let name = parts.get(1).copied().unwrap_or("");
             match diskstat::record_discard(name) {
                 Ok(()) => shell_println!("diskstat: discard on {}", name),
-                Err(e) => shell_println!("diskstat: discard error: {:?}", e),
+                Err(e) => {
+                    shell_println!("diskstat: discard error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "flush" => {
             let name = parts.get(1).copied().unwrap_or("");
             match diskstat::record_flush(name) {
                 Ok(()) => shell_println!("diskstat: flush on {}", name),
-                Err(e) => shell_println!("diskstat: flush error: {:?}", e),
+                Err(e) => {
+                    shell_println!("diskstat: flush error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -83803,7 +89229,10 @@ fn cmd_taskio(args: &str) {
                 .unwrap_or(0);
             match taskio::register(pid) {
                 Ok(()) => shell_println!("taskio: registered pid {}", pid),
-                Err(e) => shell_println!("taskio: register error: {:?}", e),
+                Err(e) => {
+                    shell_println!("taskio: register error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unregister" => {
@@ -83813,7 +89242,10 @@ fn cmd_taskio(args: &str) {
                 .unwrap_or(0);
             match taskio::unregister(pid) {
                 Ok(()) => shell_println!("taskio: unregistered pid {}", pid),
-                Err(e) => shell_println!("taskio: unregister error: {:?}", e),
+                Err(e) => {
+                    shell_println!("taskio: unregister error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "read" => {
@@ -83827,7 +89259,10 @@ fn cmd_taskio(args: &str) {
                 .unwrap_or(4096);
             match taskio::record_read(pid, bytes) {
                 Ok(()) => shell_println!("taskio: read {} bytes for pid {}", bytes, pid),
-                Err(e) => shell_println!("taskio: read error: {:?}", e),
+                Err(e) => {
+                    shell_println!("taskio: read error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "write" => {
@@ -83841,7 +89276,10 @@ fn cmd_taskio(args: &str) {
                 .unwrap_or(4096);
             match taskio::record_write(pid, bytes) {
                 Ok(()) => shell_println!("taskio: write {} bytes for pid {}", bytes, pid),
-                Err(e) => shell_println!("taskio: write error: {:?}", e),
+                Err(e) => {
+                    shell_println!("taskio: write error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "cancel" => {
@@ -83855,7 +89293,10 @@ fn cmd_taskio(args: &str) {
                 .unwrap_or(0);
             match taskio::record_cancelled(pid, bytes) {
                 Ok(()) => shell_println!("taskio: cancelled {} bytes for pid {}", bytes, pid),
-                Err(e) => shell_println!("taskio: cancel error: {:?}", e),
+                Err(e) => {
+                    shell_println!("taskio: cancel error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -83922,7 +89363,10 @@ fn cmd_ttystat(args: &str) {
                 .unwrap_or(4096);
             match ttystat::register(name, ttype, buf) {
                 Ok(()) => shell_println!("ttystat: registered {} [{}]", name, ttype.label()),
-                Err(e) => shell_println!("ttystat: register error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ttystat: register error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "read" => {
@@ -83933,7 +89377,10 @@ fn cmd_ttystat(args: &str) {
                 .unwrap_or(1);
             match ttystat::record_read(name, bytes) {
                 Ok(()) => shell_println!("ttystat: read {} bytes from {}", bytes, name),
-                Err(e) => shell_println!("ttystat: read error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ttystat: read error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "write" => {
@@ -83944,14 +89391,20 @@ fn cmd_ttystat(args: &str) {
                 .unwrap_or(1);
             match ttystat::record_write(name, bytes) {
                 Ok(()) => shell_println!("ttystat: write {} bytes to {}", bytes, name),
-                Err(e) => shell_println!("ttystat: write error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ttystat: write error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "signal" => {
             let name = parts.get(1).copied().unwrap_or("");
             match ttystat::record_signal(name) {
                 Ok(()) => shell_println!("ttystat: signal on {}", name),
-                Err(e) => shell_println!("ttystat: signal error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ttystat: signal error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -84032,7 +89485,10 @@ fn cmd_swapact(args: &str) {
                     pages,
                     prio
                 ),
-                Err(e) => shell_println!("swapact: register error: {:?}", e),
+                Err(e) => {
+                    shell_println!("swapact: register error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "in" => {
@@ -84047,7 +89503,10 @@ fn cmd_swapact(args: &str) {
                 .unwrap_or(5000);
             match swapact::record_in(name, pages, ns) {
                 Ok(()) => shell_println!("swapact: swap-in {} pages {}ns on {}", pages, ns, name),
-                Err(e) => shell_println!("swapact: in error: {:?}", e),
+                Err(e) => {
+                    shell_println!("swapact: in error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "out" => {
@@ -84062,7 +89521,10 @@ fn cmd_swapact(args: &str) {
                 .unwrap_or(10000);
             match swapact::record_out(name, pages, ns) {
                 Ok(()) => shell_println!("swapact: swap-out {} pages {}ns on {}", pages, ns, name),
-                Err(e) => shell_println!("swapact: out error: {:?}", e),
+                Err(e) => {
+                    shell_println!("swapact: out error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -84147,7 +89609,10 @@ fn cmd_schedwait(args: &str) {
                 .unwrap_or(1000);
             match schedwait::record_wait(reason, ns) {
                 Ok(()) => shell_println!("schedwait: {} wait {}ns recorded", reason.label(), ns),
-                Err(e) => shell_println!("schedwait: wait error: {:?}", e),
+                Err(e) => {
+                    shell_println!("schedwait: wait error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "reasons" => {
@@ -84216,21 +89681,30 @@ fn cmd_ratestat(args: &str) {
                     rate,
                     burst
                 ),
-                Err(e) => shell_println!("ratestat: register error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ratestat: register error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "allow" => {
             let name = parts.get(1).copied().unwrap_or("");
             match ratestat::record_allow(name) {
                 Ok(()) => shell_println!("ratestat: allow on {}", name),
-                Err(e) => shell_println!("ratestat: allow error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ratestat: allow error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "deny" => {
             let name = parts.get(1).copied().unwrap_or("");
             match ratestat::record_deny(name) {
                 Ok(()) => shell_println!("ratestat: deny on {}", name),
-                Err(e) => shell_println!("ratestat: deny error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ratestat: deny error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "refill" => {
@@ -84241,7 +89715,10 @@ fn cmd_ratestat(args: &str) {
                 .unwrap_or(1);
             match ratestat::refill(name, tokens) {
                 Ok(()) => shell_println!("ratestat: refilled {} tokens for {}", tokens, name),
-                Err(e) => shell_println!("ratestat: refill error: {:?}", e),
+                Err(e) => {
+                    shell_println!("ratestat: refill error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -84312,7 +89789,10 @@ fn cmd_iomem(args: &str) {
                     base,
                     size
                 ),
-                Err(e) => shell_println!("iomem: register error: {:?}", e),
+                Err(e) => {
+                    shell_println!("iomem: register error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unregister" => {
@@ -84322,7 +89802,10 @@ fn cmd_iomem(args: &str) {
                 .unwrap_or(0);
             match iomem::unregister(base) {
                 Ok(()) => shell_println!("iomem: unregistered 0x{:x}", base),
-                Err(e) => shell_println!("iomem: unregister error: {:?}", e),
+                Err(e) => {
+                    shell_println!("iomem: unregister error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "read" => {
@@ -84332,7 +89815,10 @@ fn cmd_iomem(args: &str) {
                 .unwrap_or(0);
             match iomem::record_read(base) {
                 Ok(()) => shell_println!("iomem: read at 0x{:x}", base),
-                Err(e) => shell_println!("iomem: read error: {:?}", e),
+                Err(e) => {
+                    shell_println!("iomem: read error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "write" => {
@@ -84342,7 +89828,10 @@ fn cmd_iomem(args: &str) {
                 .unwrap_or(0);
             match iomem::record_write(base) {
                 Ok(()) => shell_println!("iomem: write at 0x{:x}", base),
-                Err(e) => shell_println!("iomem: write error: {:?}", e),
+                Err(e) => {
+                    shell_println!("iomem: write error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -84411,7 +89900,10 @@ fn cmd_vmzone(args: &str) {
                     ztype.label(),
                     pages
                 ),
-                Err(e) => shell_println!("vmzone: register error: {:?}", e),
+                Err(e) => {
+                    shell_println!("vmzone: register error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "alloc" => {
@@ -84422,7 +89914,10 @@ fn cmd_vmzone(args: &str) {
                 .unwrap_or(1);
             match vmzone::record_alloc(name, pages) {
                 Ok(()) => shell_println!("vmzone: allocated {} pages from {}", pages, name),
-                Err(e) => shell_println!("vmzone: alloc error: {:?}", e),
+                Err(e) => {
+                    shell_println!("vmzone: alloc error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "free" => {
@@ -84433,7 +89928,10 @@ fn cmd_vmzone(args: &str) {
                 .unwrap_or(1);
             match vmzone::record_free(name, pages) {
                 Ok(()) => shell_println!("vmzone: freed {} pages to {}", pages, name),
-                Err(e) => shell_println!("vmzone: free error: {:?}", e),
+                Err(e) => {
+                    shell_println!("vmzone: free error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "reclaim" => {
@@ -84444,7 +89942,10 @@ fn cmd_vmzone(args: &str) {
                 .unwrap_or(1);
             match vmzone::record_reclaim(name, pages) {
                 Ok(()) => shell_println!("vmzone: reclaimed {} pages from {}", pages, name),
-                Err(e) => shell_println!("vmzone: reclaim error: {:?}", e),
+                Err(e) => {
+                    shell_println!("vmzone: reclaim error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -84505,7 +90006,10 @@ fn cmd_buddyinfo(args: &str) {
             let name = parts.get(1).copied().unwrap_or("Zone0");
             match budstat::register_zone(name) {
                 Ok(()) => shell_println!("buddyinfo: registered zone {}", name),
-                Err(e) => shell_println!("buddyinfo: register error: {:?}", e),
+                Err(e) => {
+                    shell_println!("buddyinfo: register error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "update" => {
@@ -84520,7 +90024,10 @@ fn cmd_buddyinfo(args: &str) {
                 .unwrap_or(0);
             match budstat::update_free(name, order, count) {
                 Ok(()) => shell_println!("buddyinfo: {} order {} = {}", name, order, count),
-                Err(e) => shell_println!("buddyinfo: update error: {:?}", e),
+                Err(e) => {
+                    shell_println!("buddyinfo: update error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "split" => {
@@ -84531,7 +90038,10 @@ fn cmd_buddyinfo(args: &str) {
                 .unwrap_or(0);
             match budstat::record_split(name, order) {
                 Ok(()) => shell_println!("buddyinfo: split {} order {}", name, order),
-                Err(e) => shell_println!("buddyinfo: split error: {:?}", e),
+                Err(e) => {
+                    shell_println!("buddyinfo: split error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -84582,7 +90092,10 @@ fn cmd_cgmem(args: &str) {
                 .unwrap_or(100_000);
             match cgmem::create(name, limit) {
                 Ok(id) => shell_println!("cgmem: created '{}' id={} limit={}", name, id, limit),
-                Err(e) => shell_println!("cgmem: create error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cgmem: create error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -84592,7 +90105,10 @@ fn cmd_cgmem(args: &str) {
                 .unwrap_or(0);
             match cgmem::remove(id) {
                 Ok(()) => shell_println!("cgmem: removed cg {}", id),
-                Err(e) => shell_println!("cgmem: remove error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cgmem: remove error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "charge" => {
@@ -84607,7 +90123,10 @@ fn cmd_cgmem(args: &str) {
             let is_cache = parts.get(3).copied().unwrap_or("rss") == "cache";
             match cgmem::record_charge(id, pages, is_cache) {
                 Ok(()) => shell_println!("cgmem: charged {} pages to cg {}", pages, id),
-                Err(e) => shell_println!("cgmem: charge error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cgmem: charge error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "uncharge" => {
@@ -84622,7 +90141,10 @@ fn cmd_cgmem(args: &str) {
             let is_cache = parts.get(3).copied().unwrap_or("rss") == "cache";
             match cgmem::record_uncharge(id, pages, is_cache) {
                 Ok(()) => shell_println!("cgmem: uncharged {} pages from cg {}", pages, id),
-                Err(e) => shell_println!("cgmem: uncharge error: {:?}", e),
+                Err(e) => {
+                    shell_println!("cgmem: uncharge error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -84681,7 +90203,10 @@ fn cmd_vmfrag(args: &str) {
             let name = parts.get(1).copied().unwrap_or("Zone0");
             match vmfrag::register_zone(name) {
                 Ok(()) => shell_println!("vmfrag: registered zone {}", name),
-                Err(e) => shell_println!("vmfrag: register error: {:?}", e),
+                Err(e) => {
+                    shell_println!("vmfrag: register error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "update" => {
@@ -84702,7 +90227,10 @@ fn cmd_vmfrag(args: &str) {
                     index / 10,
                     index % 10
                 ),
-                Err(e) => shell_println!("vmfrag: update error: {:?}", e),
+                Err(e) => {
+                    shell_println!("vmfrag: update error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "compact" => {
@@ -84714,7 +90242,10 @@ fn cmd_vmfrag(args: &str) {
                     name,
                     if success { "ok" } else { "fail" }
                 ),
-                Err(e) => shell_println!("vmfrag: compact error: {:?}", e),
+                Err(e) => {
+                    shell_println!("vmfrag: compact error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -84771,7 +90302,10 @@ fn cmd_pidfd(args: &str) {
                 .unwrap_or(0);
             match pidfd::record_create(pid) {
                 Ok(()) => shell_println!("pidfd: created for pid {}", pid),
-                Err(e) => shell_println!("pidfd: create error: {:?}", e),
+                Err(e) => {
+                    shell_println!("pidfd: create error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "poll" => {
@@ -84781,7 +90315,10 @@ fn cmd_pidfd(args: &str) {
                 .unwrap_or(0);
             match pidfd::record_poll(pid) {
                 Ok(()) => shell_println!("pidfd: polled pid {}", pid),
-                Err(e) => shell_println!("pidfd: poll error: {:?}", e),
+                Err(e) => {
+                    shell_println!("pidfd: poll error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "signal" => {
@@ -84791,7 +90328,10 @@ fn cmd_pidfd(args: &str) {
                 .unwrap_or(0);
             match pidfd::record_signal(pid) {
                 Ok(()) => shell_println!("pidfd: signal to pid {}", pid),
-                Err(e) => shell_println!("pidfd: signal error: {:?}", e),
+                Err(e) => {
+                    shell_println!("pidfd: signal error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "wait" => {
@@ -84801,7 +90341,10 @@ fn cmd_pidfd(args: &str) {
                 .unwrap_or(0);
             match pidfd::record_wait(pid) {
                 Ok(()) => shell_println!("pidfd: wait on pid {}", pid),
-                Err(e) => shell_println!("pidfd: wait error: {:?}", e),
+                Err(e) => {
+                    shell_println!("pidfd: wait error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "close" => {
@@ -84811,7 +90354,10 @@ fn cmd_pidfd(args: &str) {
                 .unwrap_or(0);
             match pidfd::record_close(pid) {
                 Ok(()) => shell_println!("pidfd: closed for pid {}", pid),
-                Err(e) => shell_println!("pidfd: close error: {:?}", e),
+                Err(e) => {
+                    shell_println!("pidfd: close error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" => {
@@ -84869,7 +90415,10 @@ fn cmd_filepicker(args: &str) {
                             shell_println!("{} items in listing", d.listing.len());
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -84881,7 +90430,10 @@ fn cmd_filepicker(args: &str) {
                 match filepicker::create_dialog(filepicker::DialogMode::OpenFiles, dir, Vec::new())
                 {
                     Ok(id) => shell_println!("Dialog #{}: OpenFiles at {}", id, dir),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -84892,7 +90444,10 @@ fn cmd_filepicker(args: &str) {
                 let dir = parts.get(1).copied().unwrap_or("/");
                 match filepicker::create_dialog(filepicker::DialogMode::SaveFile, dir, Vec::new()) {
                     Ok(id) => shell_println!("Dialog #{}: SaveFile at {}", id, dir),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -84907,7 +90462,10 @@ fn cmd_filepicker(args: &str) {
                     Vec::new(),
                 ) {
                     Ok(id) => shell_println!("Dialog #{}: SelectFolder at {}", id, dir),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -84935,7 +90493,10 @@ fn cmd_filepicker(args: &str) {
                             );
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -84958,7 +90519,10 @@ fn cmd_filepicker(args: &str) {
                             shell_println!("Now at: {}", d.current_dir.display());
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -84981,7 +90545,10 @@ fn cmd_filepicker(args: &str) {
                             shell_println!("Back to: {}", d.current_dir.display());
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -85001,7 +90568,10 @@ fn cmd_filepicker(args: &str) {
                 }
                 match filepicker::select(id, path) {
                     Ok(()) => shell_println!("Selected: {}", path),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -85021,7 +90591,10 @@ fn cmd_filepicker(args: &str) {
                 }
                 match filepicker::set_filename(id, name) {
                     Ok(()) => shell_println!("Filename: {}", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -85046,7 +90619,10 @@ fn cmd_filepicker(args: &str) {
                         }
                     }
                     Ok(filepicker::DialogResult::Cancelled) => shell_println!("Cancelled"),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -85065,7 +90641,10 @@ fn cmd_filepicker(args: &str) {
                 }
                 match filepicker::cancel(id) {
                     Ok(()) => shell_println!("Dialog #{} cancelled", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -85084,7 +90663,10 @@ fn cmd_filepicker(args: &str) {
                 }
                 match filepicker::close(id) {
                     Ok(()) => shell_println!("Dialog #{} closed", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -85182,7 +90764,10 @@ fn cmd_filepicker(args: &str) {
                         let icon = parts.get(4).copied().unwrap_or("icon-folder");
                         match filepicker::add_bookmark(label, path, icon) {
                             Ok(()) => shell_println!("Bookmark added: {} → {}", label, path),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
                     "rm" | "remove" => {
@@ -85194,7 +90779,10 @@ fn cmd_filepicker(args: &str) {
                         }
                         match filepicker::remove_bookmark(path) {
                             Ok(()) => shell_println!("Bookmark removed: {}", path),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
                     _ => {
@@ -85293,7 +90881,10 @@ fn cmd_taskbar(args: &str) {
             let icon = parts.get(3).copied().unwrap_or("icon-default");
             match taskbar::pin(app_id, name, icon) {
                 Ok(()) => shell_println!("Pinned: {} ({})", name, app_id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "unpin" => {
@@ -85305,7 +90896,10 @@ fn cmd_taskbar(args: &str) {
             }
             match taskbar::unpin(app_id) {
                 Ok(()) => shell_println!("Unpinned: {}", app_id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "reorder" => {
@@ -85318,7 +90912,10 @@ fn cmd_taskbar(args: &str) {
             }
             match taskbar::reorder_pinned(app_id, pos.unwrap_or(0)) {
                 Ok(()) => shell_println!("Reordered: {}", app_id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "pinned" => {
@@ -85345,7 +90942,10 @@ fn cmd_taskbar(args: &str) {
             let icon = parts.get(5).copied().unwrap_or("icon-default");
             match taskbar::add_window(app_id, name, icon, win_id.unwrap_or(0), title) {
                 Ok(()) => shell_println!("Added window {} to {}", win_id.unwrap_or(0), app_id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rmwin" => {
@@ -85358,7 +90958,10 @@ fn cmd_taskbar(args: &str) {
             }
             match taskbar::remove_window(app_id, win_id.unwrap_or(0)) {
                 Ok(()) => shell_println!("Removed window {}", win_id.unwrap_or(0)),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "running" | "list" | "" => {
@@ -85429,7 +91032,10 @@ fn cmd_taskbar(args: &str) {
             };
             match taskbar::set_progress(app_id, ps) {
                 Ok(()) => shell_println!("Progress set for {}", app_id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "badge" => {
@@ -85442,7 +91048,10 @@ fn cmd_taskbar(args: &str) {
             }
             match taskbar::set_badge(app_id, badge) {
                 Ok(()) => shell_println!("Badge set for {}", app_id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "attention" => {
@@ -85454,7 +91063,10 @@ fn cmd_taskbar(args: &str) {
             }
             match taskbar::request_attention(app_id) {
                 Ok(()) => shell_println!("Attention requested for {}", app_id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "config" | "cfg" => {
@@ -85572,7 +91184,10 @@ fn cmd_startmenu(args: &str) {
                     }
                     match startmenu::add_favorite(app_id) {
                         Ok(()) => shell_println!("Added favorite: {}", app_id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 "rm" | "remove" => {
@@ -85584,7 +91199,10 @@ fn cmd_startmenu(args: &str) {
                     }
                     match startmenu::remove_favorite(app_id) {
                         Ok(()) => shell_println!("Removed favorite: {}", app_id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 "reorder" => {
@@ -85597,7 +91215,10 @@ fn cmd_startmenu(args: &str) {
                     }
                     match startmenu::reorder_favorite(app_id, pos.unwrap_or(0)) {
                         Ok(()) => shell_println!("Reordered: {}", app_id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 _ => {
@@ -85627,7 +91248,10 @@ fn cmd_startmenu(args: &str) {
                     let icon = parts.get(4).copied().unwrap_or("icon-default");
                     match startmenu::add_quick_link(app_id, label, icon) {
                         Ok(()) => shell_println!("Added quick link: {}", label),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 "rm" | "remove" => {
@@ -85639,7 +91263,10 @@ fn cmd_startmenu(args: &str) {
                     }
                     match startmenu::remove_quick_link(app_id) {
                         Ok(()) => shell_println!("Removed quick link: {}", app_id),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 _ => {
@@ -85692,7 +91319,10 @@ fn cmd_startmenu(args: &str) {
             }
             match startmenu::record_launch(app_id) {
                 Ok(()) => shell_println!("Recorded launch: {}", app_id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "search" => {
@@ -85771,7 +91401,10 @@ fn cmd_startmenu(args: &str) {
         }
         "init" => match startmenu::init_defaults() {
             Ok(()) => shell_println!("Default start menu configured"),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "test" => match startmenu::self_test() {
             Ok(()) => shell_println!("All start menu self-tests passed"),
@@ -85840,7 +91473,10 @@ fn cmd_systray(args: &str) {
                 added_ns: now,
             }) {
                 Ok(()) => shell_println!("Added tray icon: {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
@@ -85852,7 +91488,10 @@ fn cmd_systray(args: &str) {
             }
             match systray::remove_icon(id) {
                 Ok(()) => shell_println!("Removed: {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "get" | "info" => {
@@ -85946,7 +91585,10 @@ fn cmd_systray(args: &str) {
                     let msg = badge.unwrap_or("(cleared)");
                     shell_println!("Badge set: {} → {}", id, msg);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "tooltip" => {
@@ -85959,7 +91601,10 @@ fn cmd_systray(args: &str) {
             }
             match systray::set_tooltip(id, text) {
                 Ok(()) => shell_println!("Tooltip set: {} → {}", id, text),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "visibility" | "vis" => {
@@ -85982,7 +91627,10 @@ fn cmd_systray(args: &str) {
             };
             match systray::set_visibility(id, vis) {
                 Ok(()) => shell_println!("Visibility set: {} → {}", id, vis_str),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "override" | "ov" => {
@@ -86035,7 +91683,10 @@ fn cmd_systray(args: &str) {
             };
             match systray::set_override(app_id, ov) {
                 Ok(()) => shell_println!("Override set: {} → {}", app_id, ov_str),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "click" => {
@@ -86062,7 +91713,10 @@ fn cmd_systray(args: &str) {
                     };
                     shell_println!("Click on {}: action = {}", id, a);
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "test" => match systray::self_test() {
@@ -86135,7 +91789,10 @@ fn cmd_fflags(args: &str) {
                     path.display(),
                     immutable::flags_to_string(bits)
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "clear" => {
@@ -86159,7 +91816,10 @@ fn cmd_fflags(args: &str) {
             }
             match immutable::clear_flags(&path, bits) {
                 Ok(()) => shell_println!("Cleared flags on {}", path.display()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "get" | "show" => {
@@ -86187,7 +91847,10 @@ fn cmd_fflags(args: &str) {
             let path = resolve_path(path_arg);
             match immutable::remove_flags(&path) {
                 Ok(()) => shell_println!("All flags removed from {}", path.display()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "check" => {
@@ -86321,7 +91984,10 @@ fn cmd_preview(args: &str) {
                         p.mime
                     );
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "check" => {
@@ -86348,7 +92014,10 @@ fn cmd_preview(args: &str) {
             };
             match preview::generate_for_directory(&dir, size) {
                 Ok(count) => shell_println!("Generated {} previews for {}", count, dir.display()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "generators" | "gens" => {
@@ -86447,7 +92116,10 @@ fn cmd_template(args: &str) {
             match template {
                 Some(t) => match templates::create(t.id, dir_str) {
                     Ok(path) => shell_println!("Created: {}", path),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 },
                 None => shell_println!("Template '{}' not found.", name_or_id),
             }
@@ -86479,7 +92151,10 @@ fn cmd_template(args: &str) {
                 "kshell",
             ) {
                 Ok(id) => shell_println!("Registered template {} (id={}).", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -86601,7 +92276,10 @@ fn cmd_columnview(args: &str) {
                         );
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "list" | "ls" | "" => {
@@ -86736,7 +92414,10 @@ fn cmd_pathbar(args: &str) {
             let path = resolve_path(path_arg);
             match pathbar::go(&path) {
                 Ok(()) => shell_println!("Navigated to: {}", path.display()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "back" => match pathbar::back() {
@@ -86749,7 +92430,10 @@ fn cmd_pathbar(args: &str) {
         },
         "up" => match pathbar::up() {
             Ok(path) => shell_println!("Up to: {}", path.display()),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "history" | "hist" => {
             let hist = pathbar::history();
@@ -86867,7 +92551,10 @@ fn cmd_viewstate(args: &str) {
                     }
                     match viewstate::set(&path, settings) {
                         Ok(()) => shell_println!("View state saved for {}.", path.display()),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 None => shell_println!(
@@ -87048,13 +92735,19 @@ fn cmd_properties(args: &str) {
                                 }
                                 shell_println!("  Size:   {} bytes", cs.computed_size);
                             }
-                            Err(e) => shell_println!("Checksum error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Checksum error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
                 }
             }
         }
-        Err(e) => shell_println!("Error: {:?}", e),
+        Err(e) => {
+            shell_println!("Error: {:?}", e);
+            set_exit(1);
+        }
     }
 }
 
@@ -87217,7 +92910,10 @@ fn cmd_setfacl(args: &str) {
 
                 match acl::set_acl(&path, a) {
                     Ok(()) => shell_println!("ACL entry removed for {}", path.display()),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("No ACL set on {}", path.display());
@@ -87253,7 +92949,10 @@ fn cmd_setfacl(args: &str) {
             let a = acl::from_mode(mode);
             match acl::set_acl(&path, a) {
                 Ok(()) => shell_println!("ACL set from mode {:o} on {}", mode, path.display()),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
 
@@ -89325,7 +95024,10 @@ fn cmd_audio(args: &str) {
                 shell_println!("Playing via virtio-sound (440 Hz, 1 sec)...");
                 match crate::virtio::sound::play_test_tone(1000) {
                     Ok(()) => shell_println!("Done."),
-                    Err(e) => shell_println!("Virtio-sound error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Virtio-sound error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else if crate::hda::is_initialized() {
                 match crate::hda::configure_output() {
@@ -89343,13 +95045,19 @@ fn cmd_audio(args: &str) {
                         shell_println!("Playing 440 Hz test tone via HDA...");
                         shell_println!("Use 'audio stop' to stop.");
                     }
-                    Err(e) => shell_println!("Failed to configure output: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Failed to configure output: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else if crate::ac97::is_available() {
                 shell_println!("Playing via AC97 (440 Hz, 1 sec)...");
                 match crate::ac97::play_test_tone(1000) {
                     Ok(()) => shell_println!("Done."),
-                    Err(e) => shell_println!("AC97 error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("AC97 error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 // Fall back to PC speaker.
@@ -90364,7 +96072,10 @@ fn cmd_firewall(args: &str) {
 
                 match firewall::add_rule(rule) {
                     Ok(idx) => shell_println!("Rule {} added", idx),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts, cmd);
@@ -90466,7 +96177,10 @@ fn cmd_firewall(args: &str) {
 
                 match firewall::add_rule6(rule) {
                     Ok(idx) => shell_println!("IPv6 rule {} added", idx),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts, cmd);
@@ -90478,7 +96192,10 @@ fn cmd_firewall(args: &str) {
                     if let Ok(idx) = idx_str.parse::<usize>() {
                         match firewall::remove_rule(idx) {
                             Ok(()) => shell_println!("Rule {} removed", idx),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Usage: firewall remove <index>");
@@ -90498,7 +96215,10 @@ fn cmd_firewall(args: &str) {
                     if let Ok(idx) = idx_str.parse::<usize>() {
                         match firewall::remove_rule6(idx) {
                             Ok(()) => shell_println!("IPv6 rule {} removed", idx),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     } else {
                         shell_println!("Usage: firewall remove6 <index>");
@@ -90707,7 +96427,10 @@ fn cmd_cap_groups(args: &str) {
             if let Some(name) = parts.get(1) {
                 match groups::create(name) {
                     Ok(id) => shell_println!("Group '{}' created (id={})", name, id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: capgroups create <name>");
@@ -90719,7 +96442,10 @@ fn cmd_cap_groups(args: &str) {
                 if let Some(id) = groups::find_by_name(name) {
                     match groups::remove(id) {
                         Ok(()) => shell_println!("Group '{}' removed", name),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Group '{}' not found", name);
@@ -90822,7 +96548,10 @@ fn cmd_cap_tags(args: &str) {
                         Ok(()) => {
                             shell_println!("Tagged '{}' with group '{}'", path, group_name)
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Group '{}' not found", group_name);
@@ -90842,7 +96571,10 @@ fn cmd_cap_tags(args: &str) {
                         Ok(()) => {
                             shell_println!("Removed '{}' tag from '{}'", group_name, path)
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 } else {
                     shell_println!("Group '{}' not found", group_name);
@@ -90857,7 +96589,10 @@ fn cmd_cap_tags(args: &str) {
             if let Some(path) = parts.get(1) {
                 match file_tags::clear_tags(path) {
                     Ok(()) => shell_println!("All tags cleared from '{}'", path),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: captags clear <path>");
@@ -90996,7 +96731,10 @@ fn cmd_socket_activation(args: &str) {
                     Ok(()) => {
                         shell_println!("Socket activation registered: {} → {}", name, path)
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: sockact add <service_name> <spawn_path>");
@@ -91007,7 +96745,10 @@ fn cmd_socket_activation(args: &str) {
             if let Some(name) = parts.get(1) {
                 match service::unregister_socket_activation(name.as_bytes()) {
                     Ok(()) => shell_println!("Socket activation removed: {}", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: sockact remove <service_name>");
@@ -91018,7 +96759,10 @@ fn cmd_socket_activation(args: &str) {
             if let Some(name) = parts.get(1) {
                 match service::reset_activation(name.as_bytes()) {
                     Ok(()) => shell_println!("Activation reset: {}", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: sockact reset <service_name>");
@@ -91128,7 +96872,10 @@ fn cmd_service_limits(args: &str) {
 
             match service_limits::set_service_limits(name, limits) {
                 Ok(()) => shell_println!("Limits set for '{}': {}", name, limits),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "profile" => {
@@ -91152,7 +96899,10 @@ fn cmd_service_limits(args: &str) {
                     Ok(()) => {
                         shell_println!("Profile {:?} applied to '{}'", profile, name)
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: slimit profile <name> <daemon|network|system|sandbox>");
@@ -91163,7 +96913,10 @@ fn cmd_service_limits(args: &str) {
             if let Some(name) = parts.get(1) {
                 match service_limits::remove_service_limits(name) {
                     Ok(()) => shell_println!("Limits removed for '{}'", name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: slimit remove <service_name>");
@@ -91508,7 +97261,10 @@ fn cmd_cgroup(args: &str) {
             let parent: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             match cgroup::create(parent) {
                 Ok(id) => shell_println!("Created cgroup {} (parent: {})", id, parent),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" | "del" | "rm" => {
@@ -91524,7 +97280,10 @@ fn cmd_cgroup(args: &str) {
             };
             match cgroup::delete(id) {
                 Ok(()) => shell_println!("Deleted cgroup {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "cpu" => {
@@ -91557,7 +97316,10 @@ fn cmd_cgroup(args: &str) {
                         shell_println!("Cgroup {}: CPU limit set to {}%", id, pct);
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "mem" | "memory" => {
@@ -91590,7 +97352,10 @@ fn cmd_cgroup(args: &str) {
                         shell_println!("Cgroup {}: memory limit set to {} frames", id, frames);
                     }
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" | "info" => {
@@ -91738,7 +97503,10 @@ fn cmd_cgroup(args: &str) {
                         bytes_str
                     );
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "test" => {
@@ -91815,7 +97583,10 @@ fn cmd_pidns(args: &str) {
                 Ok(id) => {
                     shell_println!("Created PID namespace {} (parent: {})", id, parent)
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" | "del" | "rm" => {
@@ -91831,7 +97602,10 @@ fn cmd_pidns(args: &str) {
             };
             match pidns::delete(id) {
                 Ok(()) => shell_println!("Deleted PID namespace {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" | "info" => {
@@ -91937,7 +97711,10 @@ fn cmd_userns(args: &str) {
                     parent,
                     owner
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "delete" | "del" | "rm" => {
@@ -91953,7 +97730,10 @@ fn cmd_userns(args: &str) {
             };
             match userns::delete(id) {
                 Ok(()) => shell_println!("Deleted user namespace {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "uidmap" => {
@@ -91976,7 +97756,10 @@ fn cmd_userns(args: &str) {
                     outer,
                     outer.saturating_add(count).saturating_sub(1)
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "gidmap" => {
@@ -91999,7 +97782,10 @@ fn cmd_userns(args: &str) {
                     outer,
                     outer.saturating_add(count).saturating_sub(1)
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "stats" | "info" => {
@@ -92121,7 +97907,10 @@ fn cmd_netns(args: &str) {
         }
         "create" => match netns::create() {
             Ok(id) => shell_println!("Created network namespace {}", id),
-            Err(e) => shell_println!("Error: {:?}", e),
+            Err(e) => {
+                shell_println!("Error: {:?}", e);
+                set_exit(1);
+            }
         },
         "delete" | "del" | "rm" => {
             let Some(id_str) = parts.get(1) else {
@@ -92136,7 +97925,10 @@ fn cmd_netns(args: &str) {
             };
             match netns::delete(id) {
                 Ok(()) => shell_println!("Deleted network namespace {}", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "ifconfig" | "config" => {
@@ -92191,7 +97983,10 @@ fn cmd_netns(args: &str) {
                     gw,
                     dns
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "route" => {
@@ -92276,7 +98071,10 @@ fn cmd_netns(args: &str) {
                             gw,
                             metric
                         ),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 "del" | "delete" => {
@@ -92297,7 +98095,10 @@ fn cmd_netns(args: &str) {
                     };
                     match netns::remove_route(ns, dest, mask) {
                         Ok(()) => shell_println!("Removed route: {} mask {}", dest, mask),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 _ => {
@@ -92363,7 +98164,10 @@ fn cmd_netns(args: &str) {
                     id,
                     if up { "up" } else { "down" }
                 ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "test" => {
@@ -92792,7 +98596,10 @@ fn cmd_container(args: &str) {
 
                 match container::create(&cfg) {
                     Ok(id) => shell_println!("Created container '{}' (id={})", name, id),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -92828,7 +98635,10 @@ fn cmd_container(args: &str) {
                     };
                     match result {
                         Ok(()) => shell_println!("Deleted container {}", id),
-                        Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
+                        Err(e) => {
+                            shell_println!("Container {}: Error: {:?}", id, e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -92851,7 +98661,10 @@ fn cmd_container(args: &str) {
                     };
                     match container::start(id) {
                         Ok(()) => shell_println!("Container {} started", id),
-                        Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
+                        Err(e) => {
+                            shell_println!("Container {}: Error: {:?}", id, e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -92872,7 +98685,10 @@ fn cmd_container(args: &str) {
                     };
                     match container::stop(id) {
                         Ok(()) => shell_println!("Container {} stopped", id),
-                        Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
+                        Err(e) => {
+                            shell_println!("Container {}: Error: {:?}", id, e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -93435,7 +99251,10 @@ fn cmd_container(args: &str) {
                                 }
                             }
                         }
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -93462,7 +99281,10 @@ fn cmd_container(args: &str) {
                 };
                 match container::rename(id, new_name) {
                     Ok(()) => shell_println!("Container {} renamed to '{}'", id, new_name),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -93490,7 +99312,10 @@ fn cmd_container(args: &str) {
                         Ok(n) => {
                             shell_println!("Container {}: killed {} process(es)", id, n)
                         }
-                        Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
+                        Err(e) => {
+                            shell_println!("Container {}: Error: {:?}", id, e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -93594,7 +99419,10 @@ fn cmd_container(args: &str) {
                     Err(crate::error::KernelError::InvalidArgument) => {
                         shell_println!("Container {} has no overlay rootfs (nothing to diff)", id);
                     }
-                    Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
+                    Err(e) => {
+                        shell_println!("Container {}: Error: {:?}", id, e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -93618,7 +99446,10 @@ fn cmd_container(args: &str) {
                         Ok(n) => {
                             shell_println!("Container {} paused ({} thread(s) suspended)", id, n)
                         }
-                        Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
+                        Err(e) => {
+                            shell_println!("Container {}: Error: {:?}", id, e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -93643,7 +99474,10 @@ fn cmd_container(args: &str) {
                         Ok(n) => {
                             shell_println!("Container {} unpaused ({} thread(s) resumed)", id, n)
                         }
-                        Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
+                        Err(e) => {
+                            shell_println!("Container {}: Error: {:?}", id, e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -93676,7 +99510,10 @@ fn cmd_container(args: &str) {
                 };
                 match container::set_root_path(id, path) {
                     Ok(()) => shell_println!("Container {} rootfs set to '{}'", id, path),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -93727,7 +99564,10 @@ fn cmd_container(args: &str) {
                             path
                         );
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -93751,7 +99591,10 @@ fn cmd_container(args: &str) {
                         Ok(pid) => {
                             shell_println!("Container {} restarted: init pid={}", id, pid)
                         }
-                        Err(e) => shell_println!("Container {}: Error: {:?}", id, e),
+                        Err(e) => {
+                            shell_println!("Container {}: Error: {:?}", id, e);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -93791,13 +99634,19 @@ fn cmd_container(args: &str) {
                                             dst,
                                             archive.len()
                                         ),
-                                        Err(e) => shell_println!(
-                                            "Failed to extract into '{}': {:?}",
-                                            dst,
-                                            e
-                                        ),
+                                        Err(e) => {
+                                            shell_println!(
+                                                "Failed to extract into '{}': {:?}",
+                                                dst,
+                                                e
+                                            );
+                                            set_exit(1);
+                                        }
                                     },
-                                    Err(e) => shell_println!("Error: {:?}", e),
+                                    Err(e) => {
+                                        shell_println!("Error: {:?}", e);
+                                        set_exit(1);
+                                    }
                                 }
                             }
                             Ok(_) => match container::copy_from_container(id, &cpath) {
@@ -93813,9 +99662,15 @@ fn cmd_container(args: &str) {
                                         shell_println!("Failed to write '{}': {:?}", dst, e)
                                     }
                                 },
-                                Err(e) => shell_println!("Error: {:?}", e),
+                                Err(e) => {
+                                    shell_println!("Error: {:?}", e);
+                                    set_exit(1);
+                                }
                             },
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
                     (None, Some((id, cpath))) => {
@@ -93834,7 +99689,10 @@ fn cmd_container(args: &str) {
                                                 cpath,
                                                 archive.len()
                                             ),
-                                            Err(e) => shell_println!("Error: {:?}", e),
+                                            Err(e) => {
+                                                shell_println!("Error: {:?}", e);
+                                                set_exit(1);
+                                            }
                                         }
                                     }
                                     Err(e) => {
@@ -93851,13 +99709,19 @@ fn cmd_container(args: &str) {
                                         id,
                                         cpath
                                     ),
-                                    Err(e) => shell_println!("Error: {:?}", e),
+                                    Err(e) => {
+                                        shell_println!("Error: {:?}", e);
+                                        set_exit(1);
+                                    }
                                 },
                                 Err(e) => {
                                     shell_println!("Failed to read '{}': {:?}", src, e)
                                 }
                             },
-                            Err(e) => shell_println!("Failed to stat '{}': {:?}", src, e),
+                            Err(e) => {
+                                shell_println!("Failed to stat '{}': {:?}", src, e);
+                                set_exit(1);
+                            }
                         }
                     }
                     (Some(_), Some(_)) => {
@@ -94070,7 +99934,10 @@ fn cmd_container(args: &str) {
                             shell_println!("Failed to write '{}': {:?}", out_path, e)
                         }
                     },
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -94097,9 +99964,15 @@ fn cmd_container(args: &str) {
                             id,
                             dest_dir
                         ),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     },
-                    Err(e) => shell_println!("Failed to read '{}': {:?}", tar_path, e),
+                    Err(e) => {
+                        shell_println!("Failed to read '{}': {:?}", tar_path, e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -94129,7 +100002,10 @@ fn cmd_container(args: &str) {
                         id,
                         dest_dir
                     ),
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -94219,7 +100095,10 @@ fn cmd_container(args: &str) {
                         // console — report the size (matches `cat`'s convention).
                         Err(_) => shell_println!("(binary log, {} bytes)", data.len()),
                     },
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -94345,7 +100224,10 @@ fn cmd_container(args: &str) {
                         };
                         match crate::volume::create(name) {
                             Ok(path) => shell_println!("{} ({})", name, path.display()),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                            Err(e) => {
+                                shell_println!("Error: {:?}", e);
+                                set_exit(1);
+                            }
                         }
                     }
                     "rm" | "remove" | "delete" => {
@@ -94630,7 +100512,10 @@ fn cmd_container_network(parts: &[&str]) {
                     }
                     None => shell_println!("{}", name),
                 },
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "rm" | "remove" | "delete" => {
@@ -94738,7 +100623,10 @@ fn cmd_container_network(parts: &[&str]) {
                         if peers == 1 { "" } else { "s" }
                     );
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "disconnect" => {
@@ -94755,13 +100643,19 @@ fn cmd_container_network(parts: &[&str]) {
             };
             match crate::cnetwork::disconnect_container(net, ct_id) {
                 Ok(()) => shell_println!("{} disconnected from '{}'", ctref, net),
-                Err(crate::error::KernelError::InvalidArgument) => shell_println!(
-                    "Cannot disconnect '{}' from its primary network '{}' (created with --network); \
+                Err(crate::error::KernelError::InvalidArgument) => {
+                    shell_println!(
+                        "Cannot disconnect '{}' from its primary network '{}' (created with --network); \
                      delete the container to release it",
-                    ctref,
-                    net
-                ),
-                Err(e) => shell_println!("Error: {:?}", e),
+                        ctref,
+                        net
+                    );
+                    set_exit(1);
+                }
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         other => {
@@ -96662,7 +102556,10 @@ fn cmd_oci(args: &str) {
                             image.manifest.config.size
                         );
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -96700,7 +102597,10 @@ fn cmd_oci(args: &str) {
                             shell_println!("  {:>12}  {}", size, h.created_by);
                         }
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
                 }
             }
             case(&parts);
@@ -96845,13 +102745,19 @@ fn cmd_oci(args: &str) {
                                 ),
                             }
                         }
-                        Err(e) => shell_println!(
-                            "Extracted {} but it is not a valid OCI image: {:?}",
-                            tar_path,
-                            e
-                        ),
+                        Err(e) => {
+                            shell_println!(
+                                "Extracted {} but it is not a valid OCI image: {:?}",
+                                tar_path,
+                                e
+                            );
+                            set_exit(1);
+                        }
                     },
-                    Err(e) => shell_println!("Failed to extract '{}': {:?}", tar_path, e),
+                    Err(e) => {
+                        shell_println!("Failed to extract '{}': {:?}", tar_path, e);
+                        set_exit(1);
+                    }
                 }
                 if temp {
                     let _ = crate::fs::vfs::Vfs::remove_recursive(&extract_dir);
@@ -97150,7 +103056,10 @@ fn cmd_scfilter(args: &str) {
             };
             match result {
                 Ok(()) => shell_println!("Installed {} filter for PID {}", mode, pid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
@@ -97186,7 +103095,10 @@ fn cmd_scfilter(args: &str) {
             };
             match scfilter::deny(pid, nr) {
                 Ok(()) => shell_println!("Denied syscall {} for PID {}", nr, pid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "allow" => {
@@ -97207,7 +103119,10 @@ fn cmd_scfilter(args: &str) {
             };
             match scfilter::allow(pid, nr) {
                 Ok(()) => shell_println!("Allowed syscall {} for PID {}", nr, pid),
-                Err(e) => shell_println!("Error: {:?}", e),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "check" => {

@@ -66527,3 +66527,48 @@ VFS call under a given guard. `net/tftp.rs` was named once and had three.
   log and the stats. Fixed in `d750e2d28`. The same commit replaced the WRQ
   existence probe — a full `read_file` whose result was dropped, i.e. a
   file's worth of kernel heap per *rejected* request — with `Vfs::exists`.
+
+## TD-A-ASSERTIONS-THAT-A-CONSTANT-WOULD-PASS — the weak-proxy sweep (lane A, 2026-08-23)
+
+**Status:** two instances FIXED; the class is not closed.
+
+A self-test assertion is only worth its line if there is a plausible way for
+the code under test to be wrong and still fail it. Three shapes recur here
+and none of them clear that bar:
+
+1. **`assert!(timestamp > 0)`.** Passes for a non-zero constant, for a value
+   stamped once at construction and never updated again, and for a reading
+   taken from a different clock. It fails only if the field is left at
+   exactly zero — which is the one wrong value a `hpet::elapsed_ns()` reading
+   is least likely to be. The fix is to bracket: read the clock either side
+   of the operation and require the stored value to fall inside the window.
+   - `kernel/src/fs/certmgr.rs` — `last_renewal_ns` (self-test 5). Fixed in
+     `33c40109a`; also now checks `not_before_ns`, stamped from the same
+     reading, and that `not_after_ns` follows it.
+   - `kernel/src/fs/sysrq.rs` — `last_triggered_ns` (self-test 3). Fixed in
+     the same commit.
+
+2. **A field written and never read.** `svcstart`'s `crash_history` collected
+   a ten-entry ring of crash timestamps on every crash report and no code
+   path — not `CrashInfo`, not `/proc/svcstart`, not `svcstart crashes`, not
+   a test — ever read it back. Write-only state cannot be wrong, so nothing
+   can notice when it stops being written. Fixed in `d4dff8c2a` by carrying
+   it on `CrashInfo`, rendering it, and asserting it in self-tests 4 and 5.
+
+3. **A test that skips itself and reports success.** Still open:
+   `kernel/src/fs/index.rs:1020` prints
+   `"[index]   (skipped VFS tests: /tmp not mounted)"` and returns Ok. It is
+   dormant rather than harmless — `/tmp` *is* mounted today (see
+   `build/serial-batch32.txt` line 2190, `/tmp -> memfs`), so the branch is
+   not taken; but if it ever were, the suite would go green having tested
+   nothing. A skip must be reported as a skip, not as a pass.
+
+**Also still open, same class:** `svcstart`'s `boot_start_ns`/`boot_end_ns`
+are only ever compared behind `if st.boot_end_ns > st.boot_start_ns`
+(`svcstart.rs:1128`, `kshell.rs:45849`), so a boot that never stamped the end
+prints nothing rather than failing anything. No test asserts either field.
+
+**How to find more:** grep the self-tests for `> 0)`, for `is_some()` on a
+field whose *value* is the thing under test, and for `if !x { print skip;
+return Ok }`. The pattern to look for is an assertion whose truth follows
+from the code compiling rather than from the code working.

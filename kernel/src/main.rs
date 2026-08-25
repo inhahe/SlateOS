@@ -347,9 +347,19 @@ fn check_boot_stack_canary() {
 #[cfg_attr(kasan_instrumented, sanitize(address = "off"))]
 #[unsafe(no_mangle)]
 extern "C" fn kmain() -> ! {
-    // SAFETY: `KERNEL_BOOT_STACK` is a dedicated 512 KiB static used only as
-    // the kernel boot stack and touched nowhere else, so there is no
-    // aliasing concern in computing its top address.  We load the top
+    // SAFETY: `KERNEL_BOOT_STACK` is a dedicated static of
+    // `KERNEL_BOOT_STACK_SIZE` bytes, used only as the kernel boot stack.
+    // This block performs no memory access to it at all — `addr_of_mut!` +
+    // `cast` + `add` compute an address and nothing more — so the aliasing
+    // question does not arise here.  (It is worth saying explicitly, because
+    // the static *is* named from elsewhere: the redzone canary pair
+    // `init_boot_stack_canary` / `check_boot_stack_canary`, and
+    // `boot_stack_bounds`, which `backtrace.rs` calls from an exception
+    // handler on any CPU at any time.  All four sites use raw pointers via
+    // `addr_of!`/`addr_of_mut!` and never form a Rust reference, which is what
+    // keeps that concurrency sound; a `&mut` to this static would not be.)
+    // `.add(KERNEL_BOOT_STACK_SIZE)` is one past the end of the array, which
+    // is the one out-of-range offset `add` permits.  We load the top
     // (highest address; the static's size is a multiple of 16 and it is
     // 16-byte aligned, so the top is 16-byte aligned as the ABI requires
     // before a `call`) into RSP, zero RBP to terminate stack-frame chains,
@@ -928,7 +938,7 @@ extern "C" fn kernel_main() -> ! {
             // kernel ran on Limine's small reclaimable-memory stack, which grew down
             // into the active page tables); the churn only shifted allocation/timing
             // enough to expose it.  With the kernel now switched to a dedicated
-            // 512 KiB boot stack (see `KERNEL_BOOT_STACK`), the underlying bug is
+            // boot stack (see `KERNEL_BOOT_STACK`), the underlying bug is
             // fixed and the self-test runs normally at boot.
             if let Err(e) = ipc::stream_socket::self_test() {
                 serial_println!("FATAL: Stream socket self-test failed: {}", e);

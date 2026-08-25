@@ -23211,29 +23211,69 @@ _FN = re.compile(r"^\s*(?:async\s+)?fn\s+([A-Za-z0-9_]+)\s*\(")
 # The two packages this harness sweeps. A test in guitk or the compositor is
 # not unproven-by-this-harness; it is simply out of scope, and listing it would
 # bury the finding in noise.
+#
+# This is the denominator for *unproved* only. It must not be used to decide
+# whether a declared name exists: defects legitimately patch `gui/toolkit`
+# (the contrast work of design-decisions.md §537 does), and the tests those
+# defects name live there. Judging existence against these two directories
+# reported fifteen perfectly healthy guitk tests as dangling -- a false alarm
+# in the one category the report treats as unambiguously a mistake, which is
+# the fastest way to teach a reader to ignore it. See `names_in_tree`.
 COVERED_DIRS = ("gui/desktop/src", "gui/appearance/src")
 
 
+def _tests_in(directory):
+    """`{path: [test names]}` for every `#[test] fn` under `directory`."""
+    found = {}
+    for p in sorted((ROOT / directory).rglob("*.rs")):
+        if "target" in p.parts:
+            continue
+        names = []
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        for i, ln in enumerate(lines):
+            if not _TEST_ATTR.match(ln):
+                continue
+            for nxt in lines[i + 1:]:
+                if _ATTR.match(nxt) or not nxt.strip():
+                    continue
+                m = _FN.match(nxt)
+                if m:
+                    names.append(m.group(1))
+                break
+        if names:
+            found[p.relative_to(ROOT).as_posix()] = names
+    return found
+
+
 def tests_in_tree():
-    """`{path: [test names]}` for every `#[test] fn` in the swept packages."""
+    """`{path: [test names]}` for the packages this harness sweeps.
+
+    The denominator for *unproved*, and nothing else.
+    """
     found = {}
     for d in COVERED_DIRS:
-        for p in sorted((ROOT / d).rglob("*.rs")):
-            names = []
-            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-            for i, ln in enumerate(lines):
-                if not _TEST_ATTR.match(ln):
-                    continue
-                for nxt in lines[i + 1:]:
-                    if _ATTR.match(nxt) or not nxt.strip():
-                        continue
-                    m = _FN.match(nxt)
-                    if m:
-                        names.append(m.group(1))
-                    break
-            if names:
-                found[p.relative_to(ROOT).as_posix()] = names
+        found.update(_tests_in(d))
     return found
+
+
+def names_in_tree():
+    """Every test name in every crate any defect patches.
+
+    The universe for *dangling* and *single-prover*, which is a strictly wider
+    question than the one `tests_in_tree` answers. A defect that patches
+    `gui/toolkit/src/theme.rs` names tests that live in `gui/toolkit`, so
+    asking whether those names exist against `COVERED_DIRS` alone answers a
+    question nobody posed and answers it wrongly.
+
+    Derived from the defect list rather than hard-coded, so a defect aimed at
+    a new crate widens this by itself. Otherwise the next crate to be patched
+    reintroduces the same false alarm, and the fix would have been a one-off.
+    """
+    crates = {pathlib.PurePath(*pathlib.PurePath(d[1]).parts[:2]).as_posix()
+              for d in DEFECTS}
+    crates.update(pathlib.PurePath(*pathlib.PurePath(d).parts[:2]).as_posix()
+                  for d in COVERED_DIRS)
+    return {t for c in sorted(crates) for ts in _tests_in(c).values() for t in ts}
 
 
 def coverage():
@@ -23259,7 +23299,10 @@ def coverage():
        ever asked it anything.
     2. **Dangling** -- a declared name matching no test in the tree, i.e. a
        test renamed out from under a defect. Today this surfaces only as a
-       `[MISSING: ...]` at the end of a run that takes hours.
+       `[MISSING: ...]` at the end of a run that takes hours. Judged against
+       every crate any defect patches (`names_in_tree`), not against the two
+       swept for (1) -- those are different questions and conflating them
+       reported fifteen live guitk tests as dangling.
     3. **Single-prover** -- a test exactly one defect names. These are the
        fragile ones: one refactor from becoming unproved, which is precisely
        what happened to touchpad's erasure sweep when the empty-fill guard
@@ -23271,7 +23314,7 @@ def coverage():
             provers.setdefault(t, []).append(path)
 
     in_tree = tests_in_tree()
-    everywhere = {t for names in in_tree.values() for t in names}
+    everywhere = names_in_tree()
 
     unproved = {
         f: [t for t in names if t not in provers]

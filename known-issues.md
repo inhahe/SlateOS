@@ -75071,7 +75071,7 @@ complicating it.
 **Severity.** Low. The current reading is the one the user almost certainly
 meant; the cost is that a genuinely truncated script runs instead of failing.
 
-#### TD-A-XARGS-REPORTS-THE-LAST-COMMANDS-STATUS-NOT-THE-WORST (lane A, 2026-08-24) — **open**
+#### TD-A-XARGS-REPORTS-THE-LAST-COMMANDS-STATUS-NOT-THE-WORST (lane A, 2026-08-24) — ✅ FIXED (`a3eea79a1`, boot-verified `65b4dda4b`)
 
 **In short:** `printf 'good\nbad\n' | xargs check && deploy` runs `deploy` if
 the *last* invocation succeeded, even when an earlier one failed. GNU `xargs`
@@ -75108,3 +75108,37 @@ so the shell speaks one convention rather than two.
   bugs above there is no single correct answer to match, and our behaviour is
   already one of the two real ones. Left alone deliberately; noted so the next
   reader does not "fix" it into GNU's shape without knowing it is a fork.
+
+**Fixed 2026-08-24** in `a3eea79a1`. The status is now the worst of the
+invocations, and the `-n` swallow is a usage error. The empty-input fork is
+still a fork and is still deliberately left as-is.
+
+The open question this entry left — 123 or a flat 1 — is answered in
+`design-decisions.md` §291, and the answer is **neither GNU's 123 nor a third
+value**: the child's own status is propagated unchanged. Two existing
+precedents settled it without a coin-flip.
+
+* **Why not 123.** GNU reserves 124–127 for "child exited 255", "child killed
+  by a signal", "not executable" and "not found", and 123 exists to keep those
+  four rows free. This shell produces none of them — an unknown command is a
+  flat 1 (`kshell.rs:7681`) — so adopting one row of a table whose other rows
+  we do not implement leaves a caller unable to tell which convention it is
+  reading. That is the same argument that kept the `Syntax error: …` sites at 1
+  rather than borrowing bash's 2.
+* **Why not §275's third value.** §275's trigger question is *"can this
+  command's 'no' mean either 'I checked' or 'I couldn't check'?"* For `xargs`
+  the answer is **no**: its non-zero is not an assertion about anything, it is
+  a relay of somebody else's. So there is nothing for a third value to
+  distinguish.
+* **Why `max` and not "any failure → 1".** Under §275 a larger status is a
+  worse one, so `max` propagates "I could not check" over "the answer is no" —
+  it carries §275's precedence out of a single command and into a batch,
+  without `xargs` knowing what any particular number means. It also makes
+  `cmd | xargs foo` behave exactly like `foo args` in the single-invocation
+  case, which is what the rest of the shell already does.
+
+**What reading this function for the fix taught, again:** a mechanical screen
+is a filter, not a verdict. The entry above asked for one thing (worst-status
+tracking) and the function held two more silent guesses. That is now three
+functions in a row (`cmd_xargs_input`, `parse_sed_command`, and the five pipe
+forms) where the filed bug was the smaller half of what was actually there.

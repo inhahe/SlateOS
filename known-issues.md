@@ -72350,6 +72350,80 @@ be resolved first. A coverage report computed against a list containing 56
 entries that no longer apply would have overstated the proved set by exactly
 those 56, and been wrong in a way that is very hard to see.
 
+**RE-MEASURED 2026-08-25, and three faults in the harness itself found on the
+way.** The figures moved because the dead-key work added tests, but the run
+that produced them only became trustworthy after fixing three bugs in
+`reintro-palette.py` — every one of which made the harness *understate* a
+problem, which is the direction that matters:
+
+```
+2935 tests in the swept packages, 2473 unproved (15.7% proved),
+0 dangling, 84 single-prover
+```
+
+- **The dangling universe was the wrong set.** `COVERED_DIRS` was doing double
+  duty: it is the denominator for *unproved*, which is a deliberately narrow
+  set of directories, and it was also being used to answer "does this declared
+  test name exist?" — a strictly wider question, because a defect may patch a
+  crate that is not swept. Fifteen live tests in `gui/toolkit` were reported as
+  dangling on that basis. Fixed by splitting `tests_in_tree()` (the sweep set)
+  from a new `names_in_tree()` (the existence set), the latter **derived from
+  the `DEFECTS` list** so the next crate a defect reaches widens it by itself
+  rather than reintroducing the same false alarm.
+- **Patterns were never normalised for line endings.** Git here runs
+  `core.autocrlf=input`, which normalises on commit but never on checkout, so a
+  file once written by something CRLF-aware stays CRLF in the working tree
+  while its committed bytes are LF. Every pattern in `DEFECTS` is spelled with
+  `\n`, so in such a file *every multi-line pattern silently stops matching*
+  and reports as `PATTERN NOT FOUND` — indistinguishable from the genuine
+  rename this script exists to catch. Three of the four stale defects were
+  purely this — `Y`, `PPPP…` and `QQQQ…`, all three in
+  `gui/desktop/src/run_dialog.rs`. Note *how selectively* it strikes:
+  `gui/desktop/src/lib.rs` is CRLF as well and was completely unaffected,
+  because its defects happen to be single-line patterns. The bug hides only
+  the multi-line defects, and only in files that happen to be CRLF — which is
+  why it survived so long. `reintro-keylayout.py` had already learned the
+  lesson; the fix here is a shared `source()` helper used by *both* the
+  preflight and `apply_to`, because those two had duplicate copies of the
+  matching logic and fixing only one changed nothing.
+- **A stale defect was tallied twice.** The preflight `break`s on the first
+  missing pattern, which leaves the text untouched — which is exactly what a
+  self-cancelling defect looks like, so the no-op check fired as well. One
+  fault arrived as two, and the misleading half was the no-op line, which
+  claims the edits undo each other when in fact none of them ran. This is why
+  the stale and no-op counts moved in lockstep (4/4, then 1/1) and looked like
+  a correlation rather than a duplicate.
+
+Only the fourth stale defect was real: the tray's layout label had gone from
+`.unwrap_or("??")` to `self.active_layout().map_or("??", |l| l.short_label)`
+when the accessor became fallible. It is retargeted. The list is once again
+**1722 defects, 0 stale, 0 ambiguous, 0 no-op**.
+
+**All four were then re-run for real, not left at preflight-green** — which is
+the whole point of this harness applied to itself. A defect that merely
+*matches* again has proved nothing; it has to go in, make the right tests fail,
+and come back out. All four now do:
+
+| defect | verdict |
+|---|---|
+| `Y` (run dialog focus border) | caught by 1 |
+| `PPPP…` (arrows step by string) | caught by 2 |
+| `QQQQ…` (caret slices on byte offset) | caught by 2 |
+| `BBBB…` (tray label fallback) | caught by 2 |
+
+`4 caught, 0 escaped, 0 never asked, 0 under-caught, 0 under-declared`, each
+run ending in `restored: all files match their recorded SHA-256` — which also
+confirms the newline round-trip is lossless, since `run_dialog.rs` is the CRLF
+file and its restore is byte-compared, not text-compared.
+
+The shape of all three is the same and worth naming, because it will recur:
+each was a case of the harness answering a *slightly different question* from
+the one asked — a narrower directory set, an LF file that is really CRLF, a
+skipped loop that looks like a cancelled one — and reporting the answer as if
+it were to the original. A harness that exists to stop tests being trusted on
+faith is the last place that should be trusted on faith itself; every one of
+these fixes is therefore a permanent check rather than a repair to one entry.
+
 ### BUG-C-GUITK-CONTRAST_TEXT-PICKS-WHITE-WHERE-BLACK-IS-FOUR-TIMES-MORE-LEGIBLE
 
 **Status: FIXED** 2026-08-24, the same day it was found — see §537. Kept here

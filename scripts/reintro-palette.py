@@ -21031,8 +21031,10 @@ DEFECTS = [
         'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the tray falls back to an empty label instead of ??',
         IM,
         [
-            ('            .unwrap_or("??")',
-             '            .unwrap_or("")'),
+            # Was `.unwrap_or("??")` until the accessor became fallible and
+            # the chain collapsed into one `map_or`.
+            ('self.active_layout().map_or("??", |l| l.short_label)',
+             'self.active_layout().map_or("", |l| l.short_label)'),
         ],
         ["desktop"],
         [
@@ -23140,6 +23142,28 @@ def run_tests(pkg):
     return failed, out
 
 
+def source(snap, path):
+    """The snapshotted file as LF-only text, whatever it is on disk.
+
+    Git here runs `core.autocrlf=input`, which normalises line endings on
+    commit but never on checkout, so a file once written by something
+    CRLF-aware stays CRLF in the working tree while the committed bytes are LF.
+    Every pattern in `DEFECTS` is spelled with `\\n`, so in such a file *every
+    multi-line pattern silently stops matching* -- and reports as PATTERN NOT
+    FOUND, which is indistinguishable from the rename this script exists to
+    catch. Three of the four defects reported stale on 2026-08-25 were exactly
+    this -- `Y`, `PPPP...` and `QQQQ...`, all three in `gui/desktop/run_dialog.rs`,
+    the one CRLF file here that any *multi-line* pattern points at. Only the
+    fourth was a real rename. (`gui/desktop/lib.rs` is CRLF too but was
+    unaffected: its defects are all single-line, which is what makes this bug
+    so quiet -- it hides only some of the defects in only some of the files.)
+
+    So every pattern is spelled LF, matched against LF, and the file's own
+    convention is put back on write. `reintro-keylayout.py` learned this first.
+    """
+    return snap[path].decode("utf-8").replace("\r\n", "\n")
+
+
 def check(snap):
     """Report every defect whose pattern no longer matches, without building.
 
@@ -23155,7 +23179,7 @@ def check(snap):
     amb = 0
     noop = 0
     for name, path, edits, _pkgs, _expect in DEFECTS:
-        text = snap[path].decode("utf-8")
+        text = source(snap, path)
         original = text
         # A defect may list the same edit twice on purpose, to wound both of an
         # identical pair; only an ambiguity the defect does *not* acknowledge
@@ -23163,17 +23187,19 @@ def check(snap):
         listed = {}
         for old, _new in edits:
             listed[old] = listed.get(old, 0) + 1
+        stale = False
         for i, (old, new) in enumerate(edits):
             if old not in text:
                 print(f"PATTERN NOT FOUND  {name}\n    edit {i} in {path}")
                 bad += 1
+                stale = True
                 break
             # Reported once per defect, on the first edit, against the
             # untouched file: an unacknowledged second match means the defect
             # silently patches whichever copy happens to come first, and will
             # move to the other one the day someone reorders the module.
             if i == 0:
-                n = snap[path].decode("utf-8").count(old)
+                n = source(snap, path).count(old)
                 if n > listed[old]:
                     print(f"AMBIGUOUS ({n} matches, {listed[old]} listed)  {name}")
                     amb += 1
@@ -23194,7 +23220,13 @@ def check(snap):
         # unanswered one. Checking it here rather than mid-run also means the
         # authoring mistake surfaces in the seconds-long preflight instead of
         # after the run it invalidates.
-        if text == original:
+        #
+        # Skipped when an edit went missing, because the loop above `break`s on
+        # the first stale pattern and so leaves `text` untouched — which looks
+        # exactly like a self-cancelling defect. Reporting both makes one fault
+        # arrive as two, and the no-op line is the misleading half: it says the
+        # edits undo each other when in fact none of them ran.
+        if not stale and text == original:
             print(f"NO-OP  {name}\n    every edit was undone by a later one")
             noop += 1
     print(f"\n{len(DEFECTS)} defects, {bad} stale, {amb} ambiguous, {noop} no-op")
@@ -23370,8 +23402,12 @@ def apply_to(snap, path, edits):
     They are reported apart rather than together because they mean different
     things to whoever fixes them: a missing pattern is source that moved under
     the defect, while a no-op is the defect arguing with itself (lesson 18).
+
+    Matches on LF-normalised text (see `source`) and puts the file's own
+    newline convention back on the way out.
     """
-    original = snap[path].decode("utf-8")
+    crlf = b"\r\n" in snap[path]
+    original = source(snap, path)
     text = original
     for old, new in edits:
         if old not in text:
@@ -23379,7 +23415,11 @@ def apply_to(snap, path, edits):
         text = text.replace(old, new, 1)
     if text == original:
         return None, "*** PATCH IS A NO-OP ***"
-    return text, None
+    # Back into the file's own convention, so a patched file differs from its
+    # snapshot only where the patch touched it. A whole-file newline flip would
+    # make any accidental leftover invisible in `git diff` under
+    # `autocrlf=input`, which is exactly when you most want to see it.
+    return (text.replace("\n", "\r\n") if crlf else text), None
 
 
 def cargo_check(pkg):

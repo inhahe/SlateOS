@@ -33335,6 +33335,36 @@ Two caveats for the compositor half:
 Details and the reasoning: `design-decisions.md` §270. Reply request filed as
 `requests/a-c-drm-setcrtc-has-landed-and-page-flip-is-now-strict.md`.
 
+**Update 2026-08-25 — the compositor now issues the mode-set, and had to.**
+Lane A's second caveat above understated the urgency: with `page_flip` strict,
+*not* mode-setting is no longer a limitation, it is a black screen on the ATI
+backend — that backend's CRTCs enumerate with `active: false, mode: None`, and a
+first flip onto a CRTC with no mode is `EINVAL`. `gui/compositor/src/present/drm.rs`
+now issues `DRM_IOCTL_MODE_SETCRTC` once per head in `make_head`, after both
+dumb buffers are registered and before the head's first flip, naming the
+connector, the head's back buffer, and the mode `best_mode` picked from the
+connector's advertised list. `uapi.rs` gained `SETCRTC` (`0xC068_64A2`) and
+`ModeCrtc` (104 bytes), pinned by the same offset and `_IOC`-size tests as every
+other struct there.
+
+The mode-set's error is deliberately discarded — the flip that follows is a
+strictly stronger check of the same property, and treating it as fatal would
+decline the connector on any kernel with no `SETCRTC` at all. Reasoning, and
+the diagnosis cost it accepts: `design-decisions.md` §552.
+
+The test double was made strict in the same change, which is the part that
+makes the tests mean anything: `FakeCard` now tracks the mode programmed on
+each CRTC, refuses a flip on a CRTC that has none or whose mode is not the
+framebuffer's size, and refuses a mode-set naming a mode the connector never
+advertised or a connector its encoders cannot route. Six new tests, including
+one that asserts the fake's own strictness so that a future permissive fake
+fails loudly rather than silently making `set_mode` deletable.
+
+**Still open:** changing to a mode other than the display's native one. Nothing
+above this module can ask for one, and two of the three backends refuse it
+anyway. This entry stays open at the same low severity, now for a smaller
+reason than when it was filed.
+
 ## BUG-DRM-PAGE-FLIP-ACCEPTS-A-MISMATCHED-FB (found by lane C 2026-08-21; lives in lane A's tree)
 
 **In short:** the kernel lets a program hand the graphics card a picture that is
@@ -73384,6 +73414,14 @@ was written for, and nothing regresses. When every command is on the list,
 `command_parses_own_quotes` and `remove_quotes` both delete themselves in
 favour of a real argv.
 
+**Migrated so far** (2026-08-25): `trap`, `awk`, `fold`, `base64`, `cut`, `tr`,
+`sed`. Each moved when a concrete bug forced it, not as a sweep — `sed` joined
+because `classify_sed_args` used `split_whitespace`, so
+`sed 's/hello world/hi/'` split into `s/hello` and `world/hi/` and was refused
+as an unterminated `s` command. That is the useful property of doing this one
+command at a time: every conversion arrives with a test for the thing it broke
+(here, kshell self-test rung 47), which a 750-function sweep would not have.
+
 **Not purely mechanical**, which is why it is debt rather than an afternoon:
 the commands disagree about what they want. `echo` wants the rest of the line
 joined; `grep` wants words; `trap` wants word 1 as a command string and word 2
@@ -76577,7 +76615,51 @@ than a bug: the fix is for `net::http` and `kshell` to share one, most
 naturally in a small `base64` module, and the `net/websocket.rs` caller at
 `:193` moves with it.
 
-#### TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH (lane A, 2026-08-25) — filed, blocked on `ere` going `no_std`
+#### TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH (lane A, 2026-08-25) — ✅ FIXED
+
+**Update, 2026-08-25.** Lane B made `ere` unconditionally `no_std` (their reply
+is `requests/b-a-ere-is-no-std-now-take-it.md`; no feature flag, because Cargo
+*unions* features across a build graph and `default-features = false` in one
+crate cannot stop another from turning `std` back on). The kernel now depends
+on it, and **`awk`'s `/pattern/` is a real POSIX extended regular expression**:
+`awk_compile_pattern` builds an `ere::Regex` when the *program* is read, so an
+invalid regexp is refused before any input is opened, and nothing recompiles
+per record. `kshell::self_test` rung 45 pins the three rows lane B asked for —
+`/^err/` anchors, `/a.c/` matches `abc`/`axc`, `/x*/` matches every line — plus
+brackets, alternation, groups, an undecodable record, and the two distinct
+refusals (`invalid regular expression` vs `unsupported pattern`).
+
+**`sed` followed in the same shape** — addresses *and* `s///` in one commit, so
+the command was never half a regex engine. `sed_addr_matches` takes a compiled
+`SedAddr::Regex`; `sed_replace_first`/`sed_replace_all` (`str::find` and a
+`str::find` loop) are gone, replaced by `sed_substitute`, which walks
+`capture_spans_iter`. Three deliberate differences from `awk`:
+
+- **BRE, not ERE.** `ere::bre::compile`, because without `-E` sed's patterns are
+  *basic* regular expressions: `a+b` is three literal characters, `a\+b` is the
+  repetition, `\(…\)` is a group and `(` is ordinary. Compiling them as EREs
+  would pass every anchor and `.` test and still silently change what a working
+  script means.
+- **`&` and `\1`…`\9` are now replacement references** rather than literal text,
+  parsed once into a `Vec<SedRepl>` template at script-parse time. `\N` with no
+  group `N` is a *script* error (GNU: `invalid reference \3 on 's' command's
+  RHS`), not an empty expansion at run time; `\U` and the other GNU case
+  conversions are refused rather than emitted as their own letters.
+- **An empty pattern is refused.** GNU's `s//X/` means "the last regexp used",
+  which this shell does not keep; matching the empty string everywhere instead
+  would interleave the replacement between every character and exit 0.
+
+`find_unescaped` was fixed in the same commit: it looked *back* one byte from a
+candidate delimiter, which cannot tell `\/` from `\\/`, so `sed 's/x/\\/'` — a
+replacement of one literal backslash — was reported `unterminated command`. It
+now steps over an escape instead.
+
+`kshell::self_test` rung 46 pins all of it: the two anchors in an address and in
+`s///`, `.`, the four BRE-vs-ERE spellings, `\1`, `&`, `\&`, `\\`, `g` vs not,
+the zero-width-match advance (`s/x*/-/g` on `ab` is `-a-b-`, as GNU has it), an
+escaped delimiter, and the four refusals — each of which must exit non-zero
+*and* print nothing, since a sed that emits its input unchanged and exits 0 is
+indistinguishable from one that did the edit.
 
 **In short:** `awk '/^err/ {print}'` in the kernel shell does not match lines
 that *start* with `err`. It matches lines that *contain* the four characters
@@ -76612,10 +76694,10 @@ The third row is the worst of them: a pattern that in awk matches *everything*
 here matches almost nothing, so a filter that should be a no-op silently
 discards the whole input.
 
-**Why it is still open.** This is the same bug as
-`B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-str::contains`, and it has
-the same right answer: use the `ere` crate lane B wrote for it. But `ere`
-cannot be linked into the kernel today —
+**Why it was open** (the original entry; lane B has since answered). This is the
+same bug as `B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-str::contains`,
+and it has the same right answer: use the `ere` crate lane B wrote for it. But
+`ere` could not be linked into the kernel —
 
 ```toml
 bstr = { version = "1.13.0", default-features = false, features = ["std"] }
@@ -76633,7 +76715,8 @@ engines that must agree about `[[:alpha:]]`, leftmost-longest and backreference
 semantics will not agree for long. A kernel-resident copy would also have to be
 re-verified against gawk independently, duplicating `scripts/awk-diff.sh`.
 
-**The fallback, if lane B declines.** Refuse rather than guess: any `/.../`
+**The fallback, had lane B declined** — not needed; they said yes. Refuse rather
+than guess: any `/.../`
 pattern containing a metacharacter reports `awk: regular expressions are not
 supported in the kernel shell` and exits 2. Worse for the user, but a refusal
 is detectable and a wrong answer is not.
@@ -76726,10 +76809,10 @@ first.
 Covered by self-test rung 41, which asserts whole byte strings rather than
 searching them.
 
-**Left standing:** `/re/` is still a substring match — see
-`TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`, blocked on
-`ere` gaining a `no_std` build — and the statement executor still ignores
-anything it cannot run, below.
+**Left standing at the time:** `/re/` was still a substring match, and the
+statement executor still ignored anything it could not run. Both are closed —
+the statements by the entry below, and `/re/` by the `ere` dependency, under
+`TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`.
 
 #### TD-A-AWK-IGNORES-EVERY-STATEMENT-IT-CANNOT-RUN (lane A, 2026-08-25) — ✅ FIXED
 
@@ -76759,12 +76842,17 @@ Three things came with it:
   that is the one case where echoing the text and evaluating it provably agree
   — a decimal is not, since awk formats `5.0` through `OFMT` and prints `5`.
 
-**Still not refused: `/pattern/`**, which remains a substring match. That is the
-separate `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`,
-blocked on the `ere` crate gaining a `no_std` build; refusing every `/…/` with
-a metacharacter is the documented fallback if that request is declined, and is
-not done pre-emptively because it would break working invocations while the
-request is open.
+**`/pattern/`, the carve-out this entry left standing, is now closed** — not by
+a refusal but by the engine, which was always the better answer. The kernel
+links `ere`, and `awk_compile_pattern` builds a real `ere::Regex` from the
+pattern text. That also turned §294's check from a convention into a type:
+`awk_validate_program` used to evaluate each pattern against a dummy empty
+record and ask only whether an answer came back, which was sound only because
+of a hand-written invariant ("whether an answer exists depends on the pattern
+alone") that nothing enforced and that rung 42 had to pin by hand. It is now
+`awk_compile_program`, whose *output* is what runs, and
+`awk_compile_pattern(&str)` cannot see a record at all. See
+`TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`.
 
 The original entry follows.
 
@@ -76815,7 +76903,644 @@ its own commit and its own rung.
 `908043883` rewrite neither caused it nor made it worse. It is recorded now
 because the rewrite is what made it visible.
 
-## `A-KSHELL-TR-ANSWERS-FIVE-QUESTIONS-IT-WAS-NOT-ASKED` (lane A, 2026-08-25) — **open**
+---
+
+## BUG-C-MINIMIZING-A-WINDOW-MADE-IT-UNREACHABLE (lane C, 2026-08-25) — ✅ **FIXED same day**, `1b773bb71`
+
+**In short:** minimising a window in the shell deleted its taskbar button *and*
+its Alt+Tab row at the same instant, so there was no way left to get the window
+back. It had not gone anywhere — the compositor still had it — but nothing the
+shell draws would show it to you again.
+
+**Found by** surveying `gui/desktop/src/pointer_tests.rs` for the reintroduction
+campaign, not by a failing test. Two tests covered this behaviour and both had
+the bug written down as their expectation.
+
+**Where it lived.** `gui/desktop/src/lib.rs`, three lines in three places:
+
+```rust
+// apply_window_list
+visible: info.visible && !info.minimized,
+// visible_windows
+.filter(|w| w.visible && w.desktop == self.current_desktop)
+```
+
+`visible_windows()` was then the set used by `taskbar_button_rect`,
+`taskbar_button_width`, the `hit_test` button loop, `render_taskbar`,
+`start_alt_tab` / `next_alt_tab` / `prev_alt_tab` / `finish_alt_tab`,
+`render_alt_tab` and the overview — **every list the shell draws whose entire
+purpose is to get a put-away window back**.
+
+**Root cause: one accessor answering two questions** — the same shape as the
+`COVERED_DIRS` bug in `reintro-palette.py` recorded above, three days apart and
+in unrelated code, which is why it is worth naming as a shape rather than as an
+incident. The compositor reports *unmapped* ("the program took its window
+away") and *minimised* ("the user put it away") as two separate flags because
+they are two different facts. `visible` ANDed them into one and then served
+both questions from the result. The field's own doc comment said
+`/// Whether the window is visible (not minimized to taskbar)` — the
+parenthetical is the author correctly describing a taskbar button that the code
+underneath it deletes.
+
+**The `Activate`-not-`Restore` care was unreachable code for as long as this
+lasted.** `handle_press` deliberately sends `ShellControlAction::Activate` for
+an unfocused window, and `design-decisions` records why: `Activate` un-minimises
+*and* focuses in one step, whereas `Restore` would also un-maximise, silently
+dropping a state the user never asked to leave. All of that reasoning is about
+clicking the taskbar button of a minimised window — which no user could ever do.
+
+**The fix is two accessors, not one widened one**, because the narrow question
+does have exactly one legitimate caller:
+
+| | means | asked by |
+|---|---|---|
+| `ManagedWindow::mapped` | the compositor's flag alone; a minimised window **is** mapped | taskbar, Alt+Tab, overview |
+| `ManagedWindow::on_glass()` | `mapped && state != Minimized` — is it *drawn*? | Show Desktop, and nothing else |
+
+`visible_windows()` was renamed `taskbar_windows()` for the set it actually
+returns. "Show Desktop" (Super+D) keeps the narrow question: asking an
+already-minimised window to minimise is a request the compositor must ignore
+and one the user would have to undo twice.
+
+### Why no test caught it: both of them asserted the bug
+
+This is the part worth carrying forward. The behaviour was covered *twice*, and
+both tests pinned the defect as the expectation:
+
+- `a_minimized_window_keeps_its_button_and_an_unmapped_one_does_not` asserted
+  `listed == [WindowId(3)]` — i.e. that the minimised window had **lost** its
+  button. **The body asserts the exact opposite of the name.** Its own leading
+  comment even states the rule correctly ("a minimised window is one the user
+  put away and can click to get back, so it must keep its button") and then the
+  assertion three lines later contradicts it.
+- `the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop`
+  ended `assert!(shell.taskbar_windows().is_empty())` after a minimise, for the
+  same reason.
+
+**Lesson 30: a test whose name promises a behaviour and whose body pins the
+opposite is worse than no test at all.** An absent test leaves a hole that a
+coverage sweep reports. A misnamed one fills the hole with a green result, and
+anyone who greps for the promise — which is exactly what a careful reader does
+before changing that code — finds it and stops looking. Both of these would have
+been reported as `unproved` by `--coverage` had they not existed at all; instead
+they read as two independent confirmations.
+
+The corollary for the reintroduction campaign: **`--coverage` counts names, and
+a name is not a claim.** A test can be "proved" by a defect and still be
+asserting the wrong thing, if the defect was written to match the test rather
+than the intent. This is the one failure mode the harness cannot detect on its
+own, and the only defence is reading the assertion against the *doc comment of
+the code under test* rather than against the test's own name.
+
+**A third test was vacuous in the same area** and is left as it is, noted here:
+`a_click_off_the_calendar_closes_it_without_acting` says "on the taskbar button
+of the minimised window" and calls `taskbar_button_rect(0)` — which, with the
+only window minimised, was the rectangle of a button that was not drawn. It
+passed either way because the calendar-dismiss rule consumes the click whatever
+is underneath. It is now describing something real.
+
+**Tests added:** `a_minimized_window_can_be_got_back_from_its_taskbar_button`
+(the click asks `Activate`), `alt_tab_reaches_a_minimized_window`, and
+`show_desktop_does_not_ask_an_already_minimized_window_to_minimize` (the
+`on_glass` exemption, so a future simplification back to one accessor fails).
+
+## MODULE 83 (lane C, 2026-08-25) — the pointer tranche, and four ways a green test can be empty
+
+**In short:** the shell's pointer-handling test file — 69 tests covering the
+start menu, the taskbar, the calendar popup and the tiling chooser — had never
+had a single one of its tests *proved*. Proving a test means breaking the code
+it is supposed to guard and watching it go red; until that happens, all a green
+test tells you is that it ran. Twenty-two deliberate faults were introduced one
+at a time. Eighteen were caught. The four that were not each pointed at a
+different way a test can be green without being a check, and one of them turned
+out to be guarding code the program could never execute.
+
+**Why this file.** Chosen by measurement rather than by taste: ranking every
+swept file by unproved tests put `calendar.rs` (76 of 114) and `wallpaper.rs`
+(75 of 92) above it numerically, but `pointer_tests.rs` was **69 of 69**, and a
+file that is entirely unproved is a stronger signal than a larger partial hole.
+A partial hole means the defects written so far ran along some dimension and
+missed others; a whole file means nothing has ever been asked of it.
+
+**The first pass, 22 defects:**
+
+```
+22 defects: 18 caught, 4 escaped, 0 never asked, 0 under-caught,
+11 under-declared
+restored: all files match their recorded SHA-256
+```
+
+### Lesson 31: a test that takes its aim from the code it is testing cannot miss
+
+Defect `A` made the start button a fixed size at every display scaling —
+`self.scale(START_BUTTON_WIDTH).min(bar.w)` became
+`START_BUTTON_WIDTH.min(bar.w)`, so on a 200%-scaled display the button is half
+the width of the icon drawn in it. The test named for exactly that:
+
+```rust
+fn the_start_button_is_clickable_where_it_is_drawn_at_every_scale() {
+    for percent in [100, 125, 150, 200] {
+        let mut shell = scaled(percent);
+        let start = shell.start_button_rect();
+        assert_eq!(click_at(&mut shell, start), ShellAction::Consumed);
+        assert!(shell.start_menu_open, "at {percent}% scaling");
+    }
+}
+```
+
+It clicks the middle of `start_button_rect()` and asks whether the start button
+was hit. Shrink the button and the aim shrinks with it: the middle of a small
+rectangle is still inside the small rectangle. **The expectation is computed
+from the function under test, so no value of that function can falsify it.**
+This is lesson 22 (*derived expectation*) again, and the reason it is worth a
+second number is the structural finding underneath it.
+
+**There is no second view of this geometry anywhere in the crate.** `hit_test`
+decides between chrome by calling the accessors —
+`self.start_button_rect().contains(x, y)`, `self.start_menu_row_rect(row)
+.contains(x, y)`, and so on down the list — and `render_taskbar` fills
+`self.start_button_rect()`. Renderer and hit test are not two witnesses that
+could disagree; they are one witness called twice. So the whole
+"clickable-where-it-is-drawn" family of tests can only ever prove that
+`hit_test` *scans in the right order and returns the right variant*, which is
+real but is not what the names say.
+
+The fix is the only independent view available: arithmetic written down in the
+test.
+
+```rust
+let expected = START_BUTTON_WIDTH * f32::from(percent) / 100.0;
+assert!((start.w - expected).abs() < 0.01, ...);
+assert!((start.h - shell.taskbar_thickness()).abs() < 0.01, ...);
+```
+
+Not elegant, and deliberately so — it duplicates `scale()`'s multiplication,
+which is the point. A test that re-derives the answer is a test that agrees
+with the code by construction.
+
+Two other members of the family were checked and are sound.
+`the_clocks_target_covers_the_reading_that_is_drawn_at_every_scaling` reads the
+clock's coordinates **out of the render tree** and compares them with
+`clock_rect()` — two views, because the renderer places the text from
+`bar.w - padding - clock_width()` rather than from the rect.
+`every_power_action_is_clickable_where_it_is_drawn_at_every_scale` makes
+independent claims (the popup is on the screen, the power button is inside the
+menu, every action fits without a scroll). Those two needed nothing.
+
+### Lesson 32: checking that two rows *meet* does not check that they meet *once*
+
+Defect `E` laid the start-menu rows out a pixel short — `row as f32 * height`
+became `row as f32 * (height - 1.0)` — so every row overlaps its neighbour and a
+click near a boundary is ambiguous between two programs. The test is called
+`adjacent_rows_do_not_share_a_pixel` and it escaped.
+
+```rust
+let first = shell.start_menu_row_rect(0);
+let boundary = first.y + first.h;
+assert!(!first.contains(first.x + 4.0, boundary));
+assert!(shell.start_menu_row_rect(1).contains(first.x + 4.0, boundary));
+```
+
+Row 0 is unaffected (`0 * anything` is 0). Row 1 starts one pixel *early*, so it
+still contains the boundary — it simply contains the pixel before it as well.
+Both assertions hold. **The test states that there is no gap and says nothing at
+all about there being no overlap**, which is the half its name is about.
+
+A seam has two failure modes and they need two assertions. The repaired test
+walks the first four rows and, for each pair, checks the pixel *at* the boundary
+belongs to the next row and not this one, the pixel *before* it belongs to this
+row and not the next, and — because two `contains` pairs still admit a pitch
+wrong by less than half a pixel, which walks the last row off the bottom of a
+long menu — that `next.y` equals `this.y + this.h` as arithmetic.
+
+### Lesson 33: a clamp has two ends, and the far one is the end that runs away
+
+Defect `C` deleted the taskbar's height clamp: `height.min(self.screen_height as
+f32)` became `height`. The bar's thickness is what the *user* asked for (48
+logical pixels by default, 96 at 200% scaling), so on a screen shorter than that
+the bar hangs off the bottom — a rectangle that answers `contains` for
+coordinates the display does not have. The test is
+`a_screen_smaller_than_the_taskbar_does_not_invert_the_geometry`, it builds a
+200×20 shell, and it escaped.
+
+It asserts `bar.y == 0.0`. It never mentions `bar.h`. Every other thing it
+checks is derived from `bar.y` — `work_area().3`, the menu height, the visible
+row count — so removing the clamp on the *height* leaves all of them intact.
+
+The property worth stating is not "y is 0" but that the bar sits on the bottom
+edge, `bar.y + bar.h == screen_height`, which is exactly true in both regimes:
+on a normal screen `y = h_screen − h_bar` and on a tiny one `y = 0` with `h`
+clamped. Its sibling `the_taskbar_grows_with_the_scaling_and_takes_the_room_from
+_the_work_area` already asserted it for normal screens; the small-screen test
+now asserts the same thing, which is the shape a boundary test should have —
+*the same invariant, at the boundary*, not a different and weaker one.
+
+### Lesson 34: an unreachable arm looks exactly like a covered one
+
+Defect `S` made the shell leak a click when the button under it had vanished:
+in `handle_press`, the taskbar-button arm's `None => ShellAction::Consumed`
+became `ShellAction::Pass`. There is a test whose whole subject is that case —
+`a_taskbar_button_whose_window_has_gone_swallows_the_click` — and it escaped,
+because **the arm the defect patched cannot execute.**
+
+```rust
+// hit_test
+for index in 0..self.taskbar_windows().len() {
+    if self.taskbar_button_rect(index).contains(x, y) {
+        return Hit::TaskbarButton(index);
+    }
+}
+return Hit::TaskbarPanel;
+
+// handle_press, in the same call, on the same &mut self
+Hit::TaskbarButton(index) => match self.taskbar_windows().get(index).map(|w| w.id) {
+    Some(id) => ...,
+    // The button is gone from under the click -- the window closed between
+    // the frame it was drawn in and this press.
+    None => ShellAction::Consumed,
+}
+```
+
+`hit_test` only ever reports an index it has just found a window for, and
+`handle_press` re-reads the same list in the same call with no opportunity for
+anything to change it — `ShellSession` deliberately dispatches input *before*
+folding in a new window list, which is design-decisions §503 and is why the
+race the comment describes cannot happen. So the `None` arm is dead code with a
+plausible-sounding comment, and the test named after it walks straight past:
+after the window list empties, `hit_test` finds no button at all and returns
+`Hit::TaskbarPanel`, whose arm is a different `Consumed` on a different line.
+
+**The test was green, the behaviour was real, and the route between them was
+imaginary.** That is the trap: an unreachable arm is indistinguishable from a
+covered one in every artefact a test suite produces. Only a defect injected
+*into that arm specifically* can tell them apart — which is what the harness is
+for, and is the second unreachable branch it has surfaced in this file this
+week (the `Activate`-rather-than-`Restore` care in the same match was unreachable
+for as long as minimising a window deleted its taskbar button; see
+`BUG-C-MINIMIZING-A-WINDOW-MADE-IT-UNREACHABLE`).
+
+**The fix is to make the state unrepresentable rather than merely unvisited.**
+`Hit::TaskbarButton` now carries the `WindowId` instead of the slot number:
+
+```rust
+for (index, window) in self.taskbar_windows().iter().enumerate() {
+    if self.taskbar_button_rect(index).contains(x, y) {
+        return Hit::TaskbarButton(window.id);
+    }
+}
+```
+
+The slot is resolved to a window while the list that produced the rectangle is
+still in hand, so there is no second lookup, no `None`, and no arm to write a
+comment about. Deleting the arm and leaving the index would have been the
+smaller change and the wrong one: it leaves the representation able to express
+"a slot with nothing in it" and relies on nobody ever constructing one.
+
+**A tautology fell out with it.** `a_taskbar_button_is_clickable_where_it_is
+_drawn` said:
+
+```rust
+for index in 0..shell.taskbar_windows().len() {
+    let (x, y) = centre(shell.taskbar_button_rect(index));
+    assert_eq!(shell.hit_test(x, y), Hit::TaskbarButton(index));
+}
+```
+
+which compares the slot number with itself. No arrangement of windows can make
+it false — it is lesson 31's derived aim carried all the way to the assertion.
+With ids it becomes a claim about the *pairing*: capture `a`, `b`, `c` from
+`open()` and require the button in slot 0 to name `a`. That is the thing that
+would actually strand a click on the wrong program, and it is now guarded by a
+new defect `W` (every button reports the first window on the bar), which five
+tests catch.
+
+Two consequential renames. `a_taskbar_button_whose_window_has_gone_swallows_the
+_click` became `a_click_where_a_button_used_to_be_is_still_the_taskbars`,
+because the panel is what answers and the button never did; the behaviour it
+checks — bare taskbar keeps a click rather than raising whatever is behind the
+bar — is real and worth a test, and defect `S` was retargeted to the line that
+produces it (`return Hit::TaskbarPanel` → `Hit::Desktop`).
+
+### A test that the bug fix gave teeth to
+
+`a_click_off_the_calendar_closes_it_without_acting` opens a window, minimises
+it, opens the calendar, and clicks the minimised window's taskbar button,
+asserting the click is spent dismissing the popup and the window stays away.
+Before `1b773bb71` the minimised window had *no button*, so the click landed on
+bare taskbar and "stays minimised" was true because nothing could possibly have
+acted on it — vacuous, in the same file and the same area as the two tests that
+asserted the stranded-window bug outright. Fixing the bug gave the test its
+subject back without a line of it changing. Recorded because it is the pleasant
+case of the same phenomenon: **a test's strength depends on the code around it,
+so a test can silently lose its meaning when unrelated code changes, and
+silently regain it.** Nothing in a green suite reports either direction.
+
+### Result
+
+```
+23 defects: 23 caught, 0 escaped, 0 never asked, 0 under-caught,
+0 under-declared
+restored: all files match their recorded SHA-256
+```
+
+Every repair was re-run **in contact** — the defect reintroduced against the
+fixed test — rather than merely re-checked at preflight, because a test that
+has been strengthened is a test whose new assertion has itself never been seen
+to fail.
+
+**Net:** `pointer_tests.rs` goes from **69 of 69 unproved** to **26 of 72** (the
+three extra tests came with the minimised-window fix). Across the swept
+packages, unproved falls **2419 → 2371** and proved rises **17.7 % → 19.3 %**,
+with single-prover tests up 135 → 166. The defect list is **1760 defects, 0
+stale, 0 ambiguous, 0 no-op**. 2882 desktop tests green, clippy `--all-targets`
+clean, `cargo fmt` clean.
+
+**The shape of the four escapes is worth keeping.** None of them was a logic
+defect — the eighteen logic defects (scroll direction, scroll clamping, menu
+category filters, dismissal rules, press/release/right-click routing, window-list
+replacement, layer filtering) were all caught, several by five or more tests.
+All four escapes were **geometry or reachability**: two tests that aimed with
+the code they tested, one that checked half a boundary, one that guarded a
+branch the program cannot enter. A file at 0 % proved is not uniformly weak;
+it is weak in whichever dimension nobody has yet pushed on, and this file's
+weak dimension was *where things are*, not *what happens when you click them*.
+
+## MODULE 84 (lane C, 2026-08-25) — multi-monitor geometry, and why two of the three escapes were the same escape
+
+**In short:** `gui/desktop/src/multimon.rs` is the file that decides where the
+desktop is when more than one screen is plugged in — how the monitors line up
+into one coordinate space, which one a new window opens on, what happens when
+one is unplugged. Twenty-six deliberate faults were introduced into it one at a
+time to find out which of its tests would notice. Twenty-three did. The three
+that got through were all cases where the test suite had never built the *input*
+that makes the code's decision matter, and two of those three were literally the
+same mistake in two places.
+
+**The first pass, 26 defects:**
+
+```
+26 defects: 23 caught, 3 escaped, 0 never asked, 0 under-caught,
+3 under-declared
+restored: all files match their recorded SHA-256
+```
+
+The twenty-three that were caught cover the substance of the module and are
+worth naming, because they are what says the file is in good shape: reversed
+rectangle corners, edge-inclusive `contains`, the desktop bounding box over
+enabled and disabled monitors, rotation swapping width and height, the DPI
+arithmetic in both directions and its divide-by-zero guard, every branch of the
+monitor-drag snapping (threshold equality, best-candidate replacement, both
+axes, snap-by-gap rather than snap-to-edge, disabled monitors not attracting a
+drag), gap detection, horizontal and mirrored arrangement, primary-only mode,
+duplicate hotplug, and unplugging the primary. Several were caught by five or
+more tests.
+
+### Lesson 35: a mitigation is untested until a test creates the hazard it mitigates
+
+Defect `A` reversed the direction of the module's saturating narrow:
+
+```rust
+-    i32::try_from(v).unwrap_or(if v.is_negative() { i32::MIN } else { i32::MAX })
++    i32::try_from(v).unwrap_or(if v.is_negative() { i32::MAX } else { i32::MIN })
+```
+
+`narrow` exists because every rectangle computation in the file widens to `i64`
+first, so that an intermediate cannot wrap; `narrow` is the single place the
+value comes back down, and clamping it the wrong way reintroduces exactly the
+wrap the widening was written to prevent — a monitor dragged off the left edge
+of the coordinate space reappears at the right. It is a two-line function on the
+path of every public constructor in the module, and **not one test noticed.**
+
+Not because the function was unreached — `VirtualRect::from_corners` calls it on
+every construction, and dozens of tests construct rectangles. It was unreached
+*in the branch that matters*. Every test in the file used screen-shaped numbers:
+0, 1920, 3840, −1080. `i32::try_from` succeeds for all of them, so every test
+took the `Ok` path, and the `unwrap_or` — the whole point of the function — was
+dead as far as the suite was concerned.
+
+**This generalises past this file.** Overflow guards, fallbacks, retry paths,
+error branches, `saturating_*`, the `else` of a bounds check: all of them are
+code that only runs on input the rest of the program is trying to avoid, which
+is the same input a test author is not naturally holding in mind while writing
+fixtures. A suite assembled from realistic values tests the realistic path
+exhaustively and the defensive path not at all — and the defensive path is
+precisely the one whose failure mode is silent and weird rather than loud.
+
+The fix tests `narrow` directly at the four boundaries and then again through
+the public surface, so the private helper's contract is pinned and the route
+from a caller to it is pinned too:
+
+```rust
+assert_eq!(narrow(i64::from(i32::MAX) + 1), i32::MAX);
+assert_eq!(narrow(i64::from(i32::MIN) - 1), i32::MIN);
+assert_eq!(narrow(i64::MIN), i32::MIN);
+assert_eq!(narrow(0), 0);
+
+let r = VirtualRect::from_corners(i64::from(i32::MIN) - 5_000, -9, 10, 11);
+assert_eq!(r.x, i32::MIN);   // still on the left
+assert_eq!(r.y, -9);
+```
+
+### Lesson 36: a compound condition is only proved where its operands disagree
+
+Two of the three escapes were this, and finding the same hole twice in one
+module is the reason it gets a number rather than a sentence.
+
+Defect `E` turned an `||` into an `&&`:
+
+```rust
+-        self.w == 0 || self.h == 0     // is_empty
++        self.w == 0 && self.h == 0
+```
+
+Defect `K` deleted a conjunct:
+
+```rust
+-        self.monitors.iter().find(|m| m.primary && m.enabled)
++        self.monitors.iter().find(|m| m.primary)
+```
+
+Different operators, opposite directions, same reason for escaping: **no test
+ever supplied an input on which the two operands differ.** Every existing
+`is_empty` test used a 0×0 rectangle or a fully-sized one, and on those `||` and
+`&&` return the same answer. Every existing layout fixture marked its primary
+monitor enabled, and on those `primary` and `primary && enabled` return the same
+monitor. The tests were not weak in general — they were blind along one specific
+axis, and the axis is stated exactly by the boolean structure of the code.
+
+That gives a mechanical rule that does not require insight into the subject
+matter: **for `A op B`, a suite that never runs a case with `A != B` cannot
+distinguish `&&` from `||` from `A` alone from `B` alone.** It is checkable by
+reading the condition, and it says which fixture is missing rather than merely
+that one is.
+
+Both escapes also had a real user-visible consequence, which is worth recording
+because "a predicate is under-tested" sounds academic until you follow it out:
+
+* A 1920×0 strip is empty — it covers no pixels. Under `&&` it reports itself
+  non-empty, and every caller that guards a division by the desktop's size
+  (scaling a wallpaper, computing what fraction of the desktop a window
+  occupies) divides by zero.
+* A laptop panel that is closed for the evening is still the primary display; the
+  primary flag deliberately survives being switched off, so that it comes back
+  when the lid opens. `suggest_default_monitor` consults `primary()` *before* it
+  considers area, so a disabled primary is not filtered downstream — every new
+  window opens on a screen showing nothing.
+
+The fixes state the disagreeing case directly:
+
+```rust
+assert!(VirtualRect::new(0, 0, 1920, 0).is_empty());
+assert!(VirtualRect::new(0, 0, 0, 1080).is_empty());
+assert!(!VirtualRect::new(0, 0, 1, 1).is_empty());
+```
+
+```rust
+layout.monitors[0].enabled = false;                 // still flagged primary
+assert!(layout.primary().is_none(), "it is showing nothing");
+assert_eq!(WindowPlacement::suggest_default_monitor(&layout), Some(MonitorId(2)));
+layout.monitors[0].enabled = true;                  // and it comes back
+assert_eq!(layout.primary().map(|m| m.id), Some(MonitorId(1)));
+```
+
+### Result
+
+```
+26 defects: 26 caught, 0 escaped, 0 never asked, 0 under-caught,
+0 under-declared
+```
+
+**Contrast with module 83.** That module's escapes were about *reachability* —
+tests aiming with the code they tested, an arm the program could not enter.
+This module's were about *input coverage* — the code was reached, the assertion
+was real, and the value fed in could not tell the right answer from the wrong
+one. Both are invisible in a green suite, but they call for opposite responses:
+83's wanted the code restructured so the untestable state stopped existing;
+84's wanted three more fixtures and no production change at all beyond the two
+lines the defects had touched, which were already correct.
+
+## MODULE 85 (lane C, 2026-08-25) — the rest of multimon: the config file, window placement, and one hole in a round trip
+
+**In short:** the other half of `gui/desktop/src/multimon.rs` — the code that
+saves your monitor arrangement to a file and reads it back, decides where a new
+window opens, and keeps windows from being dragged off the edge of the desktop.
+Twenty-one deliberate faults, twenty caught. The one escape was in the
+save-and-reload code, and it escaped a test that was *specifically written to
+catch exactly that kind of fault* and had already caught three of its siblings.
+The reason is worth a lesson: the test round-tripped two of the four screen
+rotations, and the fault was in one of the other two.
+
+**The pass, 21 defects:**
+
+```
+21 defects: 20 caught, 1 escaped, 0 never asked, 0 under-caught,
+0 under-declared
+```
+
+Caught: every parser fault the module can have (a bare `[` treated as a section
+header, the final section never flushed, a missing resolution, a resolution with
+no `x` in it, a position split on the wrong separator, a disabled monitor written
+out as enabled, the resolution separator itself), all of window placement
+(centring, per-monitor offsets, proportional moves between monitors of different
+sizes), all four edges of the keep-on-screen clamp including the
+smaller-than-the-minimum panic and the no-monitors case, both branches of
+choosing a monitor for a new window, and the manager's demote-the-old-primary,
+scale clamp and hotplug bookkeeping. Ten of the twenty were caught by more than
+one test.
+
+### Lesson 37: a round trip proves the values you round-tripped, and nothing else
+
+`Rotation` is written to the config with `as_str` and read back with
+`from_str_config`. They are two hand-written lists of the same four words, and
+the property that matters is that they are mutual inverses. There is a test for
+exactly that — `config_save_load_roundtrip` — and it works: it caught defect `B`
+(`Left` written as `"right"`), defect `C` (a disabled monitor written out as
+enabled) and defect `D` (the resolution separator changed to a comma).
+
+Defect `A` was the same shape as `B`:
+
+```rust
+-            Self::Inverted => "inverted",
++            Self::Inverted => "normal",
+```
+
+and it escaped, because the fixture the round-trip test uses carries a `Normal`
+monitor and a `Left` one. `Right` and `Inverted` are never written, so nothing
+observes what word they are written as.
+
+**A serialiser is the worst possible case for sampling.** Most functions
+degrade smoothly — get one input wrong and nearby inputs are usually wrong too,
+so a sample stands a fair chance of landing on the fault. A serialiser built
+from a `match` is the opposite: each arm is independent, and a wrong arm is
+wrong for exactly one value and correct for every other. The round trip is a
+strong *property*, and it is easy to read a passing round trip as having proved
+the property rather than four instances of it. It proved two.
+
+**The escape count understates the hole.** The harness staged one defect in this
+family, so the sweep reported one escape — but `Self::Right => "left"` would
+have escaped identically, and so would anything touching `from_str_config`'s
+`"right"` or `"inverted"` arms. Half the enum was unobserved; the sweep could
+only see the half of that half it happened to poke at. Escape counts are a lower
+bound on the size of a hole, never a measurement of it.
+
+**The fix is exhaustive, because for an enum it can be.** This is the one
+situation where "cover the whole input space" is not an aspiration but a loop of
+four iterations, which makes sampling an unforced choice rather than a
+compromise:
+
+```rust
+const ALL: [Rotation; 4] = [Rotation::Normal, Rotation::Left,
+                            Rotation::Right, Rotation::Inverted];
+
+// The collision itself, stated directly rather than inferred from a
+// failed round trip.
+let mut labels: Vec<&str> = ALL.iter().map(|r| r.as_str()).collect();
+let written = labels.len();
+labels.sort_unstable();
+labels.dedup();
+assert_eq!(labels.len(), written, "two rotations share a config label");
+
+for rotation in ALL {
+    // Exhaustiveness guard: a fifth variant stops this match compiling
+    // until it is listed in `ALL` above.
+    match rotation {
+        Rotation::Normal | Rotation::Left | Rotation::Right | Rotation::Inverted => {}
+    }
+    // …save a config carrying `rotation`, load it back, assert it survived.
+}
+```
+
+Two deliberate details. The **label-collision assertion** is separate from the
+round trip because it names the failure directly — "two rotations share a config
+label" is a better diagnostic than "expected Inverted, got Normal", and it holds
+even for a variant that some future refactor stops round-tripping. The
+**exhaustiveness guard** is there because `ALL` is a hand-written list, and a
+hand-written list of variants is precisely the thing that silently falls behind
+the enum; the `match` makes adding a fifth rotation a compile error here rather
+than a fresh gap.
+
+**Where this generalises.** Any `T -> String -> T` pair over a closed set — the
+rotation labels here, and by inspection the same pattern in the theme-mode,
+scaling-mode and panel-position settings elsewhere in the crate — should be
+tested over the whole set, not over a plausible-looking sample. The cost is a
+`for` loop; the thing it buys is that a collision, which is invisible in every
+other artefact, becomes a compile-time-adjacent certainty.
+
+### Result
+
+```
+21 defects: 21 caught, 0 escaped, 0 never asked, 0 under-caught,
+0 under-declared
+```
+
+`multimon.rs` is now 50 of 75 tests proved (it was 0 of 75 before module 84).
+The swept corpus stands at **2943 tests, 2325 unproved — 21.0 % proved, 0
+dangling, 202 single-prover**; the last figure recorded above, before modules
+83–85, was 15.7 %.
+
+---
+
+## `A-KSHELL-TR-ANSWERS-FIVE-QUESTIONS-IT-WAS-NOT-ASKED` (lane A, 2026-08-25) — ✅ **FIXED**
 
 **Where.** `kernel/src/kshell.rs` — `cmd_tr` (~108262), `cmd_tr_input`
 (~108312), `tr_translate` (~108328), `tr_delete` (~108345), `expand_tr_set`
@@ -76833,6 +77558,25 @@ them exits 0.
 | `cat f \| tr a b c d` | expands `b c d` as one set | refuse: extra operand |
 | `tr -d x binaryfile` | prints **nothing at all** | say the file is not text |
 | `tr -d '[:space:]'` | deletes `[`, `:`, `s`, `p`, `a`, `c`, `e`, `]` | delete whitespace |
+
+**Status (2026-08-25): fixed, in four commits, pinned by kshell self-test rungs
+46 and 49–51.** Every row of the table above is gone, and so is the repeat
+construct the table never listed (`[x*n]` / `[x*]`, which used to translate
+using the five literal characters `[`, `x`, `*`, `3`, `]`).
+
+Three deliberate divergences from GNU are recorded rather than hidden, each
+argued at its item below:
+
+| | this `tr` | GNU |
+|---|---|---|
+| `\303` (octal above `\177`) | refused | the byte 0xC3 |
+| `tr 'abc' '[:upper:]'` | accepted, paired positionally | refused as misaligned |
+| `-t` (truncate SET1) | refused | supported |
+
+The first two are in `design-decisions.md` §276. All three run in the safe
+direction: two are *missing* answers where GNU has one, and the third accepts
+a script GNU would have rejected — none of them answers an already-working
+script differently, which is the property this entry was opened about.
 
 **Why, one at a time.**
 
@@ -76900,6 +77644,72 @@ has in this file (`CutSpec` / `CutParseError` / `parse_cut_args`):
    would have to answer questions (is `²` a digit?) that `tr`'s positional
    set-to-set correspondence cannot express anyway. An unrecognised `[:name:]`
    is an error, not a literal.
+
+   **Commits 1 and 2 have landed. Commit 3 split in two**, because the escapes
+   and the bracket constructs turned out to be independent and the escape half
+   was the one with a live wrong answer in it.
+
+   - **3a — escapes: done** (kshell self-test rung 49). `expand_tr_set` now
+     returns a `Result`, which threads into the `TrParseError` path commit 1
+     built. `\a \b \f \v` and octal `\NNN` were all falling into the
+     "escaped character stands for itself" arm, so `tr -d '\a'` deleted every
+     letter `a`, and `tr -d '\0'` — the example this file's own byte-table
+     documentation gives as a common shape — deleted the digit `0`. `\101`
+     was read as the three characters `1`, `0`, `1`.
+
+     **One deliberate divergence from GNU**: an octal escape above `\177` is
+     *refused*. Above that point an octal escape names a byte in every other
+     `tr`, and this one's sets are code points — which is not an oversight but
+     the choice that makes `à-â` a range of three characters rather than of
+     six bytes (commit 2). No single value of `\303` is right under both
+     readings, so answering U+00C3 would be a silent guess of exactly the kind
+     this entry exists to remove. Refusing is a missing answer, which is the
+     acceptable one.
+
+   - **3b — classes and equivalence classes: done** (kshell self-test rung
+     50). `tr_class_members` gives the twelve POSIX names their ASCII members
+     in ascending code-point order, `tr_bracket` reads `[:name:]` and `[=c=]`,
+     and a `[` that begins neither stays a literal `[` — which is the only
+     reading under which `tr -d '[]'` means anything. **Row 6 of the table
+     above is no longer true**: `tr -d '[:space:]'` deletes whitespace.
+
+     The rule that pays for itself here is *not a construct* vs *a malformed
+     construct*. `[abc]` is the first, so it is five literal characters;
+     `[:alhpa:]` is the second — right shape, bad name — so it is an error.
+     Falling back to literals for a typo would quietly delete brackets,
+     colons and the letters of the misspelling, which is the same failure
+     class one level down.
+
+     Two GNU restrictions are kept (only `[:upper:]`/`[:lower:]` in SET2;
+     no `[=c=]` in SET2, since it names a *set* and so names no single
+     replacement). **One is deliberately not**: GNU refuses
+     `tr 'abc' '[:upper:]'` as a "misaligned construct", and we accept it,
+     because a class here is always the same fixed ordered list so the
+     misalignment that check guards against cannot arise. See
+     `design-decisions.md` §276 — the argument is that accepting more than
+     GNU cannot change what an already-working script means, whereas the
+     other two directions can.
+
+   - **3c — the repeat constructs: done** (kshell self-test rung 51). `[c*n]`
+     is n copies of c in either set; `[c*]` is SET2-only and pads SET2 to
+     SET1's length. A count beginning with `0` is octal, as everywhere else,
+     so `[x*010]` is eight copies — rung 51's assertion is built so that a
+     decimal reading would change the answer.
+
+     Two structural notes worth keeping, because they are the reason this did
+     not ride along with 3b. `expand_tr_set`'s second parameter became
+     `Option<usize>` rather than a bool: the pad's width is SET1's length
+     minus *the rest of* SET2, so the flag distinguishing the two sets has to
+     carry that number, and SET1 has to be expanded first. And the pad cannot
+     be resolved where it is read — in `tr abcd '[x*]z'` it is two characters
+     wide, knowable only after the `z` — so it is carried out of the bracket
+     parser and spliced in once the scan finishes.
+
+     `tr_escape` came out of `expand_tr_set`'s scan into its own function at
+     the same time, because the repeated character may itself be escaped and
+     `[\n*2]` has to mean two newlines. The alternative was a second copy of
+     the octal decoder inside the bracket parser, which is how one command
+     comes to disagree with itself.
 
 **Not a regression.** All five have been true since the command was written.
 They are recorded together because they are one command's worth of the same
@@ -76997,3 +77807,697 @@ the migration is another case written against the wrong reference, and every
 `# EXPECT-DIFF` waiver added is a divergence pinned into the corpus as though
 it were behaviour. `sort` is the precedent: eleven option cases sat green for
 weeks while the implementation faithfully copied a Windows porting artifact.
+
+---
+
+## MODULE 86 (lane C, 2026-08-25) -- the calendar's event store, its file format and its reminders
+
+**In short:** modules 68-70 swept how the calendar *draws* itself and module 82
+swept its date arithmetic, so what was left unasked was the bookkeeping
+underneath: adding, finding, updating and deleting events; the query that asks
+"which events fall in this range"; the plain-text save/load format; and the
+whole of the reminder manager (fire, snooze, dismiss). Seventy-six of the file's
+114 tests had never been named by any defect. Twenty-six deliberate faults,
+nineteen caught. **All seven escapes are the same shape**: a comparison the
+suite exercises only with values that sit clearly on one side of it, never
+exactly on it. Closing them found a real bug in production code that no defect
+had modelled.
+
+**The pass, 26 defects:**
+
+```
+26 defects: 19 caught, 7 escaped, 0 never asked, 0 under-caught,
+7 under-declared
+```
+
+Caught: ID assignment, the delete's report of whether it deleted anything, the
+delete's predicate itself, `update_event`'s found/not-found return, `get_event`
+by ID versus by position, the range query with its overlap test removed
+entirely, colour parsing (all three channels), the importer's mid-input record
+flush, the `all_day` flag, the recurrence keyword table, the `color:` key's
+trailing space, the reminder's lead-time direction and magnitude, the
+already-fired filter, the snooze direction, the dismiss loop's `break`,
+`dismiss_all`'s lack of one, `active_count`, and `clear_dismissed`'s polarity.
+
+### Lesson 38: an ordering comparison is only proved by a fixture that sits exactly on it
+
+Three escapes -- `G`, `H` and `P` -- are one line each, and all three are the
+same edit:
+
+```rust
+-        if event.start_timestamp < range_end && event.end_timestamp > range_start {
++        if event.start_timestamp <= range_end && event.end_timestamp >= range_start {
+```
+
+```rust
+-        if occ_start >= range_end {
++        if occ_start > range_end {
+```
+
+The rule is mechanical and worth stating as one: **for a test to distinguish
+`a < b` from `a <= b`, the suite must contain a case where `a == b`.** No amount
+of coverage elsewhere substitutes. A suite in which the two operands are never
+equal cannot see the difference, because on every input it runs the two
+expressions agree.
+
+The calendar's fixtures never produce that equality by accident, and the reason
+is structural rather than careless: events are written at plausible human times
+-- 09:00, 10:00, 14:00, 23:00 -- while every range boundary in the suite is a
+midnight, because `events_for_date` is the only caller and it hands
+`events_for_range` exactly one midnight to the next. Two families of value that
+never collide.
+
+**What that costs a user.** `events_for_date(y, m, d)` calls
+`events_for_range(midnight, next_midnight)`. Under defect `G` or `H` an event
+that ends exactly at midnight is reported on the following day as well, and one
+that begins exactly at midnight is reported on the preceding day -- so every
+all-day event, which is precisely the kind anchored to midnight, is drawn twice.
+Under `P` a daily series is one occurrence too long at its end. None of these
+is a crash; all of them are a calendar that quietly shows the wrong thing.
+
+**The fix is a fixture built around the boundary, not around a plausible day.**
+`the_range_is_half_open_at_both_ends` places four events: one ending exactly at
+`range_start`, one beginning exactly at `range_end`, and two that overlap the
+range by a single second at each end. The two one-second overlappers are the
+part that matters -- without them, a "fix" that made *both* ends exclusive would
+pass, and the test would have traded one wrong answer for another. The
+recurrence sibling, `a_recurring_series_is_half_open_at_the_end_too`, asserts
+the occurrence count *and* separately asserts that `events_for_date` on the
+excluded day still returns 1, so the guard cannot be satisfied by dropping the
+occurrence altogether.
+
+### Lesson 39: "not found" from an empty container is not evidence that lookup works
+
+Defect `E` changed `update_event`'s search:
+
+```rust
+-        if let Some(e) = self.events.iter_mut().find(|e| e.id == id) {
++        if let Some(e) = self.events.iter_mut().find(|e| e.id >= id) {
+```
+
+The suite has a test named for exactly this -- `event_store_update_nonexistent`
+-- and it escaped, because that test asks an **empty** store for ID 999. An
+empty store answers "not found" to every predicate, correct or not; the
+assertion holds for `==`, for `>=`, for `<`, and for a search that always
+returns `None`.
+
+The state that actually distinguishes them is the one a *delete* leaves behind:
+a store that holds ID 2 but not ID 1. `>=` then finds event 2 when asked for
+event 1, and the user's edit lands on the wrong appointment.
+`an_update_to_a_deleted_event_does_not_land_on_a_later_one` builds that state
+and asserts three things -- that the call reports false, that the closure never
+ran at all (via a flag it would have set), and that the surviving event's title
+is untouched -- because "returned false" alone would still pass a version that
+mutated something and then reported failure.
+
+**Generalising:** a negative test over an empty collection is nearly content-free.
+Its assertion is satisfied by the correct implementation, by every incorrect one,
+and by a stub. Negative tests earn their keep only against a populated container
+whose contents are *close* to the thing being looked for.
+
+### Lesson 40: closing an escape is an audit, not a formality
+
+The escape that mattered most was `W`, which deleted a `break`:
+
+```rust
+             if r.event_id == event_id && !r.dismissed {
+                 r.dismissed = true;
+-                break;
+             }
+```
+
+Writing the test to catch it -- "dismissing one reminder must not cancel the
+event's others" -- required stating something the defect did not model: what
+happens on the *second* call. `W` is a statement about one dismissal; the test
+had to be a statement about a sequence, because that is the only way to observe
+that the loop stopped in the right place rather than merely that it stopped.
+
+That extra assertion failed, and it failed against the *unmodified* production
+code. `ReminderManager::dismiss` matched on the event ID alone:
+
+```rust
+-            if r.event_id == event_id {
++            if r.event_id == event_id && !r.dismissed {
+                 r.dismissed = true;
+                 break;
+             }
+```
+
+Without the `!r.dismissed` half of the test the loop stops on the reminder it
+retired *last* time, so every call after the first is a no-op. An event with two
+reminders -- a day-before notice and an hour-before one, which is the ordinary
+configuration -- could never have its second reminder dismissed at all: it fires,
+you wave it away, and it fires again forever. `snooze` already carried the guard;
+`dismiss` did not, and nothing had ever asked. The fix is in production code and
+carries its own defect (module 87, `A`) so the guard is now proved rather than
+merely present.
+
+**The lesson is about the order of operations.** It is tempting to treat a
+closed escape as bookkeeping -- write the assertion the defect implies, watch it
+go red under the patch and green without it, move on. But the assertion a defect
+implies is usually narrower than the assertion a *reader* would want, and the
+gap between them is where untouched bugs live. Write the test the behaviour
+deserves, not the test the defect requires, and run it against unmodified code
+before you run it against the patch.
+
+### The other two escapes are earlier lessons recurring
+
+`O` changed the colour writer's padding:
+
+```rust
+-        text.push_str(&format!("color: {:02X}{:02X}{:02X}\n", r, g, b));
++        text.push_str(&format!("color: {:X}{:X}{:X}\n", r, g, b));
+```
+
+Every colour in every fixture has all three channels at or above `0x10`, so the
+`02` padding never has anything to do. This is **Lesson 35** again -- a
+mitigation is untested until a fixture creates the hazard it mitigates. The
+closing test, `a_dark_colour_keeps_its_leading_zeros_through_the_file`, uses
+`0x0A0B0C` and asserts both the literal text written and that a re-import
+recovers the colour, because the written form is what another program would
+have to read.
+
+`V` and `W` are both **Lesson 36** -- a compound condition whose operands never
+disagree in any fixture. No test in the suite ever dismissed a reminder and then
+snoozed or re-dismissed the same event, so `&& !r.dismissed` was decoration.
+`a_snooze_moves_the_live_reminder_not_the_dismissed_one` creates that
+disagreement directly: it dismisses the day-before notice, snoozes, and asserts
+the *live* reminder is the one that moved, by exactly
+`SnoozeDuration::FiveMinutes.secs()`.
+
+### Result
+
+```
+27 defects: 27 caught, 0 escaped, 0 never asked, 0 under-caught,
+14 under-declared
+```
+
+Twenty-seven rather than twenty-six because the confirmation pass includes
+module 87's single defect, which proves the `dismiss` guard the module forced
+into existence. The fourteen under-declarations were folded back into the
+palette so each defect names every test that catches it.
+
+`gui/desktop/src/calendar.rs` is now 65 of 120 tests never-asked, down from 76 of
+114. The swept corpus stands at **2949 tests, 2314 unproved -- 21.5 % proved, 0
+dangling, 204 single-prover**; the figure recorded above after module 85 was
+21.0 %.
+
+
+## MODULE 87 (lane C, 2026-08-25) -- the keyboard half of the desktop shell
+
+**In short:** module 83 swept `gui/desktop/src/lib.rs`'s *pointer* handling and
+left the keyboard alone, so the chord table in `DesktopAction::for_chord`, the
+Alt-Tab switcher's four stepping methods, `run_desktop_action`'s arms and the
+virtual-desktop bounds had never been asked a question. Fifty-three of the
+file's tests had never been named by any defect. Twenty-six deliberate faults,
+twenty-two caught. Three of the four escapes are one shape -- **the recovery
+code is unreachable from every fixture, because no fixture ever builds the state
+it recovers from** -- and one of those three had a test named for exactly the
+property it failed to prove. The fourth escape is a different and worse thing:
+a test that copies the production expression into its own body.
+
+**The pass, 26 defects:**
+
+```
+26 defects: 22 caught, 4 escaped, 0 never asked, 0 under-caught,
+14 under-declared
+```
+
+Caught: the one-window switcher guard, the opening index, the stepping direction
+both ways, the release path's outcome, Shift+Alt+Tab's binding, Alt+F4's, Super+D's,
+Super+Right's and Super+Down's, the historic loose-chord regression on both
+arrows (the `Super+Right` binding that stopped naming Ctrl and swallowed
+`Ctrl+Super+Right` again), the desktop-switch direction, Escape's binding and its
+arm, Super+D's desktop filter, the maximised-window test, the focused-window
+`?`, the taskbar's desktop filter and its sort order, and the off-by-one past
+the last virtual desktop.
+
+### Lesson 41: a test named for a hazard is not evidence the hazard was built
+
+Two escapes, `E` and `G`, are both in code that exists only to survive a state
+the ordinary path does not produce -- windows closing while the Alt-Tab switcher
+is open, leaving its index past the end of a list that is recomputed on every
+step.
+
+`E` removes the clamp from `prev_alt_tab`:
+
+```rust
+-            self.alt_tab_index = step::wrapping_before(count, self.alt_tab_index.min(last));
++            self.alt_tab_index = step::wrapping_before(count, self.alt_tab_index);
+```
+
+The suite already had a test named for this, written when the clamp was added:
+
+```rust
+    /// Stepping backwards from a stale index must land inside the list, not on
+    /// another index past the end.
+    #[test]
+    fn stepping_backwards_survives_the_windows_closing_underneath_it() {
+        let ids = ...four windows...;
+        shell.start_alt_tab();
+        shell.next_alt_tab();
+        shell.next_alt_tab();
+        for id in &ids[1..] { close(&mut shell, *id); }
+        shell.prev_alt_tab();
+        assert!(shell.alt_tab_index < shell.taskbar_windows().len());
+    }
+```
+
+The assertion is right, the name is right, and the test is green with the clamp
+deleted. `start_alt_tab` on four windows opens on index 2; two `next_alt_tab`
+calls go 3, then **wrap to 0**. So by the time the windows close, the index is
+already 0 -- and 0 is in range for every non-empty list, so `wrapping_before`
+gives the same answer clamped or not. The fixture never produced a stale index
+at all. It is a test about recovering from a hazard that never constructs the
+hazard.
+
+`G` is the same failure in the same subsystem. It moves `finish_alt_tab`'s
+`self.alt_tab_active = false` below the `?` that finds the window:
+
+```rust
+-        self.alt_tab_active = false;
+-        let id = self.taskbar_windows().get(self.alt_tab_index)?.id;
++        let id = self.taskbar_windows().get(self.alt_tab_index)?.id;
++        self.alt_tab_active = false;
+```
+
+Now a switcher whose window closed under it never closes -- the `?` returns
+before the flag is cleared, and the Alt release that would have ended it has
+already been spent, so the overlay sits over every window for the rest of the
+session. `alt_tab_survives_the_windows_closing_underneath_it` reaches
+`finish_alt_tab` through `next_alt_tab`, which wraps and therefore always lands
+in range, so the `?` never fires and the two orderings are the same code.
+
+**The remedy is one line, and it is not another assertion at the end.** It is an
+assertion in the *middle*, that the precondition of the hazard holds before the
+recovery is exercised. Both closing tests carry one:
+
+```rust
+        shell.start_alt_tab();
+        shell.next_alt_tab();
+        assert_eq!(shell.alt_tab_index, 3, "the last row, not a wrapped one");
+```
+
+Without it the fixture's arithmetic is invisible: nothing in the test says which
+index it is recovering *from*, so a change to `start_alt_tab`'s opening index --
+which module 87's own defect `C` makes -- silently turns the test back into one
+that proves nothing. With it, the test fails loudly instead. This generalises:
+**whenever a test is written for a failure path, assert that the failure state
+was reached.** The assertion costs a line and is the only thing standing between
+a regression test and a tautology.
+
+### Lesson 42: a test that re-derives the answer proves its own copy
+
+Escape `T` widens the predicate `run_desktop_action` uses for Super+D:
+
+```rust
+-                    .filter(|w| w.on_glass() && w.desktop == self.current_desktop)
++                    .filter(|w| w.mapped && w.desktop == self.current_desktop)
+```
+
+`on_glass()` means mapped *and not minimised*, so the widened version asks a
+window that is already minimised to minimise again -- a request the compositor
+must ignore and, worse, one the user has to undo twice to get back where they
+were. There is a test named for exactly this, `show_desktop_does_not_ask_an_
+already_minimized_window_to_minimize`, with a comment explaining why the narrow
+predicate is the right one. It was green.
+
+Its body was:
+
+```rust
+    let asked: Vec<WindowId> = shell
+        .windows
+        .values()
+        .filter(|w| w.on_glass() && w.desktop == shell.current_desktop)
+        .map(|w| w.id)
+        .collect();
+    assert_eq!(asked, [still_here], "...");
+```
+
+It never pressed Super+D. It copied the production filter into the test body and
+asserted against its own copy -- so it proved the copy, and the copy was not
+changed by the defect. This is a worse failure than an untested branch, and it
+is worth being precise about why: **an untested branch is invisible, whereas a
+test like this is visibly wrong in the other direction.** It appears in the
+coverage listing, it carries the right name, it has a comment arguing for the
+right design, and it will be counted by anyone auditing whether the property is
+covered. It is coverage-shaped and proves nothing.
+
+The rewrite presses the chord and reads what the shell asked for:
+
+```rust
+    let outcome = shell.handle_hotkey(&super_d);
+    assert!(outcome.consumed);
+    let asked: Vec<WindowId> = outcome.requests.iter().map(...).collect();
+    assert_eq!(asked, [still_here], "...");
+```
+
+Note that grep is a poor detector for this. The copied line is not literally
+identical to the production one (`self.current_desktop` versus
+`shell.current_desktop`), it sits in a different file from the code it
+duplicates, and there is nothing syntactically wrong with a test that filters a
+collection -- four other tests in this crate do it legitimately. The
+reintroduction sweep is the detector, because the sweep asks the only question
+that distinguishes the two cases: *does changing the production code change the
+test's answer?* A test that re-derives the answer says no, by construction.
+
+### Lesson 43: a name containing "only" is a universal claim, and needs a negative case
+
+Escape `H` drops the key from the release guard:
+
+```rust
+-            if (key.key == Key::LeftAlt || key.key == Key::RightAlt) && self.alt_tab_active {
++            if self.alt_tab_active {
+```
+
+Alt+Tab is *held*: Alt stays down while Tab is pressed and released, over and
+over, and the switch is committed by the **Alt** release. Under the defect the
+first Tab release commits instead, so every use of Alt+Tab lands on the second
+window and the user can never reach the third.
+
+Exactly one test in the crate released a key at all:
+`a_key_release_only_ends_the_window_switcher`. It releases LeftAlt with no
+switcher open (nothing happens), then opens the switcher and releases LeftAlt
+(it finishes). Both halves are right. Neither can see the defect, because the
+only key either half releases is the one key for which naming Alt and not naming
+it agree.
+
+The name says *only*. That is a claim about every key, and the body is two
+examples of the one key the claim exempts. The general form is worth stating:
+**a test whose name contains "only", "just", "never" or "nothing else" is
+asserting a universal, and a suite of positive examples cannot discharge one.**
+The negative case is the whole content of the claim. The closing test supplies
+it -- release Tab, assert the switcher is still up and has not moved -- and then
+releases Alt as well, so it says what the rule *is* and not merely what it is
+not.
+
+### Result
+
+```
+26 defects: 26 caught, 0 escaped, 0 never asked, 0 under-caught, 4 under-declared
+```
+
+Four closing tests: three new ones in `gui/desktop/src/lib.rs`
+(`stepping_backwards_from_the_end_lands_in_the_list_not_past_it`,
+`a_switcher_whose_window_closed_under_it_still_closes`,
+`releasing_tab_does_not_end_the_window_switcher`) and one **rewrite** in
+`gui/desktop/src/pointer_tests.rs`. The rewrite is worth flagging as such: the
+count of tests did not go up, and the honest description of the change is not
+"added coverage" but "replaced a test that proved nothing with one that proves
+the thing its name always claimed". All eighteen under-declared catchers across
+the two passes were folded back into the palette, which is what dropped the
+corpus's single-prover count by twenty.
+
+Unlike module 86, no production bug fell out: every defect here was a fault the
+sweep invented, and the shell's keyboard handling was correct as written. What
+was wrong was the evidence for it.
+
+`gui/desktop/src/lib.rs` is now 33 of 64 tests never-asked, down from 53 of 61.
+The swept corpus stands at **2952 tests, 2310 unproved -- 21.7 % proved, 0
+dangling, 184 single-prover**; the figures recorded above after module 86 were
+21.5 % and 204.
+
+### Follow-on: what lesson 42 looks like when it is mechanical
+
+Lesson 42 came out of one test that copied a production predicate. The obvious
+next question is whether that was a one-off or a class, so lane C went looking
+for other places where a test holds its own copy of something production owns.
+
+The search found two shapes, and they are worth keeping apart because only one
+of them can be automated.
+
+**The shape a machine can find** is a duplicated *list*. Three desktop test
+modules each declared `const OFFERED: [AccentColor; 14] = [...]`, byte for byte
+the body of `AccentColor::presets()`, and looped over the copy. Nothing made the
+copies follow the original; a fifteenth accent would have been offered by the
+settings panel and walked by no test. Worse, `test_accent_color_count` pins
+`presets().len() == 14` *next to the list*, which reads as the palette being
+guarded and is exactly why nobody noticed the four loops that were not. The fix
+was structural rather than another test: delete the three copies and walk
+`AccentColor::presets()` directly, so the divergence has nowhere to happen.
+
+The same shape in the general case is `const ALL: [Foo; N]` -- a declaration
+that claims to name every variant of an enum, which the language does not
+check. Add a variant and the array is still a valid array of N `Foo`s; it has
+simply stopped being all of them, and the loop that walks it silently stops
+asking about one case. `scripts/check-variant-lists.py` now audits every such
+list in lane C against its enum. Verdict today: **59 exhaustive lists, 0 out of
+step** -- so this is a hazard rather than a live bug, which is the result worth
+having but only because it was checked rather than assumed. The script carries
+a `--self-test` because a miscounting checker reports a clean tree exactly the
+way a clean tree does, and that is not hypothetical: its first version reported
+`CursorShape` as 12 of its 13 variants. `requests/c-a-wire-the-variant-list-gate-into-boot-test.md`
+asks lane A to ring it from `boot-test.sh`, where its six siblings live.
+
+Two notes that will save the next reader some work. First, the in-language fix
+does not exist yet: `const _: () = assert!(Foo::ALL.len() ==
+core::mem::variant_count::<Foo>())` is `E0658` on this tree's host toolchain
+(stable 1.95.0, checked directly rather than assumed), and no `gui/` or `apps/`
+crate carries a `#![feature]` gate. If it stabilises, the script should be
+deleted in favour of the assertion -- an error *at* the list beats a report
+*about* the list. Second, an exhaustive `match` elsewhere in the crate is not
+the guard it looks like: it does break the build when a variant is added, but
+it breaks it in `label()`, the author fixes it there, the compiler goes quiet,
+and the list is still the old length.
+
+**The shape a machine cannot find** is the original one: a copied *expression*.
+`show_desktop_does_not_ask_an_already_minimized_window_to_minimize` did not
+contain a literal copy -- it was `self.current_desktop` in production against
+`shell.current_desktop` in the test -- so grep was never going to find it, and
+a stricter grep would only have produced false positives to wade through. The
+detector for that shape is the sweep itself, which asks the only question that
+distinguishes a copy from a check: *does changing the production code change
+the test's answer?* No separate audit is warranted, because the audit already
+runs, module by module.
+
+That is the audit closed. One duplicated list removed, one class of duplicated
+list gated, and the remaining class handed back to the instrument that was
+already detecting it.
+
+### Lesson 44: check what the compiler catches by breaking it and reading the line number
+
+The audit above turned up a third shape, and it is the one worth generalising,
+because it is not about tests at all.
+
+`Palette::roles()` in `gui/appearance/src/lib.rs` returns
+`[(&'static str, Color); 21]` -- one entry per colour field of `Palette` -- and
+three sweeps consume it: the two-mode divergence check, the 4.5:1 legibility
+floor, and the shell's conversion sweep that asserts a module draws only from
+the palette it was handed. Its doc comment said:
+
+> The array's length is part of the signature so that adding a field without
+> adding it here fails to compile.
+
+That is false, and it had been false for as long as the comment existed. An
+array of 21 entries is a valid `[_; 21]` however many fields the struct has;
+the length in the signature only catches the *reverse* mistake, an entry added
+to the array without the count being changed. Adding a twenty-second `Color` to
+`Palette` produces exactly two errors, both `E0063`, both at the struct literals
+in `for_mode` -- and none at `roles`. So the compiler does stop the commit, just
+in the wrong place: the author fills in the two literals, the compiler falls
+silent, and the new colour is in the palette and in none of the sweeps.
+
+The field the crate added most recently, `teal`, carries a doc comment that says
+"a sweep that silently skips a field is the failure those sweeps exist to
+catch." The hazard was understood, written down next to the code, and still not
+guarded -- because everyone including its author believed the sentence in
+`roles`.
+
+**The lesson is the method, not the bug.** Twice in one session a claim about
+what the compiler enforces was settled by breaking the code and reading the
+error's line number rather than by reasoning about it, and reasoning would have
+been wrong both times, in opposite directions:
+
+| Claim | Reasoned | Measured |
+|---|---|---|
+| "the array length makes a new field fail to compile *here*" | plausible | false -- E0063 at `for_mode`, nothing at `roles` |
+| "an exhaustive `match` elsewhere means a stale `ALL` list gets noticed" | plausible | true that it errors, false that it errors anywhere useful |
+| "`assert!(ALL.len() == variant_count::<T>())` would fix it" | plausible | `E0658`, still unstable on 1.95.0 |
+
+The measurement costs one `cargo check` against a deliberately broken tree,
+which is under a minute, and it is the only thing that distinguishes "the
+compiler is watching this" from "the compiler is watching something nearby."
+Where a comment claims a compile-time guarantee, break it once and confirm the
+error lands where the comment says it does. If it lands somewhere else, the
+comment is describing a different guarantee than the one the reader will assume.
+
+**A guarantee documented but not enforced is worse than none, because it is the
+reason nobody looks.** An unguarded list at least looks unguarded.
+
+The remedy here was in-language and available on stable: a struct pattern with
+no `..` is exhaustive, so `roles` now destructures `*self` and a new field is
+`E0027: pattern does not mention field` at the destructure itself. The two
+non-colour fields are named and discarded (`panel_alpha: _, light: _`) rather
+than swept up by `..`, so the decision that they are not roles is on the record
+and a future non-colour cannot slip in behind them. Prefer this to a check
+script wherever the shape allows it -- an error at the omission beats a report
+about it, which is the same reason `check-variant-lists.py` documents its own
+deletion for the day `variant_count` stabilises.
+
+#### What the destructure does and does not buy (measured, same method)
+
+Applying the remedy a third time -- to `DynamicTheme::schedule` in
+`gui/desktop/src/wallpaper.rs` -- turned up its limit, by the same means: add a
+sixth phase field, build, read the errors.
+
+`E0027` fires on a field the pattern does not *mention*. Mention it and then
+not use it and the result is `unused_variables`, a **warning**. So the
+guarantee is precisely "the author is brought to this line", not "the author
+does the right thing once here" -- a distinction worth writing into the comment,
+because the stronger claim is exactly the kind of overstatement this lesson is
+about. It still holds in practice on this tree, since the finish checklist
+requires a warning-free build, but that is a project convention doing the work,
+not the compiler, and the two should not be described as if they were the same.
+
+The `schedule` case is also the first of the three that was a **production**
+defect rather than a test one. `schedule` is the only place that says what hour
+each phase begins, so a phase omitted from it is a colour that is set, saved,
+round-tripped through the config, and never painted -- no test involved. The
+lesson-42 audit found this shape by looking for stale *test* lists; that it also
+occurs in production code is the more useful half of the finding, and the reason
+to look at every hand-written list over a struct's fields rather than only the
+ones under `#[cfg(test)]`.
+
+The chain the destructure starts there is worth recording as the shape to aim
+for, because each link is a compile error and the last one lands on the safety
+property: `E0027` at the destructure -> the array grows and no longer matches
+its `[...; PHASE_COUNT]` return type (`E0308`) -> `PHASE_COUNT` is bumped ->
+`from_palette`'s parameter and the test's hand-written `SKY` exemption table
+both stop compiling. `SKY` is the membership sweep's one exemption from "the
+desktop paints only palette roles", so the phase cannot arrive as a colour the
+sweep was never told about. A single `E0027` is a nudge; a chain that terminates
+at the invariant is a guarantee.
+
+---
+
+## `A-KSHELL-SED-GUESSES-WHICH-WORD-IS-THE-SCRIPT` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25 (`ba47c7086`)
+
+**Where.** `kernel/src/kshell.rs` — `classify_sed_args` (~123228).
+
+**Correction to this entry before the fix is described.** Row 3 of the table
+below, as originally written, was **wrong about GNU**, and the correction is
+worth more than the row was. It claimed `sed -n stuff.txt other.txt` should
+answer `no command specified`. It should not: GNU takes the first operand as
+the script *unconditionally*, so GNU also compiles `stuff.txt` as an `s`
+command and also applies it to `other.txt`. That example is a case where the
+shape guess and the positional rule happen to **agree**, not a divergence —
+picked, embarrassingly, because it reads alarmingly rather than because it was
+checked. The row is replaced below with the case that is genuinely wrong, which
+is the same one reversed: `sed -i notes.txt 2d`.
+
+The lesson is the entry's own subject matter turned on itself. "It starts with
+`s`, so it is a script" and "it looks like a divergence, so it is one" are the
+same move.
+
+**What.** `sed` has no option parser. It has a `match` over three known flags
+and, for everything else, a guess about *shape*:
+
+```rust
+s if s.starts_with('s') || s.starts_with('/') || s.ends_with('d') => {
+    if out.scripts.is_empty() { /* it's the script */ } else { /* it's a file */ }
+}
+_ => out.files.push(part.clone()),
+```
+
+Three wrong answers fall out of that, all of them exit-0 or worse.
+
+| typed | what it does | what it should do |
+|---|---|---|
+| `sed -e 's/a/b/' -e` | runs the first expression, exit 0 | `-e option requires an argument` |
+| `sed -q -i 's/a/b/' f` | **rewrites `f`**, complains that `-q` is not a file | refuse the option and touch nothing |
+| `sed -i notes.txt 2d` | takes `2d` as the script (it ends in `d`) and **rewrites `notes.txt`** | `notes.txt` is the script; `unknown command`, edit nothing |
+| `sed -i.bak 's/a/b/' f` | ignores `.bak`, treats it as plain `-i` | either honour the suffix or refuse; never silently drop it |
+
+**Why, one at a time.**
+
+1. **`-e` with no argument is dropped in silence.** The arm advances the index
+   and pushes only `if let Some(script) = parts.get(i)`. With nothing there it
+   pushes nothing and the loop moves on. `sed -e` *alone* is caught downstream
+   by the "no command specified" check, which is what has hidden this: the
+   failing case is `-e` given **after** a good expression, where the script list
+   is already non-empty. The user wrote an expression they meant to supply, got
+   a partial run, and got exit 0 to say it went fine.
+
+2. **An unrecognised option becomes a file operand.** There is no rejection path
+   at all, so `-q` falls to the catch-all and is opened as a file. That produces
+   an error — but the *wrong* one, and, decisively, **not before the other files
+   are processed**: the loop in `cmd_sed` `continue`s past a file it cannot read.
+   Under `-i` that means an unrecognised option still rewrites every file that
+   does exist. GNU refuses the invocation and edits nothing. This is the one with
+   a real cost attached: the edit is not recoverable.
+
+3. **A file and a script can swap places.** The shape guess has no notion of
+   position, so which operand becomes the script depends on how the two words
+   are *spelled*, not on which came first. `sed -i notes.txt 2d` is the case
+   that costs something: `2d` ends in `d`, so it wins the script slot, and
+   `notes.txt` — the word GNU would have compiled and choked on — becomes a
+   file that `-i` then rewrites. The user mistyped the argument order and got a
+   successful in-place edit of the file they were describing.
+
+   The reverse ordering is where the guess is accidentally right, which is why
+   it survived: `sed -n stuff.txt other.txt` takes `stuff.txt` as the script,
+   and so does GNU. Agreeing in the common ordering is exactly what let the
+   disagreement in the uncommon one go unnoticed.
+
+   The `-f` case is the same defect without the reordering: `sed -f script.sed
+   f` sends `-f` to the file list and `script.sed` to the script slot.
+
+**What the proper fix looks like.** The same shape `parse_tr_args` already has,
+which is the pattern this file has been converging on:
+
+- A real flag loop: `--` ends the options, `--long` forms named, short options
+  bundled (`-ni` is `-n -i`), and **anything unrecognised is an error** rather
+  than data. `-E`/`-r`, `-f`, `-s` and `-z` are real `sed` options this shell
+  does not implement, and each should be refused by name — with, for `-E`, the
+  note that the dialect is BRE (`sed_dialect_note` already has the wording).
+- `-e` requires its argument. `MissingArgument('e')`.
+- **The script is positional, not shape-matched**: if no `-e` was given, the
+  first non-flag operand is the script and every later one is a file. If `-e`
+  *was* given, every non-flag operand is a file. That is POSIX's rule and GNU's,
+  and it removes the guess entirely.
+- Errors carried out as a `SedArgsError` enum with a `report()`, the way
+  `TrParseError` and `SedParseError` are, so `cmd_sed` and `cmd_sed_input`
+  cannot drift apart on which ones they mention.
+
+**Not a regression.** All of them have been true since the command was written.
+Item 2 is the one to fix first if they are ever split up, because it is the only
+one that destroys data.
+
+**Related.** Same root as
+`TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV`: `sed` is already on
+`command_parses_own_quotes`, so the *words* are right — what is missing is the
+grammar over them.
+
+### Fixed — `ba47c7086`
+
+`classify_sed_args` returns `Result<SedArgs, SedArgsError>` and chooses by
+position. Options first, `--` ends them, short options bundle, `-e`/`-i` take
+attached or following arguments, long options take `=VALUE` or a following
+word — and then, **if and only if no `-e` was given**, the first operand is the
+script and every operand after it is a file.
+
+| was | is |
+|---|---|
+| unknown short option → file operand | `sed: invalid option -- 'q'`, exit 1, nothing opened |
+| unknown long option → file operand | `sed: unrecognized option '--quite'`, exit 1 |
+| `-e` with nothing after it → dropped | `sed: option requires an argument -- 'e'` |
+| `-i.bak` → suffix discarded | refused by name, with what the suffix would have meant |
+| `-E`/`-r`, `-f`, `-s`, `-z` → file operands | refused each with its own reason |
+| script chosen by first letter | first operand, or every operand is a file under `-e` |
+
+`-E` is worth singling out: ignoring it is not a missing feature but a wrong
+answer, because these patterns are BREs, so `a+` silently stops meaning
+"one or more `a`" and starts meaning "an `a` followed by a plus sign" — and
+matches things. Refusing says so.
+
+**What it did not fix.** Nothing about the *script* grammar. A bare `p` is
+still `unknown command` and `s///p` is still an unknown flag; the parser only
+decides which word is handed to `parse_sed_command`. For kshell's current
+grammar every *valid* script also satisfied the old shape test, so the payoff
+here is entirely in the option loop and the reorder case — which is why rung 53
+tests those and not new scripts.
+
+**Covered by** rung 53, `sed takes its script by position, not by shape`. The
+reorder case is run against a real file in `/tmp` and the file's bytes are
+compared afterwards, because "refused" and "rewrote it anyway" are
+indistinguishable from the diagnostic alone.

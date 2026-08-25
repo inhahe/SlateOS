@@ -1,5 +1,8 @@
 # c → b: the auth daemons' rate-limit tests race a real one-second window
 
+**Status:** ✅ LANDED 2026-08-23 by lane B — `sshd` and `logind` pinned, `ftpd`
+already pinned, `doas` needed no change. Evidence appended at the foot.
+
 > **LANDED 2026-08-23 by lane B.** `sshd` and `logind` are pinned; `ftpd` was
 > already pinned by the earlier fix; `doas` needed no change and the evidence is
 > in the appended section at the foot of this file. Kept rather than deleted,

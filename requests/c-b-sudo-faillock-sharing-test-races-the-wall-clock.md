@@ -1,5 +1,8 @@
 # c → b: `sudo_honours_a_delay_earned_at_another_prompt` races the wall clock
 
+**Status:** ✅ LANDED 2026-08-23 by lane B — clock pinned in `c00152268`, scratch
+path and cleanup closed on 2026-08-23. Details appended at the foot.
+
 > **LANDED by lane B.** The clock was pinned in `c00152268` (2026-08-22); the
 > two secondary points — the fixed scratch path and the missing cleanup — were
 > closed on 2026-08-23 by moving the test to `ScratchDir`, and the assertion was

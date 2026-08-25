@@ -43043,6 +43043,119 @@ All three are cheap to revisit: each is a single branch in `DeadKeys::press`
 with a test named after the rule. None is persisted, none crosses the wire, and
 none is visible to a client — the client sees only the resulting text.
 
+## 552. A mode-set the kernel refuses does not decline the display; the page-flip that follows decides
+
+**Date:** 2026-08-25
+**Decided by:** Claude (autonomous)
+
+**In short:** To put a picture on a monitor the compositor has to tell the
+graphics card which timing to run — the resolution and refresh rate — before it
+hands over the first image. It never used to do this, because the kernel used
+to fill the gap in on our behalf; the kernel stopped doing that, so a first
+image on some cards now fails and the screen stays black. The fix is to send
+the missing instruction. The question this entry settles is the smaller one:
+what to do when *that* instruction is itself refused — give up on the monitor,
+or carry on and let the image we send next be the judge. We carry on.
+
+Lane A's `requests/a-c-drm-setcrtc-has-landed-and-page-flip-is-now-strict.md`
+records the kernel side. In its terms: `DrmDevice::page_flip` now resolves the
+CRTC, requires it to carry a programmed mode, and requires the framebuffer's
+dimensions to equal that mode's — all above the backend dispatch. The ATI
+backend's implicit mode-set inside the flip, which is what used to bring an
+unprogrammed CRTC up, is gone. `gui/compositor/src/present/drm.rs` therefore
+issues `DRM_IOCTL_MODE_SETCRTC` once per head, in `make_head`, between
+registering the second framebuffer and the first flip.
+
+### The decision: `set_mode`'s `Result` is discarded
+
+*What changes:* a card whose mode-set fails but whose display is already timed
+correctly keeps working, and reports no error. A card whose mode-set fails and
+which is *not* already timed reports `Ioctl { request: PAGE_FLIP, errno:
+EINVAL }` — naming the flip, not the mode-set that actually went wrong.
+
+**The argument for it.** Nothing can hide behind the discarded error, because
+the flip immediately afterwards is a strictly stronger test of the same
+property. Exactly two things can follow a failed mode-set:
+
+* the CRTC is already timed at the size we allocated — the mode-set was
+  redundant, which is the normal case on `limine-fb` and `virtio-gpu`, where
+  the only mode a connector advertises is the one it is already in — and the
+  flip succeeds, correctly; or
+* it is not — and the flip is refused, because the kernel's new checks are
+  precisely "has a mode" and "the mode is the framebuffer's size". The head is
+  then dropped through the path that already exists for a head whose first flip
+  fails.
+
+There is no third case. A mode-set that "half worked" is not a state the ioctl
+can leave behind: the kernel updates `crtc.mode` only after the backend reports
+success.
+
+**The argument against it, and why it loses.** Diagnosis gets worse: the errno
+the user sees names `PAGE_FLIP` when the real refusal was the `SETCRTC` a
+moment earlier, so a bug report points one ioctl too late. That is a real cost
+and it is the reason this is a decision rather than an obvious call.
+
+It loses to a concrete regression on the other side. Treating the mode-set as
+fatal declines the connector on any kernel that does not implement `SETCRTC`
+at all — an older SlateOS, or any other DRM implementation the compositor is
+pointed at — and declining the connector there blanks a screen that works
+today. Trading a working display for a better error message is the wrong way
+round, and the better error message is available anyway from the ioctl log.
+
+### The strict fake immediately found a second bug
+
+Making `FakeCard` strict was meant to give the new tests teeth. It also turned
+two *existing*, previously-green tests red, and both were right to go red.
+
+`resolve_crtc` prefers the CRTC a connector is already routed to — the one the
+firmware lit at boot — and returned it without consulting the encoder's
+`possible_crtcs`. A card can report a binding its own bitmask forbids, and until
+now that was harmless: the CRTC really was scanning out, so a flip against it
+worked. Under the new kernel it is not harmless, because `SETCRTC` refuses a
+connector that is not routable to the named CRTC. The compositor would have
+picked a CRTC it could never program, failed the mode-set, failed the flip, and
+dropped a head that a legal CRTC would have driven perfectly. So the boot-bound
+preference now applies only to CRTCs the bitmask agrees with — the same
+reasoning that already declines to believe a binding naming a CRTC the card does
+not list at all. The two tests' fixtures were self-contradictory cards; they
+were rewritten to be internally consistent, and the contradiction they used to
+contain became a test of its own.
+
+This is the argument for strict doubles in one paragraph: the bug was not in the
+code the change touched, and no amount of care writing the mode-set would have
+surfaced it.
+
+### Two smaller calls made along the way
+
+* **The mode-set names the back buffer, not the front one.** A head starts at
+  `front: 1`, meaning buffer 1 is notionally on screen and the first composed
+  frame is drawn into buffer 0. Naming buffer 1 keeps that story true and makes
+  the first flip a genuine change. Naming buffer 0 would have the CRTC scanning
+  out the buffer the compositor is about to draw into, which is a tear on the
+  very first frame — invisible in practice, because both buffers are zeroed,
+  but wrong in a way that would become visible the moment anything pre-filled
+  them.
+* **The test double was made strict rather than the production code tested
+  against a lenient one.** `FakeCard` now refuses a flip on a CRTC with no
+  mode, and refuses a mode-set naming a mode the connector never advertised.
+  Without that, every mode-set test would have been asserting that we *send*
+  an ioctl, not that sending it is *necessary* — and deleting the `set_mode`
+  call would have left the suite green. The cost is that the fake now has to
+  track programmed modes and be kept in step with the kernel's checks; the
+  benefit is that it fails the way the kernel fails.
+
+### What is still not done
+
+Changing to a mode *other* than the display's native one. `set_mode` is called
+with the mode `best_mode` chose from the connector's advertised list, and
+nothing above this module can ask for a different one. Lane A reports that
+`limine-fb` and `virtio-gpu` refuse a retime outright (`TD-DRM-VIRTIO-GPU-CANNOT-RETIME`)
+while ATI can now do it, so `TD-COMPOSITOR-CANNOT-CHANGE-MODE` is half-open
+rather than closed. The sequencing for when it is done is already known and
+recorded there: allocate the new pair of buffers at the new size *first*, then
+`SETCRTC` to adopt them, then release the old pair — because `SETCRTC` refuses
+a framebuffer smaller than the mode.
+
 ## §379 — `sed --debug` reproduces GNU's format exactly, but not GNU's sign-extended octal for high bytes
 
 **Date:** 2026-08-24
@@ -43612,3 +43725,100 @@ directory.
   Rejected: it is a file whose whole shape says "source me", sitting in the
   directory where new harnesses are written. Prose that is still worth having is
   worth having in the file that is actually sourced.
+
+---
+
+## 276. `tr`'s character classes are ASCII-only and code-point-ordered -- and this `tr` accepts a class in SET2 that GNU refuses
+
+**Date:** 2026-08-25
+**Decided by:** Claude (autonomous)
+**Zone:** shell (`kernel/src/kshell.rs`)
+
+**In short:** `tr` is the command that swaps or deletes characters --
+`tr a-z A-Z` upper-cases text. POSIX lets you name a whole group of characters
+instead of listing them: `[:digit:]` means "the digits", `[:space:]` means "the
+whitespace". Our `tr` did not understand that spelling at all, so
+`tr -d '[:space:]'` deleted the letters of the word *space* and left the actual
+whitespace untouched -- a wrong answer that exits 0. Implementing it forces two
+questions that POSIX deliberately leaves to the locale: *which* characters are
+in a class, and in *what order*. This entry records that both answers are the C
+locale's -- ASCII only, ascending code point -- and that one GNU restriction is
+deliberately not copied.
+
+### The decision
+
+1. **A class contains only ASCII members** (`tr_class_members`, a filter over
+   `0u8..=0x7f`). `[:alpha:]` is 52 letters, not every letter in Unicode.
+2. **Members are produced in ascending code-point order**, and that order is
+   part of the contract, not an implementation detail.
+3. **`[=c=]`, the equivalence class, expands to `c` and nothing else** -- which
+   is exactly what it means in the C locale.
+4. **A class *is* accepted in SET2 in cases GNU rejects.** GNU refuses
+   `tr 'abc' '[:upper:]'` with *"misaligned [:upper:] construct"* unless SET1 is
+   the matching case class; we accept any SET1 and pair positionally.
+
+### Why ASCII-only
+
+- **It is what GNU does in the C locale**, which is the locale this shell has.
+  A script that works under `LC_ALL=C` -- the way portable scripts are written
+  -- gets the same answer here.
+- **It keeps a class inside `tr_apply`'s byte-clean fast path.** That path
+  builds a 256-entry byte table whenever every member of SET1 is ASCII, and is
+  provably identical to the character path because UTF-8 is self-synchronising:
+  no ASCII byte ever occurs inside a multi-byte sequence. A Unicode
+  `[:alpha:]` would force every input through a decoder, and would make
+  undecodable input -- which `tr` is otherwise defined on -- an error.
+- **A Unicode reading would have to answer a question `tr` cannot express.**
+  `tr '[:lower:]' '[:upper:]'` is not "upper-case the text"; it is a
+  *positional* correspondence between two lists, member *n* of the first
+  mapping to member *n* of the second. That is well defined for 26 and 26. It
+  is not well defined for the lowercase and uppercase halves of Unicode, which
+  are neither the same size nor in any useful position-for-position
+  correspondence. An ASCII class is the reading under which the command's own
+  semantics work at all.
+
+Ordering follows from the same argument: ascending code point is what makes
+`[:lower:]`'s 26th member `z` and `[:upper:]`'s 26th member `Z`. Any other
+order silently re-keys the map.
+
+### Why accept what GNU refuses
+
+GNU's "misaligned construct" check exists to catch a script whose two sets do
+not line up. Ours cannot suffer the failure that check is guarding against:
+a class here is always exactly the same fixed, ordered list, so the positional
+pairing is always well defined -- `tr 'abc' '[:upper:]'` maps `a`→`A`, `b`→`B`,
+`c`→`C`, which is the only thing it could sensibly mean.
+
+The safety argument is the direction of the divergence. **Accepting more than
+GNU cannot change the meaning of a script that already works under GNU** --
+every such script is, by construction, one GNU did not reject. The reverse
+divergence (refusing something GNU accepts) breaks working scripts, and the
+much worse one (answering differently) is the silent-guess class this whole
+series exists to remove. Being more permissive is the one direction that costs
+nothing already-written.
+
+Two GNU restrictions *are* kept, because both catch a real ambiguity rather
+than a misalignment:
+
+| Kept restriction | Why |
+|---|---|
+| Only `[:upper:]`/`[:lower:]` may appear in SET2 | The others have no useful positional meaning as a replacement; `[:punct:]` as a target is far more likely a typo than an intent. |
+| `[=c=]` may not appear in SET2 | It denotes a *set* of equivalent characters, so as a replacement it names no single one. That it happens to be a singleton in the C locale is a property of the locale, not of the syntax. |
+
+### Alternatives rejected
+
+- **Unicode classes.** Rejected above: it breaks the fast path, makes
+  undecodable input an error, and leaves `tr '[:lower:]' '[:upper:]'`
+  undefined.
+- **Refuse classes in SET2 entirely**, avoiding the alignment question. Rejected
+  because `tr '[:lower:]' '[:upper:]'` is the single most common `tr` invocation
+  there is.
+- **Copy GNU's misalignment check verbatim.** Rejected because the condition it
+  tests -- that the two sets might not correspond -- cannot arise here, so the
+  check would reject only correct programs.
+- **Treat a bad class name as literal characters.** Rejected in the code as
+  well as here: `[:alhpa:]` has the *shape* of a construct with a bad name, so
+  it is an error, while `[abc]` is not a construct at all and is five literal
+  characters. Collapsing the two is precisely how a typo becomes a confident
+  wrong answer -- `tr -d '[:alhpa:]'` would delete brackets, colons and the
+  letters of the typo.

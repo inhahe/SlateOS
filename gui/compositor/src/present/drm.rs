@@ -22,17 +22,30 @@
 //! | `CREATE_DUMB` | give me a chunk of scanout-capable memory |
 //! | `MAP_DUMB` + `mmap` | …and let me write to it from userspace |
 //! | `ADDFB2` | treat that memory as a framebuffer of this size and format |
+//! | `SETCRTC` | run this timing, on this CRTC, out to this connector |
 //! | `PAGE_FLIP` | scan it out |
 //!
-//! `SETCRTC` — the ioctl that would let us pick a mode other than the one the
-//! card came up in — is deliberately absent, because the SlateOS kernel does
-//! not implement it. That is not a gap in *this* module: the kernel's
-//! `DrmDevice::page_flip` validates only that the CRTC id, the framebuffer id
-//! and the framebuffer's backing object exist, and the ATI backend performs its
-//! own modeset inside the flip when the framebuffer's dimensions differ from
-//! the current mode. Driving the boot/native resolution — which is what a
-//! compositor wants, and what [`DrmScanout::size`] reports — needs no `SETCRTC`
-//! at all. See `known-issues.md` → `TD-COMPOSITOR-CANNOT-CHANGE-MODE`.
+//! `SETCRTC` used to be absent from that list, and its absence was a bug rather
+//! than a simplification. The reasoning that justified leaving it out was that
+//! `DrmDevice::page_flip` validated only that the ids existed, and that the ATI
+//! backend performed its own modeset *inside* the flip — so driving the native
+//! resolution needed no explicit mode-set. Both halves of that stopped being
+//! true: the kernel's `page_flip` now requires the CRTC to have a programmed
+//! mode, and requires the framebuffer's size to equal that mode's, before it
+//! reaches any backend. A first flip onto a never-programmed CRTC is `EINVAL`,
+//! which on the ATI backend is every CRTC, because the implicit mode-set that
+//! used to bring it up is gone.
+//!
+//! So the mode-set is issued once per head, in `make_head`, before that head's
+//! first flip. On `limine-fb` and `virtio-gpu` it is redundant — the only mode
+//! those connectors advertise is the one they are already in — and harmless.
+//! Its failure is not fatal; see `set_mode`'s doc comment for why the flip is a
+//! strictly stronger check than propagating the error would be.
+//!
+//! Picking a mode *other* than the native one is still not offered here:
+//! [`DrmScanout::size`] reports what the display said it prefers and the
+//! compositor is laid out to it. See `known-issues.md` →
+//! `TD-COMPOSITOR-CANNOT-CHANGE-MODE`.
 //!
 //! ## One frame, several monitors
 //!
@@ -89,8 +102,8 @@ use std::time::{Duration, Instant};
 use super::{MonitorInfo, Present};
 use sys::{EAGAIN, EBUSY, EINTR, ENOENT, Errno, KmsSys, Mapped, OutArray};
 use uapi::{
-    ModeCardRes, ModeCreateDumb, ModeCrtcPageFlip, ModeDestroyDumb, ModeFbCmd2, ModeGetConnector,
-    ModeGetEncoder, ModeMapDumb, ModeModeinfo,
+    ModeCardRes, ModeCreateDumb, ModeCrtc, ModeCrtcPageFlip, ModeDestroyDumb, ModeFbCmd2,
+    ModeGetConnector, ModeGetEncoder, ModeMapDumb, ModeModeinfo,
 };
 
 /// Most CRTCs, connectors or encoders we will enumerate from one card.
@@ -635,9 +648,10 @@ impl<S: KmsSys> DrmScanout<S> {
 
     /// The composited frame's size in pixels: the bounding box of every monitor.
     ///
-    /// The compositor is built at this size rather than the other way round —
-    /// there is no `SETCRTC` to make a display match a size we picked, and even
-    /// if there were, each monitor's native mode is the one that looks right.
+    /// The compositor is built at this size rather than the other way round.
+    /// The mode-set this module issues adopts the mode the *display* named
+    /// native; it is not a lever for making a display match a size we picked,
+    /// and each monitor's native mode is the one that looks right anyway.
     #[must_use]
     pub const fn size(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -1060,9 +1074,20 @@ fn best_mode(modes: &[ModeModeinfo]) -> Option<ModeModeinfo> {
 /// already taken.
 ///
 /// Prefers the CRTC the connector is already routed to, which is the one the
-/// firmware lit at boot and therefore the one already scanning out at this
-/// mode. Otherwise walks the connector's encoders and takes the first CRTC any
-/// of them can reach.
+/// firmware lit at boot: adopting it retimes a head that is already running at
+/// this mode instead of moving the picture to a different one. Otherwise walks
+/// the connector's encoders and takes the first CRTC any of them can reach.
+///
+/// **The preference is not a licence to ignore `possible_crtcs`.** A card can
+/// report a binding its own bitmask forbids — the fake card's fixtures do, and
+/// firmware that routed a head before the driver reloaded can too. That used to
+/// be harmless, because the CRTC really was scanning out and a flip against it
+/// worked. It is no longer: the kernel's `SETCRTC` refuses a connector that is
+/// not routable to the named CRTC through one of its encoders, so a CRTC the
+/// bitmask forbids is one we can never program, and preferring it costs the
+/// head. So a binding is believed only when the bitmask agrees with it — the
+/// same reasoning that already declines to believe a binding naming a CRTC the
+/// card does not list.
 ///
 /// `taken` is what makes two monitors possible rather than a way of driving one
 /// monitor twice: a CRTC scans out one framebuffer at a time, so giving the same
@@ -1079,8 +1104,8 @@ fn resolve_crtc(
     if conn.info.encoder_id != 0 {
         if let Some(bound) = get_encoder(sys, conn.info.encoder_id) {
             if bound.crtc_id != 0
-                && crtcs.contains(&bound.crtc_id)
                 && !taken.contains(&bound.crtc_id)
+                && encoder_reaches(&bound, crtcs, bound.crtc_id)
             {
                 return Some(bound.crtc_id);
             }
@@ -1090,25 +1115,33 @@ fn resolve_crtc(
         let Some(encoder) = get_encoder(sys, encoder_id) else {
             continue;
         };
-        // `possible_crtcs` is a bitmask over the *index* into the CRTC id
-        // array from `GETRESOURCES` — not over CRTC ids. Treating it as ids
-        // is the classic mistake here, and it hides completely on a
-        // single-CRTC machine, where index 0 and the only id both make bit 0
-        // look right.
-        for (index, &crtc_id) in crtcs.iter().enumerate() {
-            if taken.contains(&crtc_id) {
-                continue;
-            }
-            let reachable = u32::try_from(index)
-                .ok()
-                .and_then(|shift| encoder.possible_crtcs.checked_shr(shift))
-                .is_some_and(|bits| bits & 1 == 1);
-            if reachable {
+        for &crtc_id in crtcs {
+            if !taken.contains(&crtc_id) && encoder_reaches(&encoder, crtcs, crtc_id) {
                 return Some(crtc_id);
             }
         }
     }
     None
+}
+
+/// Whether `encoder` can drive `crtc_id`, by the card's own account.
+///
+/// `possible_crtcs` is a bitmask over the *index* into the CRTC id array from
+/// `GETRESOURCES` — not over CRTC ids. Treating it as ids is the classic mistake
+/// here, and it hides completely on a single-CRTC machine, where index 0 and the
+/// only id both make bit 0 look right.
+///
+/// A CRTC the card did not list at all has no index, and so is unreachable —
+/// which is the answer that keeps a stale binding from becoming a flip against
+/// an id that does not exist.
+fn encoder_reaches(encoder: &ModeGetEncoder, crtcs: &[u32], crtc_id: u32) -> bool {
+    let Some(index) = crtcs.iter().position(|&c| c == crtc_id) else {
+        return false;
+    };
+    u32::try_from(index)
+        .ok()
+        .and_then(|shift| encoder.possible_crtcs.checked_shr(shift))
+        .is_some_and(|bits| bits & 1 == 1)
 }
 
 /// One encoder, or `None` if the card would not describe it.
@@ -1194,6 +1227,11 @@ fn make_head(sys: &mut dyn KmsSys, pick: &Chosen) -> Result<Head, ScanoutError> 
             return Err(e);
         }
     };
+    // Program the timing before anything is flipped to this CRTC. `front: 1`
+    // below says buffer 1 is the one notionally on screen, so that is the one
+    // the mode-set adopts and the first flip is a genuine change to buffer 0.
+    set_mode(sys, pick, second.fb_id);
+
     Ok(Head {
         crtc_id: pick.crtc_id,
         connector_id: pick.connector_id,
@@ -1216,6 +1254,46 @@ fn make_head(sys: &mut dyn KmsSys, pick: &Chosen) -> Result<Head, ScanoutError> 
         },
         alive: true,
     })
+}
+
+/// Program `pick`'s mode onto `pick`'s CRTC, routed to `pick`'s connector,
+/// fetching from `fb_id`.
+///
+/// # Why the result is discarded
+///
+/// A failed mode-set is deliberately *not* fatal to the head, and cannot hide a
+/// broken one, because the very next thing that happens to this CRTC is a
+/// `PAGE_FLIP` that the kernel refuses unless the CRTC has a mode *and* that
+/// mode's `hdisplay`/`vdisplay` equal the framebuffer's. So exactly two things
+/// can follow a mode-set that failed:
+///
+/// * the CRTC is already timed at this size — the mode-set was redundant, which
+///   is the normal case on the `limine-fb` and `virtio-gpu` backends, where the
+///   only mode a connector advertises is the one it is already in; or
+/// * it is not — and the flip fails, which drops the head through the path that
+///   already exists for a head whose first flip fails.
+///
+/// The alternative, treating it as fatal, buys no diagnosis the flip does not
+/// already give and costs every display on any kernel that does not implement
+/// `SETCRTC` at all: declining the connector there would blank a screen that
+/// works today. So the error is dropped here rather than propagated.
+fn set_mode(sys: &mut dyn KmsSys, pick: &Chosen, fb_id: u32) {
+    let mut connectors = pick.connector_id.to_le_bytes();
+    let set = ModeCrtc {
+        count_connectors: 1,
+        crtc_id: pick.crtc_id,
+        fb_id,
+        mode_valid: 1,
+        mode: pick.mode,
+        ..ModeCrtc::default()
+    };
+    let mut arrays = [OutArray::new(
+        ModeCrtc::SET_CONNECTORS_PTR_AT,
+        &mut connectors,
+    )];
+    // Discarded per the doc comment above: the flip that follows is a strictly
+    // stronger test of the same thing.
+    let _ = call(sys, uapi::SETCRTC, set.to_bytes(), &mut arrays);
 }
 
 /// Allocate, map and register one scanout buffer.

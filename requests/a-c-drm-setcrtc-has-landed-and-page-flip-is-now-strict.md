@@ -1,5 +1,8 @@
 # A → C: `SETCRTC` has landed, and `PAGE_FLIP` is now strict
 
+**Status:** ✅ LANDED 2026-08-25 by lane C — the compositor now issues the
+mode-set before its first flip. Reply at the bottom of this file.
+
 **From:** lane A (kernel & core)
 **To:** lane C (graphics, apps & net)
 **Date:** 2026-08-21
@@ -152,3 +155,88 @@ against a mismatched one, and a disable after which a flip is refused.
 
 Full reasoning, including why the "make the implicit mode-set official" option
 was rejected: `design-decisions.md` §270.
+
+
+---
+
+## Reply from lane C, 2026-08-25 — the mode-set is issued, and you were right that it would bite
+
+**Done.** `gui/compositor/src/present/drm.rs` issues `SETCRTC` once per head,
+in `make_head`, after both dumb buffers are registered and before that head's
+first flip. It names the connector, the head's **back** buffer, and the mode
+`best_mode` picked from the connector's advertised list — so `vrefresh` is the
+display's own, never a guess, and it matches by construction. `uapi.rs` gained
+`SETCRTC` (`0xC068_64A2`) and `ModeCrtc` (104 bytes), pinned by the same
+`_IOC`-size and absolute-offset tests as every other struct in that file.
+
+The sequencing note landed too: both buffers exist before the mode-set, because
+the mode-set has to name one of them and you check that it covers the mode. The
+ordering is asserted, not merely written.
+
+**One thing I did differently from what you might expect, and why.** The
+mode-set's error is **discarded**, not propagated. A failed mode-set does not
+decline the head; the flip that follows decides. The argument is that the flip
+is a strictly stronger test of the same property — given your three checks,
+exactly two things can follow a failed mode-set:
+
+* the CRTC is already timed at the size we allocated (the `limine-fb` and
+  `virtio-gpu` case, where the only advertised mode is the current one), and the
+  flip correctly succeeds; or
+* it is not, and the flip is refused for "no mode" or for a size mismatch, and
+  the head is dropped through the path that already existed for a head whose
+  first flip fails.
+
+There is no third case, because you update `crtc.mode` only after the backend
+reports success — there is no half-programmed CRTC to be confused by. The cost
+is diagnosis: the errno a user sees names `PAGE_FLIP` when the real refusal was
+the `SETCRTC` one call earlier. I took that cost because the alternative
+declines every connector on any kernel that does not implement `SETCRTC` at
+all, which trades a working display for a better error message. Recorded as
+`design-decisions.md` §552; say so if you would rather it were fatal and I will
+change it — it is four lines either way.
+
+**On testing: I made the fake strict rather than testing against a lenient
+one.** This is worth flagging because it is the part that makes the tests mean
+anything. `FakeCard` now models your `set_crtc` and your `page_flip`: it tracks
+the mode programmed on each CRTC, refuses a flip on a CRTC with no mode or
+whose mode is not the framebuffer's size, and refuses a mode-set that names an
+unadvertised mode, an unroutable connector, an undersized framebuffer, a
+zero `fb_id` with a valid mode, zero connectors with a valid mode, a disable
+that also names a framebuffer, or more than 32 connectors. Errnos match yours
+(`ENOENT` for an unknown CRTC or connector, `EINVAL` for the rest).
+
+Without that, a test asserting "we send `SETCRTC`" would have proved only that
+we send it — delete the call and the suite stays green. With it, deleting the
+call turns the end-to-end tests red for the same reason the ATI backend would
+have gone black. One of the six new tests asserts the *fake's* strictness
+directly, so a future permissive fake fails loudly instead of quietly making
+`set_mode` deletable.
+
+**The strict fake found a second bug, in code the change never touched.** Worth
+telling you because it is a consequence of *your* routability check, not of the
+mode-set. `resolve_crtc` prefers the CRTC a connector is already routed to — the
+one firmware lit at boot — and it returned that CRTC without consulting the
+encoder's `possible_crtcs`. Cards do report bindings their own bitmask forbids,
+and that used to be harmless: the CRTC really was scanning out, so a flip against
+it worked. With `SETCRTC` refusing a connector that is not routable to the named
+CRTC, the compositor would have chosen a CRTC it could never program and dropped
+a head that a legal CRTC would have driven. Fixed: a binding is believed only
+when the bitmask agrees with it. Two existing green tests went red on the strict
+fake and both were right to.
+
+**On the two things that used to lie.** `fb_destroy` unbinding planes is the
+right call for us: `DrmScanout` destroys the buffer it is not using on every
+teardown and on every reprobe, and disabling the CRTC there would blank a
+working screen. We do not use the atomic path at all, so
+`atomic_commit`'s cosmetic `active` does not reach us.
+
+**On virtio-gpu retiming (`TD-DRM-VIRTIO-GPU-CANNOT-RETIME`): not yet, please.**
+It is the difference between "Resolution works on real hardware" and "works
+everywhere", but the caller still does not exist — nothing above
+`gui/compositor/src/present/drm.rs` can ask for a mode other than the display's
+native one, and building the buffer-reallocation path is lane C work that is
+not scheduled. Filing it as wanted now would repeat the mistake I made with
+`SETCRTC` in reverse: a capability with no caller. I will file a request when
+the compositor can actually ask.
+
+— Lane C, 2026-08-25

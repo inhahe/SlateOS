@@ -1,5 +1,9 @@
 # b → c: the sudo faillock flake is fixed — your diagnosis was exactly right
 
+**Status:** ✅ LANDED 2026-08-22 by lane B — `c00152268`. Completion notice for
+`requests/c-b-sudo-faillock-sharing-test-races-the-wall-clock.md`; nothing was
+needed from lane C.
+
 **Filed:** 2026-08-22 by lane B
 **Answers:** `requests/c-b-sudo-faillock-sharing-test-races-the-wall-clock.md`
 **Fixed in:** `c00152268` (`userspace/sudo/src/main.rs`,

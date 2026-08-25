@@ -1197,6 +1197,34 @@ mod tests {
         assert!(layout.primary().is_none());
     }
 
+    #[test]
+    fn a_monitor_the_user_turned_off_is_not_offered_as_the_primary_one() {
+        // The primary flag survives being switched off — a laptop panel closed
+        // for the evening is still the primary display when it reopens — so
+        // `primary()` has to ask both questions, not just the flag. Returning a
+        // disabled monitor puts every new window on a screen showing nothing:
+        // `suggest_default_monitor` takes the primary before it considers area,
+        // so the wrong answer here is not filtered downstream.
+        let mut layout = MonitorLayout {
+            monitors: vec![
+                make_monitor(1, "eDP-1", 1920, 1080, 0, 0, true),
+                make_monitor(2, "DP-2", 2560, 1440, 1920, 0, false),
+            ],
+        };
+        layout.monitors[0].enabled = false;
+
+        assert!(layout.primary().is_none(), "it is showing nothing");
+        assert_eq!(
+            WindowPlacement::suggest_default_monitor(&layout),
+            Some(MonitorId(2)),
+            "so a new window goes to the one that is on"
+        );
+
+        // …and it comes back the moment it is switched on again.
+        layout.monitors[0].enabled = true;
+        assert_eq!(layout.primary().map(|m| m.id), Some(MonitorId(1)));
+    }
+
     // -- MonitorLayout monitor_at ------------------------------------------
 
     #[test]
@@ -1759,6 +1787,41 @@ mod tests {
     }
 
     #[test]
+    fn a_rectangle_with_one_zero_side_covers_nothing_and_says_so() {
+        // `is_empty` asks whether the rectangle covers any pixels, and a
+        // 1920x0 strip covers none of them. Asking for *both* sides to be zero
+        // instead would call that strip non-empty, and every caller that guards
+        // a division by the desktop's size — scaling a wallpaper, working out
+        // what fraction of the desktop a window occupies — divides by zero.
+        assert!(VirtualRect::new(0, 0, 1920, 0).is_empty());
+        assert!(VirtualRect::new(0, 0, 0, 1080).is_empty());
+        assert!(VirtualRect::new(0, 0, 0, 0).is_empty());
+        assert!(!VirtualRect::new(0, 0, 1, 1).is_empty());
+    }
+
+    #[test]
+    fn a_coordinate_past_the_edge_of_the_space_stops_there_rather_than_wrapping() {
+        // Every rectangle computation widens to i64 so the intermediate cannot
+        // wrap; `narrow` is where it comes back down, and the direction it
+        // clamps in is the whole point. A monitor dragged past the right-hand
+        // edge of the coordinate space must land *at* that edge. Clamping the
+        // wrong way is precisely the wrap the widening was there to prevent —
+        // the monitor reappears on the opposite side of the desktop, which is
+        // both the worst answer and the one the code superficially looks like
+        // it is avoiding.
+        assert_eq!(narrow(i64::from(i32::MAX) + 1), i32::MAX);
+        assert_eq!(narrow(i64::from(i32::MIN) - 1), i32::MIN);
+        assert_eq!(narrow(i64::MIN), i32::MIN);
+        assert_eq!(narrow(0), 0);
+
+        // And through the public surface it reaches: a rectangle whose corners
+        // are both out of range keeps its far-left corner on the left.
+        let r = VirtualRect::from_corners(i64::from(i32::MIN) - 5_000, -9, 10, 11);
+        assert_eq!(r.x, i32::MIN);
+        assert_eq!(r.y, -9);
+    }
+
+    #[test]
     fn a_rectangles_edges_are_half_open() {
         let r = VirtualRect::new(10, 20, 5, 5);
         assert!(r.contains(10, 20));
@@ -1877,5 +1940,60 @@ mod tests {
         let entry = cfg.configs.get("").unwrap();
         assert_eq!(entry.resolution, (800, 600));
         assert_eq!(entry.position, (1, 2));
+    }
+
+    #[test]
+    fn every_rotation_survives_a_round_trip_through_the_config_file() {
+        // `as_str` and `from_str_config` are two independently-written lists of
+        // the same four words, and a round trip is the only place the two of
+        // them meet. A variant whose label collides with another's — `Inverted`
+        // written out as "normal" — reads back as the wrong rotation, so a
+        // monitor mounted upside down comes back the wrong way up after a
+        // reboot, and the settings UI cannot fix it: what it saves reads back as
+        // the setting it replaced. Round-tripping *one* rotation cannot see
+        // that, because a collision needs two variants to be visible; only
+        // covering all of them can.
+        const ALL: [Rotation; 4] = [
+            Rotation::Normal,
+            Rotation::Left,
+            Rotation::Right,
+            Rotation::Inverted,
+        ];
+
+        // The collision itself, stated directly rather than inferred from a
+        // failed round trip.
+        let mut labels: Vec<&str> = ALL.iter().map(|r| r.as_str()).collect();
+        let written = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), written, "two rotations share a config label");
+
+        for rotation in ALL {
+            // Exhaustiveness guard: a fifth variant stops this match compiling
+            // until it is listed in `ALL` above, so a new rotation cannot be
+            // added and silently left out of this test.
+            match rotation {
+                Rotation::Normal | Rotation::Left | Rotation::Right | Rotation::Inverted => {}
+            }
+
+            let mut cfg = MonitorConfig::default();
+            cfg.configs.insert(
+                "DP-1".into(),
+                PerMonitorConfig {
+                    resolution: (1920, 1080),
+                    position: (0, 0),
+                    rotation,
+                    scale: 1.0,
+                    enabled: true,
+                },
+            );
+
+            let text = cfg.save_to_string();
+            let loaded = MonitorConfig::load_from_string(&text).expect("should parse");
+            assert_eq!(
+                loaded.configs["DP-1"].rotation, rotation,
+                "{rotation:?} was written out as {text:?}"
+            );
+        }
     }
 }

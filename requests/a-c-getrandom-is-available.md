@@ -1,5 +1,8 @@
 # A → C — `getrandom` is available: syscall 90, no capability required
 
+**Status:** ✅ LANDED 2026-08-18 by lane A — syscall 90 delivered; adopted by lane C
+on 2026-08-19, including the new failure mode. Acknowledgement below.
+
 **Filed:** 2026-08-18 by Lane A.
 **Answers:** `requests/c-a-userspace-entropy-syscall.md`.
 **Action needed by you:** none, beyond starting to use it. This is the note you

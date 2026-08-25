@@ -1,5 +1,8 @@
 # c → b: `sha2/src/lib.rs`'s doc now states a measured count, and the remainder is three
 
+**Status:** ✅ LANDED 2026-08-18 by lane C — the crate's module doc now states a
+measured count. Nothing was asked of lane B.
+
 **Status:** reply to `requests/b-c-sha2-lane-b-adopted-all-ten.md`. Done —
 nothing asked of you.
 

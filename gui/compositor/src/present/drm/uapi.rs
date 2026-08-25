@@ -92,6 +92,15 @@ const fn iowr(nr: u32, size: usize) -> u32 {
 
 /// `DRM_IOCTL_MODE_GETRESOURCES` — enumerate CRTC / connector / encoder ids.
 pub const GETRESOURCES: u32 = iowr(0xA0, ModeCardRes::SIZE);
+/// `DRM_IOCTL_MODE_SETCRTC` — program a timing on a CRTC and route it to a set
+/// of connectors.
+///
+/// This is what makes a CRTC *timed*: it fixes the mode, names the framebuffer
+/// the CRTC fetches from, and says which connectors the picture goes out to.
+/// Until it has been issued a CRTC has no mode, and the SlateOS kernel refuses
+/// a [`PAGE_FLIP`] on a CRTC with no mode — so this is not optional even when
+/// the mode we want is the one the display is already in.
+pub const SETCRTC: u32 = iowr(0xA2, ModeCrtc::SIZE);
 /// `DRM_IOCTL_MODE_GETENCODER` — an encoder's bound CRTC and the set it can
 /// drive.
 pub const GETENCODER: u32 = iowr(0xA6, ModeGetEncoder::SIZE);
@@ -865,6 +874,91 @@ impl ModeFbCmd2 {
     }
 }
 
+/// `struct drm_mode_crtc` — the payload of [`SETCRTC`] (and of `GETCRTC`).
+///
+/// The one struct in this file whose *absence* was a bug rather than a gap:
+/// without it the compositor never programmed a mode, and relied on a
+/// backend-specific implicit mode-set inside the flip that the kernel has since
+/// removed. See the module docs for the sequence it belongs in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModeCrtc {
+    /// Userspace pointer to an array of `count_connectors` connector ids. Set
+    /// by [`super::sys::OutArray`] at [`Self::SET_CONNECTORS_PTR_AT`]; leave it
+    /// zero here.
+    pub set_connectors_ptr: u64,
+    /// How many connector ids `set_connectors_ptr` points at. Must be 0 when
+    /// disabling and non-zero when enabling.
+    pub count_connectors: u32,
+    /// Which CRTC to program.
+    pub crtc_id: u32,
+    /// The framebuffer the CRTC fetches from. Must be 0 when disabling, and
+    /// must cover `x + hdisplay` by `y + vdisplay` when enabling.
+    pub fb_id: u32,
+    /// Horizontal offset of the mode's origin within the framebuffer.
+    pub x: u32,
+    /// Vertical offset of the mode's origin within the framebuffer.
+    pub y: u32,
+    /// Out: the gamma ramp size. Not set by the caller.
+    pub gamma_size: u32,
+    /// Non-zero to enable with [`Self::mode`], zero to disable the CRTC.
+    pub mode_valid: u32,
+    /// The timing to program. Ignored when `mode_valid` is 0.
+    pub mode: ModeModeinfo,
+}
+
+impl ModeCrtc {
+    /// Wire size, fixed by Linux.
+    pub const SIZE: usize = 104;
+
+    /// Byte offset of `set_connectors_ptr`, for [`super::sys::OutArray`].
+    ///
+    /// Zero, because it is the first field — stated as a named constant anyway
+    /// so that a caller reads the same kind of declaration here as it does for
+    /// [`ModeCardRes::CRTC_ID_PTR_AT`], rather than a bare `0` it has to trust.
+    pub const SET_CONNECTORS_PTR_AT: usize = 0;
+
+    /// Encode for the ioctl.
+    #[must_use]
+    pub fn to_bytes(self) -> [u8; Self::SIZE] {
+        Writer::<{ Self::SIZE }>::new()
+            .u64(self.set_connectors_ptr)
+            .u32(self.count_connectors)
+            .u32(self.crtc_id)
+            .u32(self.fb_id)
+            .u32(self.x)
+            .u32(self.y)
+            .u32(self.gamma_size)
+            .u32(self.mode_valid)
+            .put(&self.mode.to_bytes())
+            .finish()
+            .unwrap_or([0; Self::SIZE])
+    }
+
+    /// Decode what the kernel wrote back.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8; Self::SIZE]) -> Self {
+        let mut r = Reader::new(bytes);
+        let mut out = Self {
+            set_connectors_ptr: r.u64(),
+            count_connectors: r.u32(),
+            crtc_id: r.u32(),
+            fb_id: r.u32(),
+            x: r.u32(),
+            y: r.u32(),
+            gamma_size: r.u32(),
+            mode_valid: r.u32(),
+            mode: ModeModeinfo::default(),
+        };
+        let tail = r.take(ModeModeinfo::SIZE);
+        let mut mode = [0u8; ModeModeinfo::SIZE];
+        for (dst, src) in mode.iter_mut().zip(tail.iter()) {
+            *dst = *src;
+        }
+        out.mode = ModeModeinfo::from_bytes(&mode);
+        out
+    }
+}
+
 /// `struct drm_mode_crtc_page_flip` — put a different framebuffer on a CRTC.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ModeCrtcPageFlip {
@@ -927,8 +1021,9 @@ mod tests {
 
     use super::{
         ADDFB2, CREATE_DUMB, DESTROY_DUMB, GETCONNECTOR, GETENCODER, GETRESOURCES, MAP_DUMB,
-        MODE_TYPE_PREFERRED, ModeCardRes, ModeCreateDumb, ModeCrtcPageFlip, ModeDestroyDumb,
-        ModeFbCmd2, ModeGetConnector, ModeGetEncoder, ModeMapDumb, ModeModeinfo, PAGE_FLIP, RMFB,
+        MODE_TYPE_PREFERRED, ModeCardRes, ModeCreateDumb, ModeCrtc, ModeCrtcPageFlip,
+        ModeDestroyDumb, ModeFbCmd2, ModeGetConnector, ModeGetEncoder, ModeMapDumb, ModeModeinfo,
+        PAGE_FLIP, RMFB, SETCRTC,
     };
 
     // -- The ioctl numbers ------------------------------------------------
@@ -942,6 +1037,7 @@ mod tests {
     #[test]
     fn every_ioctl_number_matches_the_one_linux_defines() {
         assert_eq!(GETRESOURCES, 0xC040_64A0, "MODE_GETRESOURCES");
+        assert_eq!(SETCRTC, 0xC068_64A2, "MODE_SETCRTC");
         assert_eq!(GETENCODER, 0xC014_64A6, "MODE_GETENCODER");
         assert_eq!(GETCONNECTOR, 0xC050_64A7, "MODE_GETCONNECTOR");
         assert_eq!(RMFB, 0xC004_64AF, "MODE_RMFB");
@@ -959,6 +1055,7 @@ mod tests {
         // match — and that one is pinned to Linux.
         let size_of = |ioctl: u32| (ioctl >> 16) & ((1 << 14) - 1);
         assert_eq!(size_of(GETRESOURCES) as usize, ModeCardRes::SIZE);
+        assert_eq!(size_of(SETCRTC) as usize, ModeCrtc::SIZE);
         assert_eq!(size_of(GETENCODER) as usize, ModeGetEncoder::SIZE);
         assert_eq!(size_of(GETCONNECTOR) as usize, ModeGetConnector::SIZE);
         assert_eq!(size_of(PAGE_FLIP) as usize, ModeCrtcPageFlip::SIZE);
@@ -975,6 +1072,7 @@ mod tests {
         // ioctl-number typo turns into a mystery rather than an ENOTTY.
         for (name, ioctl) in [
             ("GETRESOURCES", GETRESOURCES),
+            ("SETCRTC", SETCRTC),
             ("GETENCODER", GETENCODER),
             ("GETCONNECTOR", GETCONNECTOR),
             ("RMFB", RMFB),
@@ -1005,6 +1103,7 @@ mod tests {
             ModeDestroyDumb::SIZE,
             ModeFbCmd2::SIZE,
             ModeCrtcPageFlip::SIZE,
+            ModeCrtc::SIZE,
         ] {
             assert!(size < (1 << 14), "{size} does not fit the _IOC size field");
         }
@@ -1326,6 +1425,73 @@ mod tests {
         let b = flip.to_bytes();
         assert_eq!(&b[0..4], &0xC0C0_C0C0_u32.to_le_bytes(), "crtc first");
         assert_eq!(&b[4..8], &0x0FB0_0FB0_u32.to_le_bytes(), "then fb");
+    }
+
+    #[test]
+    fn set_crtc_survives_the_round_trip_including_the_mode_it_carries() {
+        let mut name = [0_u8; 32];
+        name[..9].copy_from_slice(b"1920x1080");
+        let sent = ModeCrtc {
+            // Left zero deliberately: the pointer is written by the syscall
+            // layer, and a non-zero one here would be a userspace address this
+            // process does not own.
+            set_connectors_ptr: 0,
+            count_connectors: 1,
+            crtc_id: 2,
+            fb_id: 3,
+            x: 4,
+            y: 5,
+            gamma_size: 6,
+            mode_valid: 7,
+            mode: ModeModeinfo {
+                clock: 148_500,
+                hdisplay: 1920,
+                hsync_start: 2008,
+                hsync_end: 2052,
+                htotal: 2200,
+                hskew: 1,
+                vdisplay: 1080,
+                vsync_start: 1084,
+                vsync_end: 1089,
+                vtotal: 1125,
+                vscan: 2,
+                vrefresh: 60,
+                flags: 5,
+                type_: MODE_TYPE_PREFERRED,
+                name,
+            },
+        };
+        assert_eq!(ModeCrtc::from_bytes(&sent.to_bytes()), sent);
+    }
+
+    #[test]
+    fn set_crtc_puts_the_connector_pointer_first_and_the_mode_last() {
+        // Both halves are pinned by absolute offset because neither is caught
+        // by a round trip. `SET_CONNECTORS_PTR_AT` is the offset the syscall
+        // layer writes a real address into: name the wrong one and the kernel
+        // reads an id array out of `crtc_id`/`fb_id`. And the mode is the only
+        // field that is itself a struct, so a byte of slop before it shifts
+        // every timing by one and the mode matches nothing the display listed.
+        assert_eq!(ModeCrtc::SET_CONNECTORS_PTR_AT, 0);
+        let set = ModeCrtc {
+            count_connectors: 0x1111_1111,
+            crtc_id: 0x2222_2222,
+            fb_id: 0x3333_3333,
+            mode_valid: 0x4444_4444,
+            mode: ModeModeinfo {
+                clock: 0x5555_5555,
+                ..ModeModeinfo::default()
+            },
+            ..ModeCrtc::default()
+        };
+        let b = set.to_bytes();
+        assert_eq!(&b[0..8], &[0_u8; 8], "the pointer field is left for sys");
+        assert_eq!(&b[8..12], &0x1111_1111_u32.to_le_bytes(), "count");
+        assert_eq!(&b[12..16], &0x2222_2222_u32.to_le_bytes(), "crtc_id");
+        assert_eq!(&b[16..20], &0x3333_3333_u32.to_le_bytes(), "fb_id");
+        assert_eq!(&b[32..36], &0x4444_4444_u32.to_le_bytes(), "mode_valid");
+        assert_eq!(&b[36..40], &0x5555_5555_u32.to_le_bytes(), "mode starts");
+        assert_eq!(36 + ModeModeinfo::SIZE, ModeCrtc::SIZE, "mode is last");
     }
 
     #[test]

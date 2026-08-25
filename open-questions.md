@@ -946,20 +946,6 @@ settings pages were a mistake" — and if that is the answer, say so plainly and
 will delete them rather than convert them.
 
 
-# Resolved
-
-**The body above holds OPEN questions only.** When the operator answers one,
-write it up in `design-decisions.md` as a `Decided by: Operator` entry,
-**delete the entry from the body**, and add one line here. That is the whole
-point of the file: it is scanned for what still needs a decision, so an
-answered question left in the body is pure cost — and, being older, it sorts
-*first*, right where it is most in the way. (Why this is not append-only:
-`design-decisions.md` §437.)
-
-The index is split by lane so three lanes adding a line at once land at three
-different offsets and the merge is automatic. Newest first within each lane.
-`(§n)` cites `design-decisions.md`.
-
 ## C-Q7 — [C] In the "green on black" high-contrast scheme, the highlight colour is three times dimmer than in the other three. Change it? — Status: OPEN
 
 **In short:** SlateOS has a "high contrast" setting for people who cannot read
@@ -1061,6 +1047,97 @@ consequence is that the regression test which pins these twelve colours
 7:1, specifically so this scheme passes — so the floor is currently set by the
 outlier rather than by the standard. Answering B, C or D would let that floor
 rise to 7:1 and hold every future scheme to it.
+
+## C-Q8 — [C] You decided in June that we ship the world's timezone data. Nobody can write it, because the lane map hands the job to a directory that does not exist. Who does it? — Status: OPEN
+
+**In short:** if you set your clock to New York, SlateOS quietly gives you
+London's time instead — and says nothing. The fix needs a *package* (a bundle of
+files the system installs, like an app-store download) containing the world's
+timezone rules, which you already approved shipping back in June. It cannot be
+written, because the rule saying which of the three AI sessions owns the package
+manager points at a folder that was never created; the real package manager
+lives in a folder that session is forbidden to touch. This has been stuck since
+2026-08-16 and needs you to say which session writes it.
+
+**Where it bites:** `requests/b-c-tzdata-package.md` (lane B's ask, lane C's
+answer at the foot), `userspace/pkg/src/main.rs` (the real package manager,
+5 004 lines), `roadmap.md`'s ownership map and `scripts/which-lane.py` (both of
+which grant lane C `pkg/**`).
+
+### What is actually wrong
+
+You answered B-Q1 on 2026-08-15 (`design-decisions.md` §311): ship the **full**
+IANA timezone database, vendored as prebuilt binaries, distributed as a package.
+Everything that *reads* that data is already written and tested — the C library
+and the shell both resolve `TZ` through real binary zoneinfo files, matching
+glibc's search order exactly.
+
+There is nothing on disk for them to read. So `TZ=America/New_York` resolves to
+nothing and falls back to **UTC**, with no error. The user believes they picked
+Eastern and gets UTC. Two tests currently *assert* that wrong answer, on purpose,
+and are named to say so — they go red the day the data lands, which is the
+signal that it worked.
+
+The ownership map says lane C owns "the package manager (`pkg/**`)". **There is
+no top-level `pkg/` directory.** The package manager is `userspace/pkg/` — and
+`userspace/**` is on lane C's never-write list. So the lane assigned the work is
+the one lane forbidden to do it, and the lane that owns the files was never
+assigned the work.
+
+### The options
+
+**A — Move the package manager to a top-level `pkg/`, and lane C writes it.**
+*What changes:* nothing user-visible on its own; the ownership map becomes true
+as written, and lane C can start immediately. Costs a tree-wide move of 5 134
+lines plus every path that cites it — exactly the sort of change that conflicts
+across three lanes working in parallel.
+
+**B — Give the tzdata package to lane B, where the package manager already
+lives.** *What changes:* nothing user-visible on its own; the work starts in the
+lane that owns the code, with no move. Costs a standing inconsistency — the map
+keeps saying lane C owns `pkg/**` while lane B owns the package manager — unless
+the map is corrected in the same breath.
+
+**C — Correct the map to say `userspace/pkg/` belongs to lane C, and leave the
+files where they are.** *What changes:* nothing user-visible; lane C gains write
+access to two directories inside lane B's tree. Costs a hole in the otherwise
+clean "lane C never writes `userspace/`" rule, which is the rule that makes the
+three-lane split safe to reason about.
+
+**D — Leave it. Write down that the clock lies.** *What changes:* nothing;
+`TZ=America/New_York` keeps meaning UTC indefinitely.
+
+### My recommendation
+
+**B, with the map corrected in the same change.** The package manager is 5 004
+lines of lane B's code that lane C has never touched; the tzdata package is a
+small addition to it, and asking the lane that wrote it to add one package is far
+cheaper than moving the whole thing or carving an exception. A is the tidiest end
+state and the most expensive to reach — and its cost is paid in merge conflicts
+across three parallel lanes, which is the one currency this project is short of.
+C is the smallest edit and the worst rule.
+
+### If this is never answered
+
+It does not get worse, and nothing else is blocked on it — but it does not get
+better either, and the failure it leaves in place is the quiet kind: a clock that
+is confidently wrong. It has already been stuck nine days for want of one
+sentence from you. Everything else about the feature is finished.
+
+
+# Resolved
+
+**The body above holds OPEN questions only.** When the operator answers one,
+write it up in `design-decisions.md` as a `Decided by: Operator` entry,
+**delete the entry from the body**, and add one line here. That is the whole
+point of the file: it is scanned for what still needs a decision, so an
+answered question left in the body is pure cost — and, being older, it sorts
+*first*, right where it is most in the way. (Why this is not append-only:
+`design-decisions.md` §437.)
+
+The index is split by lane so three lanes adding a line at once land at three
+different offsets and the merge is automatic. Newest first within each lane.
+`(§n)` cites `design-decisions.md`.
 
 ## Resolved — lane A
 

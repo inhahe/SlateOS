@@ -361,7 +361,7 @@ fn a_press_on_the_panel_is_understood_where_the_user_pressed() {
 #[test]
 fn the_compositors_window_list_is_what_the_taskbar_is_drawn_from() {
     let (mut session, desktop) = session();
-    assert!(session.shell().visible_windows().is_empty());
+    assert!(session.shell().taskbar_windows().is_empty());
 
     desktop
         .borrow_mut()
@@ -370,7 +370,7 @@ fn the_compositors_window_list_is_what_the_taskbar_is_drawn_from() {
 
     let titles: Vec<&str> = session
         .shell()
-        .visible_windows()
+        .taskbar_windows()
         .iter()
         .map(|w| w.title.as_str())
         .collect();
@@ -455,7 +455,7 @@ fn alt_f4_asks_the_compositor_to_close_the_focused_window() {
     );
     // And the shell has not pretended: the window it was told about is still
     // there, because the only thing that removes it is the next list.
-    assert_eq!(session.shell().visible_windows().len(), 2);
+    assert_eq!(session.shell().taskbar_windows().len(), 2);
 }
 
 /// The shortcut that names every window at once — the reason a shortcut's
@@ -608,7 +608,7 @@ fn a_window_list_arriving_with_a_click_is_folded_in_after_it() {
     // The new list still arrives — it is applied, just second.
     let titles: Vec<&str> = session
         .shell()
-        .visible_windows()
+        .taskbar_windows()
         .iter()
         .map(|w| w.title.as_str())
         .collect();
@@ -659,7 +659,7 @@ fn run_returns_when_the_compositor_hangs_up() {
     desktop.borrow_mut().send_window_list(&[app(1, "Terminal")]);
     session.run().expect("run");
     assert!(!session.is_running());
-    assert_eq!(session.shell().visible_windows().len(), 1);
+    assert_eq!(session.shell().taskbar_windows().len(), 1);
 }
 
 #[test]

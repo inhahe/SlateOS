@@ -412,8 +412,20 @@ pub struct ManagedWindow {
     pub desktop: u32,
     /// Whether this window has focus.
     pub focused: bool,
-    /// Whether the window is visible (not minimized to taskbar).
-    pub visible: bool,
+    /// Whether the compositor has this window **mapped** — i.e. it exists on
+    /// the desktop as something the user can get back to.
+    ///
+    /// A *minimised* window is still mapped. That distinction is the whole
+    /// point of the field: the compositor reports "unmapped" (the program took
+    /// its window away) and "minimised" (the user put it away) as two separate
+    /// flags, and only the first means the window is gone. Ask
+    /// [`on_glass`](Self::on_glass) for the narrower question of whether it is
+    /// currently *drawn*.
+    ///
+    /// This field used to be called `visible` and used to fold the two
+    /// together, which is what stranded every minimised window — see
+    /// [`taskbar_windows`](DesktopShell::taskbar_windows).
+    pub mapped: bool,
     /// Process ID owning this window.
     pub pid: u32,
     /// Icon ID (index into icon registry).
@@ -425,6 +437,21 @@ pub struct ManagedWindow {
     /// shell's stacking order *is* the compositor's, and cannot drift from it
     /// between one list and the next.
     pub z_order: u32,
+}
+
+impl ManagedWindow {
+    /// Whether the window is being **drawn** right now.
+    ///
+    /// Narrower than [`mapped`](Self::mapped): a minimised window is mapped but
+    /// not on the glass. Only one caller wants this question — "Show Desktop",
+    /// which minimises what is on screen and has nothing to say to a window
+    /// already put away. Everything else the shell lists (taskbar buttons, the
+    /// Alt+Tab switcher, the overview) wants `mapped`, because the entire
+    /// purpose of those lists is to get a put-away window *back*.
+    #[must_use]
+    pub fn on_glass(&self) -> bool {
+        self.mapped && self.state != WindowState::Minimized
+    }
 }
 
 /// Window state.
@@ -462,9 +489,21 @@ pub enum Hit {
     PowerMenuEntry(usize),
     /// The open power menu, but not one of its rows.
     PowerMenuPanel,
-    /// A window button on the taskbar, by index into
-    /// [`visible_windows`](DesktopShell::visible_windows).
-    TaskbarButton(usize),
+    /// A window button on the taskbar, carrying **the window it stands for**.
+    ///
+    /// The id and not the slot number. A slot is a position on a bar whose
+    /// contents change, so a hit that carried one would have to be resolved
+    /// against the window list a second time, by the code that acts on it —
+    /// and that second lookup can fail, which is a state the shell then has to
+    /// have an answer for. It had one (`None => Consumed`, with a comment
+    /// about the window closing under the click) and the answer was
+    /// unreachable: `hit_test` reads the same list in the same call, so a slot
+    /// it reports is a slot that was occupied a microsecond ago and still is.
+    /// Naming the window makes the impossible state unrepresentable instead of
+    /// merely unvisited, and it makes the hit test's own assertion mean
+    /// something — "the button drawn third belongs to the third window" rather
+    /// than "the third button is the third button".
+    TaskbarButton(WindowId),
     /// The taskbar panel, but not one of its controls.
     TaskbarPanel,
     /// The tray clock, which opens the calendar popup.
@@ -1204,7 +1243,7 @@ impl DesktopShell {
             - self.tray_width()
             - self.scale(TRAY_RESERVE_GAP))
         .max(0.0);
-        let count = self.visible_windows().len().max(1) as f32;
+        let count = self.taskbar_windows().len().max(1) as f32;
         self.scale(TASKBAR_BUTTON_MAX_WIDTH).min(available / count)
     }
 
@@ -1523,9 +1562,12 @@ impl DesktopShell {
             if self.clock_rect().contains(x, y) {
                 return Hit::Clock;
             }
-            for index in 0..self.visible_windows().len() {
+            // The slot is resolved to a window *here*, while the list that
+            // produced the rectangle is still in hand — see
+            // [`Hit::TaskbarButton`].
+            for (index, window) in self.taskbar_windows().iter().enumerate() {
                 if self.taskbar_button_rect(index).contains(x, y) {
-                    return Hit::TaskbarButton(index);
+                    return Hit::TaskbarButton(window.id);
                 }
             }
             return Hit::TaskbarPanel;
@@ -1712,32 +1754,21 @@ impl DesktopShell {
                 ShellAction::Consumed
             }
             Hit::StartMenuPanel | Hit::PowerMenuPanel | Hit::TaskbarPanel => ShellAction::Consumed,
-            Hit::TaskbarButton(index) => {
-                match self.visible_windows().get(index).map(|w| w.id) {
-                    Some(id) => ShellAction::Control(ShellRequest::window(
-                        id,
-                        // The button of the window you are already looking at
-                        // minimises it — the taskbar button is a toggle, not a
-                        // second way to focus what is already focused.
-                        if self.focused_window == Some(id) {
-                            ShellControlAction::Minimize
-                        } else {
-                            // `Activate`, not `Restore`: a window minimised
-                            // while maximised has to come back maximised, and
-                            // restoring would silently drop a state the user
-                            // never asked to leave. See the compositor's
-                            // `activate_window`.
-                            ShellControlAction::Activate
-                        },
-                    )),
-                    // The button is gone from under the click — the window
-                    // closed between the frame it was drawn in and this press.
-                    // Consumed rather than passed on: the click landed on the
-                    // taskbar, and a taskbar must not leak clicks to whatever
-                    // is behind it just because a button vanished.
-                    None => ShellAction::Consumed,
-                }
-            }
+            Hit::TaskbarButton(id) => ShellAction::Control(ShellRequest::window(
+                id,
+                // The button of the window you are already looking at
+                // minimises it — the taskbar button is a toggle, not a second
+                // way to focus what is already focused.
+                if self.focused_window == Some(id) {
+                    ShellControlAction::Minimize
+                } else {
+                    // `Activate`, not `Restore`: a window minimised while
+                    // maximised has to come back maximised, and restoring
+                    // would silently drop a state the user never asked to
+                    // leave. See the compositor's `activate_window`.
+                    ShellControlAction::Activate
+                },
+            )),
             // Not the shell's pixel, so not the shell's press. It used to focus
             // the window it thought was there, which was both a guess — the
             // shell holds no window rectangles — and a change to a list the
@@ -1983,7 +2014,7 @@ impl DesktopShell {
     /// activating a window filed elsewhere is a switch nobody asked for.
     ///
     /// Stacking comes from the list's own order, which the compositor emits
-    /// bottom-to-top, so `visible_windows().last()` is the topmost window here
+    /// bottom-to-top, so `taskbar_windows().last()` is the topmost window here
     /// for the same reason it is there.
     pub fn apply_window_list(&mut self, list: &WindowList) {
         let mut kept: BTreeMap<WindowId, ManagedWindow> = BTreeMap::new();
@@ -2013,10 +2044,16 @@ impl DesktopShell {
                     },
                     desktop: info.workspace,
                     focused: info.focused,
-                    // Both flags have to hold: the compositor distinguishes a
-                    // window that is unmapped from one that is minimised, and a
-                    // taskbar button belongs to the second but not the first.
-                    visible: info.visible && !info.minimized,
+                    // The compositor's mapped flag, alone and unmodified. It
+                    // used to be `info.visible && !info.minimized`, which
+                    // conflated "the program took its window away" with "the
+                    // user put it away" — and since the taskbar, the Alt+Tab
+                    // switcher and the overview all list this set, a minimised
+                    // window lost its button, dropped out of the switcher and
+                    // became unreachable by any means the shell offers. The
+                    // minimised state is recorded in `state` and asked for by
+                    // name where it matters (`on_glass`).
+                    mapped: info.visible,
                     // `WindowInfo::pid` is the compositor's `u64`; the shell's
                     // field is a `u32` for the same reason a pid is one
                     // everywhere else. Truncating would make two processes
@@ -2044,12 +2081,27 @@ impl DesktopShell {
             .apply_window_list(list, self.num_desktops.max(1));
     }
 
-    /// Get visible windows on current desktop, sorted by Z-order.
-    pub fn visible_windows(&self) -> Vec<&ManagedWindow> {
+    /// The windows the shell **lists** on the current desktop, in stacking
+    /// order (bottom-to-top, so `.last()` is the topmost).
+    ///
+    /// This is the taskbar's set, the Alt+Tab switcher's set and the overview's
+    /// set, and it deliberately **includes minimised windows**: a taskbar
+    /// button and a switcher row exist precisely so that a window the user put
+    /// away can be got back. It was called `taskbar_windows` and filtered on a
+    /// flag that folded "unmapped" together with "minimised", which meant
+    /// minimising a window removed its button *and* its switcher row in the
+    /// same instant — leaving it reachable by nothing the shell draws. The
+    /// `Activate`-rather-than-`Restore` care taken in `handle_press` was
+    /// unreachable code for exactly as long as that lasted.
+    ///
+    /// For the narrower "is it being drawn?" question, ask
+    /// [`ManagedWindow::on_glass`].
+    #[must_use]
+    pub fn taskbar_windows(&self) -> Vec<&ManagedWindow> {
         let mut windows: Vec<&ManagedWindow> = self
             .windows
             .values()
-            .filter(|w| w.visible && w.desktop == self.current_desktop)
+            .filter(|w| w.mapped && w.desktop == self.current_desktop)
             .collect();
         windows.sort_by_key(|w| w.z_order);
         windows
@@ -2134,13 +2186,13 @@ impl DesktopShell {
     /// Open the window switcher, on the window below the top one.
     ///
     /// That is the window the user was in before this one, which is what
-    /// Alt+Tab is for. `visible_windows` is ordered bottom to top, so it is the
+    /// Alt+Tab is for. `taskbar_windows` is ordered bottom to top, so it is the
     /// second entry from the *end* — not index 1, which is what this used to
     /// say. With exactly two windows index 1 *is* the focused window, so
     /// press-and-release Alt+Tab — much the commonest use there is — re-focused
     /// the window you were already in and appeared to do nothing at all.
     pub fn start_alt_tab(&mut self) {
-        let count = self.visible_windows().len();
+        let count = self.taskbar_windows().len();
         if count > 1 {
             self.alt_tab_active = true;
             self.alt_tab_index = step::wrapping_before(count, count.saturating_sub(1));
@@ -2148,7 +2200,7 @@ impl DesktopShell {
     }
 
     pub fn next_alt_tab(&mut self) {
-        let count = self.visible_windows().len();
+        let count = self.taskbar_windows().len();
         if count > 0 {
             // `step::wrapping_after` carries the "the list is not empty" condition
             // inside the expression that depends on it, and lands on the first
@@ -2160,7 +2212,7 @@ impl DesktopShell {
 
     /// Step the switcher to the previous window, for Shift+Alt+Tab.
     pub fn prev_alt_tab(&mut self) {
-        let count = self.visible_windows().len();
+        let count = self.taskbar_windows().len();
         if let Some(last) = count.checked_sub(1) {
             // Clamping first matters: a stale index — windows closed while the
             // switcher was open — would otherwise step from one out-of-range
@@ -2180,7 +2232,7 @@ impl DesktopShell {
             return None;
         }
         self.alt_tab_active = false;
-        let id = self.visible_windows().get(self.alt_tab_index)?.id;
+        let id = self.taskbar_windows().get(self.alt_tab_index)?.id;
         Some(ShellRequest::window(id, ShellControlAction::Activate))
     }
 
@@ -2338,7 +2390,12 @@ impl DesktopShell {
             DesktopAction::ShowDesktop => HotkeyOutcome::ask_all(
                 self.windows
                     .values()
-                    .filter(|w| w.visible && w.desktop == self.current_desktop)
+                    // `on_glass`, not `mapped`: this is the one caller that
+                    // wants the narrower question. Asking a window that is
+                    // already minimised to minimise again is a request the
+                    // compositor would have to ignore, and one the user would
+                    // have to un-do twice.
+                    .filter(|w| w.on_glass() && w.desktop == self.current_desktop)
                     .map(|w| ShellRequest::window(w.id, ShellControlAction::Minimize))
                     .collect(),
             ),
@@ -2543,7 +2600,7 @@ impl DesktopShell {
         // Window buttons. Rounded like the windows they stand for — the corner
         // style is a property of the desktop, not of one surface in it.
         let radii = self.corner_radii();
-        for (index, window) in self.visible_windows().iter().enumerate() {
+        for (index, window) in self.taskbar_windows().iter().enumerate() {
             let button = self.taskbar_button_rect(index);
 
             let bg = if Some(window.id) == self.focused_window {
@@ -2622,7 +2679,7 @@ impl DesktopShell {
         }
 
         let mut tree = RenderTree::new();
-        let windows = self.visible_windows();
+        let windows = self.taskbar_windows();
 
         if windows.is_empty() {
             return None;
@@ -3711,7 +3768,7 @@ mod window_manager_tests {
 
         assert!(z_of(&shell, second) > z_of(&shell, first));
         assert_eq!(shell.focused_window, Some(second));
-        assert_eq!(shell.visible_windows().last().map(|w| w.id), Some(second));
+        assert_eq!(shell.taskbar_windows().last().map(|w| w.id), Some(second));
     }
 
     /// The shell's stacking *is* the list's order. It used to be a counter the
@@ -3730,7 +3787,7 @@ mod window_manager_tests {
         let raised = z_of(&shell, bottom);
         assert!(raised > z_of(&shell, middle));
         assert!(raised > z_of(&shell, top));
-        assert_eq!(shell.visible_windows().last().map(|w| w.id), Some(bottom));
+        assert_eq!(shell.taskbar_windows().last().map(|w| w.id), Some(bottom));
         assert!(!shell.windows.get(&middle).unwrap().focused);
     }
 
@@ -3870,7 +3927,7 @@ mod window_manager_tests {
         let id = open(&mut shell, "app");
 
         compositor_switched(&mut shell, 1);
-        assert!(shell.visible_windows().is_empty());
+        assert!(shell.taskbar_windows().is_empty());
         assert_eq!(
             shell.focused_window, None,
             "the window that had the keyboard is not on screen to have it"
@@ -3879,7 +3936,7 @@ mod window_manager_tests {
         compositor_moved(&mut shell, id, 1);
         assert_eq!(
             shell
-                .visible_windows()
+                .taskbar_windows()
                 .iter()
                 .map(|w| w.id)
                 .collect::<Vec<_>>(),
@@ -3902,7 +3959,7 @@ mod window_manager_tests {
         compositor_moved(&mut shell, id, 1);
         assert_eq!(shell.windows.get(&id).unwrap().desktop, 1);
         assert!(
-            shell.visible_windows().is_empty(),
+            shell.taskbar_windows().is_empty(),
             "and it is no longer on the desktop being shown"
         );
 
@@ -4002,7 +4059,7 @@ mod window_manager_tests {
         close(&mut shell, ids[2]);
 
         shell.next_alt_tab();
-        assert!(shell.alt_tab_index < shell.visible_windows().len());
+        assert!(shell.alt_tab_index < shell.taskbar_windows().len());
 
         assert_eq!(
             shell.finish_alt_tab(),
@@ -4175,7 +4232,121 @@ mod window_manager_tests {
         }
 
         shell.prev_alt_tab();
-        assert!(shell.alt_tab_index < shell.visible_windows().len());
+        assert!(shell.alt_tab_index < shell.taskbar_windows().len());
+    }
+
+    /// The same property, from the one starting index that actually exercises
+    /// the clamp.
+    ///
+    /// `stepping_backwards_survives_the_windows_closing_underneath_it` above
+    /// steps forward *twice* from a four-window switcher, which wraps the index
+    /// round to 0 — and 0 is in range for every list, so removing the clamp
+    /// leaves that test green. Stepping forward once leaves the index at 3, and
+    /// stepping back from 3 in a one-window list is the only arithmetic that
+    /// tells the two versions apart: clamped it is 0, unclamped it is 2, which
+    /// is another index past the end and so `finish_alt_tab` picks nothing at
+    /// all. The user sees Shift+Alt+Tab do nothing after a window closed under
+    /// the switcher.
+    #[test]
+    fn stepping_backwards_from_the_end_lands_in_the_list_not_past_it() {
+        let mut shell = shell();
+        let ids: Vec<WindowId> = (0..4).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+
+        shell.start_alt_tab();
+        shell.next_alt_tab();
+        assert_eq!(shell.alt_tab_index, 3, "the last row, not a wrapped one");
+
+        for id in &ids[1..] {
+            close(&mut shell, *id);
+        }
+
+        shell.prev_alt_tab();
+        assert!(
+            shell.alt_tab_index < shell.taskbar_windows().len(),
+            "index {} is past the end of a {}-window list",
+            shell.alt_tab_index,
+            shell.taskbar_windows().len()
+        );
+        assert_eq!(
+            shell.finish_alt_tab(),
+            Some(ShellRequest::window(ids[0], ShellControlAction::Activate)),
+            "and the one window left is the one it lands on"
+        );
+    }
+
+    /// A switcher left on an index that no longer names a window still has to
+    /// close.
+    ///
+    /// `finish_alt_tab` answers two questions at once — "which window?" and "the
+    /// switcher is over now" — and only the first of them can fail. Answering
+    /// them in the wrong order lets the stale-index `?` return before the
+    /// switcher is marked closed, and then it is closed by nothing: the Alt
+    /// release that would have ended it has already been spent, so the overlay
+    /// stays on screen over every window for the rest of the session.
+    #[test]
+    fn a_switcher_whose_window_closed_under_it_still_closes() {
+        let mut shell = shell();
+        let ids: Vec<WindowId> = (0..3).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+
+        shell.start_alt_tab();
+        shell.next_alt_tab();
+        assert_eq!(shell.alt_tab_index, 2, "the last row");
+
+        for id in &ids[1..] {
+            close(&mut shell, *id);
+        }
+
+        assert_eq!(
+            shell.finish_alt_tab(),
+            None,
+            "there is no window at that index any more, so it names none"
+        );
+        assert!(
+            !shell.alt_tab_active,
+            "but it is still over -- closing the switcher cannot depend on \
+             finding a window"
+        );
+    }
+
+    /// Letting go of a key that is not Alt does not end the switcher.
+    ///
+    /// Alt+Tab is held: Alt stays down while Tab is pressed and released, over
+    /// and over, and the switch is committed by the *Alt* release. A guard that
+    /// asked only whether the switcher was open would commit on the first Tab
+    /// release instead, so every use of Alt+Tab would land on the second window
+    /// and the user could never reach the third.
+    #[test]
+    fn releasing_tab_does_not_end_the_window_switcher() {
+        let mut shell = shell();
+        for i in 0..3 {
+            open(&mut shell, &format!("w{i}"));
+        }
+
+        shell.start_alt_tab();
+        let landed_on = shell.alt_tab_index;
+
+        let release_tab = KeyEvent {
+            key: Key::Tab,
+            pressed: false,
+            modifiers: Modifiers::alt(),
+            text: String::new(),
+        };
+        let outcome = shell.handle_hotkey(&release_tab);
+        assert!(!outcome.consumed, "a Tab release is not the shell's");
+        assert!(outcome.requests.is_empty(), "and asks for nothing");
+        assert!(shell.alt_tab_active, "the switcher is still up");
+        assert_eq!(shell.alt_tab_index, landed_on, "and has not moved");
+
+        // The release that *does* end it, so the test says what the rule is and
+        // not merely what it is not.
+        let release_alt = KeyEvent {
+            key: Key::LeftAlt,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+        assert!(shell.handle_hotkey(&release_alt).consumed);
+        assert!(!shell.alt_tab_active);
     }
 
     #[test]
@@ -4316,7 +4487,7 @@ mod window_manager_tests {
         );
         assert_eq!(
             shell
-                .visible_windows()
+                .taskbar_windows()
                 .iter()
                 .map(|w| w.id)
                 .collect::<Vec<_>>(),
@@ -4334,7 +4505,7 @@ mod window_manager_tests {
         assert_eq!(shell.focused_window, Some(moves));
         assert_eq!(
             shell
-                .visible_windows()
+                .taskbar_windows()
                 .iter()
                 .map(|w| w.id)
                 .collect::<Vec<_>>(),
@@ -4666,7 +4837,7 @@ mod overview_wiring_tests {
         assert_eq!(titles, ["Terminal", "Editor"]);
         assert_eq!(
             titles.len(),
-            s.visible_windows().len(),
+            s.taskbar_windows().len(),
             "the overview and the taskbar disagree about how many windows there are"
         );
     }

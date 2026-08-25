@@ -646,7 +646,7 @@ impl SnoozeDuration {
 // Subtask (for progress tracking)
 // ============================================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Subtask {
     pub title: String,
     pub completed: bool,
@@ -665,7 +665,7 @@ impl Subtask {
 // Task / Reminder
 // ============================================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
     pub id: u64,
     pub title: String,
@@ -808,15 +808,55 @@ impl Task {
         }
     }
 
-    /// Simple JSON export for a single task.
+    /// One task as the object [`TaskStore::export_json`] writes and
+    /// [`TaskStore::import_json`] reads back.
+    ///
+    /// This is a round trip, not a one-way export, so a field missing here is
+    /// a field the user loses by exporting and re-importing. Three were:
+    /// `created`, `completed_at` and `snoozed_until` were written nowhere, so
+    /// an import stamped every task as created at the moment of import — which
+    /// silently reorders [`SortMode::CreationDate`] — forgot when anything was
+    /// completed, and un-snoozed every snoozed task, so a reminder deliberately
+    /// pushed to next week fired on the spot.
+    ///
+    /// `id` is the one field written but deliberately not restored:
+    /// [`TaskStore::add`] assigns from its own counter, because an imported id
+    /// may already belong to a task in the store. It is written anyway because
+    /// `import_json` finds task objects by scanning for `{"id":`.
     pub fn to_json(&self) -> String {
-        let due_str = if let Some(d) = self.due {
-            format!("\"{}\"", d.format_short())
-        } else {
-            "null".to_string()
+        // Exhaustive (no `..`), so a new `Task` field stops this compiling
+        // until someone decides whether it survives an export. Nothing else
+        // would have: the reader builds its `Task` with `Task::new` plus
+        // assignments rather than a struct literal, so a new field errors
+        // on neither side. See known-issues.md lesson 44.
+        let Self {
+            id,
+            title,
+            description,
+            due,
+            created,
+            priority,
+            category,
+            recurrence,
+            completed,
+            completed_at,
+            snoozed_until,
+            subtasks,
+            notes,
+        } = self;
+
+        // `null` rather than an absent key for the three optional datetimes,
+        // so that "no due date" is a recorded fact and not an inference from
+        // silence. The reader treats both the same, but a file a human reads
+        // should say what it means.
+        let opt_dt = |d: &Option<DateTime>| match d {
+            Some(d) => format!("\"{}\"", d.format_short()),
+            None => "null".to_string(),
         };
-        let subtask_json: Vec<String> = self
-            .subtasks
+        let due_str = opt_dt(due);
+        let completed_at_str = opt_dt(completed_at);
+        let snoozed_until_str = opt_dt(snoozed_until);
+        let subtask_json: Vec<String> = subtasks
             .iter()
             .map(|s| {
                 format!(
@@ -829,18 +869,22 @@ impl Task {
 
         format!(
             "{{\"id\":{},\"title\":\"{}\",\"description\":\"{}\",\"due\":{},\
-             \"priority\":\"{}\",\"category\":\"{}\",\"recurrence\":\"{}\",\
-             \"completed\":{},\"subtasks\":[{}],\"notes\":\"{}\"}}",
-            self.id,
-            escape_json(&self.title),
-            escape_json(&self.description),
+             \"created\":\"{}\",\"priority\":\"{}\",\"category\":\"{}\",\
+             \"recurrence\":\"{}\",\"completed\":{},\"completed_at\":{},\
+             \"snoozed_until\":{},\"subtasks\":[{}],\"notes\":\"{}\"}}",
+            id,
+            escape_json(title),
+            escape_json(description),
             due_str,
-            self.priority.label(),
-            self.category.label(),
-            self.recurrence.to_json_str(),
-            self.completed,
+            created.format_short(),
+            priority.label(),
+            category.label(),
+            recurrence.to_json_str(),
+            completed,
+            completed_at_str,
+            snoozed_until_str,
             subtask_json.join(","),
-            escape_json(&self.notes),
+            escape_json(notes),
         )
     }
 }
@@ -1248,40 +1292,144 @@ fn find_matching_brace(s: &str) -> Option<usize> {
     None
 }
 
-/// Extract a JSON string value for a given key from a flat JSON object string.
-fn json_string_value<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let pattern = format!("\"{key}\":\"");
-    let start = json.find(&pattern)?;
-    let after_key = start + pattern.len();
-    let rest = &json[after_key..];
-    // Find unescaped closing quote
-    let mut escaped = false;
-    for (i, ch) in rest.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch == '"' {
-            return Some(&rest[..i]);
+/// Scan the JSON string literal starting at `quote`.
+///
+/// Returns its still-escaped contents and the byte index just past the closing
+/// quote. Every scan in this module goes through here so that a `{`, `[` or
+/// `"` *inside* a string cannot be mistaken for structure — a note reading
+/// `see {the thing}` is text, not an object.
+fn scan_json_string(json: &str, quote: usize) -> Option<(&str, usize)> {
+    let b = json.as_bytes();
+    if b.get(quote) != Some(&b'"') {
+        return None;
+    }
+    let start = quote.checked_add(1)?;
+    let mut i = start;
+    while let Some(&c) = b.get(i) {
+        match c {
+            // The escape's second byte is always ASCII (`"\/bfnrtu`), so
+            // stepping over it cannot land inside a multi-byte character.
+            b'\\' => i = i.checked_add(2)?,
+            b'"' => return Some((json.get(start..i)?, i.checked_add(1)?)),
+            _ => i = i.checked_add(1)?,
         }
     }
     None
 }
 
-/// Extract a JSON boolean value for a given key.
+/// The raw text of a **top-level** key's value in a JSON object.
+///
+/// The "top-level" is the entire point. This used to be a pair of helpers that
+/// searched the object with `str::find` and `str::contains`, and neither can
+/// tell an outer key from one nested inside it. A task carries its subtasks in
+/// the same object, and a subtask has its own `"completed"` key, so
+/// `"completed":true` on *any* subtask reported the parent task complete:
+/// tick one step off a task, export, re-import, and the whole task was done
+/// and gone from the active list. `contains` made it worse than a
+/// first-match-wins scan would have, because it tested for `true` before
+/// `false` and so ignored position entirely — the parent's own
+/// `"completed":false` sat earlier in the very same object and lost.
+///
+/// Depth tracking is what stops a nested key answering for an outer one.
+/// Returns the value's source text — `"quoted"` with its quotes, or `null`,
+/// `true`, `123` as written — leaving interpretation to the caller.
+fn json_top_level_value<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let b = json.as_bytes();
+    // Step into the object; everything before its `{` is not ours to read.
+    let mut i = json.find('{')?.checked_add(1)?;
+    let mut depth = 1usize;
+    while let Some(&c) = b.get(i) {
+        match c {
+            b'"' => {
+                let (text, after) = scan_json_string(json, i)?;
+                // A string followed by `:` is a key, and only a key at depth 1
+                // belongs to this object rather than to something inside it.
+                let mut j = after;
+                while b.get(j).is_some_and(u8::is_ascii_whitespace) {
+                    j = j.checked_add(1)?;
+                }
+                if depth == 1 && b.get(j) == Some(&b':') {
+                    j = j.checked_add(1)?;
+                    while b.get(j).is_some_and(u8::is_ascii_whitespace) {
+                        j = j.checked_add(1)?;
+                    }
+                    // Keys in this format are plain identifiers, so comparing
+                    // the escaped text is the same as comparing the decoded
+                    // text. A key needing an escape would not match, which is
+                    // the safe direction: absent, not wrong.
+                    if text == key {
+                        return json_value_slice(json, j);
+                    }
+                    i = j;
+                } else {
+                    i = after;
+                }
+            }
+            b'{' | b'[' => {
+                depth = depth.checked_add(1)?;
+                i = i.checked_add(1)?;
+            }
+            b'}' | b']' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    // The object ended without the key.
+                    return None;
+                }
+                i = i.checked_add(1)?;
+            }
+            _ => i = i.checked_add(1)?,
+        }
+    }
+    None
+}
+
+/// The source text of one JSON value beginning at `start`.
+///
+/// Ends at the `,` or closing bracket that belongs to the enclosing object,
+/// stepping over nested structures and strings so neither can end it early.
+fn json_value_slice(json: &str, start: usize) -> Option<&str> {
+    let b = json.as_bytes();
+    let mut i = start;
+    let mut depth = 0usize;
+    while let Some(&c) = b.get(i) {
+        match c {
+            b'"' => i = scan_json_string(json, i)?.1,
+            b'{' | b'[' => {
+                depth = depth.checked_add(1)?;
+                i = i.checked_add(1)?;
+            }
+            b'}' | b']' => {
+                if depth == 0 {
+                    break;
+                }
+                depth = depth.checked_sub(1)?;
+                i = i.checked_add(1)?;
+            }
+            b',' if depth == 0 => break,
+            _ => i = i.checked_add(1)?,
+        }
+    }
+    Some(json.get(start..i)?.trim())
+}
+
+/// Extract a JSON string value for a top-level key.
+///
+/// Returns the still-escaped contents; callers pass it through
+/// [`unescape_json`]. A key whose value is `null` (or any non-string) reads as
+/// absent, which is what makes `"due":null` and a missing `due` mean the same
+/// thing to the reader.
+fn json_string_value<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let raw = json_top_level_value(json, key)?;
+    let inner = raw.strip_prefix('"')?.strip_suffix('"')?;
+    Some(inner)
+}
+
+/// Extract a JSON boolean value for a top-level key.
 fn json_bool_value(json: &str, key: &str) -> Option<bool> {
-    let pattern_true = format!("\"{key}\":true");
-    let pattern_false = format!("\"{key}\":false");
-    if json.contains(&pattern_true) {
-        Some(true)
-    } else if json.contains(&pattern_false) {
-        Some(false)
-    } else {
-        None
+    match json_top_level_value(json, key)? {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
     }
 }
 
@@ -1305,17 +1453,38 @@ fn parse_task_json(json: &str, default_created: DateTime) -> Option<Task> {
     // Parse subtasks array
     let subtasks = parse_subtasks_json(json);
 
-    let mut task = Task::new(0, &unescape_json(title), default_created);
-    task.description = unescape_json(description);
-    task.due = due;
-    task.priority = priority;
-    task.category = category;
-    task.recurrence = recurrence;
-    task.completed = completed;
-    task.subtasks = subtasks;
-    task.notes = unescape_json(notes);
+    // Absent keys fall back rather than failing, which is what lets a file
+    // exported before `created`/`completed_at`/`snoozed_until` were written
+    // still import: an old task gets the import time for its creation date,
+    // exactly as every task did before. `default_created` is the caller's
+    // "now" and is only reached for such a file.
+    let created = json_string_value(json, "created")
+        .and_then(parse_datetime_short)
+        .unwrap_or(default_created);
+    let completed_at = json_string_value(json, "completed_at").and_then(parse_datetime_short);
+    let snoozed_until = json_string_value(json, "snoozed_until").and_then(parse_datetime_short);
 
-    Some(task)
+    // A struct literal rather than `Task::new` plus a run of assignments, so
+    // that a new `Task` field is `E0063` here and cannot be quietly dropped on
+    // import -- the counterpart of the destructure in `Task::to_json`, and the
+    // reason both sides of this format now fail loudly instead of one.
+    Some(Task {
+        // Not read from the file: `TaskStore::add` assigns the id, because an
+        // imported one may already be in use. See `Task::to_json`.
+        id: 0,
+        title: unescape_json(title),
+        description: unescape_json(description),
+        due,
+        created,
+        priority,
+        category,
+        recurrence,
+        completed,
+        completed_at,
+        snoozed_until,
+        subtasks,
+        notes: unescape_json(notes),
+    })
 }
 
 /// Parse a short datetime string like "2026-05-18 3:00 PM".
@@ -1366,38 +1535,40 @@ fn parse_time_12h(s: &str) -> Option<Time> {
 /// Parse subtasks from within a task JSON object.
 fn parse_subtasks_json(json: &str) -> Vec<Subtask> {
     let mut result = Vec::new();
-    let marker = "\"subtasks\":[";
-    let Some(pos) = json.find(marker) else {
-        return result;
-    };
-    let start = pos + marker.len();
-    let rest = &json[start..];
-    // Find the matching ]
-    let Some(end) = rest.find(']') else {
-        return result;
-    };
-    let array_content = &rest[..end];
-    if array_content.trim().is_empty() {
-        return result;
-    }
 
-    // Split on },{ boundaries
-    let mut remaining = array_content;
+    // The array's text, located by the same depth-aware scan every other key
+    // uses. This was `json.find("\"subtasks\":[")` followed by the first `]`
+    // after it, which is two separate ways to get the wrong text: the marker
+    // matches inside a note that quotes one, and a `]` in a subtask's own
+    // title ended the array early -- a step called "Buy milk [urgent]"
+    // silently truncated the list after itself. It only worked at all because
+    // `notes` happens to be written after `subtasks`, which is an ordering
+    // nothing enforced.
+    let Some(raw) = json_top_level_value(json, "subtasks") else {
+        return result;
+    };
+    let Some(inner) = raw.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
+        return result;
+    };
+
+    let mut remaining = inner.trim_start();
     while !remaining.is_empty() {
-        if let Some(brace_end) = find_matching_brace(remaining.trim_start()) {
-            let trimmed = remaining.trim_start();
-            let obj = &trimmed[..=brace_end];
-            let title = json_string_value(obj, "title").unwrap_or("");
-            let completed = json_bool_value(obj, "completed").unwrap_or(false);
-            let mut subtask = Subtask::new(&unescape_json(title));
-            subtask.completed = completed;
-            result.push(subtask);
-            remaining = &trimmed[brace_end + 1..];
-            // Skip comma
-            remaining = remaining.trim_start_matches(',');
-        } else {
+        // `find_matching_brace` tracks string state, so a `}` inside a title
+        // does not end the object either.
+        let Some(brace_end) = find_matching_brace(remaining) else {
             break;
-        }
+        };
+        let Some(obj) = remaining.get(..=brace_end) else {
+            break;
+        };
+        result.push(Subtask {
+            title: unescape_json(json_string_value(obj, "title").unwrap_or("")),
+            completed: json_bool_value(obj, "completed").unwrap_or(false),
+        });
+        let Some(rest) = brace_end.checked_add(1).and_then(|n| remaining.get(n..)) else {
+            break;
+        };
+        remaining = rest.trim_start().trim_start_matches(',').trim_start();
     }
     result
 }
@@ -3884,23 +4055,89 @@ mod tests {
         assert!(json.contains("\"category\":\"Finance\""));
     }
 
+    /// Export then import must give back the task that was exported.
+    ///
+    /// This was a list of five assertions over a thirteen-field struct, built
+    /// from a task whose other eight fields were all at their defaults — so it
+    /// passed for as long as `created`, `completed_at` and `snoozed_until`
+    /// were written nowhere at all. Every field below is deliberately *not*
+    /// its default, and the comparison is of whole values, so there is no list
+    /// left to fall behind the struct and no default left to hide a drop.
     #[test]
     fn test_json_roundtrip() {
         let now = make_now();
         let mut store = TaskStore::new();
-        let mut t = make_task("Roundtrip test", now);
-        t.description = "Some description".to_string();
-        t.priority = Priority::Critical;
-        t.category = TaskCategory::Health;
-        t.recurrence = RecurrenceRule::Weekly;
-        t.subtasks = vec![
-            {
-                let mut s = Subtask::new("Step A");
-                s.completed = true;
-                s
-            },
-            Subtask::new("Step B"),
-        ];
+
+        // A struct literal rather than `make_task` plus assignments: this is
+        // the third place a new `Task` field has to be considered, and it
+        // should stop compiling here too rather than quietly test a default.
+        let t = Task {
+            id: 0, // replaced by `add`; see `Task::to_json`
+            title: "Roundtrip test".to_string(),
+            description: "Some description".to_string(),
+            // Struct literals rather than `Date::new(..).expect(..)`, as
+            // `make_now` above does: the validating constructor returns an
+            // `Option` whose `None` arm is dead weight for a date written out
+            // here by hand, and the literal has the property this whole test
+            // is about — it names every field, so a new one stops it
+            // compiling rather than quietly defaulting.
+            due: Some(DateTime::new(
+                Date {
+                    year: 2026,
+                    month: 6,
+                    day: 1,
+                },
+                Time {
+                    hour: 9,
+                    minute: 30,
+                },
+            )),
+            created: DateTime::new(
+                Date {
+                    year: 2025,
+                    month: 1,
+                    day: 2,
+                },
+                Time {
+                    hour: 13,
+                    minute: 45,
+                },
+            ),
+            priority: Priority::Critical,
+            category: TaskCategory::Health,
+            recurrence: RecurrenceRule::Weekly,
+            completed: true,
+            completed_at: Some(DateTime::new(
+                Date {
+                    year: 2026,
+                    month: 5,
+                    day: 17,
+                },
+                Time { hour: 0, minute: 5 },
+            )),
+            snoozed_until: Some(DateTime::new(
+                Date {
+                    year: 2026,
+                    month: 12,
+                    day: 25,
+                },
+                Time {
+                    hour: 12,
+                    minute: 0,
+                },
+            )),
+            subtasks: vec![
+                Subtask {
+                    title: "Step A".to_string(),
+                    completed: true,
+                },
+                Subtask {
+                    title: "Step B".to_string(),
+                    completed: false,
+                },
+            ],
+            notes: "Some notes".to_string(),
+        };
         store.add(t);
 
         let json = store.export_json();
@@ -3908,12 +4145,163 @@ mod tests {
         let mut store2 = TaskStore::new();
         let count = store2.import_json(&json, now);
         assert_eq!(count, 1);
-        let imported = &store2.all()[0];
-        assert_eq!(imported.title, "Roundtrip test");
-        assert_eq!(imported.priority, Priority::Critical);
-        assert_eq!(imported.category, TaskCategory::Health);
-        assert_eq!(imported.subtasks.len(), 2);
-        assert!(imported.subtasks[0].completed);
+
+        // Both stores number from the same counter, so the ids match without
+        // special handling and the comparison can be of the whole store.
+        assert_eq!(
+            store2.all(),
+            store.all(),
+            "a task did not survive export and re-import unchanged"
+        );
+
+        // `created` falls back to the caller's "now" only when the file does
+        // not carry one, so `now` is a value the imported task must *not*
+        // have. Without this, a writer that dropped `created` and a test whose
+        // task happened to be created at `now` would agree with each other.
+        assert_ne!(
+            store2.all().first().map(|t| t.created),
+            Some(now),
+            "`created` came back as the import time, so it was not exported"
+        );
+    }
+
+    /// The three optional datetimes have to survive as `None` as well.
+    ///
+    /// `test_json_roundtrip` sets all three, so it walks the `Some` path and
+    /// nothing else — and `None` is the side where a key is written as `null`
+    /// and a substring-scanning reader can pick up the *next* task's value
+    /// instead. A default task also covers empty strings and an empty subtask
+    /// list.
+    /// A subtask's `completed` must not answer for its parent's.
+    ///
+    /// The regression test for the reader's worst defect: `json_bool_value`
+    /// used `str::contains` over the whole task object, and a task carries its
+    /// subtasks inside that object. Ticking off one step of an unfinished task
+    /// and re-importing marked the whole task done — the parent's own
+    /// `"completed":false` was right there, earlier in the same object, and
+    /// lost to a `contains` that asked about `true` first.
+    ///
+    /// Note this cannot be caught by a round-trip test that sets the parent
+    /// and the subtask to the same value, which is why the two states are
+    /// deliberately opposed here.
+    #[test]
+    fn a_completed_subtask_does_not_complete_its_parent() {
+        let now = make_now();
+        let mut store = TaskStore::new();
+        let mut t = make_task("Not done", now);
+        t.completed = false;
+        t.subtasks = vec![
+            Subtask {
+                title: "Step A".to_string(),
+                completed: true,
+            },
+            Subtask {
+                title: "Step B".to_string(),
+                completed: false,
+            },
+        ];
+        store.add(t);
+
+        let json = store.export_json();
+        let mut store2 = TaskStore::new();
+        assert_eq!(store2.import_json(&json, now), 1);
+        assert_eq!(
+            store2.all(),
+            store.all(),
+            "an unfinished task with a finished step did not survive import"
+        );
+    }
+
+    /// A bracket in a subtask's title must not truncate the list.
+    ///
+    /// The array used to be delimited by the first `]` after the `subtasks`
+    /// key, so a step whose title contained one ended the array there and
+    /// every step after it was dropped on import — a silent partial loss,
+    /// which is worse than a refused import because the task still looks
+    /// intact. `[urgent]` is not a contrived title.
+    #[test]
+    fn a_bracket_in_a_step_title_does_not_truncate_the_list() {
+        let now = make_now();
+        let mut store = TaskStore::new();
+        let mut t = make_task("Shopping", now);
+        t.subtasks = vec![
+            Subtask {
+                title: "Buy milk [urgent]".to_string(),
+                completed: false,
+            },
+            Subtask {
+                title: "Buy bread {also}".to_string(),
+                completed: true,
+            },
+            Subtask {
+                title: "Pay, then leave".to_string(),
+                completed: false,
+            },
+        ];
+        store.add(t);
+
+        let json = store.export_json();
+        let mut store2 = TaskStore::new();
+        assert_eq!(store2.import_json(&json, now), 1);
+        // Checked before the whole-value comparison below because "3 steps
+        // became 1" names the bracket bug directly, where a whole-`Task` diff
+        // buries it in thirteen fields of otherwise-matching output.
+        let imported = store2.all();
+        assert_eq!(
+            imported.first().map(|t| t.subtasks.len()),
+            Some(3),
+            "steps were dropped: {:?}",
+            imported.first().map(|t| &t.subtasks)
+        );
+        assert_eq!(
+            store2.all(),
+            store.all(),
+            "a step whose title contains JSON punctuation did not survive"
+        );
+    }
+
+    /// Text that looks like JSON is text.
+    ///
+    /// The reader walks the object byte by byte, so every `{`, `[`, `"` and
+    /// `,` it meets inside a string has to be stepped over rather than counted
+    /// as structure. A note is free-form user text and is exactly where such
+    /// characters turn up — including a `"completed":true` a user could
+    /// plausibly paste in from an export they were looking at.
+    #[test]
+    fn a_note_that_looks_like_json_is_still_a_note() {
+        let now = make_now();
+        let mut store = TaskStore::new();
+        let mut t = make_task("Meta", now);
+        t.completed = false;
+        t.notes = r#"see {"completed":true, "subtasks":[ }] and a "quote"#.to_string();
+        t.description = "ends with a brace }".to_string();
+        store.add(t);
+
+        let json = store.export_json();
+        let mut store2 = TaskStore::new();
+        assert_eq!(store2.import_json(&json, now), 1);
+        assert_eq!(
+            store2.all(),
+            store.all(),
+            "a note containing JSON punctuation was read as JSON"
+        );
+    }
+
+    #[test]
+    fn an_untouched_task_survives_the_round_trip_too() {
+        let now = make_now();
+        let mut store = TaskStore::new();
+        store.add(make_task("Bare task", now));
+
+        let json = store.export_json();
+        let mut store2 = TaskStore::new();
+        assert_eq!(store2.import_json(&json, now), 1);
+        assert_eq!(
+            store2.all(),
+            store.all(),
+            "a task with no due date, no completion and no snooze did not \
+             survive export and re-import"
+        );
     }
 
     #[test]

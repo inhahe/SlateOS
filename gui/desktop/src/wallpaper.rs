@@ -226,13 +226,45 @@ impl DynamicTheme {
     ///
     /// Layout: night [0..5)  dawn [5..8)  morning [8..12)
     ///         afternoon [12..17)  evening [17..20)  night [20..24)
+    ///
+    /// This is also the one place that decides *when* each phase begins, so a
+    /// phase missing from it is a colour the day never reaches: the field is
+    /// set, the config round-trips it, and nothing ever paints it. What holds
+    /// every phase to this table is the destructure in the body, not the
+    /// `PHASE_COUNT` in the return type — the length only catches the reverse
+    /// mistake, an entry added without the count changing.
     fn schedule(&self) -> [(f32, Color); PHASE_COUNT] {
+        // A struct pattern with no `..` is exhaustive, so a sixth phase added
+        // to `DynamicTheme` stops this compiling until it is named here. Say
+        // exactly that and no more: naming it and then not using it is an
+        // `unused_variables` *warning*, not an error, so what the compiler
+        // guarantees is that the author is brought to this line -- deciding
+        // what hour the phase starts at is still theirs to do. That is the
+        // whole point, though: without the destructure they are never brought
+        // here at all. Measured, not assumed -- a sixth field errors at the
+        // three struct literals, and, with this pattern, `E0027` here too;
+        // fix only the literals and the compiler falls silent with the new
+        // phase set, round-tripped through the config, and never painted.
+        //
+        // Naming it does then pull the rest of the chain: the array below
+        // grows to six and no longer matches `[…; PHASE_COUNT]` (`E0308`),
+        // bumping `PHASE_COUNT` reaches `from_palette`'s parameter and the
+        // test-side `SKY` table, which is the membership sweep's one
+        // exemption. So the phase cannot become a colour the sweep was never
+        // told about. See known-issues.md lesson 44.
+        let Self {
+            dawn,
+            morning,
+            afternoon,
+            evening,
+            night,
+        } = *self;
         [
-            (5.0, self.dawn),
-            (8.0, self.morning),
-            (12.0, self.afternoon),
-            (17.0, self.evening),
-            (20.0, self.night),
+            (5.0, dawn),
+            (8.0, morning),
+            (12.0, afternoon),
+            (17.0, evening),
+            (20.0, night),
         ]
     }
 
@@ -2443,8 +2475,21 @@ mod tests {
 
     #[test]
     fn the_five_sky_tones_are_the_ones_the_module_was_written_with() {
-        let t = DynamicTheme::default();
-        let got = [t.dawn, t.morning, t.afternoon, t.evening, t.night].map(|c| (c.r, c.g, c.b));
+        // The left side reads `schedule()` rather than writing out
+        // `[t.dawn, t.morning, …]` by hand, and the difference is whether a
+        // sixth phase can reach the desktop without this table hearing of it.
+        // Written out by hand it could: the array would still be a valid five
+        // and this test would still be named "the five sky tones" while
+        // checking five of six. Read from `schedule` it cannot — `schedule`
+        // is pinned to the struct by an exhaustive destructure, its length is
+        // `PHASE_COUNT`, and so is `SKY`'s, so the addition walks a chain of
+        // compile errors that ends here (checked by adding a phase and
+        // reading the line numbers, lesson 44). `SKY` stays hand-written
+        // regardless: it is the *exemption* from the membership sweep, and an
+        // exemption derived from the code it excuses excuses anything.
+        let got = DynamicTheme::default()
+            .schedule()
+            .map(|(_, c)| (c.r, c.g, c.b));
         assert_eq!(
             got, SKY,
             "a dynamic-wallpaper phase colour changed. These five are the \

@@ -1,5 +1,8 @@
 # c → b: both of yours are landed — and yes, the `rssreader` constants were dead
 
+**Status:** ✅ LANDED 2026-08-21 by lane C — both of lane B's asks done and pushed;
+nothing was needed back from lane B.
+
 **Status:** done and pushed on `lane-c`, merged to `main`. Nothing needed from
 you. Replies to
 `requests/b-c-tzrules-now-exports-civil-from-days.md` and

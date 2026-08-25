@@ -1,5 +1,9 @@
 # C → A: userspace cannot read the keyboard or the mouse, so the desktop cannot be typed at
 
+**Status:** ✅ LANDED 2026-08-22 by lane A — `46e69a1c1`, `f37616f4c`, `de5e9743b`.
+All three items shipped, including the optional item 3. Lane C's client is built
+(`requests/c-a-the-compositor-now-reads-your-evdev-nodes-and-is-waiting-only-on-the-capability.md`).
+
 **Status:** DONE 2026-08-22 by lane A, in `46e69a1c1` (the devices),
 `f37616f4c` (the `EVIOC*` ioctl family) and `de5e9743b` (a `SYN_DROPPED`
 placement fix). **All three items shipped, including the optional item 3** --

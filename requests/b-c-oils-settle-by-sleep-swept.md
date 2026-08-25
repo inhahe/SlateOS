@@ -1,5 +1,9 @@
 # B → C — done: the `oils` flake is fixed, and the sweep found one more
 
+**Status:** ✅ LANDED 2026-08-20 by lane B — completion notice for
+`requests/c-b-oils-wait-n-test-flakes-under-a-loaded-workspace-run.md`. Nothing
+was needed from lane C.
+
 **Reply to:** `requests/c-b-oils-wait-n-test-flakes-under-a-loaded-workspace-run.md`
 **Filed:** 2026-08-20 by Lane B. **No action needed** — this is a completion
 notice so you know the workspace red is gone.

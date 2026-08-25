@@ -24585,6 +24585,8 @@ DEFECTS = [
         [
             # Every later lookup in the module is by the returned ID, so the
             # event the caller just added is one it can never find again.
+            'an_uncoloured_event_round_trips_without_gaining_a_colour',
+            'an_update_to_a_deleted_event_does_not_land_on_a_later_one',
             'event_store_get',
             'event_store_remove',
             'event_store_update',
@@ -24612,6 +24614,7 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'an_update_to_a_deleted_event_does_not_land_on_a_later_one',
             'event_store_remove',
         ],
     ),
@@ -24624,6 +24627,7 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'an_update_to_a_deleted_event_does_not_land_on_a_later_one',
             'event_store_update_nonexistent',
         ],
     ),
@@ -24636,11 +24640,12 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            # Predicted escape. `event_store_update_nonexistent` asks a
-            # *empty* store for ID 999, and `>=` finds nothing in an empty
-            # store either -- the two predicates only disagree when the store
-            # still holds an event whose ID is above the missing one, which is
-            # the state a delete leaves behind.
+            # Escaped on the first sweep: `event_store_update_nonexistent`
+            # asks an *empty* store for ID 999, and `>=` finds nothing in an
+            # empty store either. The two predicates only disagree when the
+            # store still holds an event whose ID is above the missing one,
+            # which is the state a delete leaves behind.
+            'an_update_to_a_deleted_event_does_not_land_on_a_later_one',
         ],
     ),
     (
@@ -24652,7 +24657,11 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'an_uncoloured_event_round_trips_without_gaining_a_colour',
+            'an_update_to_a_deleted_event_does_not_land_on_a_later_one',
             'event_store_get',
+            'event_store_update',
+            'import_single_event',
         ],
     ),
     (
@@ -24664,11 +24673,12 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            # Predicted escape: every event in the suite starts at 09:00,
-            # 10:00, 14:00 or 23:00, and the range ends every fixture asks
-            # about are midnights, so no fixture puts a start *on* a range
-            # end. Midnight is the range end of every day cell, so a real
-            # event at exactly 00:00 would be drawn on the day before too.
+            # Escaped on the first sweep: every event in the suite started at
+            # 09:00, 10:00, 14:00 or 23:00 against range ends that are all
+            # midnights, so no fixture put a start *on* a range end. Midnight
+            # is the range end of every day cell, so a real event at exactly
+            # 00:00 was drawn on the day before as well.
+            'the_range_is_half_open_at_both_ends',
         ],
     ),
     (
@@ -24680,12 +24690,12 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            # Predicted escape, for the mirror-image reason as `G`: no
-            # fixture has an event *ending* exactly on a range start either.
-            # The half-open interval is what stops a meeting ending at
-            # midnight from appearing on both days. Module 82's `E` proved
-            # this for the *recurring* branch; the non-recurring branch has
-            # never been asked.
+            # Escaped for the mirror-image reason as `G`: no fixture had an
+            # event *ending* exactly on a range start either. The half-open
+            # interval is what stops a meeting ending at midnight from
+            # appearing on both days. Module 82's `E` proved this for the
+            # recurring branch; the non-recurring one had never been asked.
+            'the_range_is_half_open_at_both_ends',
         ],
     ),
     (
@@ -24697,8 +24707,11 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'events_for_range',
+            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
             'events_for_date_non_recurring',
+            'events_for_range',
+            'every_month_view_site_draws_the_role_it_claims',
+            'the_range_is_half_open_at_both_ends',
         ],
     ),
     (
@@ -24731,7 +24744,10 @@ DEFECTS = [
             # The count still comes out right -- the store gains one event per
             # EVENT line either way -- so only a test that reads the imported
             # *fields* can see it.
+            'a_dark_colour_keeps_its_leading_zeros_through_the_file',
+            'an_uncoloured_event_round_trips_without_gaining_a_colour',
             'export_import_roundtrip',
+            'import_single_event',
         ],
     ),
     (
@@ -24769,8 +24785,9 @@ DEFECTS = [
         [
             # Seven characters is not six, so `parse_hex_color` answers None
             # and the event silently reverts to the renderer's default.
-            'import_single_event',
+            'a_dark_colour_keeps_its_leading_zeros_through_the_file',
             'export_import_roundtrip',
+            'import_single_event',
         ],
     ),
     (
@@ -24782,12 +24799,13 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            # Predicted escape. `export_color_hex_format` uses F38BA8 and the
-            # round trip uses A6E3A1 and F9E2AF -- every channel in the suite
-            # is >= 0x10, so the padding never has anything to do. A dark
-            # colour writes fewer than six digits, which the length check in
-            # `parse_hex_color` then refuses on the way back in, silently
-            # losing the colour the user chose.
+            # Escaped on the first sweep: `export_color_hex_format` uses
+            # F38BA8 and the round trip A6E3A1 and F9E2AF -- every channel in
+            # the suite was >= 0x10, so the padding never had anything to do.
+            # A dark colour writes fewer than six digits, which the length
+            # check in `parse_hex_color` then refuses on the way back in,
+            # silently losing the colour the user chose.
+            'a_dark_colour_keeps_its_leading_zeros_through_the_file',
         ],
     ),
     (
@@ -24799,10 +24817,12 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            # Predicted escape: the recurrence fixtures anchor at 10:00 and
-            # 14:00 and stop at midnights, so no occurrence ever starts *on*
-            # the range end. A daily event anchored at 00:00 would gain a
-            # whole extra day at the end of every range it is drawn in.
+            # Escaped on the first sweep: the recurrence fixtures anchor at
+            # 10:00 and 14:00 and stop at midnights, so no occurrence ever
+            # started *on* the range end. A daily event anchored at 00:00 --
+            # which is every all-day event -- gained a whole extra day at the
+            # end of every range it was drawn in.
+            'a_recurring_series_is_half_open_at_the_end_too',
         ],
     ),
     (
@@ -24814,7 +24834,11 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'a_snooze_moves_the_live_reminder_not_the_dismissed_one',
+            'dismissing_one_reminder_leaves_the_others_for_that_event_alone',
+            'multiple_reminders_same_event',
             'reminder_set_and_due',
+            'reminder_snooze',
         ],
     ),
     (
@@ -24827,7 +24851,9 @@ DEFECTS = [
         ["desktop"],
         [
             # A 15-minute warning arrives 15 seconds before the meeting.
+            'dismissing_one_reminder_leaves_the_others_for_that_event_alone',
             'reminder_set_and_due',
+            'reminder_snooze',
         ],
     ),
     (
@@ -24839,6 +24865,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'a_snooze_moves_the_live_reminder_not_the_dismissed_one',
+            'dismissing_one_reminder_leaves_the_others_for_that_event_alone',
             'reminder_dismiss',
             'reminder_dismiss_all',
         ],
@@ -24852,7 +24880,9 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'a_snooze_moves_the_live_reminder_not_the_dismissed_one',
             'reminder_set_and_due',
+            'reminder_snooze',
         ],
     ),
     (
@@ -24864,6 +24894,7 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'a_snooze_moves_the_live_reminder_not_the_dismissed_one',
             'reminder_snooze',
         ],
     ),
@@ -24871,15 +24902,18 @@ DEFECTS = [
         "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a snooze is absorbed by an already-dismissed reminder for the same event",
         CAL,
         [
-            ('            if r.event_id == event_id && !r.dismissed {\n',
-             '            if r.event_id == event_id {\n'),
+            # Scoped to `snooze` by its body: `dismiss` carries the same
+            # condition now, and an unscoped patch would match both.
+            ('            if r.event_id == event_id && !r.dismissed {\n                r.fire_at = r.fire_at.saturating_add(duration.secs());\n',
+             '            if r.event_id == event_id {\n                r.fire_at = r.fire_at.saturating_add(duration.secs());\n'),
         ],
         ["desktop"],
         [
-            # Predicted escape: no fixture dismisses a reminder and then
-            # snoozes the same event. The loop breaks on the first match, so
-            # a dead reminder standing earlier in the list swallows the
-            # snooze and the live one fires again immediately.
+            # Escaped on the first sweep: no fixture dismissed a reminder and
+            # then snoozed the same event. The loop breaks on the first match,
+            # so a dead reminder standing earlier in the list swallowed the
+            # snooze and the live one fired again immediately.
+            'a_snooze_moves_the_live_reminder_not_the_dismissed_one',
         ],
     ),
     (
@@ -24891,13 +24925,14 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            # Predicted escape: `multiple_reminders_same_event` sets two
-            # reminders on one event but never dismisses either, and every
-            # fixture that *does* dismiss has one reminder per event. Yet
-            # that test is precisely what establishes two reminders on one
-            # event as a supported arrangement -- a day-before and an
-            # hour-before -- so dismissing the first must not cancel the
-            # second.
+            # Escaped on the first sweep: `multiple_reminders_same_event` set
+            # two reminders on one event but never dismissed either, and every
+            # fixture that *did* dismiss had one reminder per event. Yet that
+            # test is precisely what establishes two reminders on one event as
+            # a supported arrangement -- a day-before and an hour-before -- so
+            # dismissing the first must not cancel the second.
+            'a_snooze_moves_the_live_reminder_not_the_dismissed_one',
+            'dismissing_one_reminder_leaves_the_others_for_that_event_alone',
         ],
     ),
     (
@@ -24921,6 +24956,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'a_snooze_moves_the_live_reminder_not_the_dismissed_one',
+            'dismissing_one_reminder_leaves_the_others_for_that_event_alone',
             'reminder_dismiss',
             'reminder_dismiss_all',
         ],
@@ -24935,6 +24972,367 @@ DEFECTS = [
         ["desktop"],
         [
             'reminder_prune_dismissed',
+        ],
+    ),
+    # ------------------------------------------------------------------
+    # Module 87 opens with the production fix module 86 forced. Writing the
+    # test for defect `W` -- "dismissing one reminder must not cancel the
+    # event's others" -- turned up a second bug in the same four lines that
+    # no defect had asked about, because `dismiss` matched on the event ID
+    # alone: the loop stopped on the reminder it had already retired, so
+    # every call after the first was a no-op and an event's second notice
+    # could never be dismissed at all. The guard is new code, so it needs a
+    # defect of its own.
+    # ------------------------------------------------------------------
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: an event's second reminder can never be dismissed, because the first swallows every call",
+        CAL,
+        [
+            ('            if r.event_id == event_id && !r.dismissed {\n                r.dismissed = true;\n',
+             '            if r.event_id == event_id {\n                r.dismissed = true;\n'),
+        ],
+        ["desktop"],
+        [
+            'dismissing_one_reminder_leaves_the_others_for_that_event_alone',
+        ],
+    ),
+    # ------------------------------------------------------------------
+    # Module 87 proper: the keyboard half of the desktop shell -- the chord
+    # table in `DesktopAction::for_chord`, the Alt-Tab switcher's four
+    # stepping methods, `run_desktop_action`'s arms, and the virtual-desktop
+    # bounds. Module 83 swept this file's *pointer* handling and left the
+    # keyboard alone; 53 of its tests had never been named by any defect.
+    # ------------------------------------------------------------------
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a single window opens the Alt-Tab switcher, which then has nothing to switch to",
+        DESK,
+        [
+            ('        let count = self.taskbar_windows().len();\n        if count > 1 {\n            self.alt_tab_active = true;\n',
+             '        let count = self.taskbar_windows().len();\n        if count > 0 {\n            self.alt_tab_active = true;\n'),
+        ],
+        ["desktop"],
+        [
+            'alt_tab_with_one_window_is_consumed_without_opening_the_switcher',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: Alt-Tab opens on index 1, which with exactly two windows is the window you are already in",
+        DESK,
+        [
+            ('            self.alt_tab_index = step::wrapping_before(count, count.saturating_sub(1));\n',
+             '            self.alt_tab_index = 1;\n'),
+        ],
+        ["desktop"],
+        [
+            # The documented historical bug, restored. `taskbar_windows` is
+            # ordered bottom-to-top, so the window below the top one is the
+            # second from the *end*, not index 1.
+            'a_key_release_only_ends_the_window_switcher',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: Alt-Tab steps backwards, so the switcher walks away from the window you came from",
+        DESK,
+        [
+            ('            self.alt_tab_index = step::wrapping_after(count, self.alt_tab_index);\n',
+             '            self.alt_tab_index = step::wrapping_before(count, self.alt_tab_index);\n'),
+        ],
+        ["desktop"],
+        [
+            # Not caught by `alt_tab_visits_every_window_and_comes_back_round`:
+            # stepping the other way still visits all three windows and still
+            # comes back round. Only the test that asserts the *direction*
+            # against a remembered index can see it.
+            'shift_alt_tab_goes_round_the_other_way',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: Shift+Alt+Tab steps from one out-of-range index to another when windows close under it",
+        DESK,
+        [
+            ('            self.alt_tab_index = step::wrapping_before(count, self.alt_tab_index.min(last));\n',
+             '            self.alt_tab_index = step::wrapping_before(count, self.alt_tab_index);\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape. `stepping_backwards_survives_the_windows_
+            # closing_underneath_it` steps forward twice from a 4-window start,
+            # which lands the index on 0 -- so by the time the windows close the
+            # index is already in range and the clamp has nothing to do. The
+            # clamp only acts on an index that is *past the end*, which that
+            # fixture never produces.
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: Shift+Alt+Tab steps forwards, so the switcher has no way back",
+        DESK,
+        [
+            ('            self.alt_tab_index = step::wrapping_before(count, self.alt_tab_index.min(last));\n',
+             '            self.alt_tab_index = step::wrapping_after(count, self.alt_tab_index.min(last));\n'),
+        ],
+        ["desktop"],
+        [
+            'shift_alt_tab_goes_round_the_other_way',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a switcher whose window closed under it stays open forever, because the early return skips the close",
+        DESK,
+        [
+            ('        self.alt_tab_active = false;\n        let id = self.taskbar_windows().get(self.alt_tab_index)?.id;\n',
+             '        let id = self.taskbar_windows().get(self.alt_tab_index)?.id;\n        self.alt_tab_active = false;\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape. The `?` only fires on a stale index, and every
+            # fixture reaches `finish_alt_tab` through `next_alt_tab`, which
+            # wraps and therefore always lands in range. Reaching it with a
+            # stale index needs a window to close between the last step and the
+            # release of Alt, which nothing sets up.
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: any key release ends the Alt-Tab switcher, not just letting go of Alt",
+        DESK,
+        [
+            ('            if (key.key == Key::LeftAlt || key.key == Key::RightAlt) && self.alt_tab_active {\n',
+             '            if self.alt_tab_active {\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape. Only one test releases a key at all, and the key
+            # it releases is LeftAlt -- for which the guard and its removal agree.
+            # Releasing the Tab of an Alt+Tab is the ordinary case this breaks,
+            # and no fixture ever releases Tab.
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: every key release is swallowed by the shell, so no window ever sees one",
+        DESK,
+        [
+            ('            return HotkeyOutcome::ignored();\n        }\n\n        // The overview gets every press before the shortcut table does, and\n',
+             '            return HotkeyOutcome::consumed();\n        }\n\n        // The overview gets every press before the shortcut table does, and\n'),
+        ],
+        ["desktop"],
+        [
+            'a_key_release_only_ends_the_window_switcher',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: Shift+Alt+Tab is bound to the forwards cycle, so the two chords do the same thing",
+        DESK,
+        [
+            ('            (true, false, true, false, Key::Tab) => Some(Self::CycleWindowsBackwards),\n',
+             '            (true, false, true, false, Key::Tab) => Some(Self::CycleWindows),\n'),
+        ],
+        ["desktop"],
+        [
+            'shift_alt_tab_goes_round_the_other_way',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: Alt+F4 is bound to Alt+Super+F4, so plain Alt+F4 falls through to the application",
+        DESK,
+        [
+            ('            (false, false, true, false, Key::F4) => Some(Self::CloseFocused),\n',
+             '            (false, false, true, true, Key::F4) => Some(Self::CloseFocused),\n'),
+        ],
+        ["desktop"],
+        [
+            'a_window_shortcut_with_nothing_focused_asks_for_nothing',
+            'alt_f4_asks_the_compositor_and_changes_nothing_itself',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: Super+D maximises the focused window instead of clearing the desktop",
+        DESK,
+        [
+            ('            (false, false, false, true, Key::D) => Some(Self::ShowDesktop),\n',
+             '            (false, false, false, true, Key::D) => Some(Self::Maximize),\n'),
+        ],
+        ["desktop"],
+        [
+            'super_d_minimizes_everything_on_the_current_desktop',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: Super+Right tiles the window to the left, so both arrows snap the same way",
+        DESK,
+        [
+            ('            (false, false, false, true, Key::Right) => Some(Self::SnapRight),\n',
+             '            (false, false, false, true, Key::Right) => Some(Self::SnapLeft),\n'),
+        ],
+        ["desktop"],
+        [
+            'snapping_and_switching_desktops_are_different_shortcuts',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: Super+Down maximises rather than walking the window down a step",
+        DESK,
+        [
+            ('            (false, false, false, true, Key::Down) => Some(Self::RestoreOrMinimize),\n',
+             '            (false, false, false, true, Key::Down) => Some(Self::Maximize),\n'),
+        ],
+        ["desktop"],
+        [
+            'super_down_restores_a_maximized_window_and_minimizes_any_other',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the Super+Right binding stops naming Ctrl, and swallows Ctrl+Super+Right the way it used to",
+        DESK,
+        [
+            ('            (false, false, false, true, Key::Right) => Some(Self::SnapRight),\n',
+             '            (false, _, false, true, Key::Right) => Some(Self::SnapRight),\n'),
+        ],
+        ["desktop"],
+        [
+            # The exact bug the whole match-the-full-chord table exists to
+            # prevent, reintroduced on the right-hand side.
+            'snapping_and_switching_desktops_are_different_shortcuts',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the same loosening on the left-hand side: Ctrl+Super+Left snaps instead of switching desktop",
+        DESK,
+        [
+            ('            (false, false, false, true, Key::Left) => Some(Self::SnapLeft),\n',
+             '            (false, _, false, true, Key::Left) => Some(Self::SnapLeft),\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape, and the interesting one: the table's own
+            # regression test presses Ctrl+Super+*Right* and never
+            # Ctrl+Super+Left. `desktop_navigation_stops_at_both_ends` does press
+            # it -- but on desktop 0, where the correct answer is 'ask for
+            # nothing', and a snap request on a shell with no focused window is
+            # also nothing. The two answers coincide at exactly the one point
+            # the suite looks at.
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: Ctrl+Super+Left goes to the next desktop, so both chords go the same way",
+        DESK,
+        [
+            ('            (false, true, false, true, Key::Left) => Some(Self::PreviousDesktop),\n',
+             '            (false, true, false, true, Key::Left) => Some(Self::NextDesktop),\n'),
+        ],
+        ["desktop"],
+        [
+            'desktop_navigation_stops_at_both_ends',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: Escape is bound to nothing, so a popup can be opened by a click but never closed by a key",
+        DESK,
+        [
+            ('            (false, false, false, false, Key::Escape) => Some(Self::DismissPopup),\n',
+             '            (false, false, false, false, Key::Escape) => None,\n'),
+        ],
+        ["desktop"],
+        [
+            'escape_closes_a_popup_and_is_otherwise_left_alone',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: Escape is claimed unconditionally, so no window can ever close a dialog with it",
+        DESK,
+        [
+            ('            DesktopAction::DismissPopup => {\n                if self.dismiss_popups() {\n                    HotkeyOutcome::consumed()\n                } else {\n                    HotkeyOutcome::ignored()\n                }\n            }\n',
+             '            DesktopAction::DismissPopup => {\n                self.dismiss_popups();\n                HotkeyOutcome::consumed()\n            }\n'),
+        ],
+        ["desktop"],
+        [
+            'escape_closes_a_popup_and_is_otherwise_left_alone',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: Super+D asks an already-minimised window to minimise again, which the user must then undo twice",
+        DESK,
+        [
+            ('                    .filter(|w| w.on_glass() && w.desktop == self.current_desktop)\n',
+             '                    .filter(|w| w.mapped && w.desktop == self.current_desktop)\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape. `show_desktop_does_not_ask_an_already_minimized_
+            # window_to_minimize` is named for exactly this and cannot catch it:
+            # it *copies* the filter expression into the test body and asserts
+            # against its own copy, rather than pressing Super+D and reading the
+            # requests. A copied predicate is proved by nothing.
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: Super+D minimises every window on every desktop, not just the one on screen",
+        DESK,
+        [
+            ('                    .filter(|w| w.on_glass() && w.desktop == self.current_desktop)\n',
+             '                    .filter(|w| w.on_glass())\n'),
+        ],
+        ["desktop"],
+        [
+            'super_d_minimizes_everything_on_the_current_desktop',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: Super+Down restores an ordinary window and minimises a maximised one, which is backwards",
+        DESK,
+        [
+            ('                    .is_some_and(|w| w.state == WindowState::Maximized);\n',
+             '                    .is_some_and(|w| w.state != WindowState::Maximized);\n'),
+        ],
+        ["desktop"],
+        [
+            'super_down_restores_a_maximized_window_and_minimizes_any_other',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a window shortcut with nothing focused asks the compositor to act on window 0",
+        DESK,
+        [
+            ('        Some(ShellRequest::window(self.focused_window?, action))\n',
+             '        Some(ShellRequest::window(\n            self.focused_window.unwrap_or(WindowId(0)),\n            action,\n        ))\n'),
+        ],
+        ["desktop"],
+        [
+            'a_window_shortcut_with_nothing_focused_asks_for_nothing',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the taskbar lists every desktop's windows at once",
+        DESK,
+        [
+            ('            .filter(|w| w.mapped && w.desktop == self.current_desktop)\n',
+             '            .filter(|w| w.mapped)\n'),
+        ],
+        ["desktop"],
+        [
+            'a_window_is_only_visible_on_its_own_desktop',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the taskbar is ordered top-to-bottom, so every list the shell draws is reversed",
+        DESK,
+        [
+            ('        windows.sort_by_key(|w| w.z_order);\n',
+             '        windows.sort_by_key(|w| core::cmp::Reverse(w.z_order));\n'),
+        ],
+        ["desktop"],
+        [
+            'the_stacking_order_is_the_one_the_list_arrived_in',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: there is one virtual desktop past the last one, and it cannot be switched to",
+        DESK,
+        [
+            ('            Some(next) if next < self.num_desktops => Some(next),\n',
+             '            Some(next) if next <= self.num_desktops => Some(next),\n'),
+        ],
+        ["desktop"],
+        [
+            'desktop_navigation_stops_at_both_ends',
         ],
     ),
 ]

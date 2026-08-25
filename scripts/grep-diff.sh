@@ -134,8 +134,28 @@ printf 'foo\n'  > sub/s1
 printf 'bar\n'  > sub/deep/s2
 mkdir -p symdir
 printf 'foo\n' > symdir/plain
-ln -s ../sub symdir/tosub
-ln -s ../abc symdir/tofile
+ln -s ../sub  symdir/tosub
+ln -s ../abc  symdir/tofile
+ln -s /nowhere-at-all symdir/dangling
+
+# A tree that contains a link back to its own root, which is an infinite tree to
+# anything that follows links: `-R` must notice and say so, and `-r` must never
+# reach the question. Ours did reach it, and did not terminate.
+#
+# The link points at `loopdir`, not at the fixture directory above it, so that
+# the loop cases stay about the loop. Pointed one level higher it walked the
+# entire fixture tree, which meant each of them also compared binary-file
+# suppression and directory ordering — and would have needed re-marking every
+# time a fixture was added anywhere in this file.
+mkdir -p loopdir/inner
+printf 'foo\n' > loopdir/inner/leaf
+ln -s .. loopdir/inner/up
+
+# Exactly one matching file under a directory, which is the case that separates
+# "prefix because there are several files" from "prefix because -r was pointed
+# at a directory". Ours counted the expansion and so got this one wrong.
+mkdir -p onefile
+printf 'foo\n' > onefile/only
 
 # ------------------------------------------------------------------- cases ---
 #
@@ -449,8 +469,11 @@ grep -rL foo sub
 grep -rc foo sub
 grep -rh foo sub
 # `.` sweeps in `zsep`, which has NUL bytes in it, so this case differs for the
-# binary reason at the bottom of the file as well as for the symlink one.
-!we never suppress binary output, and -r follows a symlink found during the walk|grep -r foo .
+# binary reason at the bottom of the file — and it is also the one case whose
+# output is long enough to show that we list a directory in sorted order where
+# GNU lists it in readdir order (design-decisions.md §380). Both are choices;
+# neither is a defect, which is why this is `!` and not `?`.
+!we never suppress binary output, and we list a directory sorted where GNU uses readdir order|grep -r foo .
 grep -r foo sub/deep
 grep foo sub
 grep -r foo sub/s1
@@ -465,15 +488,57 @@ grep -r foo sub empty
 # -r and -R differ over exactly one thing: a symlink met during the walk. -r
 # skips it, -R follows it. A symlink named on the command line is followed by
 # both. None of this could be tested while the subject was a Windows binary,
-# and the first run inside WSL found that we do not make the distinction at
-# all: we follow during the walk, so `symdir/tosub/s1` is reported that GNU
-# does not report, and `-r` on a tree with a loop in it would not terminate.
-?-r follows a symlink found during the walk; GNU follows only ones named on the command line (that is -R)|grep -r foo symdir
+# and the first run inside WSL found that we did not make the distinction at
+# all — we followed during the walk, so `symdir/tosub/s1` was reported that GNU
+# does not report, and `-r` on a tree with a loop in it did not terminate.
+grep -r foo symdir
 grep -R foo symdir
 grep -r foo symdir/tosub
 grep -r a symdir/tofile
-?-r follows a symlink found during the walk; GNU follows only ones named on the command line (that is -R)|grep -rl foo symdir
+grep -rl foo symdir
 grep -Rl foo symdir
+grep -r foo symdir/dangling
+grep -R foo symdir/dangling
+grep -Rs foo symdir
+grep -r foo loopdir
+grep -R foo loopdir
+grep -Rl foo loopdir
+
+# The loop warning has three separate properties, and we had all three wrong at
+# once. It is silenced by -s; it does *not* raise the exit status, so a -R that
+# found nothing in a looping tree still exits 1 and not 2; and it names the
+# link, not what the link resolves to.
+grep -Rs foo loopdir
+grep -R zzz loopdir
+grep -Rc foo loopdir
+
+# -q stops at the first match, and the walk has to be *streaming* for that to
+# be visible: what it means is that the files after the match are never looked
+# at, so the diagnostics they would have produced never appear. Expanding the
+# tree into a list first produced the warning either way, because the expansion
+# had already finished before the first file was read. The pair below is the
+# whole test: same tree, same flags, and the warning appears only in the one
+# that had to walk all of it.
+grep -Rq foo loopdir
+grep -Rq zzz loopdir
+grep -rq foo sub
+
+# -q asks one question, and an error reading some other file does not unanswer
+# it: POSIX says a selected line means status 0 "even if an error was
+# detected". The three below separate that from the ordinary rule — the first
+# reports the missing file and still exits 0, the second exits 0 without ever
+# reaching it, and the third has no match to outrank the error and so exits 2.
+grep -q foo nonexistent words
+grep -q foo words nonexistent
+grep -q zzz nonexistent words
+
+# The filename prefix under -r is not "more than one file": it is "the operand
+# was a directory". These two say so, and they disagreed before the walk was
+# rewritten — the second printed a bare `foo`.
+grep -r foo onefile
+grep -r a symdir/tofile
+grep -rH foo onefile
+grep -rh foo onefile
 
 # --- -Z and -z, the NUL-delimited pair ---
 grep -Z a abc
@@ -562,10 +627,13 @@ grep -E 'caf.' accent
 # match loop and the exit status. GNU exits 2 and says `grep: write error: Bad
 # file descriptor`. The two cases that write nothing pass, which locates it in
 # the writing rather than in the setup.
-?a failed write to a closed stdout is dropped; GNU exits 2 with `write error`|grep a abc >&-
-?a failed write to a closed stdout is dropped; GNU exits 2 with `write error`|grep -c a abc >&-
+grep a abc >&-
+grep -c a abc >&-
 grep -q a abc >&-
 grep z abc >&-
+grep -l a abc >&-
+grep -o a abc >&-
+grep -r foo sub >&-
 grep a /nonexistent 2>&-
 CASES
 
@@ -583,13 +651,15 @@ if [ "$(id -u)" != 0 ]; then
     run_case 'grep a noread'
     run_case 'grep -s a noread'
     run_case 'grep a noread abc'
-    # Two separate faults, both found on the first run inside WSL: an
-    # unopenable *directory* leaves the exit status at 1 where an unopenable
-    # file correctly makes it 2, and -s does not cover the directory case at
-    # all. The plain-file cases above pass, which is what says it is the
-    # recursive walk's error path and not the shared one.
-    run_case '?an unreadable directory under -r leaves the status at 1; an unreadable file correctly makes it 2|grep -r foo nolist'
-    run_case '?-s does not suppress an unreadable directory met during the -r walk|grep -rs foo nolist'
+    # Two separate faults, both found on the first run inside WSL and both
+    # fixed by giving the recursive walk the error path the file case already
+    # had: an unopenable directory left the status at 1, and -s did not cover
+    # it. The plain-file cases above passed throughout, which is what said it
+    # was the walk and not the shared path.
+    run_case 'grep -r foo nolist'
+    run_case 'grep -rs foo nolist'
+    run_case 'grep -r foo nolist abc'
+    run_case 'grep -R foo nolist'
     # Restore, so `diff_cleanup` can descend even if the chmod -R there ever
     # stops covering a case.
     chmod 755 nolist

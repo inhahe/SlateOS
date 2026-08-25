@@ -77481,7 +77481,7 @@ dangling, 202 single-prover**; the last figure recorded above, before modules
 
 ---
 
-## `A-KSHELL-TR-ANSWERS-FIVE-QUESTIONS-IT-WAS-NOT-ASKED` (lane A, 2026-08-25) — **open**
+## `A-KSHELL-TR-ANSWERS-FIVE-QUESTIONS-IT-WAS-NOT-ASKED` (lane A, 2026-08-25) — ✅ **FIXED**
 
 **Where.** `kernel/src/kshell.rs` — `cmd_tr` (~108262), `cmd_tr_input`
 (~108312), `tr_translate` (~108328), `tr_delete` (~108345), `expand_tr_set`
@@ -77500,11 +77500,24 @@ them exits 0.
 | `tr -d x binaryfile` | prints **nothing at all** | say the file is not text |
 | `tr -d '[:space:]'` | deletes `[`, `:`, `s`, `p`, `a`, `c`, `e`, `]` | delete whitespace |
 
-**Status (2026-08-25): every row of that table is now fixed.** The entry stays
-open for one thing the table never listed — the `[x*n]` / `[x*]` repeat
-constructs, which are still read as literals, so `tr 'abc' '[x*]'` maps
-`a`→`[`, `b`→`x`, `c`→`*` and exits 0. That is the same failure class, so the
-entry does not close until it is gone. See item 3c below.
+**Status (2026-08-25): fixed, in four commits, pinned by kshell self-test rungs
+46 and 49–51.** Every row of the table above is gone, and so is the repeat
+construct the table never listed (`[x*n]` / `[x*]`, which used to translate
+using the five literal characters `[`, `x`, `*`, `3`, `]`).
+
+Three deliberate divergences from GNU are recorded rather than hidden, each
+argued at its item below:
+
+| | this `tr` | GNU |
+|---|---|---|
+| `\303` (octal above `\177`) | refused | the byte 0xC3 |
+| `tr 'abc' '[:upper:]'` | accepted, paired positionally | refused as misaligned |
+| `-t` (truncate SET1) | refused | supported |
+
+The first two are in `design-decisions.md` §276. All three run in the safe
+direction: two are *missing* answers where GNU has one, and the third accepts
+a script GNU would have rejected — none of them answers an already-working
+script differently, which is the property this entry was opened about.
 
 **Why, one at a time.**
 
@@ -77618,14 +77631,26 @@ has in this file (`CutSpec` / `CutParseError` / `parse_cut_args`):
      GNU cannot change what an already-working script means, whereas the
      other two directions can.
 
-   - **3c — the repeat constructs: still open.** `[x*n]` (x repeated n times,
-     allowed in either set) and `[x*]` (SET2 only, pad SET2 to SET1's length
-     with x). Currently both are read as literals: `tr 'abc' '[x*]'` maps
-     `a`→`[`, `b`→`x`, `c`→`*` and reports success, so this row of the class
-     is *not* yet closed. `[x*]` needs `expand_tr_set` to learn SET1's
-     length, which is why it did not ride along with 3b — and GNU's own
-     message for the misuse (`the [c*] repeat construct may not appear in
-     string1`) is the shape of the error to emit for the SET1 case.
+   - **3c — the repeat constructs: done** (kshell self-test rung 51). `[c*n]`
+     is n copies of c in either set; `[c*]` is SET2-only and pads SET2 to
+     SET1's length. A count beginning with `0` is octal, as everywhere else,
+     so `[x*010]` is eight copies — rung 51's assertion is built so that a
+     decimal reading would change the answer.
+
+     Two structural notes worth keeping, because they are the reason this did
+     not ride along with 3b. `expand_tr_set`'s second parameter became
+     `Option<usize>` rather than a bool: the pad's width is SET1's length
+     minus *the rest of* SET2, so the flag distinguishing the two sets has to
+     carry that number, and SET1 has to be expanded first. And the pad cannot
+     be resolved where it is read — in `tr abcd '[x*]z'` it is two characters
+     wide, knowable only after the `z` — so it is carried out of the bracket
+     parser and spliced in once the scan finishes.
+
+     `tr_escape` came out of `expand_tr_set`'s scan into its own function at
+     the same time, because the repeated character may itself be escaped and
+     `[\n*2]` has to mean two newlines. The alternative was a second copy of
+     the octal decoder inside the bracket parser, which is how one command
+     comes to disagree with itself.
 
 **Not a regression.** All five have been true since the command was written.
 They are recorded together because they are one command's worth of the same

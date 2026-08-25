@@ -24,7 +24,12 @@
 //! | `-q` | print nothing; the exit status is the answer |
 //! | `-s` | do not report unreadable files |
 //! | `-m N` | stop after N selected lines per file; `-m 0` prints nothing |
-//! | `-r` | search directories recursively |
+//! | `-r` / `-R` | search directories recursively; `-R` follows symlinks it finds |
+//! | `-d A` | do `A` with a directory: `read`, `recurse` (which is `-r`) or `skip` |
+//! | `-D A` | do `A` with a device, socket or FIFO: `read` or `skip` |
+//! | `--include=G` / `--exclude=G` | search only / never the files whose name matches glob `G` |
+//! | `--exclude-from=F` | read `--exclude` globs from file `F`, one per line |
+//! | `--exclude-dir=G` | do not descend into a directory whose name matches `G` |
 //! | `-Z` | write a NUL after a file name instead of the `:` or newline |
 //! | `-z` | the input is NUL-separated too, and so is the output |
 //! | `-a` | accepted and ignored: this grep never suppresses binary output |
@@ -57,12 +62,16 @@
 //! `grep -rlZ … | xargs -0` are the spellings that are actually correct.
 
 use coreutils::diag;
+use coreutils::filekind;
+// Aliased for the same reason `ere::Syntax` is: `Flags` is far too plain a name
+// to stand unqualified next to grep's own option soup.
+use coreutils::fnmatch::{Flags as FnmatchFlags, fnmatch};
 use coreutils::quote::{self, quotef_os};
 use coreutils::stdfd;
 use std::collections::VecDeque;
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -125,6 +134,314 @@ impl GroupSep {
     }
 }
 
+/// `--color[=WHEN]`.
+///
+/// The argument is *optional* — `grep --color foo file` means `auto` and does
+/// not eat `foo` — which is why this cannot go through the same "value or the
+/// next argv entry" path as `--context`.
+#[derive(Clone, Copy, Default)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum ColorWhen {
+    #[default]
+    Never,
+    Always,
+    /// Colour only when standard output is a terminal. Resolved once, after
+    /// parsing, rather than asked per line.
+    Auto,
+}
+
+/// The eight SGR capabilities `GREP_COLORS` names, and the two booleans.
+///
+/// Each is stored as the *parameter* text — `01;31`, not the whole escape — so
+/// that "unset" and "empty" are the same thing and mean "write this text
+/// plainly", which is what GNU's default `sl=`/`cx=` rely on.
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Colors {
+    /// `ms`: matched text on a *selected* line.
+    selected_match: Vec<u8>,
+    /// `mc`: matched text on a *context* line. `-v` is what makes the two
+    /// visibly different: under it the matches are on the context lines.
+    context_match: Vec<u8>,
+    /// `sl`: everything else on a selected line. Empty by default, which is why
+    /// plain `grep --color=always` colours only the matches.
+    selected_line: Vec<u8>,
+    /// `cx`: everything else on a context line. Empty by default.
+    context_line: Vec<u8>,
+    /// `fn`: the file name in a prefix, and in `-c`/`-l`/`-L` output.
+    filename: Vec<u8>,
+    /// `ln`: the line number.
+    line_number: Vec<u8>,
+    /// `bn`: the byte offset.
+    byte_number: Vec<u8>,
+    /// `se`: every separator — the `:` and `-` between prefix fields, and the
+    /// `--` between context groups.
+    separator: Vec<u8>,
+    /// `rv`: swap `sl` and `cx`, but only when `-v` is also in effect. The
+    /// point is that under `-v` the *selected* lines are the boring ones.
+    reverse_video: bool,
+    /// `ne`: do not append "erase in line" (`\e[K`) to each escape. It is there
+    /// by default so that a highlight reaching the end of a line does not paint
+    /// the rest of the terminal row on a screen whose background colour differs.
+    no_erase: bool,
+}
+
+impl Default for Colors {
+    /// GNU's defaults: `ms=01;31:mc=01;31:sl=:cx=:fn=35:ln=32:bn=32:se=36`.
+    fn default() -> Self {
+        Self {
+            selected_match: b"01;31".to_vec(),
+            context_match: b"01;31".to_vec(),
+            selected_line: Vec::new(),
+            context_line: Vec::new(),
+            filename: b"35".to_vec(),
+            line_number: b"32".to_vec(),
+            byte_number: b"32".to_vec(),
+            separator: b"36".to_vec(),
+            reverse_video: false,
+            no_erase: false,
+        }
+    }
+}
+
+impl Colors {
+    /// The escape that begins a run of `cap`-coloured output, or nothing at all
+    /// when `cap` is empty — an empty capability means "write it plainly", and
+    /// emitting `\e[m` for it would reset a colour the caller had set.
+    fn start(&self, cap: &[u8]) -> Vec<u8> {
+        if cap.is_empty() {
+            return Vec::new();
+        }
+        let mut v = b"\x1b[".to_vec();
+        v.extend_from_slice(cap);
+        v.push(b'm');
+        if !self.no_erase {
+            v.extend_from_slice(b"\x1b[K");
+        }
+        v
+    }
+
+    /// The escape that ends one, matched to [`Colors::start`] — nothing when
+    /// `cap` is empty.
+    fn end(&self, cap: &[u8]) -> Vec<u8> {
+        if cap.is_empty() {
+            return Vec::new();
+        }
+        let mut v = b"\x1b[m".to_vec();
+        if !self.no_erase {
+            v.extend_from_slice(b"\x1b[K");
+        }
+        v
+    }
+
+    /// `text` wrapped in `cap`'s pair.
+    fn wrap(&self, cap: &[u8], text: &[u8]) -> Vec<u8> {
+        let mut v = self.start(cap);
+        v.extend_from_slice(text);
+        v.extend_from_slice(&self.end(cap));
+        v
+    }
+
+    /// Apply one `GREP_COLORS` specification: `key=value` pairs and bare
+    /// boolean keys, separated by `:`.
+    ///
+    /// A key that is not one of the ten, and a value that is not SGR
+    /// parameters, are both ignored **in silence** — measured, and it is the
+    /// only tolerable behaviour for a variable that is set once in a shell
+    /// profile and then inherited by every grep in every script.
+    fn apply(&mut self, spec: &[u8]) {
+        for item in spec.split(|&b| b == b':') {
+            let (key, value, valued) = match item.iter().position(|&b| b == b'=') {
+                Some(i) => (
+                    item.get(..i).unwrap_or_default(),
+                    item.get(i.saturating_add(1)..).unwrap_or_default(),
+                    true,
+                ),
+                // No `=` at all. `rv` and `ne` are booleans and still fire;
+                // `GREP_COLORS=ms` is *ignored* rather than read as `ms=`,
+                // which is the difference between "no highlight" and the
+                // default one. Measured.
+                None => (item, &[][..], false),
+            };
+            // A capability is SGR parameters: digits and `;`. Anything else is
+            // not something to hand to a terminal.
+            let sane = valued && value.iter().all(|b| b.is_ascii_digit() || *b == b';');
+            let set = |field: &mut Vec<u8>| {
+                if sane {
+                    *field = value.to_vec();
+                }
+            };
+            match key {
+                b"ms" => set(&mut self.selected_match),
+                b"mc" => set(&mut self.context_match),
+                // `mt` is both at once, and order decides: the last assignment
+                // to a field wins, so `ms=…:mt=…` and `mt=…:ms=…` differ.
+                b"mt" => {
+                    set(&mut self.selected_match);
+                    set(&mut self.context_match);
+                }
+                b"sl" => set(&mut self.selected_line),
+                b"cx" => set(&mut self.context_line),
+                b"fn" => set(&mut self.filename),
+                b"ln" => set(&mut self.line_number),
+                b"bn" => set(&mut self.byte_number),
+                b"se" => set(&mut self.separator),
+                b"rv" => self.reverse_video = true,
+                b"ne" => self.no_erase = true,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// `-d ACTION` / `--directories=ACTION`: what to do with a directory.
+///
+/// `-r` and `-R` are not a separate setting — they *are* `-d recurse`, which is
+/// why the last of `-r` and `-d skip` wins whichever order they are written in.
+/// Measured: `grep -r -d skip foo dir` skips, `grep -d skip -r foo dir`
+/// recurses, and `grep -r -d read foo dir` says `Is a directory`. Modelling
+/// recursion as its own `bool` — which this did until 2026-08-25 — cannot
+/// express that, because two independent flags have no order between them.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+enum Directories {
+    /// `read`, the default: try to read the directory, which fails with
+    /// `Is a directory` and status 2. `-s` silences the message; the status
+    /// stands, because the file was named and not searched.
+    #[default]
+    Read,
+    /// `recurse`: what `-r` and `-R` set.
+    Recurse,
+    /// `skip`: pass over it in silence, and **without** raising the status —
+    /// `grep -d skip foo dir` exits 1, not 2. Skipping is not an error.
+    Skip,
+}
+
+/// `-D ACTION` / `--devices=ACTION`: what to do with a character device, block
+/// device, socket or FIFO.
+///
+/// Three states rather than two, because the default is neither "read" nor
+/// "skip": it reads a device **named on the command line** and skips one the
+/// recursive walk **finds**. That asymmetry is what lets `grep -r pat /` finish
+/// on a system with FIFOs in it while `grep pat /dev/stdin` still works.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+enum Devices {
+    /// The default: read a device the command line names, skip one the walk
+    /// finds.
+    #[default]
+    CommandLine,
+    /// `read`: read them wherever they are found. `grep -D read -r pat .` over
+    /// a tree holding a FIFO with no writer blocks forever — GNU does too.
+    Read,
+    /// `skip`: never read one.
+    Skip,
+}
+
+/// One run of consecutive same-kind selector options.
+///
+/// `--include a --include b --exclude c` is two segments, not three patterns:
+/// a run of `--include`s coalesces into one, and so does a run of `--exclude`s
+/// (`--exclude-from` extends the current exclude run rather than starting a new
+/// one). A segment matches when *any* of its globs does.
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Segment {
+    /// Whether matching this segment means *keep* (`--include`) or *drop*
+    /// (`--exclude`, `--exclude-from`, `--exclude-dir`).
+    include: bool,
+    globs: Vec<Vec<u8>>,
+}
+
+/// The `--include`/`--exclude` list for one kind of name — files, or
+/// directories — and the rule that turns it into a yes or a no.
+///
+/// # The rule
+///
+/// This is gnulib's `excluded_file_name`, and it is not the "last one wins" or
+/// "include beats exclude" that either reading of the manual suggests. Three
+/// steps, in order:
+///
+/// 1. Try the segments **newest first**. The first one that matches decides:
+///    an include segment means keep, an exclude segment means drop.
+/// 2. If none matches, look at the **oldest** segment. Drop iff it is an
+///    include — because a command that opens with `--include` is a whitelist,
+///    and a whitelist's default is to reject.
+/// 3. With no segments at all, keep.
+///
+/// Step 2 is the surprising one, and together with step 1 it makes swapping two
+/// options change far more than their order. Measured, GNU grep 3.11:
+///
+/// | command | `s1.txt` | `s2.log` | `s2.txt` |
+/// |---|---|---|---|
+/// | `--include='*.txt' --exclude='s1*'` | dropped — newest segment matches, and it excludes | dropped — nothing matches, and the oldest segment is an include | kept |
+/// | `--exclude='s1*' --include='*.txt'` | **kept** — newest segment matches, and it includes | kept — nothing matches, and the oldest segment is an exclude | kept |
+///
+/// So the second command searches *everything*, `s1.txt` included: written in
+/// that order the `--exclude` cannot reject anything the `--include` names, and
+/// cannot reject anything it does not name either.
+#[derive(Clone, Default)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Selectors {
+    segments: Vec<Segment>,
+}
+
+impl Selectors {
+    /// Add one glob, extending the newest segment when it is of the same kind.
+    fn push(&mut self, include: bool, glob: Vec<u8>) {
+        match self.segments.last_mut() {
+            Some(seg) if seg.include == include => seg.globs.push(glob),
+            _ => self.segments.push(Segment {
+                include,
+                globs: vec![glob],
+            }),
+        }
+    }
+
+    /// Whether `name` is *excluded* — the sense gnulib's function returns, and
+    /// the sense the callers want, since "no selectors at all" must answer
+    /// `false`.
+    fn excludes(&self, name: &[u8]) -> bool {
+        for seg in self.segments.iter().rev() {
+            if seg.globs.iter().any(|g| glob_matches(g, name)) {
+                return !seg.include;
+            }
+        }
+        // Nothing matched: the oldest segment sets the default.
+        self.segments.first().is_some_and(|seg| seg.include)
+    }
+}
+
+/// gnulib's `exclude_fnmatch` without `EXCLUDE_ANCHORED`: the glob is tried
+/// against the whole name, and then against each suffix of it that begins just
+/// after a `/`.
+///
+/// The suffix pass is why `grep --exclude='top.txt' foo ./top.txt` excludes the
+/// file even though the operand was written with a `./` on the front, and why
+/// `grep --exclude-dir='su*' -r foo ./sub` skips the directory. It is invisible
+/// for a name the walk found, because the walk matches base names, which hold
+/// no `/` — see [`Options::skipped_file`].
+///
+/// `Flags::NONE`, deliberately: grep passes no `FNM_PATHNAME`, so `*` crosses a
+/// `/`, and no `FNM_PERIOD`, so `--include='*'` matches a dotfile. `\` still
+/// escapes.
+fn glob_matches(glob: &[u8], name: &[u8]) -> bool {
+    if fnmatch(glob, name, FnmatchFlags::NONE) {
+        return true;
+    }
+    for (i, b) in name.iter().enumerate() {
+        // `p[1] != '/'` is gnulib's, and it is what stops `a//b` offering the
+        // suffix `/b` as well as `b`.
+        if *b == b'/' && name.get(i.saturating_add(1)) != Some(&b'/') {
+            let suffix = name.get(i.saturating_add(1)..).unwrap_or_default();
+            if fnmatch(glob, suffix, FnmatchFlags::NONE) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct Options {
@@ -133,7 +450,20 @@ struct Options {
     invert: bool,
     count_only: bool,
     line_numbers: bool,
-    recursive: bool,
+    /// `-d`/`--directories`, which `-r` and `-R` also write. See
+    /// [`Directories`] for why recursion is a *value of this* rather than a
+    /// flag beside it.
+    directories: Directories,
+    /// `-D`/`--devices`.
+    devices: Devices,
+    /// `--include`, `--exclude` and `--exclude-from`, in the order written.
+    /// Consulted for anything that is not a directory.
+    file_selectors: Selectors,
+    /// `--exclude-dir`, in the order written. Consulted for directories, and
+    /// only ever holding exclude segments — GNU has no `--include-dir`, so a
+    /// `--include` never reaches a directory and cannot filter the walk by the
+    /// names of the directories in it.
+    dir_selectors: Selectors,
     /// `-R`: also follow a symbolic link found *during* the walk.
     ///
     /// `-r` and `-R` differ over exactly this. Both follow a link named on the
@@ -180,6 +510,34 @@ struct Options {
     default_context: Option<usize>,
     /// `--group-separator=SEP` / `--no-group-separator`.
     group_sep: GroupSep,
+    /// `-b`: prefix each printed line with its byte offset in the file.
+    ///
+    /// The offset is of *what is printed*, not of the line: under `-o` each
+    /// match carries its own, so `grep -bo foo` over `foo bar foo` at offset 6
+    /// prints `6` and `14`. Under `-z` it still counts bytes, NUL separators
+    /// included.
+    byte_offset: bool,
+    /// `-T`: line the bodies up, by padding the numeric prefix fields to a
+    /// common width and ending the prefix with a tab.
+    ///
+    /// The width is neither a constant nor the widest value actually printed —
+    /// it is fixed *before the first line is read*, from the file's size, which
+    /// is why it can be applied to a stream. Measured against GNU grep 3.11:
+    /// the digit count of the size, plus one when `-n` is on because a file of
+    /// N bytes can hold N+1 lines. So a 99-byte file pads line numbers to three
+    /// columns and byte offsets to two, and a 9-byte file pads them to two and
+    /// one. See [`offset_width`].
+    align_tabs: bool,
+    /// `--color=WHEN` as it was written on the command line. Turned into
+    /// `color` — the answer actually used — once, after parsing, because `auto`
+    /// asks the operating system a question and a line of output is the wrong
+    /// place to ask it.
+    color_when: ColorWhen,
+    /// Whether output is coloured at all: [`Options::color_when`] resolved.
+    color: bool,
+    /// The palette, from `GREP_COLORS`. Read even when `color` is false, so
+    /// that a malformed variable is ignored the same way either way.
+    colors: Colors,
     /// `-z`: the *input* is NUL-separated too, and so is the output.
     ///
     /// The other half of the same pipeline: `find -print0 | xargs -0 grep -z`
@@ -191,21 +549,42 @@ struct Options {
 }
 
 impl Options {
+    /// Whether directories are walked — `-r`, `-R` or `-d recurse`.
+    fn recursive(&self) -> bool {
+        self.directories == Directories::Recurse
+    }
+
+    /// gnulib's `skip_devices`: whether a device found *here* is passed over.
+    ///
+    /// `command_line` distinguishes the two places a device can turn up,
+    /// because the default setting treats them differently — see [`Devices`].
+    fn skip_devices(&self, command_line: bool) -> bool {
+        self.devices == Devices::Skip || (self.devices == Devices::CommandLine && !command_line)
+    }
+
+    /// GNU's `skipped_file`: whether the selectors reject this name.
+    ///
+    /// Which list is asked depends on `is_dir` and on nothing else — so
+    /// `--exclude=sub` does not stop `grep -r pat sub`, and `--exclude-dir=sub`
+    /// does, even without `-r`.
+    ///
+    /// **`name` is not the path.** For an operand it is the operand exactly as
+    /// written, `./` and all; for an entry the walk found it is that entry's
+    /// **base name**, never the path the walk built up to reach it. That is
+    /// GNU's `ent->fts_name`, and it is why `--exclude='sub/s1'` excludes
+    /// nothing under `-r` while `--exclude='s1'` excludes it at every depth.
+    fn skipped_file(&self, name: &[u8], is_dir: bool) -> bool {
+        if is_dir {
+            self.dir_selectors.excludes(name)
+        } else {
+            self.file_selectors.excludes(name)
+        }
+    }
+
     /// The byte that ends a line of input and of output: `\n`, or NUL under
     /// `-z`.
     fn line_sep(&self) -> u8 {
         if self.null_data { 0 } else { b'\n' }
-    }
-
-    /// What follows a file name that is being used as a prefix — `:` normally,
-    /// NUL under `-Z`.
-    ///
-    /// `field` is the byte that separates the *other* prefix fields, which is
-    /// `:` on a selected line and `-` on a context line. It is ignored under
-    /// `-Z`: a name is terminated by NUL there whatever kind of line follows
-    /// it, which is what keeps `grep -ZC1 … | xargs -0` parseable.
-    fn name_sep(&self, field: u8) -> u8 {
-        if self.null_name { 0 } else { field }
     }
 
     /// Lines of trailing context, with `-C`'s value standing in for an unset
@@ -240,6 +619,45 @@ impl Options {
     fn context_printed(&self) -> bool {
         !self.count_only && !self.quiet && !self.files_with_matches && !self.files_without_match
     }
+
+    /// `text` wrapped in `cap`, or `text` alone when `--color` is off.
+    ///
+    /// Every coloured field goes through here rather than through
+    /// [`Colors::wrap`] directly, so that "is colour on at all" is asked in one
+    /// place instead of at each of the eight call sites.
+    fn paint(&self, cap: &[u8], text: &[u8]) -> Vec<u8> {
+        if self.color {
+            self.colors.wrap(cap, text)
+        } else {
+            text.to_vec()
+        }
+    }
+
+    /// The capability for the body of a line — `sl` for a selected line, `cx`
+    /// for a context one, swapped when `rv` is set *and* `-v` is in effect.
+    ///
+    /// `rv` exists because `-v` inverts which lines are interesting: the
+    /// selected ones are the ones that did **not** match, so a caller who
+    /// colours selected lines specially wants that colouring to follow the
+    /// matches rather than the selection.
+    fn line_cap(&self, selected: bool) -> &[u8] {
+        if selected ^ (self.invert && self.colors.reverse_video) {
+            &self.colors.selected_line
+        } else {
+            &self.colors.context_line
+        }
+    }
+
+    /// The capability for matched text within a line: `ms` on a selected line,
+    /// `mc` on a context one. Unlike [`Options::line_cap`] this follows the
+    /// line's kind directly — `rv` does not touch it.
+    fn match_cap(&self, selected: bool) -> &[u8] {
+        if selected {
+            &self.colors.selected_match
+        } else {
+            &self.colors.context_match
+        }
+    }
 }
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -251,6 +669,10 @@ struct GrepArgs {
     /// argument parsing stays a pure function of argv.
     pattern_files: Vec<String>,
     files: Vec<String>,
+    /// Whether the sole operand is a `.` this parser supplied rather than one
+    /// the caller wrote, in which case the walk's names print without their
+    /// leading `./`. GNU's `omit_dot_slash`.
+    omit_dot_slash: bool,
 }
 
 /// A compiled pattern.
@@ -342,9 +764,9 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
                 'v' => opts.invert = true,
                 'c' => opts.count_only = true,
                 'n' => opts.line_numbers = true,
-                'r' => opts.recursive = true,
+                'r' => opts.directories = Directories::Recurse,
                 'R' => {
-                    opts.recursive = true;
+                    opts.directories = Directories::Recurse;
                     opts.deref_links = true;
                 }
                 'w' => opts.word = true,
@@ -358,11 +780,15 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
                 's' => opts.no_messages = true,
                 'Z' => opts.null_name = true,
                 'z' => opts.null_data = true,
+                'b' => opts.byte_offset = true,
+                'T' => opts.align_tabs = true,
                 // Accepted and ignored: this grep does not suppress output for
                 // input it thinks is binary, so there is nothing for `-a` to
                 // turn off. Refusing it would break callers that pass it
                 // defensively, and they are asking for what we already do.
                 'a' => {}
+                'd' => opts.directories = directories_arg(&take_arg('d')?)?,
+                'D' => opts.devices = devices_arg(&take_arg('D')?)?,
                 'A' => opts.after_context = Some(context_len(&take_arg('A')?)?),
                 'B' => opts.before_context = Some(context_len(&take_arg('B')?)?),
                 'C' => opts.default_context = Some(context_len(&take_arg('C')?)?),
@@ -391,14 +817,22 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
         patterns.push(files.remove(0).into_bytes());
     }
 
+    // Recursion with no operand walks the working directory, as GNU does;
+    // without it there is nothing to walk and the input is stdin.
+    //
+    // `omit_dot_slash` is the half of that nobody expects: the walk is rooted at
+    // `.`, but the names GNU prints have no `./` on them — `grep -rl foo` says
+    // `sub/s1` where `grep -rl foo .` says `./sub/s1`. It is GNU's
+    // `filename_prefix_len`, and it applies only when the `.` was *supplied* by
+    // this branch, never when the caller wrote it.
+    let mut omit_dot_slash = false;
     if files.is_empty() {
-        // Recursion with no operand walks the working directory, as GNU does;
-        // without it there is nothing to walk and the input is stdin.
-        files.push(if opts.recursive {
-            ".".to_string()
+        if opts.recursive() {
+            files.push(".".to_string());
+            omit_dot_slash = true;
         } else {
-            "-".to_string()
-        });
+            files.push("-".to_string());
+        }
     }
 
     Ok(GrepArgs {
@@ -406,6 +840,7 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
         patterns,
         pattern_files,
         files,
+        omit_dot_slash,
     })
 }
 
@@ -449,10 +884,33 @@ fn parse_long(
         "invert-match" => opts.invert = true,
         "count" => opts.count_only = true,
         "line-number" => opts.line_numbers = true,
-        "recursive" => opts.recursive = true,
+        "recursive" => opts.directories = Directories::Recurse,
         "dereference-recursive" => {
-            opts.recursive = true;
+            opts.directories = Directories::Recurse;
             opts.deref_links = true;
+        }
+        "directories" => opts.directories = directories_arg(&need(value)?)?,
+        "devices" => opts.devices = devices_arg(&need(value)?)?,
+        "include" => opts.file_selectors.push(true, need(value)?.into_bytes()),
+        "exclude" => opts.file_selectors.push(false, need(value)?.into_bytes()),
+        // Trailing slashes are stripped from the *pattern*, so `--exclude-dir=
+        // sub/` and `--exclude-dir=sub` are the same request. GNU does it with
+        // `strip_trailing_slashes`, and without it the pattern could never
+        // match, because the names it is compared against never end in one.
+        "exclude-dir" => {
+            let mut pat = need(value)?.into_bytes();
+            while pat.len() > 1 && pat.last() == Some(&b'/') {
+                pat.pop();
+            }
+            opts.dir_selectors.push(false, pat);
+        }
+        "exclude-from" => {
+            let path = need(value)?;
+            let raw =
+                fs::read(&path).map_err(|e| format!("{}: {}", quotef_os(&path), strerror(&e)))?;
+            for pat in split_exclude_file(&raw) {
+                opts.file_selectors.push(false, pat);
+            }
         }
         "word-regexp" => opts.word = true,
         "line-regexp" => opts.whole_line = true,
@@ -465,6 +923,8 @@ fn parse_long(
         "no-messages" => opts.no_messages = true,
         "null" => opts.null_name = true,
         "null-data" => opts.null_data = true,
+        "byte-offset" => opts.byte_offset = true,
+        "initial-tab" => opts.align_tabs = true,
         "after-context" => opts.after_context = Some(context_len(&need(value)?)?),
         "before-context" => opts.before_context = Some(context_len(&need(value)?)?),
         "context" => opts.default_context = Some(context_len(&need(value)?)?),
@@ -473,6 +933,9 @@ fn parse_long(
         // empty value is stored rather than folded into `Suppressed`.
         "group-separator" => opts.group_sep = GroupSep::Custom(need(value)?.into_bytes()),
         "no-group-separator" => opts.group_sep = GroupSep::Suppressed,
+        // `value`, not `need(value)`: the argument is optional, so `grep
+        // --color foo file` means `auto` and leaves `foo` as the pattern.
+        "color" | "colour" => opts.color_when = color_when(value)?,
         "text" | "binary-files" => {}
         "regexp" => patterns.push(need(value)?.into_bytes()),
         "file" => pattern_files.push(need(value)?),
@@ -486,6 +949,110 @@ fn parse_long(
         other => return Err(format!("unknown option: --{other}")),
     }
     Ok(())
+}
+
+/// The value of `-d` / `--directories`.
+///
+/// # Errors
+///
+/// GNU routes this through gnulib's `argmatch`, which prints **seven** lines —
+/// the rejected value, `Valid arguments are:` and the three of them, then
+/// `Usage: …` and `Try 'grep --help' …` — and exits **1**, not grep's usual 2.
+///
+/// The first five are reproduced here exactly, curly quotes included, because
+/// [`quote::quote`] is gnulib's `quote` and those lines say nothing about which
+/// options exist. The last two are not, and cannot be until this family has a
+/// `--help` at all: printing `Try 'grep --help' for more information.` when
+/// `--help` is an unknown option would be a diagnostic that lies. Nor is the
+/// status right, because every parse error in this program funnels through one
+/// `Err(String)` that exits 2. Both belong to
+/// `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, which is the same
+/// defect `--zzz` and `-m x` have, and `scripts/grep-diff.sh` records this case
+/// as a gap against it rather than as a decision about `-d`.
+fn directories_arg(value: &str) -> Result<Directories, String> {
+    match value {
+        "read" => Ok(Directories::Read),
+        "recurse" => Ok(Directories::Recurse),
+        "skip" => Ok(Directories::Skip),
+        _ => Err(format!(
+            "invalid argument {} for {}\nValid arguments are:\n  - {}\n  - {}\n  - {}",
+            quote::quote(value.as_bytes()),
+            quote::quote(b"--directories"),
+            quote::quote(b"read"),
+            quote::quote(b"recurse"),
+            quote::quote(b"skip"),
+        )),
+    }
+}
+
+/// The value of `-D` / `--devices`.
+///
+/// # Errors
+///
+/// `grep: unknown devices method`, exit 2 — GNU's own wording and status, which
+/// this one can reproduce exactly because GNU checks `-D` by hand rather than
+/// through `argmatch`. The value is not named, which is GNU's choice and not an
+/// omission here.
+fn devices_arg(value: &str) -> Result<Devices, String> {
+    match value {
+        "read" => Ok(Devices::Read),
+        "skip" => Ok(Devices::Skip),
+        _ => Err("unknown devices method".to_string()),
+    }
+}
+
+/// The patterns held in a `--exclude-from` file.
+///
+/// gnulib's `add_exclude_fp`, which is *not* [`split_patterns`]: there is no
+/// comment syntax — a line beginning `#` is a glob that matches a name
+/// beginning `#` — and a blank line is an empty pattern, which matches nothing
+/// rather than everything. (An empty *`-f` pattern* matches every line; the
+/// two files look alike and mean opposite things.)
+///
+/// One pattern per newline, plus a final unterminated remainder if there is
+/// one, so an empty file contributes nothing at all — which matters, because a
+/// segment made of no patterns would still set the "oldest segment" default in
+/// [`Selectors::excludes`].
+fn split_exclude_file(raw: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for (i, b) in raw.iter().enumerate() {
+        if *b == b'\n' {
+            out.push(raw.get(start..i).unwrap_or_default().to_vec());
+            start = i.saturating_add(1);
+        }
+    }
+    if start < raw.len() {
+        out.push(raw.get(start..).unwrap_or_default().to_vec());
+    }
+    out
+}
+
+/// The value of `--color[=WHEN]`.
+///
+/// The three GNU spellings each have two synonyms nobody documents but scripts
+/// use: `force`/`yes` for `always`, `none`/`no` for `never`, `tty`/`if-tty` for
+/// `auto`. All six are matched without regard to case, as GNU does.
+///
+/// # Errors
+///
+/// A `WHEN` that is none of them is *not* an error to GNU: it sets the
+/// show-help flag, so `grep --color=bogus foo file` prints the entire usage
+/// summary on **stdout** and exits 0. We have no usage text to print — and one
+/// listing options we do not implement would be a lie — so this reports it as
+/// an unknown value instead, which `scripts/grep-diff.sh` records as a
+/// deliberate divergence.
+fn color_when(value: Option<&str>) -> Result<ColorWhen, String> {
+    let Some(v) = value else {
+        return Ok(ColorWhen::Auto);
+    };
+    let lower = v.to_ascii_lowercase();
+    match lower.as_str() {
+        "always" | "yes" | "force" => Ok(ColorWhen::Always),
+        "never" | "no" | "none" => Ok(ColorWhen::Never),
+        "auto" | "tty" | "if-tty" => Ok(ColorWhen::Auto),
+        _ => Err(format!("invalid argument '{v}' for '--color'")),
+    }
 }
 
 /// The value of `-A`, `-B` or `-C`, or the diagnostic GNU gives for one that is
@@ -724,38 +1291,185 @@ fn wants_filename(explicit: Option<bool>, operands: usize, named_a_directory: bo
     explicit.unwrap_or(operands > 1 || named_a_directory)
 }
 
-/// The prefix shown before a printed line: file name, line number, both or
-/// neither.
+/// Everything one printed line's prefix is built from.
+///
+/// A struct rather than a longer parameter list because the fields are not
+/// interchangeable and four of them are numbers: `line_prefix(name, 3, 118,
+/// true, 2, b'-')` is a call nobody can read, and swapping two of its arguments
+/// compiles.
+struct Prefix<'a> {
+    filename: &'a str,
+    show_filename: bool,
+    /// Zero-based internally; printed one-based.
+    line_idx: usize,
+    /// The byte offset within the file of whatever follows this prefix — the
+    /// line, or under `-o` the match.
+    byte_pos: u64,
+    /// The column the numeric fields are right-aligned in under `-T`; ignored
+    /// without it. See [`offset_width`].
+    width: usize,
+    /// `:` for a selected line, `-` for a context line.
+    field: u8,
+}
+
+/// The prefix shown before a printed line: file name, line number, byte offset,
+/// any combination, or none.
 ///
 /// Bytes rather than `String` because `-Z` puts a NUL after the name, and
 /// because the name itself is a path — which on this system may hold any byte
-/// but `/` and NUL. Only the *name's* separator changes under `-Z`; the one
-/// after a line number stays as `field`, which is what GNU does and is what
-/// keeps `-nZ` output parseable at all.
+/// but `/` and NUL. Only the *name's* separator changes under `-Z`; the ones
+/// after a line number and a byte offset stay as `field`, which is what GNU
+/// does and is what keeps `-nZ` output parseable at all.
 ///
 /// `field` is `:` for a selected line and `-` for a context line, and it
 /// punctuates *every* field rather than just the last: `grep -nHC1` writes
 /// `ctx:3:HIT` for the match and `ctx-2-2` for its neighbour. That is the only
 /// thing distinguishing the two kinds of line in the output, so a caller
 /// filtering `grep -C` output for real matches is reading this byte.
-fn line_prefix(
-    filename: &str,
-    line_idx_zero_based: usize,
-    show_filename: bool,
-    opts: &Options,
-    field: u8,
-) -> Vec<u8> {
+///
+/// `-T`'s tab goes *after* the last separator and only when some field was
+/// printed at all: `grep -TnH` writes `f: 2:\tbody`, `grep -TH` writes
+/// `f:\tbody`, `grep -THZ` writes `f\0\tbody`, and plain `grep -T` writes no
+/// tab because it wrote no prefix to line up. Measured.
+fn line_prefix(p: &Prefix, opts: &Options) -> Vec<u8> {
     let mut prefix = Vec::new();
-    if show_filename {
-        prefix.extend_from_slice(filename.as_bytes());
-        prefix.push(opts.name_sep(field));
+    let mut any = false;
+    let number = |cap: &[u8], n: u64| {
+        // The padding goes *inside* the escape — measured: `-T` with colour
+        // writes `\e[32m\e[K  12\e[m\e[K`, not two plain spaces and then the
+        // escape. It matters on a terminal whose `ln` sets a background.
+        let mut field = Vec::new();
+        push_number(&mut field, n, if opts.align_tabs { p.width } else { 0 });
+        opts.paint(cap, &field)
+    };
+    if p.show_filename {
+        prefix.extend_from_slice(&opts.paint(&opts.colors.filename, p.filename.as_bytes()));
+        // `-Z`'s NUL is a delimiter for a machine, and GNU leaves it outside
+        // the `se` escape — it is the one separator that is not coloured.
+        if opts.null_name {
+            prefix.push(0);
+        } else {
+            prefix.extend_from_slice(&opts.paint(&opts.colors.separator, &[p.field]));
+        }
+        any = true;
     }
     if opts.line_numbers {
         // Zero-based internally, one-based on the way out.
-        prefix.extend_from_slice(line_idx_zero_based.saturating_add(1).to_string().as_bytes());
-        prefix.push(field);
+        let n = u64::try_from(p.line_idx.saturating_add(1)).unwrap_or(u64::MAX);
+        prefix.extend_from_slice(&number(&opts.colors.line_number, n));
+        prefix.extend_from_slice(&opts.paint(&opts.colors.separator, &[p.field]));
+        any = true;
+    }
+    if opts.byte_offset {
+        prefix.extend_from_slice(&number(&opts.colors.byte_number, p.byte_pos));
+        prefix.extend_from_slice(&opts.paint(&opts.colors.separator, &[p.field]));
+        any = true;
+    }
+    if any && opts.align_tabs {
+        // Uncoloured, like `-Z`'s NUL: it is whitespace, and painting it would
+        // extend a background colour across the gutter.
+        prefix.push(b'\t');
     }
     prefix
+}
+
+/// A decimal number right-aligned in `width` columns, or unpadded when `width`
+/// is zero or too small to hold it.
+fn push_number(out: &mut Vec<u8>, n: u64, width: usize) {
+    let text = n.to_string();
+    for _ in text.len()..width {
+        out.push(b' ');
+    }
+    out.extend_from_slice(text.as_bytes());
+}
+
+/// The column `-T` right-aligns the numeric prefix fields in.
+///
+/// GNU fixes this from the file's *size* before reading a line, not from the
+/// widest value it goes on to print — which is what lets `-T` work on a stream,
+/// and what makes the padding of a given file independent of which lines match.
+/// Measured against GNU grep 3.11:
+///
+/// | size | `-b` pads to | `-n` pads to |
+/// |---|---|---|
+/// | 9 | 1 | 2 |
+/// | 34 | 2 | 2 |
+/// | 99 | 2 | 3 |
+/// | 1504 | 4 | 4 |
+///
+/// So: the digit count of the size, plus one for `-n` — a file of N bytes holds
+/// at most N+1 lines. With both flags the wider of the two is used for both,
+/// which falls out of computing it once.
+///
+/// `None` is an input whose size cannot be taken, which is every pipe. GNU pads
+/// those to 19 columns; that is the digit count of `i64::MAX`, and the
+/// measurement is the reason for the odd-looking constant.
+/// The size `-T` sizes its columns from, or `None` for an input that has no
+/// meaningful one.
+///
+/// [`filekind::is_regular`] rather than `Metadata::is_file`: on the harness's
+/// Windows host a pipe answers yes to the latter and reports however many bytes
+/// happen to be sitting in the pipe buffer, so every run of the same pipeline
+/// would pad to a different width. GNU asks `S_ISREG`, and this is that
+/// question asked portably.
+fn regular_size(file: &File) -> Option<u64> {
+    if !filekind::is_regular(file) {
+        return None;
+    }
+    file.metadata().map(|m| m.len()).ok()
+}
+
+fn offset_width(size: Option<u64>, opts: &Options) -> usize {
+    let mut n = size.unwrap_or_else(|| u64::try_from(i64::MAX).unwrap_or(u64::MAX));
+    if opts.line_numbers {
+        n = n.saturating_add(1);
+    }
+    let mut width = 1usize;
+    while n >= 10 {
+        n /= 10;
+        width = width.saturating_add(1);
+    }
+    width
+}
+
+/// Settle `--color` into a yes or a no, and read the palette.
+///
+/// Both questions are asked once, here, rather than per line: `auto` queries
+/// the operating system, and `GREP_COLORS` has to be parsed before the first
+/// byte of output.
+///
+/// `GREP_COLOR` — singular, deprecated in 2011 — still works and still sets
+/// both match colours, and GNU still warns about it on stderr. It is read
+/// *first*, so that a `GREP_COLORS` that also sets `ms`/`mc` wins. Neither is
+/// read at all when colour is off, which is what keeps the warning from
+/// appearing for a caller who never asked for colour.
+fn resolve_colors(opts: &mut Options) {
+    opts.color = match opts.color_when {
+        ColorWhen::Always => true,
+        ColorWhen::Never => false,
+        // GNU asks about *stdout*, not stdin: the question is whether whoever
+        // reads this output can render an escape sequence.
+        ColorWhen::Auto => io::stdout().is_terminal(),
+    };
+    if !opts.color {
+        return;
+    }
+    if let Some(v) = env::var_os("GREP_COLOR") {
+        let raw = quote::os_bytes(&v).into_owned();
+        if !raw.is_empty() {
+            // The text is GNU's, quoted the way GNU quotes it — a script that
+            // greps its own stderr for this warning greps for that wording.
+            let shown = String::from_utf8_lossy(&raw).into_owned();
+            diag!(
+                "grep: warning: GREP_COLOR='{shown}' is deprecated; use GREP_COLORS='mt={shown}'"
+            );
+            opts.colors.selected_match.clone_from(&raw);
+            opts.colors.context_match = raw;
+        }
+    }
+    if let Some(v) = env::var_os("GREP_COLORS") {
+        opts.colors.apply(&quote::os_bytes(&v));
+    }
 }
 
 /// The funnel. A diagnostic that could not be written turns the earned
@@ -769,13 +1483,14 @@ fn main() -> ExitCode {
 fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<String> = env::args().skip(1).collect();
-    let parsed = match parse_args(&args) {
+    let mut parsed = match parse_args(&args) {
         Ok(p) => p,
         Err(e) => {
             diag!("grep: {e}");
             return ExitCode::from(2);
         }
     };
+    resolve_colors(&mut parsed.opts);
 
     let mut patterns = parsed.patterns;
     for pf in &parsed.pattern_files {
@@ -802,7 +1517,7 @@ fn run_main() -> ExitCode {
         }
     };
 
-    let named_a_directory = parsed.opts.recursive
+    let named_a_directory = parsed.opts.recursive()
         && parsed.files.iter().any(|f| {
             // `is_dir` follows a symlink, matching what `Run::operand` does
             // with the same operand a moment later.
@@ -821,6 +1536,7 @@ fn run_main() -> ExitCode {
         pats: &pats,
         opts: &parsed.opts,
         show_filename,
+        omit_dot_slash: parsed.omit_dot_slash,
         any_match: false,
         had_error: false,
         done: false,
@@ -876,6 +1592,10 @@ struct Run<'a> {
     pats: &'a [Pat],
     opts: &'a Options,
     show_filename: bool,
+    /// Strip the `./` the walk builds onto every name, because the `.` it is
+    /// walking was supplied by [`parse_args`] rather than written by the
+    /// caller. See `GrepArgs::omit_dot_slash`.
+    omit_dot_slash: bool,
     any_match: bool,
     had_error: bool,
     /// Set once `-q` has its answer. Every remaining file and directory is
@@ -892,26 +1612,102 @@ struct Run<'a> {
 
 impl Run<'_> {
     /// Handle one command-line operand.
+    ///
+    /// # Why this stats before it decides anything
+    ///
+    /// GNU's order is open, `fstat`, *then* choose — and the choices need the
+    /// mode, so there is no way to skip the stat. Doing it before the open
+    /// instead of after is the one deliberate difference, and it is what keeps
+    /// `grep -D skip pat fifo` from hanging: opening a FIFO that has no writer
+    /// blocks forever, so a `grep` that opened first would hang on exactly the
+    /// input it was told to skip. GNU avoids the same hang from the other side,
+    /// by adding `O_NONBLOCK` when devices are to be skipped.
+    ///
+    /// The order of the tests below is GNU's, and it is observable:
+    ///
+    /// * The stat comes **first**, so `grep --exclude='*' pat nosuch` still
+    ///   reports the missing file and exits 2. A name that does not exist is
+    ///   not excluded; it is an error.
+    /// * The selectors come **before** the directory handling, so
+    ///   `grep --exclude-dir=sub pat sub` is silent and exits 1 where plain
+    ///   `grep pat sub` says `Is a directory` and exits 2.
+    /// * `--exclude` and `--exclude-dir` are chosen between by what the operand
+    ///   *is*, so `grep --exclude=sub -r pat sub` searches `sub` after all.
     fn operand(&mut self, f: &str) {
-        // `is_dir`, which follows a symlink — deliberately, and unlike the
-        // walk. A link named on the command line is followed by `-r` as well
-        // as `-R`; it is only a link *discovered* by the walk that `-r` skips.
-        if self.opts.recursive && Path::new(f).is_dir() {
-            let mut ancestors: Vec<PathBuf> = Vec::new();
-            self.walk(Path::new(f), &mut ancestors);
-        } else {
+        // Standard input is exempt from every one of these: it is not a name,
+        // so no glob can select it, and GNU's tests are all guarded on the
+        // descriptor not being stdin. `grep --exclude='*' pat -` reads it.
+        if f == "-" {
             self.search(f);
+            return;
         }
+        // `metadata`, which follows a symlink — deliberately, and unlike the
+        // walk. A link named on the command line is followed by `-r` as well as
+        // `-R`; it is only a link *discovered* by the walk that `-r` skips.
+        let md = match fs::metadata(Path::new(f)) {
+            Ok(md) => md,
+            Err(e) => {
+                if !self.opts.no_messages {
+                    diag!("grep: {}: {}", quotef_os(f), strerror(&e));
+                }
+                self.had_error = true;
+                return;
+            }
+        };
+        let is_dir = md.is_dir();
+
+        if self.opts.skipped_file(f.as_bytes(), is_dir) {
+            return;
+        }
+
+        if is_dir {
+            match self.opts.directories {
+                Directories::Recurse => {
+                    let mut ancestors: Vec<PathBuf> = Vec::new();
+                    self.walk(Path::new(f), &mut ancestors);
+                }
+                // Silent, and *not* an error: `grep -d skip pat dir` exits 1.
+                Directories::Skip => {}
+                Directories::Read => {
+                    if !self.opts.no_messages {
+                        diag!("grep: {}: Is a directory", quotef_os(f));
+                    }
+                    // Named but not searched, so the run's answer is about less
+                    // than it was asked about — status 2, as for a file that
+                    // could not be opened. `-s` silences the message, not this.
+                    self.had_error = true;
+                }
+            }
+            return;
+        }
+
+        if self.opts.skip_devices(true) && filekind::is_device(&md) {
+            return;
+        }
+
+        self.search(f);
     }
 
     /// Search one named file — or standard input, spelled `-`.
     fn search(&mut self, path: &str) {
+        // The size is `-T`'s alone, so it is not asked for without it: an
+        // `fstat` per file is cheap but not free, and a `grep -r` over a large
+        // tree pays it once per entry.
+        let mut size: Option<u64> = None;
         let reader: Box<dyn Read> = if path == "-" {
+            if self.opts.align_tabs {
+                size = filekind::borrowed_stdin().and_then(|f| regular_size(&f));
+            }
             Box::new(io::stdin())
         } else {
             if Path::new(path).is_dir() {
-                // Only reachable without `-r`; with it, `operand` walked the
-                // directory instead of arriving here.
+                // A backstop, not the usual route: [`Run::operand`] settles
+                // every directory it is given, and the walk recurses rather
+                // than arriving here, so this is reached only when a name
+                // becomes a directory between the stat there and the open here.
+                // It stays because on a host where opening a directory fails
+                // outright — Windows, where the differential harness used to
+                // run — the `read` below would report the wrong errno.
                 if !self.opts.no_messages {
                     diag!("grep: {}: Is a directory", quotef_os(path));
                 }
@@ -922,7 +1718,12 @@ impl Run<'_> {
                 return;
             }
             match File::open(path) {
-                Ok(f) => Box::new(f),
+                Ok(f) => {
+                    if self.opts.align_tabs {
+                        size = regular_size(&f);
+                    }
+                    Box::new(f)
+                }
                 Err(e) => {
                     if !self.opts.no_messages {
                         diag!("grep: {}: {}", quotef_os(path), strerror(&e));
@@ -937,12 +1738,16 @@ impl Run<'_> {
         };
 
         let shown = display_name(path);
+        let src = Source {
+            filename: shown,
+            show_filename: self.show_filename,
+            width: offset_width(size, self.opts),
+        };
         match search_stream(
             &mut self.out,
             reader,
             self.pats,
-            shown,
-            self.show_filename,
+            &src,
             self.opts,
             &mut self.printed_before,
         ) {
@@ -965,7 +1770,10 @@ impl Run<'_> {
                     // is the half of `-Z` that matters: `grep -rlZ | xargs -0`
                     // is the only listing of paths that survives a path
                     // containing a newline, which this system permits.
-                    let _ = self.out.write_all(shown.as_bytes());
+                    let painted = self
+                        .opts
+                        .paint(&self.opts.colors.filename, shown.as_bytes());
+                    let _ = self.out.write_all(&painted);
                     let _ = self.out.write_all(if self.opts.null_name {
                         &b"\0"[..]
                     } else {
@@ -995,6 +1803,15 @@ impl Run<'_> {
     /// inline in the middle of the walk.
     fn search_found(&mut self, path: &Path) {
         let shown = path.to_string_lossy().into_owned();
+        // GNU's `filename_prefix_len`: the walk is rooted at a `.` this program
+        // supplied, and the names it prints carry no `./`. Applied here rather
+        // than at the root because it is a property of how the name is
+        // *displayed*, not of where the walk goes.
+        let shown = if self.omit_dot_slash {
+            shown.strip_prefix("./").unwrap_or(&shown).to_string()
+        } else {
+            shown
+        };
         self.search(&shown);
     }
 
@@ -1100,6 +1917,13 @@ impl Run<'_> {
                 }
             };
 
+            // The name the selectors are shown is the entry's **base name**,
+            // never the path the walk built to reach it — GNU matches
+            // `ent->fts_name`. So `--exclude='sub/s1'` excludes nothing under
+            // `-r`, and `--include='*/s1'` matches nothing at all, while
+            // `--exclude='s1'` excludes it at every depth.
+            let name = path.file_name().map(quote::os_bytes).unwrap_or_default();
+
             if md.file_type().is_symlink() {
                 if !self.opts.deref_links {
                     // `-r` passes over it in silence — including a dangling
@@ -1107,8 +1931,19 @@ impl Run<'_> {
                     continue;
                 }
                 match fs::metadata(&path) {
-                    Ok(target) if target.is_dir() => self.walk(&path, ancestors),
-                    Ok(_) => self.search_found(&path),
+                    Ok(target) => {
+                        // Asked of the *target*, because that is what `-R`'s
+                        // walk treats the entry as: a link to a directory is a
+                        // directory here, and so faces `--exclude-dir`.
+                        if self.opts.skipped_file(&name, target.is_dir()) {
+                            continue;
+                        }
+                        if target.is_dir() {
+                            self.walk(&path, ancestors);
+                        } else if !(self.opts.skip_devices(false) && filekind::is_device(&target)) {
+                            self.search_found(&path);
+                        }
+                    }
                     Err(e) => {
                         if !self.opts.no_messages {
                             diag!("grep: {}: {}", quotef_os(&path), strerror(&e));
@@ -1119,9 +1954,16 @@ impl Run<'_> {
                 continue;
             }
 
+            if self.opts.skipped_file(&name, md.is_dir()) {
+                continue;
+            }
+
             if md.is_dir() {
                 self.walk(&path, ancestors);
-            } else {
+            } else if !(self.opts.skip_devices(false) && filekind::is_device(&md)) {
+                // The default already skips a device the walk found, which is
+                // what stops `grep -r pat /` blocking on the first FIFO with no
+                // writer. Only `-D read` reads them here.
                 self.search_found(&path);
             }
         }
@@ -1142,17 +1984,97 @@ impl Run<'_> {
 fn write_context_line(
     out: &mut impl Write,
     body: &[u8],
-    filename: &str,
-    line_idx: usize,
-    show_filename: bool,
+    p: &Prefix,
+    pats: &[Pat],
     opts: &Options,
 ) -> io::Result<()> {
     if opts.only_matching {
         return Ok(());
     }
-    out.write_all(&line_prefix(filename, line_idx, show_filename, opts, b'-'))?;
-    out.write_all(body)?;
+    out.write_all(&line_prefix(p, opts))?;
+    write_body(out, body, false, pats, opts)?;
     out.write_all(&[opts.line_sep()])
+}
+
+/// One line's text, with `--color`'s escapes woven through it.
+///
+/// Reproduces GNU's two-stage model, which is not the obvious one and was
+/// measured rather than guessed:
+///
+/// * **Matches.** A line is searched for matches to highlight when
+///   `selected ^ -v` — so plain `grep` highlights the selected lines, and
+///   `grep -v` highlights the *context* lines, which are the ones the pattern
+///   actually hit. The capability is `ms` on a selected line and `mc` on a
+///   context one. Each match is preceded by the *line* capability's opening
+///   escape and the text since the last match, and that opening escape is
+///   never closed — the match's own escape pair is what ends it. An empty
+///   match is skipped, exactly as under `-o`.
+/// * **Tail.** Whatever follows the last match is then written wrapped in the
+///   line capability, but only when that capability is non-empty — which is
+///   why plain `grep --color=always` (where `sl` and `cx` are both empty)
+///   emits no escapes around the unmatched text at all. The tail stops short
+///   of a `\r` that ends the line, so that a CRLF file's carriage return is
+///   not painted; anything left after that is written plainly.
+///
+/// The two stages together are why `GREP_COLORS='ms='` and
+/// `GREP_COLORS='ms=:sl=33'` produce differently *shaped* output rather than
+/// the same shape with one escape missing.
+fn write_body(
+    out: &mut impl Write,
+    body: &[u8],
+    selected: bool,
+    pats: &[Pat],
+    opts: &Options,
+) -> io::Result<()> {
+    if !opts.color {
+        return out.write_all(body);
+    }
+    let line_cap = opts.line_cap(selected);
+    let match_cap = opts.match_cap(selected);
+    let mut done = 0usize;
+    if (selected ^ opts.invert) && !match_cap.is_empty() {
+        for (s, e) in matches_in(pats, body, opts).map_err(limit_err)? {
+            // Empty matches are at every position, so highlighting them would
+            // bury the line in escapes; GNU skips them here for the same
+            // reason `-o` does not print them.
+            if e <= s || s < done {
+                continue;
+            }
+            out.write_all(&opts.colors.start(line_cap))?;
+            out.write_all(body.get(done..s).unwrap_or_default())?;
+            out.write_all(
+                &opts
+                    .colors
+                    .wrap(match_cap, body.get(s..e).unwrap_or_default()),
+            )?;
+            done = e;
+        }
+    }
+    if !line_cap.is_empty() {
+        let tail_end = body
+            .len()
+            .saturating_sub(usize::from(body.last() == Some(&b'\r')));
+        if tail_end > done {
+            out.write_all(&opts.colors.start(line_cap))?;
+            out.write_all(body.get(done..tail_end).unwrap_or_default())?;
+            out.write_all(&opts.colors.end(line_cap))?;
+            done = tail_end;
+        }
+    }
+    out.write_all(body.get(done..).unwrap_or_default())
+}
+
+/// The one stream being searched, and what its prefixes need to know about it.
+///
+/// Separate from [`Options`] because these three are per-file where the options
+/// are per-run, and `width` in particular is a *measurement* of the file taken
+/// before the first line is read.
+struct Source<'a> {
+    /// The name shown in a prefix — `(standard input)` for `-`.
+    filename: &'a str,
+    show_filename: bool,
+    /// The column `-T` right-aligns numbers in. Meaningless without it.
+    width: usize,
 }
 
 /// Search one stream, printing what the options ask for. Returns whether any
@@ -1167,11 +2089,12 @@ fn search_stream(
     out: &mut impl Write,
     reader: impl Read,
     pats: &[Pat],
-    filename: &str,
-    show_filename: bool,
+    src: &Source<'_>,
     opts: &Options,
     printed_before: &mut bool,
 ) -> io::Result<bool> {
+    let filename = src.filename;
+    let show_filename = src.show_filename;
     // `-m 0` is not "no limit", and it is not "stop after the first" either:
     // GNU prints nothing at all — not even the `-c` count line, which is the
     // surprising half — and reports the file as not matching. Answering it
@@ -1197,9 +2120,16 @@ fn search_stream(
     let mut match_count: usize = 0;
     let mut line_idx: usize = 0;
     let mut line: Vec<u8> = Vec::new();
+    // Bytes of the file that precede the line about to be read — `-b`'s answer,
+    // and the base its per-match offsets are measured from. Counted rather than
+    // asked for because the input need not be seekable, and it counts the line
+    // separator too: under `-z` the NULs are bytes of the file like any other.
+    let mut byte_pos: u64 = 0;
     // Lines held back as possible leading context: the last `out_before` lines
-    // that were neither selected nor already printed, oldest first.
-    let mut before: VecDeque<(usize, Vec<u8>)> = VecDeque::new();
+    // that were neither selected nor already printed, oldest first. The byte
+    // offset travels with the text because by the time the line is printed the
+    // stream has moved past it.
+    let mut before: VecDeque<(usize, u64, Vec<u8>)> = VecDeque::new();
     // Trailing context still owed to the most recent selected line.
     let mut pending_after: usize = 0;
     // The one-based number of the last line this *file* has printed — or has
@@ -1224,12 +2154,23 @@ fn search_stream(
         // is still a line.
         let body = line.strip_suffix(&[sep][..]).unwrap_or(&line);
         let lineno = line_idx.saturating_add(1);
+        let here = byte_pos;
+        // Advanced now, before any `continue` or `break` below can skip it.
+        byte_pos = byte_pos.saturating_add(u64::try_from(line.len()).unwrap_or(0));
+        let at = |line_idx: usize, byte_pos: u64, field: u8| Prefix {
+            filename,
+            show_filename,
+            line_idx,
+            byte_pos,
+            width: src.width,
+            field,
+        };
 
         if limit_reached {
             if pending_after == 0 {
                 break;
             }
-            write_context_line(out, body, filename, line_idx, show_filename, opts)?;
+            write_context_line(out, body, &at(line_idx, here, b'-'), pats, opts)?;
             last_out = Some(lineno);
             pending_after = pending_after.saturating_sub(1);
             if pending_after == 0 {
@@ -1260,25 +2201,25 @@ fn search_stream(
                     && !adjacent
                     && let Some(s) = opts.group_sep.bytes()
                 {
-                    out.write_all(s)?;
+                    // `se` paints the `--` too, and the newline after it is
+                    // left plain.
+                    out.write_all(&opts.paint(&opts.colors.separator, s))?;
                     // A newline even under `-z`, where every *line* ends with
                     // NUL. Measured; and it follows — the separator is not a
                     // line of the file.
                     out.write_all(b"\n")?;
                 }
-                for (n, text) in before.drain(..) {
+                for (n, pos, text) in before.drain(..) {
                     if n >= start {
                         write_context_line(
                             out,
                             &text,
-                            filename,
-                            n.saturating_sub(1),
-                            show_filename,
+                            &at(n.saturating_sub(1), pos, b'-'),
+                            pats,
                             opts,
                         )?;
                     }
                 }
-                let prefix = line_prefix(filename, line_idx, show_filename, opts, b':');
                 if opts.only_matching {
                     // `-o` with `-v` prints nothing: the part of the line that
                     // did not match is the whole line, and GNU declines to call
@@ -1294,15 +2235,25 @@ fn search_stream(
                             // *line* still counts as selected, which is why
                             // this loop can legitimately print nothing.
                             if e > s {
-                                out.write_all(&prefix)?;
-                                out.write_all(body.get(s..e).unwrap_or_default())?;
+                                // `-bo` reports each match's own offset, not the
+                                // line's: `grep -bo foo` over `foo bar foo` at
+                                // offset 6 prints 6 and 14.
+                                let off = here.saturating_add(u64::try_from(s).unwrap_or(0));
+                                out.write_all(&line_prefix(&at(line_idx, off, b':'), opts))?;
+                                // `-o` prints nothing but matches, so `sl`/`cx`
+                                // never apply: the whole of what it writes is
+                                // matched text, in `ms`.
+                                out.write_all(&opts.paint(
+                                    opts.match_cap(true),
+                                    body.get(s..e).unwrap_or_default(),
+                                ))?;
                                 out.write_all(&[sep])?;
                             }
                         }
                     }
                 } else {
-                    out.write_all(&prefix)?;
-                    out.write_all(body)?;
+                    out.write_all(&line_prefix(&at(line_idx, here, b':'), opts))?;
+                    write_body(out, body, true, pats, opts)?;
                     out.write_all(&[sep])?;
                 }
                 last_out = Some(lineno);
@@ -1316,11 +2267,11 @@ fn search_stream(
                 limit_reached = true;
             }
         } else if pending_after > 0 {
-            write_context_line(out, body, filename, line_idx, show_filename, opts)?;
+            write_context_line(out, body, &at(line_idx, here, b'-'), pats, opts)?;
             last_out = Some(lineno);
             pending_after = pending_after.saturating_sub(1);
         } else if out_before > 0 {
-            before.push_back((lineno, body.to_vec()));
+            before.push_back((lineno, here, body.to_vec()));
             if before.len() > out_before {
                 before.pop_front();
             }
@@ -1330,9 +2281,15 @@ fn search_stream(
 
     if opts.count_only {
         if show_filename {
-            out.write_all(filename.as_bytes())?;
-            out.write_all(&[opts.name_sep(b':')])?;
+            out.write_all(&opts.paint(&opts.colors.filename, filename.as_bytes()))?;
+            // As in a line prefix: `se` paints the `:`, `-Z`'s NUL stays plain.
+            if opts.null_name {
+                out.write_all(&[0])?;
+            } else {
+                out.write_all(&opts.paint(&opts.colors.separator, b":"))?;
+            }
         }
+        // The count itself is never coloured — there is no capability for it.
         out.write_all(match_count.to_string().as_bytes())?;
         // A newline, not `sep`: `-z` says what a *line of input* is, and a
         // count is not one. Measured — `grep -zHc` ends its count with `\n`
@@ -1394,7 +2351,7 @@ mod tests {
         assert!(a.opts.invert);
         assert!(a.opts.count_only);
         assert!(a.opts.line_numbers);
-        assert!(a.opts.recursive);
+        assert!(a.opts.recursive());
     }
 
     #[test]
@@ -1530,7 +2487,244 @@ mod tests {
 
     #[test]
     fn parse_recursive_with_no_operand_walks_here() {
-        assert_eq!(parse_args(&s(&["-r", "foo"])).unwrap().files, vec!["."]);
+        let a = parse_args(&s(&["-r", "foo"])).unwrap();
+        assert_eq!(a.files, vec!["."]);
+        // …and prints the names it finds *without* the `./` that walking a `.`
+        // would otherwise put on them, which a caller who wrote the `.` gets.
+        assert!(a.omit_dot_slash);
+        assert!(!parse_args(&s(&["-r", "foo", "."])).unwrap().omit_dot_slash);
+        // Not recursing means no walk to name anything, so the input is stdin
+        // and the question never arises.
+        let plain = parse_args(&s(&["foo"])).unwrap();
+        assert_eq!(plain.files, vec!["-"]);
+        assert!(!plain.omit_dot_slash);
+        // `-d recurse` reaches the same branch, because it is the same setting.
+        assert_eq!(
+            parse_args(&s(&["-d", "recurse", "foo"])).unwrap().files,
+            vec!["."]
+        );
+    }
+
+    /// `-r`, `-R` and `-d` all write one setting, so the **last** of them wins
+    /// whichever order they are written in. Two independent booleans could not
+    /// express this, and expressing it is the whole reason [`Directories`]
+    /// exists.
+    #[test]
+    fn recursion_and_d_are_one_setting_and_the_last_wins() {
+        let d = |a: &[&str]| parse_args(&s(a)).unwrap().opts.directories;
+        assert_eq!(d(&["foo"]), Directories::Read);
+        assert_eq!(d(&["-r", "foo"]), Directories::Recurse);
+        assert_eq!(d(&["-d", "skip", "foo"]), Directories::Skip);
+        assert_eq!(d(&["-r", "-d", "skip", "foo"]), Directories::Skip);
+        assert_eq!(d(&["-d", "skip", "-r", "foo"]), Directories::Recurse);
+        assert_eq!(d(&["-r", "-d", "read", "foo"]), Directories::Read);
+        // Bundled, split and long-with-`=` are the same option three ways.
+        assert_eq!(d(&["-dskip", "foo"]), Directories::Skip);
+        assert_eq!(d(&["--directories=skip", "foo"]), Directories::Skip);
+        assert_eq!(d(&["--directories", "skip", "foo"]), Directories::Skip);
+        // `-R` sets the same value *and* the dereference flag.
+        let upper = parse_args(&s(&["-R", "foo"])).unwrap().opts;
+        assert_eq!(upper.directories, Directories::Recurse);
+        assert!(upper.deref_links);
+        // …and `-d` does not clear it, because it is a different field. GNU is
+        // the same: `-R -d recurse` still follows links met during the walk.
+        let both = parse_args(&s(&["-R", "-d", "recurse", "foo"]))
+            .unwrap()
+            .opts;
+        assert!(both.deref_links);
+
+        assert!(parse_args(&s(&["-d", "bogus", "foo"])).is_err());
+        assert!(parse_args(&s(&["-d"])).is_err());
+    }
+
+    /// `-D`'s default is neither "read" nor "skip" but a third thing, and the
+    /// third thing is the one that keeps `grep -r` from blocking on a FIFO.
+    #[test]
+    fn devices_default_reads_named_ones_and_skips_found_ones() {
+        let dev = |a: &[&str]| parse_args(&s(a)).unwrap().opts;
+
+        let default = dev(&["foo"]);
+        assert_eq!(default.devices, Devices::CommandLine);
+        assert!(!default.skip_devices(true));
+        assert!(default.skip_devices(false));
+
+        let read = dev(&["-D", "read", "foo"]);
+        assert_eq!(read.devices, Devices::Read);
+        assert!(!read.skip_devices(true));
+        assert!(!read.skip_devices(false));
+
+        let skip = dev(&["--devices=skip", "foo"]);
+        assert_eq!(skip.devices, Devices::Skip);
+        assert!(skip.skip_devices(true));
+        assert!(skip.skip_devices(false));
+
+        // GNU checks `-D` by hand rather than through argmatch, so this is its
+        // exact wording — and it does not name the offending value.
+        assert_eq!(
+            parse_args(&s(&["-D", "bogus", "foo"])).unwrap_err(),
+            "unknown devices method"
+        );
+    }
+
+    /// The three steps of gnulib's `excluded_file_name`, each isolated.
+    #[test]
+    fn selector_segments_are_read_newest_first() {
+        let sel = |opts: &[&str]| {
+            let mut a: Vec<&str> = opts.to_vec();
+            a.push("foo");
+            parse_args(&s(&a)).unwrap().opts.file_selectors
+        };
+
+        // Nothing at all: everything is searched.
+        assert!(!sel(&[]).excludes(b"s1.txt"));
+
+        // One include is a whitelist — rule 1 keeps what it names, rule 2
+        // drops what it does not.
+        let inc = sel(&["--include=*.txt"]);
+        assert!(!inc.excludes(b"s1.txt"));
+        assert!(inc.excludes(b"s2.log"));
+
+        // One exclude is a blacklist, and its default is the opposite.
+        let exc = sel(&["--exclude=s1*"]);
+        assert!(exc.excludes(b"s1.txt"));
+        assert!(!exc.excludes(b"s2.log"));
+
+        // The pair, both ways round — the table in [`Selectors`]'s docs.
+        let ie = sel(&["--include=*.txt", "--exclude=s1*"]);
+        assert!(ie.excludes(b"s1.txt"));
+        assert!(ie.excludes(b"s2.log"));
+        assert!(!ie.excludes(b"s2.txt"));
+
+        let ei = sel(&["--exclude=s1*", "--include=*.txt"]);
+        assert!(!ei.excludes(b"s1.txt"));
+        assert!(!ei.excludes(b"s2.log"));
+        assert!(!ei.excludes(b"s2.txt"));
+
+        // Consecutive same-kind options coalesce, so `--include a --include b`
+        // is one segment matching either — not two segments where the newer
+        // shadows the older.
+        let two = sel(&["--include=*.txt", "--include=*.log"]);
+        assert!(!two.excludes(b"s1.txt"));
+        assert!(!two.excludes(b"s2.log"));
+        assert!(two.excludes(b"s3.bin"));
+
+        // …and a segment is only broken by a *change* of kind, which is what
+        // makes three options able to mean three different things.
+        let three = sel(&["--exclude=s1*", "--include=*.log", "--exclude=s2*"]);
+        assert!(three.excludes(b"s2.log")); // newest segment matches
+        assert!(!three.excludes(b"s3.log")); // the include matches
+        assert!(!three.excludes(b"s3.txt")); // nothing matches; oldest excludes
+
+        // An empty pattern matches nothing, so `--include=''` is a whitelist
+        // with nothing on it: everything is dropped.
+        assert!(sel(&["--include="]).excludes(b"s1.txt"));
+        assert!(!sel(&["--exclude="]).excludes(b"s1.txt"));
+    }
+
+    /// `--exclude` and `--exclude-dir` are separate lists chosen between by
+    /// what the name *is*, not two spellings of one list.
+    #[test]
+    fn directories_have_their_own_selector_list() {
+        let opts = parse_args(&s(&["--exclude=sub", "--exclude-dir=deep", "foo"]))
+            .unwrap()
+            .opts;
+        assert!(opts.skipped_file(b"sub", false));
+        assert!(!opts.skipped_file(b"sub", true));
+        assert!(opts.skipped_file(b"deep", true));
+        assert!(!opts.skipped_file(b"deep", false));
+
+        // A trailing slash on the *pattern* is stripped; without that it could
+        // never match, since no name it is compared against ends in one.
+        let slash = parse_args(&s(&["--exclude-dir=deep//", "foo"]))
+            .unwrap()
+            .opts;
+        assert!(slash.skipped_file(b"deep", true));
+    }
+
+    /// The suffix pass of gnulib's `exclude_fnmatch`, which is what lets a
+    /// pattern written without the `./` still match an operand written with it.
+    #[test]
+    fn a_glob_is_tried_against_every_suffix_after_a_slash() {
+        assert!(glob_matches(b"top.txt", b"./top.txt"));
+        assert!(glob_matches(b"./top.txt", b"./top.txt"));
+        assert!(glob_matches(b"deepfile", b"a/b/c/deepfile"));
+        assert!(glob_matches(b"c/deepfile", b"a/b/c/deepfile"));
+        assert!(glob_matches(b"su*", b"./sub"));
+        assert!(!glob_matches(b"b/deepfile", b"a/b/c/deepfile"));
+
+        // No `FNM_PATHNAME`, so `*` crosses a `/`; no `FNM_PERIOD`, so `*`
+        // matches a leading dot. Both are grep's choices, not fnmatch's
+        // defaults elsewhere in this family.
+        assert!(glob_matches(b"a*e", b"a/b/c/deepfile"));
+        assert!(glob_matches(b"*", b".dotfile"));
+        // `\` still escapes, and a bracket still negates.
+        assert!(glob_matches(b"t[!1].txt", b"t2.txt"));
+        assert!(!glob_matches(b"t[!1].txt", b"t1.txt"));
+        assert!(glob_matches(br"t\1.txt", b"t1.txt"));
+        // Case matters: grep passes no `FNM_CASEFOLD`, and `-i` does not reach
+        // here — it is about the pattern, not about file names.
+        assert!(!glob_matches(b"*.TXT", b"a.txt"));
+    }
+
+    /// A `--exclude-from` file is not a `-f` file: no comments, and a blank
+    /// line is an empty glob rather than a glob that matches everything.
+    #[test]
+    fn exclude_from_splits_at_newlines_and_has_no_comment_syntax() {
+        assert_eq!(split_exclude_file(b""), Vec::<Vec<u8>>::new());
+        assert_eq!(split_exclude_file(b"a\n"), vec![b"a".to_vec()]);
+        // A final line with no newline on it still counts.
+        assert_eq!(
+            split_exclude_file(b"a\nb"),
+            vec![b"a".to_vec(), b"b".to_vec()]
+        );
+        assert_eq!(
+            split_exclude_file(b"a\n\nb\n"),
+            vec![b"a".to_vec(), Vec::new(), b"b".to_vec()]
+        );
+        // `#` is a character a file name may begin with, so it is a glob.
+        assert_eq!(split_exclude_file(b"#a\n"), vec![b"#a".to_vec()]);
+    }
+
+    /// `--exclude-from` extends the current exclude run rather than starting a
+    /// segment of its own — which matters, because a segment boundary is what
+    /// the newest-first scan stops at.
+    #[test]
+    fn exclude_from_joins_the_neighbouring_exclude_segment() {
+        let dir = std::env::temp_dir().join(format!(
+            "slateos-grep-exfrom-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("list");
+        fs::write(&file, b"*.log\n").expect("write exclude list");
+        let name = file.to_string_lossy().into_owned();
+
+        let opts = parse_args(&s(&[
+            "--include=*.txt",
+            "--exclude=s1*",
+            &format!("--exclude-from={name}"),
+            "foo",
+        ]))
+        .unwrap()
+        .opts;
+        assert_eq!(opts.file_selectors.segments.len(), 2);
+        assert!(opts.file_selectors.excludes(b"a.log"));
+        assert!(opts.file_selectors.excludes(b"s1.txt"));
+        assert!(!opts.file_selectors.excludes(b"s2.txt"));
+
+        // A file that cannot be read is an error at parse time, worded as the
+        // ordinary "no such file" is.
+        let missing = dir.join("nope");
+        let err = parse_args(&s(&[
+            &format!("--exclude-from={}", missing.to_string_lossy()),
+            "foo",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("No such file"), "{err}");
+
+        let _ = fs::remove_file(&file);
+        let _ = fs::remove_dir(&dir);
     }
 
     /// `-r` and `-R` are not synonyms, and the whole of the difference is one
@@ -1541,24 +2735,24 @@ mod tests {
     #[test]
     fn parse_capital_r_is_the_dereferencing_one() {
         let lower = parse_args(&s(&["-r", "foo"])).unwrap().opts;
-        assert!(lower.recursive);
+        assert!(lower.recursive());
         assert!(!lower.deref_links);
 
         let upper = parse_args(&s(&["-R", "foo"])).unwrap().opts;
-        assert!(upper.recursive);
+        assert!(upper.recursive());
         assert!(upper.deref_links);
 
         // The long spellings say the same thing at more length, and
         // `--dereference-recursive` implies `--recursive` rather than needing
         // it alongside.
         let long = parse_args(&s(&["--recursive", "foo"])).unwrap().opts;
-        assert!(long.recursive);
+        assert!(long.recursive());
         assert!(!long.deref_links);
 
         let long_deref = parse_args(&s(&["--dereference-recursive", "foo"]))
             .unwrap()
             .opts;
-        assert!(long_deref.recursive);
+        assert!(long_deref.recursive());
         assert!(long_deref.deref_links);
     }
 
@@ -1905,13 +3099,30 @@ mod tests {
         }
     }
 
+    /// The prefix an assertion about names and line numbers cares about: no
+    /// byte offset and no `-T` width, so neither of those two fields can
+    /// colour the result of a test that is not about them.
+    fn px(filename: &str, line_idx: usize, show_filename: bool, field: u8) -> Prefix<'_> {
+        Prefix {
+            filename,
+            show_filename,
+            line_idx,
+            byte_pos: 0,
+            width: 0,
+            field,
+        }
+    }
+
     #[test]
     fn standard_input_has_a_name_of_its_own() {
         assert_eq!(display_name("-"), "(standard input)");
         assert_eq!(display_name("a.txt"), "a.txt");
         // `grep -H pattern -` printing `-:line` reads as part of the line.
         assert_eq!(
-            line_prefix(display_name("-"), 0, true, &pfx_opts(false, false), b':'),
+            line_prefix(
+                &px(display_name("-"), 0, true, b':'),
+                &pfx_opts(false, false)
+            ),
             b"(standard input):"
         );
     }
@@ -1935,7 +3146,7 @@ mod tests {
     #[test]
     fn prefix_none() {
         assert_eq!(
-            line_prefix("f", 0, false, &pfx_opts(false, false), b':'),
+            line_prefix(&px("f", 0, false, b':'), &pfx_opts(false, false)),
             b""
         );
     }
@@ -1943,7 +3154,7 @@ mod tests {
     #[test]
     fn prefix_filename_only() {
         assert_eq!(
-            line_prefix("a.txt", 0, true, &pfx_opts(false, false), b':'),
+            line_prefix(&px("a.txt", 0, true, b':'), &pfx_opts(false, false)),
             b"a.txt:"
         );
     }
@@ -1951,11 +3162,11 @@ mod tests {
     #[test]
     fn prefix_line_number_only() {
         assert_eq!(
-            line_prefix("ignored", 0, false, &pfx_opts(true, false), b':'),
+            line_prefix(&px("ignored", 0, false, b':'), &pfx_opts(true, false)),
             b"1:"
         );
         assert_eq!(
-            line_prefix("ignored", 41, false, &pfx_opts(true, false), b':'),
+            line_prefix(&px("ignored", 41, false, b':'), &pfx_opts(true, false)),
             b"42:"
         );
     }
@@ -1963,7 +3174,7 @@ mod tests {
     #[test]
     fn prefix_filename_and_line_number() {
         assert_eq!(
-            line_prefix("a.txt", 9, true, &pfx_opts(true, false), b':'),
+            line_prefix(&px("a.txt", 9, true, b':'), &pfx_opts(true, false)),
             b"a.txt:10:"
         );
     }
@@ -1974,16 +3185,158 @@ mod tests {
         // line number too would make `-nZ` output unparseable, and it is not
         // what GNU does.
         assert_eq!(
-            line_prefix("a.txt", 0, true, &pfx_opts(false, true), b':'),
+            line_prefix(&px("a.txt", 0, true, b':'), &pfx_opts(false, true)),
             b"a.txt\0"
         );
         assert_eq!(
-            line_prefix("a.txt", 9, true, &pfx_opts(true, true), b':'),
+            line_prefix(&px("a.txt", 9, true, b':'), &pfx_opts(true, true)),
             b"a.txt\x0010:"
         );
     }
 
+    // ---------------- -b and -T ----------------
+
+    /// The width is fixed from the file's size before a line is read, which is
+    /// what lets `-T` apply to input that cannot be measured twice. Every
+    /// number here was read off GNU grep 3.11.
+    #[test]
+    fn the_tab_width_comes_from_the_size_and_grows_by_one_for_the_line_count() {
+        let plain = Options::default();
+        let numbered = Options {
+            line_numbers: true,
+            ..Options::default()
+        };
+        // A file of N bytes holds at most N+1 lines, so `-n` can need one more
+        // column than the size alone does — but only across a power of ten.
+        for (size, without_n, with_n) in [
+            (0, 1, 1),
+            (1, 1, 1),
+            (9, 1, 2),
+            (10, 2, 2),
+            (99, 2, 3),
+            (100, 3, 3),
+            (1492, 4, 4),
+        ] {
+            assert_eq!(offset_width(Some(size), &plain), without_n, "size {size}");
+            assert_eq!(
+                offset_width(Some(size), &numbered),
+                with_n,
+                "size {size} with -n"
+            );
+        }
+        // Nothing to measure — a pipe — falls back to the largest a signed
+        // `off_t` holds, which is nineteen digits either way.
+        assert_eq!(offset_width(None, &plain), 19);
+        assert_eq!(offset_width(None, &numbered), 19);
+    }
+
+    /// `-T` right-aligns the numeric fields and ends the prefix with a tab —
+    /// *after* the last separator, with no backspace, which is the detail two
+    /// readings of GNU's source got wrong and one `od -c` settled.
+    #[test]
+    fn the_initial_tab_follows_the_last_field_and_pads_only_the_numbers() {
+        let t = |line_numbers, byte_offset, null_name| Options {
+            align_tabs: true,
+            line_numbers,
+            byte_offset,
+            null_name,
+            ..Options::default()
+        };
+        let p = |width, show_filename| Prefix {
+            filename: "a.txt",
+            show_filename,
+            line_idx: 0,
+            byte_pos: 0,
+            width,
+            field: b':',
+        };
+        // Both numeric fields take the same width — there is one width, not one
+        // per field.
+        assert_eq!(
+            line_prefix(&p(3, false), &t(true, true, false)),
+            b"  1:  0:\t"
+        );
+        // The name is never padded, and `-Z`'s NUL does not stop the tab.
+        assert_eq!(
+            line_prefix(&p(2, true), &t(true, false, false)),
+            b"a.txt: 1:\t"
+        );
+        assert_eq!(
+            line_prefix(&p(2, true), &t(true, false, true)),
+            b"a.txt\0 1:\t"
+        );
+        // A name on its own still ends in a tab…
+        assert_eq!(
+            line_prefix(&p(2, true), &t(false, false, false)),
+            b"a.txt:\t"
+        );
+        assert_eq!(
+            line_prefix(&p(2, true), &t(false, false, true)),
+            b"a.txt\0\t"
+        );
+        // …but an empty prefix does not gain one, because the tab follows the
+        // last field and there is no field.
+        assert_eq!(line_prefix(&p(2, false), &t(false, false, false)), b"");
+        // And without `-T` the width is ignored outright.
+        let no_t = Options {
+            line_numbers: true,
+            byte_offset: true,
+            ..Options::default()
+        };
+        assert_eq!(line_prefix(&p(9, false), &no_t), b"1:0:");
+    }
+
+    /// `-b` reports where in the *file* the printed text starts, which is the
+    /// line's own offset — and under `-o` each match's.
+    #[test]
+    fn the_byte_offset_counts_separators_and_follows_the_match_under_o() {
+        let opts = Options {
+            byte_offset: true,
+            ..Options::default()
+        };
+        let p = pats("foo", &opts);
+        let (out, _) = run_search(b"foo bar foo\nbaz\nfoo\n", &p, &opts, "f", false);
+        assert_eq!(out, b"0:foo bar foo\n16:foo\n");
+
+        let o = Options {
+            byte_offset: true,
+            only_matching: true,
+            ..Options::default()
+        };
+        let (out, _) = run_search(b"foo bar foo\nbaz\nfoo\n", &pats("foo", &o), &o, "f", false);
+        assert_eq!(out, b"0:foo\n8:foo\n16:foo\n");
+
+        // Under `-z` the NUL separators are bytes of the file like any other.
+        let z = Options {
+            byte_offset: true,
+            null_data: true,
+            ..Options::default()
+        };
+        let (out, _) = run_search(b"foo\0bar\0foo\0", &pats("foo", &z), &z, "f", false);
+        assert_eq!(out, b"0:foo\08:foo\0");
+
+        // A context line carries its own offset, ended by `-` like every other
+        // field of a context line's prefix.
+        let c = Options {
+            byte_offset: true,
+            ..ctx_opts(None, None, Some(1))
+        };
+        let (out, _) = run_search(b"foo bar foo\nbaz\nfoo\n", &pats("baz", &c), &c, "f", false);
+        assert_eq!(out, b"0-foo bar foo\n12:baz\n16-foo\n");
+    }
+
     // ---------------- search_stream ----------------
+
+    /// A source with no `-T` width, which is what every test that is not about
+    /// `-T` wants: [`line_prefix`] ignores the width unless `align_tabs` is on,
+    /// so zero here can never affect an assertion that does not set it.
+    fn src(filename: &str, show_filename: bool) -> Source<'_> {
+        Source {
+            filename,
+            show_filename,
+            width: 0,
+        }
+    }
 
     fn run_search(
         input: &[u8],
@@ -1998,8 +3351,7 @@ mod tests {
             &mut out,
             input,
             pats,
-            filename,
-            show_filename,
+            &src(filename, show_filename),
             opts,
             &mut printed_before,
         )
@@ -2202,7 +3554,15 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let mut printed_before = false;
         for (name, body) in [("a", CTX), ("b", &b"HIT\n2\n3\n"[..])] {
-            search_stream(&mut out, body, &p, name, true, &opts, &mut printed_before).unwrap();
+            search_stream(
+                &mut out,
+                body,
+                &p,
+                &src(name, true),
+                &opts,
+                &mut printed_before,
+            )
+            .unwrap();
         }
         assert_eq!(
             String::from_utf8(out).unwrap(),
@@ -2213,7 +3573,15 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let mut printed_before = false;
         for (name, body) in [("a", CTX), ("empty", &b""[..]), ("b", CTX)] {
-            search_stream(&mut out, body, &p, name, false, &opts, &mut printed_before).unwrap();
+            search_stream(
+                &mut out,
+                body,
+                &p,
+                &src(name, false),
+                &opts,
+                &mut printed_before,
+            )
+            .unwrap();
         }
         assert_eq!(
             String::from_utf8(out).unwrap(),
@@ -2474,5 +3842,406 @@ mod tests {
         assert_eq!(quote_ere(b"a.c"), b"a\\.c".to_vec());
         assert_eq!(quote_ere(b"a+b|c"), b"a\\+b\\|c".to_vec());
         assert_eq!(quote_ere(b"plain"), b"plain".to_vec());
+    }
+
+    // ---------------- colour ----------------
+
+    /// Options with colour on and everything else default, so that a colour
+    /// assertion is never reading a second feature by accident.
+    fn colored() -> Options {
+        Options {
+            color_when: ColorWhen::Always,
+            color: true,
+            ..Options::default()
+        }
+    }
+
+    /// What `search_stream` writes, as bytes — colour output is not text, and
+    /// `String` would hide exactly the escapes being asserted about.
+    fn painted(input: &[u8], pattern: &str, opts: &Options, show_filename: bool) -> Vec<u8> {
+        let p = pats(pattern, opts);
+        run_search(input, &p, opts, "f", show_filename).0
+    }
+
+    #[test]
+    fn a_when_word_is_one_of_three_answers_and_bare_means_auto() {
+        assert_eq!(color_when(None), Ok(ColorWhen::Auto));
+        for word in ["always", "yes", "force"] {
+            assert_eq!(color_when(Some(word)), Ok(ColorWhen::Always));
+        }
+        for word in ["never", "no", "none"] {
+            assert_eq!(color_when(Some(word)), Ok(ColorWhen::Never));
+        }
+        for word in ["auto", "tty", "if-tty"] {
+            assert_eq!(color_when(Some(word)), Ok(ColorWhen::Auto));
+        }
+        // The words are matched case-insensitively.
+        assert_eq!(color_when(Some("ALWAYS")), Ok(ColorWhen::Always));
+        assert!(color_when(Some("bogus")).is_err());
+    }
+
+    #[test]
+    fn a_capability_without_a_value_is_ignored_and_a_boolean_is_not() {
+        // `ms` is not `ms=`: the first leaves the default highlight standing,
+        // the second removes it. Getting this wrong turns a stray `GREP_COLORS`
+        // in a profile into a grep that quietly stops highlighting.
+        let mut c = Colors::default();
+        c.apply(b"ms");
+        assert_eq!(c.selected_match, b"01;31".to_vec());
+        c.apply(b"ms=");
+        assert!(c.selected_match.is_empty());
+
+        // The two booleans have no value to miss, and fire either way.
+        let mut c = Colors::default();
+        c.apply(b"rv:ne");
+        assert!(c.reverse_video && c.no_erase);
+        let mut c = Colors::default();
+        c.apply(b"rv=1:ne=1");
+        assert!(c.reverse_video && c.no_erase);
+    }
+
+    #[test]
+    fn an_unknown_key_or_an_unusable_value_is_ignored_in_silence() {
+        let mut c = Colors::default();
+        // Not one of the ten keys; not SGR parameters; nothing at all.
+        c.apply(b"zz=1:ms=nope::");
+        assert_eq!(c, Colors::default());
+        // An empty specification is not a specification.
+        let mut c = Colors::default();
+        c.apply(b"");
+        assert_eq!(c, Colors::default());
+    }
+
+    #[test]
+    fn mt_sets_both_match_colours_and_the_last_assignment_wins() {
+        let mut c = Colors::default();
+        c.apply(b"mt=44");
+        assert_eq!(c.selected_match, b"44".to_vec());
+        assert_eq!(c.context_match, b"44".to_vec());
+        // Order decides, because each key assigns rather than merges.
+        let mut c = Colors::default();
+        c.apply(b"ms=44:mt=45");
+        assert_eq!(c.selected_match, b"45".to_vec());
+        let mut c = Colors::default();
+        c.apply(b"mt=45:ms=44");
+        assert_eq!(c.selected_match, b"44".to_vec());
+        assert_eq!(c.context_match, b"45".to_vec());
+    }
+
+    #[test]
+    fn ne_drops_the_erase_that_otherwise_follows_every_escape() {
+        let c = Colors::default();
+        assert_eq!(c.wrap(b"32", b"x"), b"\x1b[32m\x1b[Kx\x1b[m\x1b[K".to_vec());
+        let mut c = Colors::default();
+        c.apply(b"ne");
+        assert_eq!(c.wrap(b"32", b"x"), b"\x1b[32mx\x1b[m".to_vec());
+        // An empty capability writes the text and nothing else, which is what
+        // makes the default `sl=`/`cx=` mean "leave this alone".
+        assert_eq!(c.wrap(b"", b"x"), b"x".to_vec());
+    }
+
+    #[test]
+    fn every_prefix_field_carries_its_own_colour_and_the_delimiters_do_not() {
+        let opts = Options {
+            line_numbers: true,
+            byte_offset: true,
+            ..colored()
+        };
+        assert_eq!(
+            line_prefix(
+                &Prefix {
+                    filename: "f",
+                    show_filename: true,
+                    line_idx: 0,
+                    byte_pos: 7,
+                    width: 0,
+                    field: b':',
+                },
+                &opts
+            ),
+            [
+                b"\x1b[35m\x1b[Kf\x1b[m\x1b[K".as_slice(), // fn
+                b"\x1b[36m\x1b[K:\x1b[m\x1b[K".as_slice(), // se
+                b"\x1b[32m\x1b[K1\x1b[m\x1b[K".as_slice(), // ln
+                b"\x1b[36m\x1b[K:\x1b[m\x1b[K".as_slice(), // se
+                b"\x1b[32m\x1b[K7\x1b[m\x1b[K".as_slice(), // bn
+                b"\x1b[36m\x1b[K:\x1b[m\x1b[K".as_slice(), // se
+            ]
+            .concat()
+        );
+
+        // `-T`'s padding belongs *inside* the number's escape — a terminal
+        // whose `ln` sets a background paints the padding too — and its tab
+        // belongs outside every escape, as does `-Z`'s NUL.
+        let opts = Options {
+            line_numbers: true,
+            align_tabs: true,
+            null_name: true,
+            ..colored()
+        };
+        assert_eq!(
+            line_prefix(
+                &Prefix {
+                    filename: "f",
+                    show_filename: true,
+                    line_idx: 0,
+                    byte_pos: 0,
+                    width: 3,
+                    field: b':',
+                },
+                &opts
+            ),
+            [
+                b"\x1b[35m\x1b[Kf\x1b[m\x1b[K".as_slice(),
+                b"\0".as_slice(),
+                b"\x1b[32m\x1b[K  1\x1b[m\x1b[K".as_slice(),
+                b"\x1b[36m\x1b[K:\x1b[m\x1b[K".as_slice(),
+                b"\t".as_slice(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn by_default_only_the_matches_are_painted() {
+        // `sl` and `cx` are empty out of the box, so the text around a match is
+        // written with no escapes at all — not with an escape naming no colour.
+        assert_eq!(
+            painted(b"foo bar foo\nqux\n", "foo", &colored(), false),
+            b"\x1b[01;31m\x1b[Kfoo\x1b[m\x1b[K bar \x1b[01;31m\x1b[Kfoo\x1b[m\x1b[K\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn a_selected_line_colour_opens_before_each_match_and_closes_only_at_the_tail() {
+        let mut opts = colored();
+        opts.colors.apply(b"sl=33");
+        // `qux foo bar` has text before, between (none) and after its match:
+        // the run before the match is opened and left open — the match's own
+        // escape pair ends it — and only the trailing run is closed.
+        assert_eq!(
+            painted(b"qux foo bar\n", "foo", &opts, false),
+            [
+                b"\x1b[33m\x1b[Kqux ".as_slice(),
+                b"\x1b[01;31m\x1b[Kfoo\x1b[m\x1b[K".as_slice(),
+                b"\x1b[33m\x1b[K bar\x1b[m\x1b[K".as_slice(),
+                b"\n".as_slice(),
+            ]
+            .concat()
+        );
+        // A line that *ends* on its match has no tail, and so no closing
+        // escape of its own.
+        assert_eq!(
+            painted(b"qux foo\n", "foo", &opts, false),
+            [
+                b"\x1b[33m\x1b[Kqux ".as_slice(),
+                b"\x1b[01;31m\x1b[Kfoo\x1b[m\x1b[K".as_slice(),
+                b"\n".as_slice(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn with_no_match_colour_the_whole_line_is_one_closed_run() {
+        // The shape changes, not just an escape: with `ms` empty there is no
+        // per-match pass, so the line is a single `sl` run — opened, written,
+        // closed — rather than one run per match left hanging.
+        let mut opts = colored();
+        opts.colors.apply(b"ms=:sl=33");
+        assert_eq!(
+            painted(b"foo bar foo\n", "foo", &opts, false),
+            b"\x1b[33m\x1b[Kfoo bar foo\x1b[m\x1b[K\n".to_vec()
+        );
+        // And with neither, nothing is painted at all.
+        let mut opts = colored();
+        opts.colors.apply(b"ms=");
+        assert_eq!(
+            painted(b"foo bar foo\n", "foo", &opts, false),
+            b"foo bar foo\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn an_empty_match_is_not_painted_any_more_than_it_is_printed() {
+        let mut opts = colored();
+        opts.colors.apply(b"sl=33");
+        // `o*` matches nothing at most positions and `oo` at one. Painting the
+        // empty matches would bury the line in escapes, so they are skipped —
+        // the same rule `-o` follows — and the line's tail run covers them.
+        assert_eq!(
+            painted(b"foo bar\n", "o*", &opts, false),
+            [
+                b"\x1b[33m\x1b[Kf".as_slice(),
+                b"\x1b[01;31m\x1b[Koo\x1b[m\x1b[K".as_slice(),
+                b"\x1b[33m\x1b[K bar\x1b[m\x1b[K".as_slice(),
+                b"\n".as_slice(),
+            ]
+            .concat()
+        );
+        // A pattern that can *only* match nothing paints no match at all, and
+        // the whole line is the tail.
+        assert_eq!(
+            painted(b"foo\n", "", &opts, false),
+            b"\x1b[33m\x1b[Kfoo\x1b[m\x1b[K\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn the_carriage_return_of_a_crlf_line_is_terminator_and_not_text() {
+        let mut opts = colored();
+        opts.colors.apply(b"ms=:sl=33");
+        // A CR immediately before the line separator is left outside the run…
+        assert_eq!(
+            painted(b"foo\r\n", "foo", &opts, false),
+            b"\x1b[33m\x1b[Kfoo\x1b[m\x1b[K\r\n".to_vec()
+        );
+        // …but a CR anywhere else in the line is ordinary text.
+        assert_eq!(
+            painted(b"foo\rzz\n", "foo", &opts, false),
+            b"\x1b[33m\x1b[Kfoo\rzz\x1b[m\x1b[K\n".to_vec()
+        );
+        // A final line with no separator still ends in a CR that is terminator.
+        assert_eq!(
+            painted(b"foo\r", "foo", &opts, false),
+            b"\x1b[33m\x1b[Kfoo\x1b[m\x1b[K\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn under_invert_the_highlight_follows_the_matches_onto_the_context_lines() {
+        // `-v` selects what did *not* match, so the selected lines have nothing
+        // to highlight and the context lines have everything — in `mc`, not
+        // `ms`. This is the one place the two match capabilities differ.
+        let opts = Options {
+            invert: true,
+            ..ctx_colored(b"mc=44")
+        };
+        assert_eq!(
+            painted(b"foo\nbar\nfoo\n", "bar", &opts, false),
+            [
+                num(1, b':').as_slice(),
+                b"foo\n".as_slice(),
+                num(2, b'-').as_slice(),
+                b"\x1b[44m\x1b[Kbar\x1b[m\x1b[K\n".as_slice(),
+                num(3, b':').as_slice(),
+                b"foo\n".as_slice(),
+            ]
+            .concat()
+        );
+    }
+
+    /// `-C 1` with line numbers and colour on, plus one `GREP_COLORS` spec —
+    /// the shape every context-colouring assertion below needs.
+    fn ctx_colored(spec: &[u8]) -> Options {
+        let mut opts = Options {
+            line_numbers: true,
+            default_context: Some(1),
+            ..colored()
+        };
+        opts.colors.apply(spec);
+        opts
+    }
+
+    /// A `-n` prefix in the default palette: the number in `ln`, the separator
+    /// in `se`. Spelled once because a context assertion is about the *body*,
+    /// and repeating twenty bytes of escape in front of each one would hide it.
+    fn num(n: u64, field: u8) -> Vec<u8> {
+        let c = Colors::default();
+        let mut v = c.wrap(&c.line_number, n.to_string().as_bytes());
+        v.extend_from_slice(&c.wrap(&c.separator, &[field]));
+        v
+    }
+
+    #[test]
+    fn rv_swaps_the_line_colours_but_only_under_invert() {
+        // Without `-v`, `rv` changes nothing: the selected lines are still the
+        // interesting ones.
+        let opts = ctx_colored(b"rv:sl=33:cx=34");
+        assert_eq!(
+            painted(b"a\nbar\nc\n", "bar", &opts, false),
+            [
+                num(1, b'-').as_slice(),
+                b"\x1b[34m\x1b[Ka\x1b[m\x1b[K\n".as_slice(),
+                num(2, b':').as_slice(),
+                b"\x1b[33m\x1b[K\x1b[01;31m\x1b[Kbar\x1b[m\x1b[K\n".as_slice(),
+                num(3, b'-').as_slice(),
+                b"\x1b[34m\x1b[Kc\x1b[m\x1b[K\n".as_slice(),
+            ]
+            .concat()
+        );
+        // With `-v` it swaps them, so the lines carrying the matches are the
+        // ones wearing `sl`.
+        let opts = Options {
+            invert: true,
+            ..ctx_colored(b"rv:sl=33:cx=34")
+        };
+        assert_eq!(
+            painted(b"a\nbar\nc\n", "bar", &opts, false),
+            [
+                num(1, b':').as_slice(),
+                b"\x1b[34m\x1b[Ka\x1b[m\x1b[K\n".as_slice(),
+                num(2, b'-').as_slice(),
+                b"\x1b[33m\x1b[K\x1b[01;31m\x1b[Kbar\x1b[m\x1b[K\n".as_slice(),
+                num(3, b':').as_slice(),
+                b"\x1b[34m\x1b[Kc\x1b[m\x1b[K\n".as_slice(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn the_group_separator_is_painted_and_its_newline_is_not() {
+        let opts = ctx_colored(b"se=45");
+        let out = painted(b"HIT\nx\ny\nz\nHIT\n", "HIT", &opts, false);
+        let want = b"\x1b[45m\x1b[K--\x1b[m\x1b[K\n";
+        assert!(
+            out.windows(want.len()).any(|w| w == want.as_slice()),
+            "group separator painted, newline plain: {out:?}"
+        );
+    }
+
+    #[test]
+    fn only_matching_prints_matched_text_and_therefore_only_a_match_colour() {
+        // `-o` writes nothing but matches, so `sl` has nothing to apply to —
+        // setting it changes the output not at all.
+        let mut opts = Options {
+            only_matching: true,
+            ..colored()
+        };
+        opts.colors.apply(b"sl=33:cx=34");
+        assert_eq!(
+            painted(b"foo bar foo\n", "foo", &opts, false),
+            [
+                b"\x1b[01;31m\x1b[Kfoo\x1b[m\x1b[K\n".as_slice(),
+                b"\x1b[01;31m\x1b[Kfoo\x1b[m\x1b[K\n".as_slice(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn the_file_name_outputs_colour_the_name_and_nothing_else() {
+        // `-c` paints the name and the `:` but never the count: there is no
+        // capability for a count.
+        let opts = Options {
+            count_only: true,
+            ..colored()
+        };
+        assert_eq!(
+            painted(b"foo\nbar\n", "foo", &opts, true),
+            b"\x1b[35m\x1b[Kf\x1b[m\x1b[K\x1b[36m\x1b[K:\x1b[m\x1b[K1\n".to_vec()
+        );
+        // Under `-Z` the NUL replaces the separator and stays outside the
+        // escapes, exactly as it does in a line prefix.
+        let opts = Options {
+            count_only: true,
+            null_name: true,
+            ..colored()
+        };
+        assert_eq!(
+            painted(b"foo\nbar\n", "foo", &opts, true),
+            b"\x1b[35m\x1b[Kf\x1b[m\x1b[K\x001\n".to_vec()
+        );
     }
 }

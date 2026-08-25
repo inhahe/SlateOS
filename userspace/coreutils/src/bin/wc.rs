@@ -646,42 +646,13 @@ fn stdin_stat() -> Stat {
     // buffered in it — which would make `printf 'a b\nc\n' | wc` pad to 1 where
     // GNU pads to 7. The three-valued answer is what is needed here rather than
     // the boolean, because `Failed` and `Other` differ by six columns.
-    let Some(file) = borrowed_stdin() else {
+    let Some(file) = filekind::borrowed_stdin() else {
         return Stat::Failed;
     };
     match filekind::regular(&file) {
         None => Stat::Failed,
         Some(false) => Stat::Other,
         Some(true) => Stat::of(file.metadata()),
-    }
-}
-
-/// Standard input as a `File` that will not close it.
-///
-/// `File::from_raw_fd` takes ownership, and letting that `File` drop would close
-/// standard input in the middle of a program that is about to read it — hence
-/// the `ManuallyDrop`. Nothing is read through the returned handle, so it cannot
-/// disturb the stream position either.
-fn borrowed_stdin() -> Option<std::mem::ManuallyDrop<File>> {
-    #[cfg(unix)]
-    {
-        use std::os::fd::{AsRawFd, FromRawFd};
-        let fd = io::stdin().as_raw_fd();
-        // SAFETY: `fd` is standard input, which the runtime keeps open for the
-        // whole process, and `ManuallyDrop` prevents the `File` from closing it.
-        Some(unsafe { std::mem::ManuallyDrop::new(File::from_raw_fd(fd)) })
-    }
-    #[cfg(all(not(unix), windows))]
-    {
-        use std::os::windows::io::{AsRawHandle, FromRawHandle};
-        let handle = io::stdin().as_raw_handle();
-        // SAFETY: as above — standard input's handle, which the runtime keeps
-        // open for the whole process, kept from being closed by `ManuallyDrop`.
-        Some(unsafe { std::mem::ManuallyDrop::new(File::from_raw_handle(handle)) })
-    }
-    #[cfg(all(not(unix), not(windows)))]
-    {
-        None
     }
 }
 

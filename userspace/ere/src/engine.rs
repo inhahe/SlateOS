@@ -41,6 +41,12 @@
 //! metacharacter test goes through [`Ch::as_ascii`] and no encoding question
 //! arises in the parser.
 
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::ch::{self as bytes, BStr, Ch, Str};
 
 /// Concatenate the pieces of a diagnostic that quotes bytes back.
@@ -182,13 +188,17 @@ pub struct MatchLimit;
 /// them; spelled out, the type is long enough that the reader stops reading it.
 pub type GroupSpans = Vec<Option<(usize, usize)>>;
 
-impl std::fmt::Display for MatchLimit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for MatchLimit {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("backreference matching exceeded its step limit")
     }
 }
 
-impl std::error::Error for MatchLimit {}
+// `core::error::Error`, not `std::error::Error` — they are the same trait since
+// Rust 1.81, `std` merely re-exporting `core`'s, so a `std` caller can still put
+// this in a `Box<dyn std::error::Error>` and a `no_std` one can still ask it for
+// a source.
+impl core::error::Error for MatchLimit {}
 
 /// The fixed part of a backreference search's step budget.
 ///
@@ -1404,8 +1414,8 @@ pub struct Regex {
 /// regex to serve `{:?}` would be paying for the debugger in production), and
 /// dumping two hundred instructions where the reader expected `/^a.*b$/` would
 /// bury the rest of the tree; the counts are enough to tell two regexes apart.
-impl std::fmt::Debug for Regex {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Regex {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Regex")
             .field("insts", &self.prog.len())
             .field("groups", &self.ngroups)
@@ -2385,6 +2395,10 @@ impl Iterator for CaptureMatches<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `to_string`, which is the `Display` impl above seen from the outside. It
+    // needs importing because the crate is `no_std`, so the prelude in scope
+    // here is `core`'s and does not carry `ToString`.
+    use alloc::string::ToString;
 
     /// Every malformed pattern is classified the way glibc classifies it.
     ///

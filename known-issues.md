@@ -75949,22 +75949,22 @@ carry their own copy of the BEGIN/record/END driver, and
 `cmd_mapfile`/`cmd_mapfile_input` each carry their own copy of the `-t` flag
 scan. Both are the same accident waiting for its first divergence.
 
-## TD-GREP-IS-MISSING-CONTEXT-COLOUR-BYTE-OFFSETS-AND-THE-FILE-SELECTORS (lane B, 2026-08-25) — **open** (the missing features; the defects below were fixed the same day)
+## TD-GREP-IS-MISSING-CONTEXT-COLOUR-BYTE-OFFSETS-AND-THE-FILE-SELECTORS (lane B, 2026-08-25) — **resolved 2026-08-25** (every feature the title names is built; what is left is diagnostic wording, tracked with the getopt debt)
 
-**In short:** our `grep` handles matching well and is missing a lot of the
-things people actually type at it. `--color`, `-b` (print each hit's byte
-offset), `-T` (line up the output in columns), `-d` (what to do when an operand
-is a directory), and `--include`/`--exclude`/`--exclude-dir` (search only some
-of the files a recursive search would reach) are all missing. Typing any of
-them gets `grep: unknown option`, so a script that uses one fails outright
-rather than degrading. The largest gap, context selection — `grep -C 3 pattern
-file`, show three lines either side of each hit — was closed on 2026-08-25 and
-is recorded below. Five further things were wrong rather than absent — the recursive walk
-followed symbolic links it should have skipped, an unreadable directory did not
-raise the exit status, a failed write to a closed output was thrown away, `-q`
-stopped too late, and a long option refused a value given as the next argument
-— and all five were fixed on 2026-08-25; they are kept below because the fix
-for each is what the harness now pins.
+**In short:** our `grep` handled matching well and was missing a lot of the
+things people actually type at it. All of it is now built. `-d` (what to do when
+an operand is a directory), `-D` (the same question for a device or a FIFO) and
+`--include`/`--exclude`/`--exclude-dir`/`--exclude-from` (search only some of the
+files a recursive search would reach) landed on 2026-08-25, joining context
+selection (`grep -C 3 pattern file`, show three lines either side of each hit),
+`-b` (print each hit's byte offset), `-T` (line up the output in columns) and
+`--color` (paint the matched text, and the rest of the line, in terminal
+colours) from earlier the same day. Five further things were wrong rather than
+absent — the recursive walk followed symbolic links it should have skipped, an
+unreadable directory did not raise the exit status, a failed write to a closed
+output was thrown away, `-q` stopped too late, and a long option refused a value
+given as the next argument — and all five were fixed on 2026-08-25; they are kept
+below because the fix for each is what the harness now pins.
 
 **How they were found.** All of it in one run, by `scripts/grep-diff.sh`'s
 first execution after it was moved onto `diff-wsl.sh` (2026-08-25). None of it
@@ -75975,19 +75975,11 @@ had introduced. Each item below is a live case in that harness carrying a `?`
 marker, which means the harness fails the moment the gap closes — deleting the
 marker is part of closing it, and nothing here can be fixed and forgotten.
 
-**Missing features**, in the order worth doing them:
-
-| | What it does | Harness cases |
-|---|---|---|
-| `--color=never\|always\|auto` + `GREP_COLORS` | wrap the matched text in SGR escapes; `auto` means "only if stdout is a terminal" | 7 |
-| `-b` | prefix each output line with the byte offset it starts at | 5 |
-| `--include=GLOB` `--exclude=GLOB` `--exclude-dir=GLOB` | filter what a recursive search descends into and reports | 3 |
-| `-d ACTION` | `read` (the default), `skip`, or `recurse` for a directory operand | 2 |
-| `-T` | pad the filename/line-number prefix so the text lines up | 2 |
-
-`--color` is now the largest group and the one to do next; `-b` and `-T` are
-small and share the prefix-building code that context selection has just
-reworked, so they are cheap to do alongside it.
+**Nothing is missing any more.** A table here used to list the two
+file-selection groups as the last gaps, with the note that they had to land
+together because `-d recurse` *is* `-r`, `-d skip` is the degenerate case of
+`--exclude`, and all of them want the same glob matcher and the same hook in the
+recursive walk. They did land together, and the write-up is below.
 
 **Defects — all fixed 2026-08-25**, and each now pinned by plain (unmarked)
 cases in `scripts/grep-diff.sh`, so a regression fails the harness:
@@ -76068,20 +76060,201 @@ not obvious, each measured against GNU 3.11 rather than recalled:
   why the "printed before" flag lives on `Run` and not in `search_stream`.
 * `-c`, `-l`, `-L` and `-q` ignore context outright, separator included.
 
-**Diagnostic wording** (four more `?` cases, lower value than the above):
-`grep` with no operands answers `grep: missing PATTERN` where GNU prints the
-usage summary; `--zzz` is `unknown option: --zzz` against GNU's `unrecognized
-option '--zzz'`; `-m x` names the offending value where GNU's does not; and a
-leading quantifier under `-E` (`grep -E '*a'`) is accepted silently where GNU
-also warns `grep: warning: * at start of expression` on stderr while still
-exiting 0. The first two belong with
-`TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE` rather than with grep.
+**`-b` and `-T` — implemented 2026-08-25.** The seven `?` cases that pinned
+their absence are now 33 plain cases. Both were measured against GNU 3.11 with
+`od -c` rather than recalled, and twice the recollection was wrong:
 
-**Severity.** Medium, and lower than it was: the four defects are gone, which
-removes the only hang and the only silently-wrong exit status. What is left
-produces no wrong answer to a query that works — the matching itself agrees
-with GNU across 217 cases — but `-C` and `--color` are common enough that a
-script or a habit that uses them simply does not run.
+* **`-T`'s field width is computed from the file's `st_size` before a single
+  line is read**, which is the whole reason it can be applied to a stream at
+  all. The rule is `num = size; num += 1 if -n; width = decimal_digits(num)` —
+  the `+1` because a file of N bytes can hold N+1 lines. So a 99-byte file pads
+  line numbers to three columns and byte offsets to two. There is *one* width,
+  shared by both numeric fields, not one per field. An input with no size (a
+  pipe) uses what a signed `off_t` holds, giving 19 columns; `grep -Tn HIT
+  < file` is *not* that case, because redirected stdin is a regular file. This
+  is why `scripts/grep-diff.sh` grew a `w99` fixture: every other fixture is
+  small enough that a hardcoded width of 1 would pass.
+* **The tab goes after the last separator, with no backspace.** GNU's
+  `print_line_head` reads as if it emitted `"	"` *before* the separator;
+  the dump says `a.txt: 1:	foo`. And `-Z` does not suppress it —
+  `a.txt  1:	foo`, and `a.txt 	foo` with no numbers at all. What *does*
+  suppress it is having no field to follow: bare `-T` prints no tab, and
+  neither do `-c`, `-l` or `-L`, which print no line prefix.
+* **`-b` reports the offset of what is printed, not of the line.** Under `-o`
+  each match carries its own, so `grep -bo foo` over `foo bar foo` prints `0`
+  and `8`. Under `-z` the NUL separators count as bytes like any other. A
+  context line gets an offset too, punctuated with `-` like its other fields.
+
+Implementation notes: `line_prefix` now takes a `Prefix` struct rather than
+five positionals, and `search_stream` a `Source`, because the alternative was
+tripping `clippy::too_many_arguments` in a crate that denies pedantic. The
+"is this a regular file, honestly" test that `-T` needs on stdin was already
+written for `wc`; it moved to `coreutils::filekind::borrowed_stdin` and `wc`'s
+private copy was deleted rather than a third one written.
+
+**`--color`/`--colour` and `GREP_COLORS` — implemented 2026-08-25.** The
+seven `?` cases that pinned their absence are now 36 plain cases. The whole
+model below was **measured** against GNU 3.11 with `od -c` — three throwaway
+probe scripts, ~96 dumps — and not recalled, because two of its rules are ones
+recall gets wrong.
+
+The selection rules are small:
+
+```
+matching    = selected ^ invert
+line_color  = if selected ^ (invert && rv) { sl } else { cx }
+match_color = if selected { ms } else { mc }
+```
+
+An escape is `\e[<cap>m\e[K` — text — `\e[m\e[K`, with the `\e[K` (erase to
+end of line) dropped under `ne`. **An empty capability emits nothing at all**,
+which is not the same as emitting an empty escape, and is what makes the next
+point observable.
+
+* **The body is printed in two independent stages, and either can be skipped.**
+  The *middle* runs only when `matching && !match_color.is_empty()`: for each
+  non-empty match it emits `start(line_color)`, then the text since the previous
+  match — **which is never closed** — then the matched text wrapped in
+  `match_color`. The *tail* runs only when `!line_color.is_empty()`:
+  `start(line_color)`, the rest of the line, `end(line_color)`. Whatever neither
+  stage claimed is written plainly. The consequence recall gets wrong is that
+  `GREP_COLORS='ms='` does not produce the default output minus one escape — it
+  produces a *differently shaped* output, because switching off the match colour
+  switches off the whole middle stage, so the line becomes one closed `sl` run
+  instead of a sequence of unclosed ones.
+* **A value capability written without `=` is ignored, not set to empty.**
+  `GREP_COLORS='ms'` leaves the match colour at its default; `GREP_COLORS='ms='`
+  turns it off. The booleans `rv` and `ne` fire either way. This is the second
+  thing recall gets wrong, and it is the difference between "no highlight" and
+  "the default highlight".
+* An unknown key, a value that is not SGR parameters (digits and `;`), and an
+  empty item between two colons are all ignored in silence. `mt` sets `ms` and
+  `mc` together, and the last assignment in the string wins.
+* **`-T`'s padding goes inside the number's escape**, not before it: the dump is
+  `\e[32m\e[K  12\e[m\e[K`, which matters on a terminal whose `ln` sets a
+  background. `-T`'s tab and `-Z`'s NUL are the two delimiters that stay
+  *outside* every escape — painting whitespace would drag a background across
+  the gutter, and the NUL is for a machine.
+* Every other prefix field carries its own capability: the file name in `fn`,
+  the line number in `ln`, the byte offset in `bn`, and **every** separator
+  (`:`, `-`, and the `--` between groups) in `se`. The newline after a group
+  separator is plain.
+* **`-o` ignores `sl` and `cx` entirely.** Everything it prints is matched text,
+  so everything it prints is `ms` — there is no line to colour.
+* `-c` paints the name and the `:` but never the count; there is no capability
+  for a count. `-l`/`-L` paint the name and nothing else.
+* A `\r` that ends a line is terminator, not text: the tail run stops before it.
+  A `\r` in the middle of a line is ordinary text and is painted. Hence the
+  `crlf` fixture in the harness.
+* An empty match is not painted, for the same reason `-o` does not print one:
+  it occurs at every position, and highlighting it would bury the line in
+  escapes.
+* `GREP_COLOR` (singular) is deprecated: it warns on stderr and sets both match
+  colours. An empty value warns nothing and changes nothing. Neither variable is
+  read when colour is off, so `GREP_COLOR=1;32 grep --color=never` is silent.
+* `--color=auto` and a bare `--color` mean "only if stdout is a terminal", which
+  is `IsTerminal` — and off in the harness, which is why the harness always says
+  `always`.
+
+**`-d`, `-D` and the file selectors — implemented 2026-08-25.** The five `?`
+cases that pinned their absence are now 65 plain cases and one `?` (`-d bogus`,
+whose diagnostic is the getopt-shape debt rather than anything about `-d`). The
+model below was **measured** against GNU 3.11 — five throwaway probe scripts —
+and in one place the measurement flatly contradicted what reading gnulib from
+memory had concluded.
+
+* **`-d` and `-r` are one setting, not three flags.** `-d recurse` *is* `-r`;
+  `-d read` is the default that says `Is a directory` and exits 2 (`-s` silences
+  the message, not the status); `-d skip` says nothing and exits 1, because
+  skipping is not an error. Being one setting, the last one written wins in both
+  directions — `-r -d skip` skips and `-d skip -r` recurses. `-R` differs from
+  `-r` only in *also* turning on symlink dereferencing, which a following `-d`
+  leaves behind when it takes the recursion away. Ours therefore stores a
+  `Directories` enum where it had a `recursive: bool`, with
+  `Options::recursive()` reading it.
+* **`-D` is tri-state, and that is what stops `grep -r pat /` hanging.** A device
+  *named on the command line* is read; a device the *walk finds* is skipped.
+  Neither is spelled by an argument, so the default is its own variant. Opening a
+  FIFO with no writer blocks forever, so the skip has to be decided from a `stat`
+  and never from an open — which is why the predicate is
+  `coreutils::filekind::is_device(&Metadata)` and not a question asked of an open
+  `File`. (GNU dodges the same hang from the other side, by adding `O_NONBLOCK`
+  when devices are to be skipped.) It is four `S_IS*` tests — char device, block
+  device, socket, FIFO — and no others: a directory is not a device, so `-D skip`
+  still descends into one.
+* **The combination rule is neither "includes win" nor "the last one wins".**
+  Consecutive options of the same kind coalesce into a segment; the segments are
+  scanned **newest first** and the first one holding a matching glob decides; a
+  name no segment matches is dropped only if the **oldest** segment is an
+  include. So the same two options in the other order are not the same command:
+
+  | command | `t1.txt` | `l1.log` |
+  |---|---|---|
+  | `--include='*.txt' --exclude='t1*'` | dropped | dropped |
+  | `--exclude='t1*' --include='*.txt'` | **kept** | **kept** |
+
+  Reversing them makes the exclude the *newer* segment, so `t1.txt` is reached by
+  the include first and kept; and it makes the include the *older* segment, so a
+  name neither matches — `l1.log` — is kept rather than dropped.
+* **Which list a glob joins is decided by the option, not by what it names.**
+  `--exclude` and `--exclude-from` ask about files only, `--exclude-dir` about
+  directories only, and there is no `--include-dir`. `--exclude=drop` therefore
+  does not stop the walk entering `drop/`, and `--exclude-dir=t1.txt` does not
+  stop `t1.txt` being searched. Trailing slashes are stripped from an
+  `--exclude-dir` pattern, because `--exclude-dir=drop/` is what tab completion
+  produces.
+* **A command-line operand is matched as written *and* at every suffix that
+  starts after a `/`.** Recalling gnulib said the opposite — that command-line
+  names are `EXCLUDE_ANCHORED` and so match whole or not at all — and the probe
+  disproved it: `--exclude=deepfile.txt` excludes `a/b/c/deepfile.txt` and
+  `--exclude=top.txt` excludes `./top.txt`. During the walk only the base name is
+  ever offered, so the suffix loop is unobservable there; it is written once and
+  used by both paths rather than special-cased.
+* The globs are `fnmatch` with **no** `FNM_PATHNAME` and **no** `FNM_PERIOD`: `*`
+  crosses a `/` and matches a leading dot, which is the opposite of what a shell
+  would do and the assumption a reader is most likely to bring. `\` still
+  escapes.
+* **Selection happens after the `stat`, not instead of it.** `grep --exclude='*'
+  foo abc /nonexistent` still reports the missing file and still exits 2. Stdin
+  is exempt from the whole mechanism, there being no name to match.
+* **`--exclude-from` has no comment syntax.** One glob per line, a final line
+  without a newline still counted, `#t1*` a glob and not a remark, and an empty
+  file excluding nothing — which is not the same as excluding everything. It is
+  read at parse time and its globs join the neighbouring `--exclude` segment, so
+  where it sits among the other options changes the answer.
+* **With no operand at all, `-r` walks `.` and prints the names without the `./`**
+  that naming `.` explicitly would have kept. That is a property of the
+  defaulting rather than of the walk, so it rides on its own flag set at the end
+  of `parse_args`.
+
+**One harness lesson, kept because it nearly cost the whole tranche.** The `-D`
+cases can hang rather than fail if the "skip a device found by the walk" rule is
+ever lost, so `scripts/grep-diff.sh` wraps each side in `timeout 20`. Written as
+`env PATH=$bindir/$side timeout 20 grep`, that resolves `timeout` through the
+PATH it has just set — a directory holding one symlink named `grep` — so
+`timeout` was not found, **both** sides exited 127, and all 435 cases agreed at
+once. A completely clean run is what a harness that cannot fail looks like from
+the outside. `timeout` now comes before `env`, and `DIFF_NEED` names both it and
+`sort` so a missing one skips the run instead of greening it.
+
+**Diagnostic wording** — five kinds, eight `?` cases, every one of lower value
+than the above: `grep` with no operands answers `grep: missing PATTERN` where GNU
+prints the usage summary; `--zzz` is `unknown option: --zzz` against GNU's
+`unrecognized option '--zzz'`; `-m x` names the offending value where GNU's does
+not; `-d bogus` prints gnulib's argmatch block but stops before the
+`Usage:`/`Try 'grep --help'` pair and exits 2 where GNU exits 1; and a leading
+quantifier under `-E` (`grep -E '*a'`) is accepted silently where GNU also warns
+`grep: warning: * at start of expression` on stderr while still exiting 0. All
+but the last belong with `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`
+rather than with grep. (`-D bogus` is *not* among them: GNU does not use argmatch
+for it, and we reproduce its one-liner and its status exactly.)
+
+**Severity.** Low, and only wording is left. Every feature this entry was opened
+for is implemented and pinned by plain cases in `scripts/grep-diff.sh`, which now
+runs **435 agreeing cases** against GNU 3.11 with five deliberate divergences and
+eight wording gaps. The deliberate five are the two choices recorded elsewhere:
+we never suppress binary output, and we list a directory sorted where GNU uses
+readdir order (design-decisions.md §380).
 
 #### TD-A-POISON-CHECK-READS-EVERY-BYTE-ONE-AT-A-TIME-WHILE-THE-FILL-USES-REP-STOSB (lane A, 2026-08-25) — **open**
 
@@ -76529,7 +76702,42 @@ searching them.
 `ere` gaining a `no_std` build — and the statement executor still ignores
 anything it cannot run, below.
 
-#### TD-A-AWK-IGNORES-EVERY-STATEMENT-IT-CANNOT-RUN (lane A, 2026-08-25) — filed
+#### TD-A-AWK-IGNORES-EVERY-STATEMENT-IT-CANNOT-RUN (lane A, 2026-08-25) — ✅ FIXED
+
+**Fixed** by the parse-time refusal described under "What the fix looks like",
+plus the pattern half of the same fault, which this entry did not originally
+cover. `awk_validate_program` walks the parsed rules before any of them runs and
+refuses the whole program with `awk: unsupported statement: '…'` or
+`awk: unsupported pattern: '…'` and exit 2. Rationale and the decision not to
+implement the missing language instead: design-decisions §294. Pinned by
+`kshell::self_test` rung 42, which asserts all four rows of the table below plus
+the pattern case.
+
+Three things came with it:
+
+- **The pattern fallback is gone.** `awk_pattern_matches` used to end in
+  "treat as a literal substring match", so `awk '$1 > 5 { print }'` searched
+  each record for the seven characters `$1 > 5` and printed nothing. It is now
+  `awk_pattern_eval`, returning `Option<bool>`, and `None` is a refusal.
+- **`NF` gained the three comparison operators it was missing.** The `NR` and
+  `NF` chains were separate copies and had drifted — `NR` handled all six
+  operators, `NF` only `>=`, `>` and `==` — so `awk 'NF < 3'` fell out of the
+  bottom and became a substring search. One `awk_compare` now serves both. This
+  is `TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP` in a second place.
+- **A bare word in `print` is refused rather than echoed.** `print total`
+  printed the five characters `total`; awk prints the value of the variable
+  `total`, which here is empty. An *integer* literal is still supported, because
+  that is the one case where echoing the text and evaluating it provably agree
+  — a decimal is not, since awk formats `5.0` through `OFMT` and prints `5`.
+
+**Still not refused: `/pattern/`**, which remains a substring match. That is the
+separate `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`,
+blocked on the `ere` crate gaining a `no_std` build; refusing every `/…/` with
+a metacharacter is the documented fallback if that request is declined, and is
+not done pre-emptively because it would break working invocations while the
+request is open.
+
+The original entry follows.
 
 **In short:** the kernel shell's `awk` understands exactly one statement,
 `print`. Anything else — an assignment, an `if`, a function call — is skipped
@@ -77213,3 +77421,98 @@ The swept corpus stands at **2943 tests, 2325 unproved — 21.0 % proved, 0
 dangling, 202 single-prover**; the last figure recorded above, before modules
 83–85, was 15.7 %.
 
+---
+
+## `A-KSHELL-TR-ANSWERS-FIVE-QUESTIONS-IT-WAS-NOT-ASKED` (lane A, 2026-08-25) — **open**
+
+**Where.** `kernel/src/kshell.rs` — `cmd_tr` (~108262), `cmd_tr_input`
+(~108312), `tr_translate` (~108328), `tr_delete` (~108345), `expand_tr_set`
+(~108365).
+
+**What.** The kernel shell's `tr` has five separate ways of producing a
+confident, successful, wrong answer. None of them is a refusal; every one of
+them exits 0.
+
+| typed | what it does | what it should do |
+|---|---|---|
+| `cat f \| tr ' ' '_'` | passes the text through **unchanged** | replace spaces with underscores |
+| `tr ' ' '_' file` | usage message, exit 1 | the same, on the file |
+| `cat f \| tr -s ab` | translates `-`→`a` and `s`→`b` | refuse: `-s` is not implemented |
+| `cat f \| tr a b c d` | expands `b c d` as one set | refuse: extra operand |
+| `tr -d x binaryfile` | prints **nothing at all** | say the file is not text |
+| `tr -d '[:space:]'` | deletes `[`, `:`, `s`, `p`, `a`, `c`, `e`, `]` | delete whitespace |
+
+**Why, one at a time.**
+
+1. **A set cannot contain a space.** `tr` is not on
+   `command_parses_own_quotes`, so `remove_quotes` runs over its line before it
+   arrives: `' ' '_'` becomes `  _` (two spaces and an underscore). `cmd_tr_input`
+   then does `args.splitn(2, ' ')`, which yields `("", " _")` — SET1 is the
+   *empty* set, so `expand_tr_set("")` is empty, nothing matches, and the input
+   is copied out verbatim with exit 0. This is the same fault `cut -d' '` had
+   (fixed in `667d34060`), except that `cut` at least failed loudly.
+   The file form takes the other branch of the same split and reaches the usage
+   message instead, so the two halves of one command disagree about what
+   happened.
+
+2. **An unknown option becomes SET1.** There is no flag loop at all — the first
+   word is compared to the literal `"-d"` and otherwise *used as a set*. So
+   `tr -s ab` is read as "translate `-` and `s` into `a` and `b`". `-s`
+   (squeeze), `-c`/`-C` (complement) and `-t` (truncate SET1) are all real `tr`
+   options that this one does not implement, and all three are silently
+   reinterpreted as data.
+
+3. **Extra operands are absorbed.** `splitn(2, ' ')` in the pipe form puts
+   everything after the first word into SET2, so `tr a b c d` expands
+   `b c d` — including the spaces — as the replacement set.
+
+4. **An undecodable file becomes an empty one.** Both file paths read
+   `core::str::from_utf8(&data).unwrap_or("")`, so a file `tr` cannot decode
+   produces no output and exits 0, indistinguishable from a file that really
+   was empty. This is the same silent-guess-by-another-door already fixed in
+   `tac`, `fold`, `base64`, `awk` and `cut`. Note the *pipe* form does not have
+   this bug — `dispatch_with_input` narrows through `shell_bytes_as_str`, which
+   reports and exits 1 — so, again, the two halves of one command disagree.
+
+5. **Character classes are literals.** `expand_tr_set` knows ranges (`a-z`) and
+   escapes (`\n`, `\t`, `\r`) and nothing else, so POSIX's `[:alpha:]`,
+   `[:digit:]`, `[:space:]` … expand to their own punctuation, and the `[x*n]`
+   repeat form and octal `\NNN` escapes do likewise. `tr -d '[:space:]'` on a
+   line containing a `c` deletes the `c`.
+
+**What the fix looks like.** Three commits, mirroring the shape `cut` already
+has in this file (`CutSpec` / `CutParseError` / `parse_cut_args`):
+
+1. **Arguments.** A `TrSpec` and a `TrParseError`, parsed from
+   [`split_words`] rather than `splitn`, with `tr` added to
+   `command_parses_own_quotes` — which it then qualifies for, by the rule that
+   function documents. A real flag loop that names `-s`, `-c`/`-C` and `-t` as
+   *unsupported* rather than eating them as data, refuses anything else
+   beginning with `-`, and checks the operand count (1–2 words for `-d`, 2–3
+   for a translation). `strip_quotes` comes out of `expand_tr_set` at the same
+   time, because with the quotes already removed by `split_words` it would
+   start eating real data (`tr "''" x`).
+2. **Data.** Byte-clean whenever every character of SET1 is ASCII — which is
+   provably identical to the character path, since UTF-8 is self-synchronising
+   and so no ASCII byte ever occurs inside a multi-byte sequence, and it is
+   still correct on input that is not text at all. `tr -d '\r'` over a binary
+   file is the case that matters. When SET1 *does* contain a non-ASCII
+   character the input genuinely has to be decoded, and a file that will not
+   decode is reported (`tr: <file>: not valid text, and SET1 contains
+   non-ASCII characters`) with exit 1 rather than treated as empty.
+3. **Sets.** `[:alnum:] [:alpha:] [:blank:] [:cntrl:] [:digit:] [:graph:]
+   [:lower:] [:print:] [:punct:] [:space:] [:upper:] [:xdigit:]`, the `[x*n]`
+   and `[x*]` repeat forms, and octal `\NNN`. The classes are defined over
+   ASCII only — that is what GNU does in the C locale, it is the reading that
+   keeps them inside the byte-clean fast path above, and a Unicode reading
+   would have to answer questions (is `²` a digit?) that `tr`'s positional
+   set-to-set correspondence cannot express anyway. An unrecognised `[:name:]`
+   is an error, not a literal.
+
+**Not a regression.** All five have been true since the command was written.
+They are recorded together because they are one command's worth of the same
+failure class, and because fixing any one of them in isolation would leave a
+`tr` that is honest about one thing and not the others.
+
+**No caller is affected.** Nothing in `kernel/` invokes `tr` — no self-test
+rung, no script — so the stricter parser cannot turn something green red.

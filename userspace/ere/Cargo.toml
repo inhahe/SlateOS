@@ -13,7 +13,20 @@ path = "src/lib.rs"
 # holds U+FFFD" apart from "this byte decodes to nothing". Re-deriving that by
 # hand would be a second UTF-8 decoder that has to agree with the shell's
 # exactly, which is the kind of divergence this crate exists to prevent.
-bstr = { version = "1.13.0", default-features = false, features = ["std"] }
+#
+# No features at all, not even `alloc`: `char_indices` is a decoder over a
+# `&[u8]` and wants neither. It used to be `features = ["std"]`, which is the
+# single line that kept `kernel` from linking this crate at all — see the
+# `no_std` section of `src/lib.rs`.
+#
+# Asking for nothing is necessary and not sufficient, because Cargo *unions* a
+# dependency's features across everything in one build graph, and `oils` is in
+# this workspace asking the same `bstr` for `alloc`. That union is harmless
+# because it is `alloc` — which this crate could have asked for itself — and
+# stays harmless only while nobody puts `bstr/std` back. If a third consumer
+# ever needs `bstr/std`, it has to be a separate build graph from the kernel's,
+# not a separate `features` line.
+bstr = { version = "1.13.0", default-features = false }
 
 [lints]
 workspace = true

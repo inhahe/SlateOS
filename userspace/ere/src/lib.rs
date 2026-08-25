@@ -1,3 +1,4 @@
+#![no_std]
 #![deny(clippy::all)]
 // The workspace's defensive lints (`unwrap_used`, `indexing_slicing`,
 // `arithmetic_side_effects`, …) exist to stop a shaped input turning into a
@@ -50,9 +51,34 @@
 //! about the same file.
 //!
 //! `posix`'s `regcomp`/`regexec` (`posix/src/regex.rs`) deliberately stays a
-//! separate implementation: it is `no_std` with fixed-size buffers and a C ABI,
-//! and it answers to a different specification — POSIX's, byte-for-byte,
-//! including the error codes. This crate is for the Rust programs.
+//! separate implementation: it has fixed-size buffers and a C ABI, and it
+//! answers to a different specification — POSIX's, byte-for-byte, including the
+//! error codes, which is what a C program linking `libc` is entitled to expect.
+//! This crate is for the Rust programs.
+//!
+//! ## Why this crate is `no_std`
+//!
+//! The table above says "five programs", and it was five for as long as the
+//! crate could only be linked into a userspace process. But `kernel`'s
+//! `kshell` — the shell that runs before userspace exists — carries its own
+//! `awk` and `sed`, and they matched `/regex/` with `str::contains` for exactly
+//! the reason the four userspace ones did: there was no engine they could
+//! reach. `awk '/^err/'` matched lines *containing* the four characters `^err`,
+//! and exited 0 about it.
+//!
+//! The only thing standing between them and this engine was a dependency edge:
+//! the kernel is `no_std`, and this crate was not. So the crate is `no_std` plus
+//! `alloc` — unconditionally, not behind a `std` feature, because nothing in it
+//! ever needed `std`. Four `core::fmt` impls and one `core::error::Error` are
+//! the whole of what the change came to.
+//!
+//! Unconditional rather than feature-gated is the point rather than an
+//! incidental: a `std` feature would be a configuration axis with two settings,
+//! one of which nobody builds, and Cargo unifies features across a build graph —
+//! so a kernel build that happened to share a graph with a `std`-wanting
+//! consumer would acquire `std` and fail, or worse, quietly compile a different
+//! crate than the one the tests ran against. Two configurations that can
+//! disagree is the shape of the divergence this crate exists to prevent.
 //!
 //! ## What is here
 //!
@@ -70,6 +96,21 @@
 //!   no `-E` is given, and it is *not* a subset of ERE: `a+b` is three literal
 //!   characters in BRE and a repetition in ERE, so the difference has to be
 //!   handled somewhere, and one translator is better than three parsers.
+
+// A regular expression is compiled from a pattern whose length is not known
+// until it is read, so the engine allocates: `Vec` for the program, `Vec<u8>`
+// for the byte strings it is defined over. That is `alloc`, not `std`, and the
+// kernel has a heap long before it has a userspace.
+extern crate alloc;
+
+// Two tests bound the backtracker's running time, and bounding a running time
+// needs a second thread to watch from and a clock to watch with. Nothing in the
+// library wants either, so `std` is linked for the test build and only there —
+// which also means `cargo test` compiles the library itself as `no_std`, so a
+// `std::` path that crept into non-test code would fail the test run and not
+// only the kernel build.
+#[cfg(test)]
+extern crate std;
 
 pub mod bre;
 pub mod ch;

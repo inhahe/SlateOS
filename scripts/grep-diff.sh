@@ -71,6 +71,21 @@
 # deciding whether to open a bug: `!` is a decision, `?` is a debt. Counting
 # them together, as this harness did when every `!` was really a `?`, is how
 # six cases spent months labelled "deliberate" while describing a defect.
+#
+# ## Why cases may end in `| sort`
+#
+# We list a directory sorted; GNU lists it in readdir order (design-decisions.md
+# §380). That is a decision, not a defect, but it means any case whose output is
+# more than one line from one directory would fail for a reason that has nothing
+# to do with the flag under test. Sorting both sides removes the one difference
+# we already know about and leaves every other one visible — which is what makes
+# the file-selection options testable at all, since a selector's whole job is to
+# change *which* of several files come out.
+#
+# `pipefail` is what keeps that honest. Without it a pipeline reports `sort`'s
+# status, so a case where GNU exits 1 and we exit 0 would agree by construction;
+# with it the pipeline reports grep's own 0/1/2. The four pre-existing piped
+# cases are `cat w99 | grep …`, where `cat` cannot fail, so nothing else moves.
 set -u
 
 # grep reads these, and inheriting them from the operator's shell would change
@@ -78,8 +93,22 @@ set -u
 unset GREP_OPTIONS GREP_COLOR GREP_COLORS POSIXLY_CORRECT
 
 DIFF_PROG=grep
+# `sort` normalises the directory order the selector cases would otherwise
+# disagree about, and `timeout` is what stops a device case hanging the run.
+# Both are load-bearing enough that running without them would be worse than
+# not running: a missing one makes *both* sides fail identically, which reads as
+# a pass.
+DIFF_NEED='sort timeout'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
+
+# After the source, not before: `pipefail` is a bash option, and the shell that
+# reaches the top of this file is whatever the operator typed — `sh`, which on a
+# Debian WSL is dash and rejects it outright. Everything past `diff-wsl.sh` runs
+# in the bash it re-execs into, so this is the first line where the option
+# exists. (Sourcing is what makes that true: an `exec` inside the sourced file
+# replaces this process, so nothing above it survives to matter.)
+set -o pipefail
 
 pass=0; fail=0; xfail=0; xgap=0; xpass=0
 
@@ -120,6 +149,9 @@ cd "$fixtures" || exit 1
 #   run3         three consecutive hits, so that `-m` can be satisfied while
 #                trailing context is still owed — the lines that follow print
 #                as context even though they match
+#   w99          exactly ninety-nine bytes, which is the only size here that
+#                gives `-T` a field width above 1 *and* a different one with
+#                `-n` than without it
 printf 'a\nb\nc\n'                              > abc
 printf 'foo bar\nbaz foo foo\nqux\nfoofoo\n'    > words
 printf 'a{b}\n{b}a\na{}\nab\na\naaa\na{1,2}\n'  > braces
@@ -133,6 +165,20 @@ printf 'caf\303\251\nCAF\303\211\ncafe\n'       > accent
 printf '1\n2\nHIT\n4\n5\n6\nHIT\n8\n'           > ctx
 printf 'HIT\n2\n3\n'                            > ctxtop
 printf 'HIT\nHIT\nHIT\n'                        > run3
+# CRLF, because colouring treats the carriage return as part of the line
+# terminator rather than as text: `sl`'s run stops before it. The third line
+# ends with a CR that is *not* followed by a newline, and the second holds a CR
+# in the middle, where it is ordinary text and does get painted.
+printf 'foo\r\nfoo\rzz\r\nfoo bar\r'            > crlf
+
+# Exactly ninety-nine bytes: nine eleven-byte lines. The one fixture whose
+# `-T` field width is neither 1 nor equal with and without `-n` — 99 bytes is
+# two digits, and the 100 lines a 99-byte file could hold is three. Every other
+# fixture here is under ten bytes per field and so cannot tell a computed width
+# from a hardcoded one.
+i=0
+while [ $i -lt 8 ]; do printf 'nine bytes\n'; i=$((i + 1)); done > w99
+printf 'HITxxxxxxx\n' >> w99
 
 # The recursion fixtures. `sub` is the plain tree; `symdir` exists because -r
 # and -R differ over exactly one thing — a symlink met *during* the walk, which
@@ -166,6 +212,40 @@ ln -s .. loopdir/inner/up
 mkdir -p onefile
 printf 'foo\n' > onefile/only
 
+# The file-selection tree. Every file in it matches `foo`, so that what comes
+# out is decided by --include/--exclude/--exclude-dir alone and never by the
+# pattern. Two extensions with two files each give a glob something to select
+# *among*; two subdirectories give --exclude-dir the same; and the dotted pair
+# is there because these globs are plain `fnmatch` with no `FNM_PERIOD`, so `*`
+# matches a leading dot — which is the opposite of what a shell would do and the
+# thing a reader is most likely to assume wrongly.
+mkdir -p sel/keep sel/drop sel/.hid
+printf 'foo\n' > sel/t1.txt
+printf 'foo\n' > sel/t2.txt
+printf 'foo\n' > sel/l1.log
+printf 'foo\n' > sel/l2.log
+printf 'foo\n' > sel/.dot
+printf 'foo\n' > sel/keep/k.txt
+printf 'foo\n' > sel/drop/d.txt
+printf 'foo\n' > sel/.hid/h.txt
+
+# --exclude-from's whole content model: one glob per line, a final line with no
+# newline still counted, and *no* comment syntax — `#t1*` is a glob that matches
+# a file called `#t1…`, not a remark. An empty file excludes nothing, which is
+# not the same as excluding everything.
+printf 't1*\nl1*\n'   > selfrom
+printf '#t1*\nl1*'    > selhash
+: > selempty
+
+# A directory holding a device, for -D. The FIFO is the only fixture here that
+# can hang the harness: opening it blocks until someone writes, so the cases
+# below only ever ask grep to *skip* it or to walk past it — never `-D read`,
+# which would block GNU exactly as hard as it blocks us and prove nothing.
+# `mkfifo` is why this section could not exist on the Windows host.
+mkdir -p dev
+printf 'foo\n' > dev/plain
+mkfifo dev/fifo 2>/dev/null || printf 'note: mkfifo failed; the -D device cases will not mean much\n'
+
 # ------------------------------------------------------------------- cases ---
 #
 # One shell command line per case, `grep` standing for whichever grep is
@@ -183,7 +263,21 @@ printf 'foo\n' > onefile/only
 # directory holds one symlink and is the whole of `PATH` for that one process —
 # safe here because grep runs no subprocess, so there is nothing else it could
 # need to find.
-grep() { env PATH="$bindir/$CAP_SIDE" grep "$@"; }
+#
+# The `timeout` is insurance for the `-D` cases below. A FIFO with no writer
+# blocks in `open`, and the only thing standing between `grep -r` and a
+# permanent stall is the rule that a device *found by the walk* is skipped
+# without being opened. If we ever lose that rule the harness would hang rather
+# than fail, and a hang reports nothing; with the timeout the case fails loudly
+# with status 124 and names itself.
+#
+# `timeout` comes *before* `env`, not after. `env PATH=… timeout 20 grep` looks
+# equivalent and is not: `env` resolves its own command through the PATH it was
+# just handed, and that directory holds one symlink named `grep` and nothing
+# else — so `timeout` was not found, both sides exited 127, and all 435 cases
+# agreed at once. That is what a harness that cannot fail looks like from the
+# outside: a completely clean run.
+grep() { timeout 20 env PATH="$bindir/$CAP_SIDE" grep "$@"; }
 
 # Everything observable about one run, left in globals rather than printed,
 # because the stderr *text* and the mere fact of a diagnostic are two different
@@ -495,12 +589,135 @@ grep -r foo sub/deep
 grep foo sub
 grep -r foo sub/s1
 grep -r foo /nonexistent
-?-d is not implemented; GNU's `-d recurse` is -r and `-d skip` ignores directories silently|grep -d recurse foo sub
-?-d is not implemented; GNU's `-d recurse` is -r and `-d skip` ignores directories silently|grep -d skip foo sub
 grep -r foo sub empty
-?--include is not implemented|grep -r --include='s1' foo .
-?--exclude is not implemented|grep -r --exclude='s1' foo .
-?--exclude-dir is not implemented|grep -r --exclude-dir='deep' bar .
+
+# --- -d, which is where -r actually lives ---
+#
+# `-d recurse` *is* -r, `-d read` is the default that says `Is a directory`, and
+# `-d skip` says nothing and exits 1 — skipping is not an error. Because they
+# are one setting and not three flags, the last one written wins in both
+# directions, which is what the two -r/-d pairs below are for. -R writes the
+# same setting *and* turns on symlink dereferencing, so a following `-d` can
+# take the recursion away and leave the dereferencing behind.
+grep -d recurse foo sub
+grep -d skip foo sub
+grep -d read foo sub
+grep -sd read foo sub
+grep -d skip -r foo sub
+grep -r -d skip foo sub
+grep -d recurse -R foo symdir
+grep -R -d skip foo symdir
+grep -d skip foo sub abc
+grep -d read foo sub abc
+grep --directories=recurse foo sub
+grep --directories=skip foo sub
+# GNU rejects an unknown ACTION with gnulib's argmatch block: the invalid
+# argument, `Valid arguments are:`, the three of them, and then the usage
+# summary and `Try 'grep --help'` that every option error here ends with. We
+# print those first five lines and stop, and we exit 2 where GNU exits 1 —
+# which is not grep being inconsistent, it is `usage()` being reached by a path
+# that does not go through EXIT_TROUBLE. Both halves are the getopt-diagnostic
+# shape debt and neither is about -d.
+#
+# `-D bogus` is unmarked below because GNU does not use argmatch for it: it is
+# grep's own one-liner and exits 2, which we reproduce exactly.
+?our argmatch diagnostic stops before GNU's `Usage:`/`Try ...' pair, and exits 2 where GNU exits 1 (TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE)|grep -d bogus foo sub
+
+# --- -D, and why its default is not a plain boolean ---
+#
+# It is tri-state: a device *named on the command line* is read, a device the
+# walk *finds* is skipped. That asymmetry is the only thing keeping `grep -r pat
+# /` from blocking forever on the first FIFO it meets, so `grep -r foo dev`
+# below has to come back rather than hang. `-c ''` on /dev/null is how read and
+# skip are told apart at all: reading an empty device prints `0`, skipping it
+# prints nothing, and both exit 1.
+grep -c '' /dev/null
+grep -D read -c '' /dev/null
+grep -D skip -c '' /dev/null
+grep -D skip foo dev/fifo
+grep -D skip -c foo dev/fifo abc
+grep -r foo dev
+grep -rD skip foo dev
+grep -rc foo dev
+grep --devices=skip -c '' /dev/null
+grep -D bogus foo abc
+
+# --- --include / --exclude / --exclude-dir / --exclude-from ---
+#
+# Every file under `sel` matches `foo`, so these cases are about selection and
+# nothing else. They sort because a selector's job is to change which of several
+# files come out, and our directory order is not GNU's; see the header.
+#
+# The combination rule is not "includes win" or "the last one wins". Runs of the
+# same kind coalesce into segments, the newest matching segment decides, and a
+# name no segment matches is dropped only if the *oldest* segment is an include.
+# The two middle cases are the whole proof: the same two options in the other
+# order keep `t1.txt` instead of dropping it, because reversing them makes the
+# exclude the newer segment and the include the older one.
+grep -rl foo sel | sort
+grep -rl --include='*.txt' foo sel | sort
+grep -rl --exclude='*.txt' foo sel | sort
+grep -rl --include='*.txt' --exclude='t1*' foo sel | sort
+grep -rl --exclude='t1*' --include='*.txt' foo sel | sort
+grep -rl --include='t1*' --include='l1*' foo sel | sort
+grep -rl --exclude='t1*' --exclude='l1*' foo sel | sort
+grep -rl --include='*.txt' --exclude='*' --include='*.log' foo sel | sort
+grep -rl --exclude='*' foo sel
+grep -rl --include='zz' foo sel
+# No FNM_PERIOD: `*` matches a leading dot, and `.*` matches nothing else.
+grep -rl --include='*' foo sel | sort
+grep -rl --include='.*' foo sel | sort
+grep -rl --exclude='.*' foo sel | sort
+
+# --exclude-dir has its own list and only ever consults it about directories,
+# so an --exclude that names a directory does not stop the walk and an
+# --exclude-dir that names a file does not stop the file. The trailing slash is
+# stripped from the pattern, because `--exclude-dir=drop/` is what tab
+# completion produces.
+grep -rl --exclude-dir='drop' foo sel | sort
+grep -rl --exclude-dir='drop/' foo sel | sort
+grep -rl --exclude-dir='dr*' foo sel | sort
+grep -rl --exclude-dir='.*' foo sel | sort
+grep -rl --exclude='drop' foo sel | sort
+grep -rl --exclude-dir='t1.txt' foo sel | sort
+grep -rl --include='*.txt' --exclude-dir='keep' foo sel | sort
+grep -rl --exclude-dir='sel' foo sel
+grep -rl --exclude-dir='sel/' foo sel
+
+# On the command line the name is matched as written, and also at every suffix
+# that starts after a `/` — so `--exclude=s1` reaches `sub/s1`. During the walk
+# only the base name is ever offered, which is why the same glob behaves the
+# same either way here.
+grep -l --exclude='t1.txt' foo sel/t1.txt sel/l1.log
+grep -l --exclude='sel/t1.txt' foo sel/t1.txt
+grep -l --exclude='*/t1.txt' foo sel/t1.txt
+grep -l --include='*.log' foo sel/t1.txt sel/l1.log
+grep -r --exclude='s1' foo sub
+grep -r --exclude-dir='deep' bar sub
+grep -c --include='*.log' foo sel/t1.txt
+# Selection happens after the stat, not instead of it: a name that does not
+# exist is still reported and still raises the status, however thoroughly it
+# would have been excluded.
+grep --exclude='*' foo abc /nonexistent
+grep --exclude='*' foo abc
+# Stdin is exempt from all of it — there is no name to match.
+grep --exclude='*' foo < abc
+grep --include='zz' foo < abc
+
+grep -rl --exclude-from=selfrom foo sel | sort
+grep -rl --exclude-from=selhash foo sel | sort
+grep -rl --exclude-from=selempty foo sel | sort
+grep -rl --include='*.txt' --exclude-from=selfrom foo sel | sort
+grep -rl --exclude-from=selfrom --include='*.txt' foo sel | sort
+grep --exclude-from=/nonexistent foo abc
+grep --exclude-from=sel foo abc
+
+# With no operand at all, -r walks `.` — and prints the names *without* the
+# `./` that naming `.` explicitly would have kept. The pair below is the only
+# way to see that, since either one alone looks like an ordinary walk.
+grep -rl foo | sort
+grep -rl foo . | sort
+grep -l --directories=recurse foo | sort
 
 # -r and -R differ over exactly one thing: a symlink met during the walk. -r
 # skips it, -R follows it. A symlink named on the command line is followed by
@@ -564,7 +781,11 @@ grep -LZ z abc
 grep -HZ a abc
 grep -HZc a abc
 grep -nZ a abc abc
-!the Windows build joins recursive paths with `\`; the target build joins with `/`|grep -rlZ foo .
+# The last survivor of the six cases whose stated reason was "the Windows build
+# joins recursive paths with `\`". That reason died with the move into WSL; what
+# it actually differs over is the same directory ordering as the `-r foo .` case
+# above, and it cannot be sorted away because the names come out NUL-separated.
+!we list a directory sorted where GNU uses readdir order (design-decisions.md §380)|grep -rlZ foo .
 grep -z foo zsep
 grep -zc foo zsep
 grep -zn foo zsep
@@ -669,26 +890,161 @@ grep -LC 1 zzz ctx
 grep -qC 1 HIT ctx
 
 # --- byte offsets and the other output decorations ---
-?-b is not implemented|grep -b a abc
-?-b is not implemented|grep -bn a abc
-?-b is not implemented|grep -bo foo words
-?-b is not implemented|grep -bH a abc
-?-b is not implemented|grep -b foo zsep
-?-T is not implemented|grep -T a abc
-?-T is not implemented|grep -Tn a abc
+grep -b a abc
+grep -bn a abc
+grep -bo foo words
+grep -bH a abc
+# Under `-z` the NUL separators are bytes of the file like any other, so they
+# count towards the offset. (Without `-z` GNU calls this fixture binary and
+# prints no lines at all — see the `!` case above.)
+grep -bz foo zsep
+grep --byte-offset foo words
+# The offset is of the *line*, not of the match — except under -o, where each
+# match carries its own. Context lines get one too, with a `-` after it.
+grep -bC 1 HIT ctx
+grep -bnoH foo words
+grep -bv a abc
+
+# -T pads the numeric fields to a width taken from the file's size *before a
+# line is read*, and ends the prefix with a tab. Which is why `w99` is here: at
+# 99 bytes the width is 2 without -n and 3 with it, because a 99-byte file can
+# hold 100 lines. Every other fixture is small enough for both to be 1, so none
+# of them can tell a correct width from a constant.
+grep -T a abc
+grep -Tn a abc
+grep -T HIT w99
+grep -Tn HIT w99
+grep -Tb HIT w99
+grep -Tbn HIT w99
+grep -TnH HIT w99
+grep -TnHZ HIT w99
+grep -TH HIT w99
+grep -THZ HIT w99
+grep -Tbo foo words
+grep -TbA 1 HIT ctx
+grep -TnC 1 HIT ctx
+grep --initial-tab --line-number HIT w99
+# -T with nothing to pad prints no tab at all: the tab follows the last field,
+# and here there is no field.
+grep -T HIT ctx
+# The options that answer a question about the file print no line prefix, and
+# so take no tab either.
+grep -Tc HIT w99
+grep -THc HIT w99
+grep -Tl HIT w99
+# A stream has no size to take a width from, so GNU falls back to the largest a
+# signed off_t can hold — nineteen columns.
+cat w99 | grep -Tn HIT
+cat w99 | grep -Tb HIT
+# Redirected stdin *is* a regular file, so it gets the file's own width rather
+# than the stream fallback.
+grep -Tn HIT < w99
+grep -Tb HIT < w99
 
 # --- colour, which is escape sequences on stdout and therefore comparable ---
 #
 # The `;` in GREP_COLORS is quoted because an unquoted one ends the command:
 # the first draft of this case ran `GREP_COLORS=mt=01` and then `32 grep …`,
 # which failed identically on both sides and was recorded as a pass.
-?--color is not implemented|grep --color=never foo words
-?--color is not implemented|grep --color=always foo words
-?--color is not implemented|grep --color=always -o foo words
-?--color is not implemented|grep --color=always -n foo words
-?--color is not implemented|grep --color=always -i alpha mixed
-?--color is not implemented|grep --color=auto foo words
-?--color is not implemented|GREP_COLORS='mt=01;32' grep --color=always foo words
+grep --color=never foo words
+grep --color=always foo words
+grep --color=always -o foo words
+grep --color=always -n foo words
+grep --color=always -i alpha mixed
+grep --color=auto foo words
+GREP_COLORS='mt=01;32' grep --color=always foo words
+# Every prefix field has a colour of its own, and so does each separator
+# between them — including the `--` between context groups.
+grep --color=always -nbH foo words
+grep --color=always -nC 1 HIT ctx
+grep --color=always -nbHTC 1 HIT w99
+grep --color=always -Z -nH foo words
+grep --color=always foo words abc
+grep --color=always -Hc foo words
+grep --color=always -l foo words
+grep --color=always -lZ foo words
+grep --color=always -L zzz words
+grep --color=always -q foo words
+grep --color=always -z foo zsep
+# `-v` selects the lines that did not match, so there is nothing on them to
+# colour — but a *context* line under -v may match, and gets `mc`.
+grep --color=always -v foo words
+grep --color=always -vC 1 foo words
+# The empty-match rule of -o survives colouring: `o*` matches nothing at most
+# positions, and nothing is what gets printed for them.
+grep --color=always -o 'o*' words
+grep --color=always -i café accent
+# `--colour` is the same option, and bare `--color` means `auto`, which off a
+# terminal means never.
+grep --colour=always foo words
+grep --color foo words
+# GREP_COLORS: `mt` sets both `ms` and `mc`, last assignment wins, an unknown
+# key or an unparsable value is ignored in silence, `ne` drops the `\e[K` that
+# otherwise follows every escape, and `rv` swaps the selected- and context-line
+# colours when -v is in effect.
+GREP_COLORS='ms=01;36:mt=01;33' grep --color=always foo words
+GREP_COLORS='mt=01;33:ms=01;36' grep --color=always foo words
+GREP_COLORS='fn=35:ln=33:bn=34:se=36' grep --color=always -nbH foo words
+GREP_COLORS='sl=33' grep --color=always foo words
+GREP_COLORS='cx=90' grep --color=always -C 1 HIT ctx
+GREP_COLORS='ne' grep --color=always foo words
+GREP_COLORS='rv:sl=33:cx=34' grep --color=always -v foo words
+GREP_COLORS='rv:sl=33:cx=34' grep --color=always foo words
+GREP_COLORS='zz=1' grep --color=always foo words
+GREP_COLORS='ms=zz' grep --color=always foo words
+GREP_COLORS='' grep --color=always foo words
+# A value capability with no `=` is *ignored*, not read as "set it to empty":
+# `ms` leaves the default highlight alone where `ms=` removes it. The two
+# booleans are the exception — they fire with or without a value.
+GREP_COLORS='ms' grep --color=always foo words
+GREP_COLORS='ms=' grep --color=always foo words
+GREP_COLORS='ne=1' grep --color=always -n foo words
+GREP_COLORS='rv=1:sl=33:cx=34' grep --color=always -v foo words
+GREP_COLORS='sl=33::cx=34' grep --color=always -C 1 HIT ctx
+# `ms=` and `ms=:sl=33` differ in *shape*, not by one escape: with no match
+# colour there is no per-match pass at all, so the whole line is written as one
+# `sl` run — start, text, end — where a highlighted line's `sl` runs are opened
+# before each match and never closed.
+GREP_COLORS='ms=:sl=33' grep --color=always foo words
+GREP_COLORS='sl=33' grep --color=always -o foo words
+GREP_COLORS='cx=34' grep --color=always -o foo words
+# `sl`'s trailing run: `foo bar` has text after its last match, `baz foo foo`
+# ends on one, and an empty pattern has no match to open a run at all.
+GREP_COLORS='sl=33' grep --color=always '' words
+GREP_COLORS='sl=33' grep --color=always 'o*' words
+GREP_COLORS='sl=33' grep --color=always -x qux words
+# The carriage return of a CRLF line is terminator, not text.
+GREP_COLORS='sl=33' grep --color=always foo crlf
+GREP_COLORS='sl=33' grep --color=always -n foo crlf
+grep --color=always foo crlf
+# The `--` between groups is `se`, and so is a `--group-separator` of one's own;
+# the newline after it is not.
+grep --color=always -A 1 HIT ctx
+GREP_COLORS='se=45' grep --color=always -A 1 HIT ctx
+GREP_COLORS='se=45' grep --color=always -A 1 --group-separator=XX HIT ctx
+GREP_COLORS='se=' grep --color=always -nA 1 HIT ctx
+GREP_COLORS='ne:sl=33' grep --color=always -nbH foo words
+# The file-name-only outputs colour the name and nothing else — and under -Z the
+# NUL after it stays outside the escape, as it does in a line prefix.
+grep --color=always -HcZ foo words
+GREP_COLORS='fn=45:se=46' grep --color=always -Hc foo words
+GREP_COLORS='fn=' grep --color=always -Hc foo words
+grep --color=always -rn foo sub
+grep --color=always -rlZ foo sub
+GREP_COLORS='sl=33' grep --color=always -TnbHZ HIT w99
+# The deprecated spelling still works, and says so on stderr.
+GREP_COLOR='01;35' grep --color=always foo words
+# An empty one is not a setting: no warning, and the default highlight stands.
+GREP_COLOR='' grep --color=always foo words
+# GREP_COLOR loses to a GREP_COLORS that names the same capability, and neither
+# is read at all when colour is off — the deprecation warning included.
+GREP_COLOR='01;35' GREP_COLORS='ms=01;36' grep --color=always foo words
+GREP_COLOR='01;35' grep foo words
+GREP_COLOR='01;35' grep --color=never foo words
+# `--color=` with a word that is none of the three is not an error: GNU sets
+# `show_help` and prints the whole usage text on *stdout*, exiting 0. Matching
+# that would mean printing a help text advertising options we do not have.
+!--color=WORD with an unrecognised WORD prints GNU'\''s full usage summary and exits 0; ours has no --help text to print|grep --color=bogus foo words
 
 # --- a character that is not one byte, now that the locale is C.UTF-8 ---
 grep -i cafe accent

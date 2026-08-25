@@ -63,7 +63,7 @@ use coreutils::stdfd;
 use std::collections::VecDeque;
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -122,6 +122,166 @@ impl GroupSep {
             Self::Dashes => Some(b"--"),
             Self::Custom(s) => Some(s),
             Self::Suppressed => None,
+        }
+    }
+}
+
+/// `--color[=WHEN]`.
+///
+/// The argument is *optional* — `grep --color foo file` means `auto` and does
+/// not eat `foo` — which is why this cannot go through the same "value or the
+/// next argv entry" path as `--context`.
+#[derive(Clone, Copy, Default)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum ColorWhen {
+    #[default]
+    Never,
+    Always,
+    /// Colour only when standard output is a terminal. Resolved once, after
+    /// parsing, rather than asked per line.
+    Auto,
+}
+
+/// The eight SGR capabilities `GREP_COLORS` names, and the two booleans.
+///
+/// Each is stored as the *parameter* text — `01;31`, not the whole escape — so
+/// that "unset" and "empty" are the same thing and mean "write this text
+/// plainly", which is what GNU's default `sl=`/`cx=` rely on.
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Colors {
+    /// `ms`: matched text on a *selected* line.
+    selected_match: Vec<u8>,
+    /// `mc`: matched text on a *context* line. `-v` is what makes the two
+    /// visibly different: under it the matches are on the context lines.
+    context_match: Vec<u8>,
+    /// `sl`: everything else on a selected line. Empty by default, which is why
+    /// plain `grep --color=always` colours only the matches.
+    selected_line: Vec<u8>,
+    /// `cx`: everything else on a context line. Empty by default.
+    context_line: Vec<u8>,
+    /// `fn`: the file name in a prefix, and in `-c`/`-l`/`-L` output.
+    filename: Vec<u8>,
+    /// `ln`: the line number.
+    line_number: Vec<u8>,
+    /// `bn`: the byte offset.
+    byte_number: Vec<u8>,
+    /// `se`: every separator — the `:` and `-` between prefix fields, and the
+    /// `--` between context groups.
+    separator: Vec<u8>,
+    /// `rv`: swap `sl` and `cx`, but only when `-v` is also in effect. The
+    /// point is that under `-v` the *selected* lines are the boring ones.
+    reverse_video: bool,
+    /// `ne`: do not append "erase in line" (`\e[K`) to each escape. It is there
+    /// by default so that a highlight reaching the end of a line does not paint
+    /// the rest of the terminal row on a screen whose background colour differs.
+    no_erase: bool,
+}
+
+impl Default for Colors {
+    /// GNU's defaults: `ms=01;31:mc=01;31:sl=:cx=:fn=35:ln=32:bn=32:se=36`.
+    fn default() -> Self {
+        Self {
+            selected_match: b"01;31".to_vec(),
+            context_match: b"01;31".to_vec(),
+            selected_line: Vec::new(),
+            context_line: Vec::new(),
+            filename: b"35".to_vec(),
+            line_number: b"32".to_vec(),
+            byte_number: b"32".to_vec(),
+            separator: b"36".to_vec(),
+            reverse_video: false,
+            no_erase: false,
+        }
+    }
+}
+
+impl Colors {
+    /// The escape that begins a run of `cap`-coloured output, or nothing at all
+    /// when `cap` is empty — an empty capability means "write it plainly", and
+    /// emitting `\e[m` for it would reset a colour the caller had set.
+    fn start(&self, cap: &[u8]) -> Vec<u8> {
+        if cap.is_empty() {
+            return Vec::new();
+        }
+        let mut v = b"\x1b[".to_vec();
+        v.extend_from_slice(cap);
+        v.push(b'm');
+        if !self.no_erase {
+            v.extend_from_slice(b"\x1b[K");
+        }
+        v
+    }
+
+    /// The escape that ends one, matched to [`Colors::start`] — nothing when
+    /// `cap` is empty.
+    fn end(&self, cap: &[u8]) -> Vec<u8> {
+        if cap.is_empty() {
+            return Vec::new();
+        }
+        let mut v = b"\x1b[m".to_vec();
+        if !self.no_erase {
+            v.extend_from_slice(b"\x1b[K");
+        }
+        v
+    }
+
+    /// `text` wrapped in `cap`'s pair.
+    fn wrap(&self, cap: &[u8], text: &[u8]) -> Vec<u8> {
+        let mut v = self.start(cap);
+        v.extend_from_slice(text);
+        v.extend_from_slice(&self.end(cap));
+        v
+    }
+
+    /// Apply one `GREP_COLORS` specification: `key=value` pairs and bare
+    /// boolean keys, separated by `:`.
+    ///
+    /// A key that is not one of the ten, and a value that is not SGR
+    /// parameters, are both ignored **in silence** — measured, and it is the
+    /// only tolerable behaviour for a variable that is set once in a shell
+    /// profile and then inherited by every grep in every script.
+    fn apply(&mut self, spec: &[u8]) {
+        for item in spec.split(|&b| b == b':') {
+            let (key, value, valued) = match item.iter().position(|&b| b == b'=') {
+                Some(i) => (
+                    item.get(..i).unwrap_or_default(),
+                    item.get(i.saturating_add(1)..).unwrap_or_default(),
+                    true,
+                ),
+                // No `=` at all. `rv` and `ne` are booleans and still fire;
+                // `GREP_COLORS=ms` is *ignored* rather than read as `ms=`,
+                // which is the difference between "no highlight" and the
+                // default one. Measured.
+                None => (item, &[][..], false),
+            };
+            // A capability is SGR parameters: digits and `;`. Anything else is
+            // not something to hand to a terminal.
+            let sane = valued && value.iter().all(|b| b.is_ascii_digit() || *b == b';');
+            let set = |field: &mut Vec<u8>| {
+                if sane {
+                    *field = value.to_vec();
+                }
+            };
+            match key {
+                b"ms" => set(&mut self.selected_match),
+                b"mc" => set(&mut self.context_match),
+                // `mt` is both at once, and order decides: the last assignment
+                // to a field wins, so `ms=…:mt=…` and `mt=…:ms=…` differ.
+                b"mt" => {
+                    set(&mut self.selected_match);
+                    set(&mut self.context_match);
+                }
+                b"sl" => set(&mut self.selected_line),
+                b"cx" => set(&mut self.context_line),
+                b"fn" => set(&mut self.filename),
+                b"ln" => set(&mut self.line_number),
+                b"bn" => set(&mut self.byte_number),
+                b"se" => set(&mut self.separator),
+                b"rv" => self.reverse_video = true,
+                b"ne" => self.no_erase = true,
+                _ => {}
+            }
         }
     }
 }
@@ -199,6 +359,16 @@ struct Options {
     /// columns and byte offsets to two, and a 9-byte file pads them to two and
     /// one. See [`offset_width`].
     align_tabs: bool,
+    /// `--color=WHEN` as it was written on the command line. Turned into
+    /// `color` — the answer actually used — once, after parsing, because `auto`
+    /// asks the operating system a question and a line of output is the wrong
+    /// place to ask it.
+    color_when: ColorWhen,
+    /// Whether output is coloured at all: [`Options::color_when`] resolved.
+    color: bool,
+    /// The palette, from `GREP_COLORS`. Read even when `color` is false, so
+    /// that a malformed variable is ignored the same way either way.
+    colors: Colors,
     /// `-z`: the *input* is NUL-separated too, and so is the output.
     ///
     /// The other half of the same pipeline: `find -print0 | xargs -0 grep -z`
@@ -214,17 +384,6 @@ impl Options {
     /// `-z`.
     fn line_sep(&self) -> u8 {
         if self.null_data { 0 } else { b'\n' }
-    }
-
-    /// What follows a file name that is being used as a prefix — `:` normally,
-    /// NUL under `-Z`.
-    ///
-    /// `field` is the byte that separates the *other* prefix fields, which is
-    /// `:` on a selected line and `-` on a context line. It is ignored under
-    /// `-Z`: a name is terminated by NUL there whatever kind of line follows
-    /// it, which is what keeps `grep -ZC1 … | xargs -0` parseable.
-    fn name_sep(&self, field: u8) -> u8 {
-        if self.null_name { 0 } else { field }
     }
 
     /// Lines of trailing context, with `-C`'s value standing in for an unset
@@ -258,6 +417,45 @@ impl Options {
     /// them — including the group separator.
     fn context_printed(&self) -> bool {
         !self.count_only && !self.quiet && !self.files_with_matches && !self.files_without_match
+    }
+
+    /// `text` wrapped in `cap`, or `text` alone when `--color` is off.
+    ///
+    /// Every coloured field goes through here rather than through
+    /// [`Colors::wrap`] directly, so that "is colour on at all" is asked in one
+    /// place instead of at each of the eight call sites.
+    fn paint(&self, cap: &[u8], text: &[u8]) -> Vec<u8> {
+        if self.color {
+            self.colors.wrap(cap, text)
+        } else {
+            text.to_vec()
+        }
+    }
+
+    /// The capability for the body of a line — `sl` for a selected line, `cx`
+    /// for a context one, swapped when `rv` is set *and* `-v` is in effect.
+    ///
+    /// `rv` exists because `-v` inverts which lines are interesting: the
+    /// selected ones are the ones that did **not** match, so a caller who
+    /// colours selected lines specially wants that colouring to follow the
+    /// matches rather than the selection.
+    fn line_cap(&self, selected: bool) -> &[u8] {
+        if selected ^ (self.invert && self.colors.reverse_video) {
+            &self.colors.selected_line
+        } else {
+            &self.colors.context_line
+        }
+    }
+
+    /// The capability for matched text within a line: `ms` on a selected line,
+    /// `mc` on a context one. Unlike [`Options::line_cap`] this follows the
+    /// line's kind directly — `rv` does not touch it.
+    fn match_cap(&self, selected: bool) -> &[u8] {
+        if selected {
+            &self.colors.selected_match
+        } else {
+            &self.colors.context_match
+        }
     }
 }
 
@@ -496,6 +694,9 @@ fn parse_long(
         // empty value is stored rather than folded into `Suppressed`.
         "group-separator" => opts.group_sep = GroupSep::Custom(need(value)?.into_bytes()),
         "no-group-separator" => opts.group_sep = GroupSep::Suppressed,
+        // `value`, not `need(value)`: the argument is optional, so `grep
+        // --color foo file` means `auto` and leaves `foo` as the pattern.
+        "color" | "colour" => opts.color_when = color_when(value)?,
         "text" | "binary-files" => {}
         "regexp" => patterns.push(need(value)?.into_bytes()),
         "file" => pattern_files.push(need(value)?),
@@ -509,6 +710,33 @@ fn parse_long(
         other => return Err(format!("unknown option: --{other}")),
     }
     Ok(())
+}
+
+/// The value of `--color[=WHEN]`.
+///
+/// The three GNU spellings each have two synonyms nobody documents but scripts
+/// use: `force`/`yes` for `always`, `none`/`no` for `never`, `tty`/`if-tty` for
+/// `auto`. All six are matched without regard to case, as GNU does.
+///
+/// # Errors
+///
+/// A `WHEN` that is none of them is *not* an error to GNU: it sets the
+/// show-help flag, so `grep --color=bogus foo file` prints the entire usage
+/// summary on **stdout** and exits 0. We have no usage text to print — and one
+/// listing options we do not implement would be a lie — so this reports it as
+/// an unknown value instead, which `scripts/grep-diff.sh` records as a
+/// deliberate divergence.
+fn color_when(value: Option<&str>) -> Result<ColorWhen, String> {
+    let Some(v) = value else {
+        return Ok(ColorWhen::Auto);
+    };
+    let lower = v.to_ascii_lowercase();
+    match lower.as_str() {
+        "always" | "yes" | "force" => Ok(ColorWhen::Always),
+        "never" | "no" | "none" => Ok(ColorWhen::Never),
+        "auto" | "tty" | "if-tty" => Ok(ColorWhen::Auto),
+        _ => Err(format!("invalid argument '{v}' for '--color'")),
+    }
 }
 
 /// The value of `-A`, `-B` or `-C`, or the diagnostic GNU gives for one that is
@@ -790,28 +1018,40 @@ struct Prefix<'a> {
 fn line_prefix(p: &Prefix, opts: &Options) -> Vec<u8> {
     let mut prefix = Vec::new();
     let mut any = false;
+    let number = |cap: &[u8], n: u64| {
+        // The padding goes *inside* the escape — measured: `-T` with colour
+        // writes `\e[32m\e[K  12\e[m\e[K`, not two plain spaces and then the
+        // escape. It matters on a terminal whose `ln` sets a background.
+        let mut field = Vec::new();
+        push_number(&mut field, n, if opts.align_tabs { p.width } else { 0 });
+        opts.paint(cap, &field)
+    };
     if p.show_filename {
-        prefix.extend_from_slice(p.filename.as_bytes());
-        prefix.push(opts.name_sep(p.field));
+        prefix.extend_from_slice(&opts.paint(&opts.colors.filename, p.filename.as_bytes()));
+        // `-Z`'s NUL is a delimiter for a machine, and GNU leaves it outside
+        // the `se` escape — it is the one separator that is not coloured.
+        if opts.null_name {
+            prefix.push(0);
+        } else {
+            prefix.extend_from_slice(&opts.paint(&opts.colors.separator, &[p.field]));
+        }
         any = true;
     }
     if opts.line_numbers {
         // Zero-based internally, one-based on the way out.
         let n = u64::try_from(p.line_idx.saturating_add(1)).unwrap_or(u64::MAX);
-        push_number(&mut prefix, n, if opts.align_tabs { p.width } else { 0 });
-        prefix.push(p.field);
+        prefix.extend_from_slice(&number(&opts.colors.line_number, n));
+        prefix.extend_from_slice(&opts.paint(&opts.colors.separator, &[p.field]));
         any = true;
     }
     if opts.byte_offset {
-        push_number(
-            &mut prefix,
-            p.byte_pos,
-            if opts.align_tabs { p.width } else { 0 },
-        );
-        prefix.push(p.field);
+        prefix.extend_from_slice(&number(&opts.colors.byte_number, p.byte_pos));
+        prefix.extend_from_slice(&opts.paint(&opts.colors.separator, &[p.field]));
         any = true;
     }
     if any && opts.align_tabs {
+        // Uncoloured, like `-Z`'s NUL: it is whitespace, and painting it would
+        // extend a background colour across the gutter.
         prefix.push(b'\t');
     }
     prefix
@@ -876,6 +1116,46 @@ fn offset_width(size: Option<u64>, opts: &Options) -> usize {
     width
 }
 
+/// Settle `--color` into a yes or a no, and read the palette.
+///
+/// Both questions are asked once, here, rather than per line: `auto` queries
+/// the operating system, and `GREP_COLORS` has to be parsed before the first
+/// byte of output.
+///
+/// `GREP_COLOR` — singular, deprecated in 2011 — still works and still sets
+/// both match colours, and GNU still warns about it on stderr. It is read
+/// *first*, so that a `GREP_COLORS` that also sets `ms`/`mc` wins. Neither is
+/// read at all when colour is off, which is what keeps the warning from
+/// appearing for a caller who never asked for colour.
+fn resolve_colors(opts: &mut Options) {
+    opts.color = match opts.color_when {
+        ColorWhen::Always => true,
+        ColorWhen::Never => false,
+        // GNU asks about *stdout*, not stdin: the question is whether whoever
+        // reads this output can render an escape sequence.
+        ColorWhen::Auto => io::stdout().is_terminal(),
+    };
+    if !opts.color {
+        return;
+    }
+    if let Some(v) = env::var_os("GREP_COLOR") {
+        let raw = quote::os_bytes(&v).into_owned();
+        if !raw.is_empty() {
+            // The text is GNU's, quoted the way GNU quotes it — a script that
+            // greps its own stderr for this warning greps for that wording.
+            let shown = String::from_utf8_lossy(&raw).into_owned();
+            diag!(
+                "grep: warning: GREP_COLOR='{shown}' is deprecated; use GREP_COLORS='mt={shown}'"
+            );
+            opts.colors.selected_match.clone_from(&raw);
+            opts.colors.context_match = raw;
+        }
+    }
+    if let Some(v) = env::var_os("GREP_COLORS") {
+        opts.colors.apply(&quote::os_bytes(&v));
+    }
+}
+
 /// The funnel. A diagnostic that could not be written turns the earned
 /// status into `exit_failure`, which is what upstream's `atexit
 /// (close_stdout)` does on every exit path at once. See
@@ -887,13 +1167,14 @@ fn main() -> ExitCode {
 fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<String> = env::args().skip(1).collect();
-    let parsed = match parse_args(&args) {
+    let mut parsed = match parse_args(&args) {
         Ok(p) => p,
         Err(e) => {
             diag!("grep: {e}");
             return ExitCode::from(2);
         }
     };
+    resolve_colors(&mut parsed.opts);
 
     let mut patterns = parsed.patterns;
     for pf in &parsed.pattern_files {
@@ -1099,7 +1380,10 @@ impl Run<'_> {
                     // is the half of `-Z` that matters: `grep -rlZ | xargs -0`
                     // is the only listing of paths that survives a path
                     // containing a newline, which this system permits.
-                    let _ = self.out.write_all(shown.as_bytes());
+                    let painted = self
+                        .opts
+                        .paint(&self.opts.colors.filename, shown.as_bytes());
+                    let _ = self.out.write_all(&painted);
                     let _ = self.out.write_all(if self.opts.null_name {
                         &b"\0"[..]
                     } else {
@@ -1277,14 +1561,83 @@ fn write_context_line(
     out: &mut impl Write,
     body: &[u8],
     p: &Prefix,
+    pats: &[Pat],
     opts: &Options,
 ) -> io::Result<()> {
     if opts.only_matching {
         return Ok(());
     }
     out.write_all(&line_prefix(p, opts))?;
-    out.write_all(body)?;
+    write_body(out, body, false, pats, opts)?;
     out.write_all(&[opts.line_sep()])
+}
+
+/// One line's text, with `--color`'s escapes woven through it.
+///
+/// Reproduces GNU's two-stage model, which is not the obvious one and was
+/// measured rather than guessed:
+///
+/// * **Matches.** A line is searched for matches to highlight when
+///   `selected ^ -v` — so plain `grep` highlights the selected lines, and
+///   `grep -v` highlights the *context* lines, which are the ones the pattern
+///   actually hit. The capability is `ms` on a selected line and `mc` on a
+///   context one. Each match is preceded by the *line* capability's opening
+///   escape and the text since the last match, and that opening escape is
+///   never closed — the match's own escape pair is what ends it. An empty
+///   match is skipped, exactly as under `-o`.
+/// * **Tail.** Whatever follows the last match is then written wrapped in the
+///   line capability, but only when that capability is non-empty — which is
+///   why plain `grep --color=always` (where `sl` and `cx` are both empty)
+///   emits no escapes around the unmatched text at all. The tail stops short
+///   of a `\r` that ends the line, so that a CRLF file's carriage return is
+///   not painted; anything left after that is written plainly.
+///
+/// The two stages together are why `GREP_COLORS='ms='` and
+/// `GREP_COLORS='ms=:sl=33'` produce differently *shaped* output rather than
+/// the same shape with one escape missing.
+fn write_body(
+    out: &mut impl Write,
+    body: &[u8],
+    selected: bool,
+    pats: &[Pat],
+    opts: &Options,
+) -> io::Result<()> {
+    if !opts.color {
+        return out.write_all(body);
+    }
+    let line_cap = opts.line_cap(selected);
+    let match_cap = opts.match_cap(selected);
+    let mut done = 0usize;
+    if (selected ^ opts.invert) && !match_cap.is_empty() {
+        for (s, e) in matches_in(pats, body, opts).map_err(limit_err)? {
+            // Empty matches are at every position, so highlighting them would
+            // bury the line in escapes; GNU skips them here for the same
+            // reason `-o` does not print them.
+            if e <= s || s < done {
+                continue;
+            }
+            out.write_all(&opts.colors.start(line_cap))?;
+            out.write_all(body.get(done..s).unwrap_or_default())?;
+            out.write_all(
+                &opts
+                    .colors
+                    .wrap(match_cap, body.get(s..e).unwrap_or_default()),
+            )?;
+            done = e;
+        }
+    }
+    if !line_cap.is_empty() {
+        let tail_end = body
+            .len()
+            .saturating_sub(usize::from(body.last() == Some(&b'\r')));
+        if tail_end > done {
+            out.write_all(&opts.colors.start(line_cap))?;
+            out.write_all(body.get(done..tail_end).unwrap_or_default())?;
+            out.write_all(&opts.colors.end(line_cap))?;
+            done = tail_end;
+        }
+    }
+    out.write_all(body.get(done..).unwrap_or_default())
 }
 
 /// The one stream being searched, and what its prefixes need to know about it.
@@ -1393,7 +1746,7 @@ fn search_stream(
             if pending_after == 0 {
                 break;
             }
-            write_context_line(out, body, &at(line_idx, here, b'-'), opts)?;
+            write_context_line(out, body, &at(line_idx, here, b'-'), pats, opts)?;
             last_out = Some(lineno);
             pending_after = pending_after.saturating_sub(1);
             if pending_after == 0 {
@@ -1424,7 +1777,9 @@ fn search_stream(
                     && !adjacent
                     && let Some(s) = opts.group_sep.bytes()
                 {
-                    out.write_all(s)?;
+                    // `se` paints the `--` too, and the newline after it is
+                    // left plain.
+                    out.write_all(&opts.paint(&opts.colors.separator, s))?;
                     // A newline even under `-z`, where every *line* ends with
                     // NUL. Measured; and it follows — the separator is not a
                     // line of the file.
@@ -1432,7 +1787,13 @@ fn search_stream(
                 }
                 for (n, pos, text) in before.drain(..) {
                     if n >= start {
-                        write_context_line(out, &text, &at(n.saturating_sub(1), pos, b'-'), opts)?;
+                        write_context_line(
+                            out,
+                            &text,
+                            &at(n.saturating_sub(1), pos, b'-'),
+                            pats,
+                            opts,
+                        )?;
                     }
                 }
                 if opts.only_matching {
@@ -1455,14 +1816,20 @@ fn search_stream(
                                 // offset 6 prints 6 and 14.
                                 let off = here.saturating_add(u64::try_from(s).unwrap_or(0));
                                 out.write_all(&line_prefix(&at(line_idx, off, b':'), opts))?;
-                                out.write_all(body.get(s..e).unwrap_or_default())?;
+                                // `-o` prints nothing but matches, so `sl`/`cx`
+                                // never apply: the whole of what it writes is
+                                // matched text, in `ms`.
+                                out.write_all(&opts.paint(
+                                    opts.match_cap(true),
+                                    body.get(s..e).unwrap_or_default(),
+                                ))?;
                                 out.write_all(&[sep])?;
                             }
                         }
                     }
                 } else {
                     out.write_all(&line_prefix(&at(line_idx, here, b':'), opts))?;
-                    out.write_all(body)?;
+                    write_body(out, body, true, pats, opts)?;
                     out.write_all(&[sep])?;
                 }
                 last_out = Some(lineno);
@@ -1476,7 +1843,7 @@ fn search_stream(
                 limit_reached = true;
             }
         } else if pending_after > 0 {
-            write_context_line(out, body, &at(line_idx, here, b'-'), opts)?;
+            write_context_line(out, body, &at(line_idx, here, b'-'), pats, opts)?;
             last_out = Some(lineno);
             pending_after = pending_after.saturating_sub(1);
         } else if out_before > 0 {
@@ -1490,9 +1857,15 @@ fn search_stream(
 
     if opts.count_only {
         if show_filename {
-            out.write_all(filename.as_bytes())?;
-            out.write_all(&[opts.name_sep(b':')])?;
+            out.write_all(&opts.paint(&opts.colors.filename, filename.as_bytes()))?;
+            // As in a line prefix: `se` paints the `:`, `-Z`'s NUL stays plain.
+            if opts.null_name {
+                out.write_all(&[0])?;
+            } else {
+                out.write_all(&opts.paint(&opts.colors.separator, b":"))?;
+            }
         }
+        // The count itself is never coloured — there is no capability for it.
         out.write_all(match_count.to_string().as_bytes())?;
         // A newline, not `sep`: `-z` says what a *line of input* is, and a
         // count is not one. Measured — `grep -zHc` ends its count with `\n`
@@ -2808,5 +3181,406 @@ mod tests {
         assert_eq!(quote_ere(b"a.c"), b"a\\.c".to_vec());
         assert_eq!(quote_ere(b"a+b|c"), b"a\\+b\\|c".to_vec());
         assert_eq!(quote_ere(b"plain"), b"plain".to_vec());
+    }
+
+    // ---------------- colour ----------------
+
+    /// Options with colour on and everything else default, so that a colour
+    /// assertion is never reading a second feature by accident.
+    fn colored() -> Options {
+        Options {
+            color_when: ColorWhen::Always,
+            color: true,
+            ..Options::default()
+        }
+    }
+
+    /// What `search_stream` writes, as bytes — colour output is not text, and
+    /// `String` would hide exactly the escapes being asserted about.
+    fn painted(input: &[u8], pattern: &str, opts: &Options, show_filename: bool) -> Vec<u8> {
+        let p = pats(pattern, opts);
+        run_search(input, &p, opts, "f", show_filename).0
+    }
+
+    #[test]
+    fn a_when_word_is_one_of_three_answers_and_bare_means_auto() {
+        assert_eq!(color_when(None), Ok(ColorWhen::Auto));
+        for word in ["always", "yes", "force"] {
+            assert_eq!(color_when(Some(word)), Ok(ColorWhen::Always));
+        }
+        for word in ["never", "no", "none"] {
+            assert_eq!(color_when(Some(word)), Ok(ColorWhen::Never));
+        }
+        for word in ["auto", "tty", "if-tty"] {
+            assert_eq!(color_when(Some(word)), Ok(ColorWhen::Auto));
+        }
+        // The words are matched case-insensitively.
+        assert_eq!(color_when(Some("ALWAYS")), Ok(ColorWhen::Always));
+        assert!(color_when(Some("bogus")).is_err());
+    }
+
+    #[test]
+    fn a_capability_without_a_value_is_ignored_and_a_boolean_is_not() {
+        // `ms` is not `ms=`: the first leaves the default highlight standing,
+        // the second removes it. Getting this wrong turns a stray `GREP_COLORS`
+        // in a profile into a grep that quietly stops highlighting.
+        let mut c = Colors::default();
+        c.apply(b"ms");
+        assert_eq!(c.selected_match, b"01;31".to_vec());
+        c.apply(b"ms=");
+        assert!(c.selected_match.is_empty());
+
+        // The two booleans have no value to miss, and fire either way.
+        let mut c = Colors::default();
+        c.apply(b"rv:ne");
+        assert!(c.reverse_video && c.no_erase);
+        let mut c = Colors::default();
+        c.apply(b"rv=1:ne=1");
+        assert!(c.reverse_video && c.no_erase);
+    }
+
+    #[test]
+    fn an_unknown_key_or_an_unusable_value_is_ignored_in_silence() {
+        let mut c = Colors::default();
+        // Not one of the ten keys; not SGR parameters; nothing at all.
+        c.apply(b"zz=1:ms=nope::");
+        assert_eq!(c, Colors::default());
+        // An empty specification is not a specification.
+        let mut c = Colors::default();
+        c.apply(b"");
+        assert_eq!(c, Colors::default());
+    }
+
+    #[test]
+    fn mt_sets_both_match_colours_and_the_last_assignment_wins() {
+        let mut c = Colors::default();
+        c.apply(b"mt=44");
+        assert_eq!(c.selected_match, b"44".to_vec());
+        assert_eq!(c.context_match, b"44".to_vec());
+        // Order decides, because each key assigns rather than merges.
+        let mut c = Colors::default();
+        c.apply(b"ms=44:mt=45");
+        assert_eq!(c.selected_match, b"45".to_vec());
+        let mut c = Colors::default();
+        c.apply(b"mt=45:ms=44");
+        assert_eq!(c.selected_match, b"44".to_vec());
+        assert_eq!(c.context_match, b"45".to_vec());
+    }
+
+    #[test]
+    fn ne_drops_the_erase_that_otherwise_follows_every_escape() {
+        let c = Colors::default();
+        assert_eq!(c.wrap(b"32", b"x"), b"\x1b[32m\x1b[Kx\x1b[m\x1b[K".to_vec());
+        let mut c = Colors::default();
+        c.apply(b"ne");
+        assert_eq!(c.wrap(b"32", b"x"), b"\x1b[32mx\x1b[m".to_vec());
+        // An empty capability writes the text and nothing else, which is what
+        // makes the default `sl=`/`cx=` mean "leave this alone".
+        assert_eq!(c.wrap(b"", b"x"), b"x".to_vec());
+    }
+
+    #[test]
+    fn every_prefix_field_carries_its_own_colour_and_the_delimiters_do_not() {
+        let opts = Options {
+            line_numbers: true,
+            byte_offset: true,
+            ..colored()
+        };
+        assert_eq!(
+            line_prefix(
+                &Prefix {
+                    filename: "f",
+                    show_filename: true,
+                    line_idx: 0,
+                    byte_pos: 7,
+                    width: 0,
+                    field: b':',
+                },
+                &opts
+            ),
+            [
+                b"\x1b[35m\x1b[Kf\x1b[m\x1b[K".as_slice(), // fn
+                b"\x1b[36m\x1b[K:\x1b[m\x1b[K".as_slice(), // se
+                b"\x1b[32m\x1b[K1\x1b[m\x1b[K".as_slice(), // ln
+                b"\x1b[36m\x1b[K:\x1b[m\x1b[K".as_slice(), // se
+                b"\x1b[32m\x1b[K7\x1b[m\x1b[K".as_slice(), // bn
+                b"\x1b[36m\x1b[K:\x1b[m\x1b[K".as_slice(), // se
+            ]
+            .concat()
+        );
+
+        // `-T`'s padding belongs *inside* the number's escape — a terminal
+        // whose `ln` sets a background paints the padding too — and its tab
+        // belongs outside every escape, as does `-Z`'s NUL.
+        let opts = Options {
+            line_numbers: true,
+            align_tabs: true,
+            null_name: true,
+            ..colored()
+        };
+        assert_eq!(
+            line_prefix(
+                &Prefix {
+                    filename: "f",
+                    show_filename: true,
+                    line_idx: 0,
+                    byte_pos: 0,
+                    width: 3,
+                    field: b':',
+                },
+                &opts
+            ),
+            [
+                b"\x1b[35m\x1b[Kf\x1b[m\x1b[K".as_slice(),
+                b"\0".as_slice(),
+                b"\x1b[32m\x1b[K  1\x1b[m\x1b[K".as_slice(),
+                b"\x1b[36m\x1b[K:\x1b[m\x1b[K".as_slice(),
+                b"\t".as_slice(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn by_default_only_the_matches_are_painted() {
+        // `sl` and `cx` are empty out of the box, so the text around a match is
+        // written with no escapes at all — not with an escape naming no colour.
+        assert_eq!(
+            painted(b"foo bar foo\nqux\n", "foo", &colored(), false),
+            b"\x1b[01;31m\x1b[Kfoo\x1b[m\x1b[K bar \x1b[01;31m\x1b[Kfoo\x1b[m\x1b[K\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn a_selected_line_colour_opens_before_each_match_and_closes_only_at_the_tail() {
+        let mut opts = colored();
+        opts.colors.apply(b"sl=33");
+        // `qux foo bar` has text before, between (none) and after its match:
+        // the run before the match is opened and left open — the match's own
+        // escape pair ends it — and only the trailing run is closed.
+        assert_eq!(
+            painted(b"qux foo bar\n", "foo", &opts, false),
+            [
+                b"\x1b[33m\x1b[Kqux ".as_slice(),
+                b"\x1b[01;31m\x1b[Kfoo\x1b[m\x1b[K".as_slice(),
+                b"\x1b[33m\x1b[K bar\x1b[m\x1b[K".as_slice(),
+                b"\n".as_slice(),
+            ]
+            .concat()
+        );
+        // A line that *ends* on its match has no tail, and so no closing
+        // escape of its own.
+        assert_eq!(
+            painted(b"qux foo\n", "foo", &opts, false),
+            [
+                b"\x1b[33m\x1b[Kqux ".as_slice(),
+                b"\x1b[01;31m\x1b[Kfoo\x1b[m\x1b[K".as_slice(),
+                b"\n".as_slice(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn with_no_match_colour_the_whole_line_is_one_closed_run() {
+        // The shape changes, not just an escape: with `ms` empty there is no
+        // per-match pass, so the line is a single `sl` run — opened, written,
+        // closed — rather than one run per match left hanging.
+        let mut opts = colored();
+        opts.colors.apply(b"ms=:sl=33");
+        assert_eq!(
+            painted(b"foo bar foo\n", "foo", &opts, false),
+            b"\x1b[33m\x1b[Kfoo bar foo\x1b[m\x1b[K\n".to_vec()
+        );
+        // And with neither, nothing is painted at all.
+        let mut opts = colored();
+        opts.colors.apply(b"ms=");
+        assert_eq!(
+            painted(b"foo bar foo\n", "foo", &opts, false),
+            b"foo bar foo\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn an_empty_match_is_not_painted_any_more_than_it_is_printed() {
+        let mut opts = colored();
+        opts.colors.apply(b"sl=33");
+        // `o*` matches nothing at most positions and `oo` at one. Painting the
+        // empty matches would bury the line in escapes, so they are skipped —
+        // the same rule `-o` follows — and the line's tail run covers them.
+        assert_eq!(
+            painted(b"foo bar\n", "o*", &opts, false),
+            [
+                b"\x1b[33m\x1b[Kf".as_slice(),
+                b"\x1b[01;31m\x1b[Koo\x1b[m\x1b[K".as_slice(),
+                b"\x1b[33m\x1b[K bar\x1b[m\x1b[K".as_slice(),
+                b"\n".as_slice(),
+            ]
+            .concat()
+        );
+        // A pattern that can *only* match nothing paints no match at all, and
+        // the whole line is the tail.
+        assert_eq!(
+            painted(b"foo\n", "", &opts, false),
+            b"\x1b[33m\x1b[Kfoo\x1b[m\x1b[K\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn the_carriage_return_of_a_crlf_line_is_terminator_and_not_text() {
+        let mut opts = colored();
+        opts.colors.apply(b"ms=:sl=33");
+        // A CR immediately before the line separator is left outside the run…
+        assert_eq!(
+            painted(b"foo\r\n", "foo", &opts, false),
+            b"\x1b[33m\x1b[Kfoo\x1b[m\x1b[K\r\n".to_vec()
+        );
+        // …but a CR anywhere else in the line is ordinary text.
+        assert_eq!(
+            painted(b"foo\rzz\n", "foo", &opts, false),
+            b"\x1b[33m\x1b[Kfoo\rzz\x1b[m\x1b[K\n".to_vec()
+        );
+        // A final line with no separator still ends in a CR that is terminator.
+        assert_eq!(
+            painted(b"foo\r", "foo", &opts, false),
+            b"\x1b[33m\x1b[Kfoo\x1b[m\x1b[K\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn under_invert_the_highlight_follows_the_matches_onto_the_context_lines() {
+        // `-v` selects what did *not* match, so the selected lines have nothing
+        // to highlight and the context lines have everything — in `mc`, not
+        // `ms`. This is the one place the two match capabilities differ.
+        let opts = Options {
+            invert: true,
+            ..ctx_colored(b"mc=44")
+        };
+        assert_eq!(
+            painted(b"foo\nbar\nfoo\n", "bar", &opts, false),
+            [
+                num(1, b':').as_slice(),
+                b"foo\n".as_slice(),
+                num(2, b'-').as_slice(),
+                b"\x1b[44m\x1b[Kbar\x1b[m\x1b[K\n".as_slice(),
+                num(3, b':').as_slice(),
+                b"foo\n".as_slice(),
+            ]
+            .concat()
+        );
+    }
+
+    /// `-C 1` with line numbers and colour on, plus one `GREP_COLORS` spec —
+    /// the shape every context-colouring assertion below needs.
+    fn ctx_colored(spec: &[u8]) -> Options {
+        let mut opts = Options {
+            line_numbers: true,
+            default_context: Some(1),
+            ..colored()
+        };
+        opts.colors.apply(spec);
+        opts
+    }
+
+    /// A `-n` prefix in the default palette: the number in `ln`, the separator
+    /// in `se`. Spelled once because a context assertion is about the *body*,
+    /// and repeating twenty bytes of escape in front of each one would hide it.
+    fn num(n: u64, field: u8) -> Vec<u8> {
+        let c = Colors::default();
+        let mut v = c.wrap(&c.line_number, n.to_string().as_bytes());
+        v.extend_from_slice(&c.wrap(&c.separator, &[field]));
+        v
+    }
+
+    #[test]
+    fn rv_swaps_the_line_colours_but_only_under_invert() {
+        // Without `-v`, `rv` changes nothing: the selected lines are still the
+        // interesting ones.
+        let opts = ctx_colored(b"rv:sl=33:cx=34");
+        assert_eq!(
+            painted(b"a\nbar\nc\n", "bar", &opts, false),
+            [
+                num(1, b'-').as_slice(),
+                b"\x1b[34m\x1b[Ka\x1b[m\x1b[K\n".as_slice(),
+                num(2, b':').as_slice(),
+                b"\x1b[33m\x1b[K\x1b[01;31m\x1b[Kbar\x1b[m\x1b[K\n".as_slice(),
+                num(3, b'-').as_slice(),
+                b"\x1b[34m\x1b[Kc\x1b[m\x1b[K\n".as_slice(),
+            ]
+            .concat()
+        );
+        // With `-v` it swaps them, so the lines carrying the matches are the
+        // ones wearing `sl`.
+        let opts = Options {
+            invert: true,
+            ..ctx_colored(b"rv:sl=33:cx=34")
+        };
+        assert_eq!(
+            painted(b"a\nbar\nc\n", "bar", &opts, false),
+            [
+                num(1, b':').as_slice(),
+                b"\x1b[34m\x1b[Ka\x1b[m\x1b[K\n".as_slice(),
+                num(2, b'-').as_slice(),
+                b"\x1b[33m\x1b[K\x1b[01;31m\x1b[Kbar\x1b[m\x1b[K\n".as_slice(),
+                num(3, b':').as_slice(),
+                b"\x1b[34m\x1b[Kc\x1b[m\x1b[K\n".as_slice(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn the_group_separator_is_painted_and_its_newline_is_not() {
+        let opts = ctx_colored(b"se=45");
+        let out = painted(b"HIT\nx\ny\nz\nHIT\n", "HIT", &opts, false);
+        let want = b"\x1b[45m\x1b[K--\x1b[m\x1b[K\n";
+        assert!(
+            out.windows(want.len()).any(|w| w == want.as_slice()),
+            "group separator painted, newline plain: {out:?}"
+        );
+    }
+
+    #[test]
+    fn only_matching_prints_matched_text_and_therefore_only_a_match_colour() {
+        // `-o` writes nothing but matches, so `sl` has nothing to apply to —
+        // setting it changes the output not at all.
+        let mut opts = Options {
+            only_matching: true,
+            ..colored()
+        };
+        opts.colors.apply(b"sl=33:cx=34");
+        assert_eq!(
+            painted(b"foo bar foo\n", "foo", &opts, false),
+            [
+                b"\x1b[01;31m\x1b[Kfoo\x1b[m\x1b[K\n".as_slice(),
+                b"\x1b[01;31m\x1b[Kfoo\x1b[m\x1b[K\n".as_slice(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn the_file_name_outputs_colour_the_name_and_nothing_else() {
+        // `-c` paints the name and the `:` but never the count: there is no
+        // capability for a count.
+        let opts = Options {
+            count_only: true,
+            ..colored()
+        };
+        assert_eq!(
+            painted(b"foo\nbar\n", "foo", &opts, true),
+            b"\x1b[35m\x1b[Kf\x1b[m\x1b[K\x1b[36m\x1b[K:\x1b[m\x1b[K1\n".to_vec()
+        );
+        // Under `-Z` the NUL replaces the separator and stays outside the
+        // escapes, exactly as it does in a line prefix.
+        let opts = Options {
+            count_only: true,
+            null_name: true,
+            ..colored()
+        };
+        assert_eq!(
+            painted(b"foo\nbar\n", "foo", &opts, true),
+            b"\x1b[35m\x1b[Kf\x1b[m\x1b[K\x001\n".to_vec()
+        );
     }
 }

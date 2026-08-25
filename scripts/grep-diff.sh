@@ -136,6 +136,11 @@ printf 'caf\303\251\nCAF\303\211\ncafe\n'       > accent
 printf '1\n2\nHIT\n4\n5\n6\nHIT\n8\n'           > ctx
 printf 'HIT\n2\n3\n'                            > ctxtop
 printf 'HIT\nHIT\nHIT\n'                        > run3
+# CRLF, because colouring treats the carriage return as part of the line
+# terminator rather than as text: `sl`'s run stops before it. The third line
+# ends with a CR that is *not* followed by a newline, and the second holds a CR
+# in the middle, where it is ordinary text and does get painted.
+printf 'foo\r\nfoo\rzz\r\nfoo bar\r'            > crlf
 
 # Exactly ninety-nine bytes: nine eleven-byte lines. The one fixture whose
 # `-T` field width is neither 1 nor equal with and without `-n` — 99 bytes is
@@ -737,55 +742,101 @@ grep -Tb HIT < w99
 # The `;` in GREP_COLORS is quoted because an unquoted one ends the command:
 # the first draft of this case ran `GREP_COLORS=mt=01` and then `32 grep …`,
 # which failed identically on both sides and was recorded as a pass.
-?--color is not implemented|grep --color=never foo words
-?--color is not implemented|grep --color=always foo words
-?--color is not implemented|grep --color=always -o foo words
-?--color is not implemented|grep --color=always -n foo words
-?--color is not implemented|grep --color=always -i alpha mixed
-?--color is not implemented|grep --color=auto foo words
-?--color is not implemented|GREP_COLORS='mt=01;32' grep --color=always foo words
+grep --color=never foo words
+grep --color=always foo words
+grep --color=always -o foo words
+grep --color=always -n foo words
+grep --color=always -i alpha mixed
+grep --color=auto foo words
+GREP_COLORS='mt=01;32' grep --color=always foo words
 # Every prefix field has a colour of its own, and so does each separator
 # between them — including the `--` between context groups.
-?--color is not implemented|grep --color=always -nbH foo words
-?--color is not implemented|grep --color=always -nC 1 HIT ctx
-?--color is not implemented|grep --color=always -nbHTC 1 HIT w99
-?--color is not implemented|grep --color=always -Z -nH foo words
-?--color is not implemented|grep --color=always foo words abc
-?--color is not implemented|grep --color=always -Hc foo words
-?--color is not implemented|grep --color=always -l foo words
-?--color is not implemented|grep --color=always -lZ foo words
-?--color is not implemented|grep --color=always -L zzz words
-?--color is not implemented|grep --color=always -q foo words
-?--color is not implemented|grep --color=always -z foo zsep
+grep --color=always -nbH foo words
+grep --color=always -nC 1 HIT ctx
+grep --color=always -nbHTC 1 HIT w99
+grep --color=always -Z -nH foo words
+grep --color=always foo words abc
+grep --color=always -Hc foo words
+grep --color=always -l foo words
+grep --color=always -lZ foo words
+grep --color=always -L zzz words
+grep --color=always -q foo words
+grep --color=always -z foo zsep
 # `-v` selects the lines that did not match, so there is nothing on them to
 # colour — but a *context* line under -v may match, and gets `mc`.
-?--color is not implemented|grep --color=always -v foo words
-?--color is not implemented|grep --color=always -vC 1 foo words
+grep --color=always -v foo words
+grep --color=always -vC 1 foo words
 # The empty-match rule of -o survives colouring: `o*` matches nothing at most
 # positions, and nothing is what gets printed for them.
-?--color is not implemented|grep --color=always -o 'o*' words
-?--color is not implemented|grep --color=always -i café accent
+grep --color=always -o 'o*' words
+grep --color=always -i café accent
 # `--colour` is the same option, and bare `--color` means `auto`, which off a
 # terminal means never.
-?--color is not implemented|grep --colour=always foo words
-?--color is not implemented|grep --color foo words
+grep --colour=always foo words
+grep --color foo words
 # GREP_COLORS: `mt` sets both `ms` and `mc`, last assignment wins, an unknown
 # key or an unparsable value is ignored in silence, `ne` drops the `\e[K` that
 # otherwise follows every escape, and `rv` swaps the selected- and context-line
 # colours when -v is in effect.
-?--color is not implemented|GREP_COLORS='ms=01;36:mt=01;33' grep --color=always foo words
-?--color is not implemented|GREP_COLORS='mt=01;33:ms=01;36' grep --color=always foo words
-?--color is not implemented|GREP_COLORS='fn=35:ln=33:bn=34:se=36' grep --color=always -nbH foo words
-?--color is not implemented|GREP_COLORS='sl=33' grep --color=always foo words
-?--color is not implemented|GREP_COLORS='cx=90' grep --color=always -C 1 HIT ctx
-?--color is not implemented|GREP_COLORS='ne' grep --color=always foo words
-?--color is not implemented|GREP_COLORS='rv:sl=33:cx=34' grep --color=always -v foo words
-?--color is not implemented|GREP_COLORS='rv:sl=33:cx=34' grep --color=always foo words
-?--color is not implemented|GREP_COLORS='zz=1' grep --color=always foo words
-?--color is not implemented|GREP_COLORS='ms=zz' grep --color=always foo words
-?--color is not implemented|GREP_COLORS='' grep --color=always foo words
+GREP_COLORS='ms=01;36:mt=01;33' grep --color=always foo words
+GREP_COLORS='mt=01;33:ms=01;36' grep --color=always foo words
+GREP_COLORS='fn=35:ln=33:bn=34:se=36' grep --color=always -nbH foo words
+GREP_COLORS='sl=33' grep --color=always foo words
+GREP_COLORS='cx=90' grep --color=always -C 1 HIT ctx
+GREP_COLORS='ne' grep --color=always foo words
+GREP_COLORS='rv:sl=33:cx=34' grep --color=always -v foo words
+GREP_COLORS='rv:sl=33:cx=34' grep --color=always foo words
+GREP_COLORS='zz=1' grep --color=always foo words
+GREP_COLORS='ms=zz' grep --color=always foo words
+GREP_COLORS='' grep --color=always foo words
+# A value capability with no `=` is *ignored*, not read as "set it to empty":
+# `ms` leaves the default highlight alone where `ms=` removes it. The two
+# booleans are the exception — they fire with or without a value.
+GREP_COLORS='ms' grep --color=always foo words
+GREP_COLORS='ms=' grep --color=always foo words
+GREP_COLORS='ne=1' grep --color=always -n foo words
+GREP_COLORS='rv=1:sl=33:cx=34' grep --color=always -v foo words
+GREP_COLORS='sl=33::cx=34' grep --color=always -C 1 HIT ctx
+# `ms=` and `ms=:sl=33` differ in *shape*, not by one escape: with no match
+# colour there is no per-match pass at all, so the whole line is written as one
+# `sl` run — start, text, end — where a highlighted line's `sl` runs are opened
+# before each match and never closed.
+GREP_COLORS='ms=:sl=33' grep --color=always foo words
+GREP_COLORS='sl=33' grep --color=always -o foo words
+GREP_COLORS='cx=34' grep --color=always -o foo words
+# `sl`'s trailing run: `foo bar` has text after its last match, `baz foo foo`
+# ends on one, and an empty pattern has no match to open a run at all.
+GREP_COLORS='sl=33' grep --color=always '' words
+GREP_COLORS='sl=33' grep --color=always 'o*' words
+GREP_COLORS='sl=33' grep --color=always -x qux words
+# The carriage return of a CRLF line is terminator, not text.
+GREP_COLORS='sl=33' grep --color=always foo crlf
+GREP_COLORS='sl=33' grep --color=always -n foo crlf
+grep --color=always foo crlf
+# The `--` between groups is `se`, and so is a `--group-separator` of one's own;
+# the newline after it is not.
+grep --color=always -A 1 HIT ctx
+GREP_COLORS='se=45' grep --color=always -A 1 HIT ctx
+GREP_COLORS='se=45' grep --color=always -A 1 --group-separator=XX HIT ctx
+GREP_COLORS='se=' grep --color=always -nA 1 HIT ctx
+GREP_COLORS='ne:sl=33' grep --color=always -nbH foo words
+# The file-name-only outputs colour the name and nothing else — and under -Z the
+# NUL after it stays outside the escape, as it does in a line prefix.
+grep --color=always -HcZ foo words
+GREP_COLORS='fn=45:se=46' grep --color=always -Hc foo words
+GREP_COLORS='fn=' grep --color=always -Hc foo words
+grep --color=always -rn foo sub
+grep --color=always -rlZ foo sub
+GREP_COLORS='sl=33' grep --color=always -TnbHZ HIT w99
 # The deprecated spelling still works, and says so on stderr.
-?--color is not implemented|GREP_COLOR='01;35' grep --color=always foo words
+GREP_COLOR='01;35' grep --color=always foo words
+# An empty one is not a setting: no warning, and the default highlight stands.
+GREP_COLOR='' grep --color=always foo words
+# GREP_COLOR loses to a GREP_COLORS that names the same capability, and neither
+# is read at all when colour is off — the deprecation warning included.
+GREP_COLOR='01;35' GREP_COLORS='ms=01;36' grep --color=always foo words
+GREP_COLOR='01;35' grep foo words
+GREP_COLOR='01;35' grep --color=never foo words
 # `--color=` with a word that is none of the three is not an error: GNU sets
 # `show_help` and prints the whole usage text on *stdout*, exiting 0. Matching
 # that would mean printing a help text advertising options we do not have.

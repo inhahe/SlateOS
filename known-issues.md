@@ -75749,14 +75749,15 @@ scan. Both are the same accident waiting for its first divergence.
 ## TD-GREP-IS-MISSING-CONTEXT-COLOUR-BYTE-OFFSETS-AND-THE-FILE-SELECTORS (lane B, 2026-08-25) — **open** (the missing features; the defects below were fixed the same day)
 
 **In short:** our `grep` handles matching well and is missing a lot of the
-things people actually type at it. `--color`, `-d` (what to do when an operand
-is a directory), and `--include`/`--exclude`/`--exclude-dir` (search only some
-of the files a recursive search would reach) are still missing. Typing any of
-them gets `grep: unknown option`, so a script that uses one fails outright
-rather than degrading. Three larger gaps were closed on 2026-08-25 and are
-recorded below: context selection (`grep -C 3 pattern file`, show three lines
-either side of each hit), `-b` (print each hit's byte offset) and `-T` (line up
-the output in columns). Five further things were wrong rather than absent — the recursive walk
+things people actually type at it. `-d` (what to do when an operand is a
+directory) and `--include`/`--exclude`/`--exclude-dir` (search only some of the
+files a recursive search would reach) are still missing. Typing either gets
+`grep: unknown option`, so a script that uses one fails outright rather than
+degrading. Four larger gaps were closed on 2026-08-25 and are recorded below:
+context selection (`grep -C 3 pattern file`, show three lines either side of
+each hit), `-b` (print each hit's byte offset), `-T` (line up the output in
+columns) and `--color` (paint the matched text, and the rest of the line, in
+terminal colours). Five further things were wrong rather than absent — the recursive walk
 followed symbolic links it should have skipped, an unreadable directory did not
 raise the exit status, a failed write to a closed output was thrown away, `-q`
 stopped too late, and a long option refused a value given as the next argument
@@ -75776,13 +75777,14 @@ marker is part of closing it, and nothing here can be fixed and forgotten.
 
 | | What it does | Harness cases |
 |---|---|---|
-| `--color=never\|always\|auto` + `GREP_COLORS` | wrap the matched text in SGR escapes; `auto` means "only if stdout is a terminal" | 7 |
 | `--include=GLOB` `--exclude=GLOB` `--exclude-dir=GLOB` | filter what a recursive search descends into and reports | 3 |
 | `-d ACTION` | `read` (the default), `skip`, or `recurse` for a directory operand | 2 |
 
-`--color` is now the largest group and the one to do next. `-b` and `-T` were
-the cheap pair and landed on 2026-08-25 (recorded below), which leaves
-`--color` and the two file-selection groups.
+The two file-selection groups are all that is left, and they should land
+together: `-d recurse` *is* `-r`, `-d skip` is the degenerate case of
+`--exclude`, and all four options want the same glob matcher and the same hook
+in the recursive walk. Building one of them and not the others would mean
+writing that hook twice.
 
 **Defects — all fixed 2026-08-25**, and each now pinned by plain (unmarked)
 cases in `scripts/grep-diff.sh`, so a regression fails the harness:
@@ -75895,6 +75897,70 @@ tripping `clippy::too_many_arguments` in a crate that denies pedantic. The
 written for `wc`; it moved to `coreutils::filekind::borrowed_stdin` and `wc`'s
 private copy was deleted rather than a third one written.
 
+**`--color`/`--colour` and `GREP_COLORS` — implemented 2026-08-25.** The
+seven `?` cases that pinned their absence are now 36 plain cases. The whole
+model below was **measured** against GNU 3.11 with `od -c` — three throwaway
+probe scripts, ~96 dumps — and not recalled, because two of its rules are ones
+recall gets wrong.
+
+The selection rules are small:
+
+```
+matching    = selected ^ invert
+line_color  = if selected ^ (invert && rv) { sl } else { cx }
+match_color = if selected { ms } else { mc }
+```
+
+An escape is `\e[<cap>m\e[K` — text — `\e[m\e[K`, with the `\e[K` (erase to
+end of line) dropped under `ne`. **An empty capability emits nothing at all**,
+which is not the same as emitting an empty escape, and is what makes the next
+point observable.
+
+* **The body is printed in two independent stages, and either can be skipped.**
+  The *middle* runs only when `matching && !match_color.is_empty()`: for each
+  non-empty match it emits `start(line_color)`, then the text since the previous
+  match — **which is never closed** — then the matched text wrapped in
+  `match_color`. The *tail* runs only when `!line_color.is_empty()`:
+  `start(line_color)`, the rest of the line, `end(line_color)`. Whatever neither
+  stage claimed is written plainly. The consequence recall gets wrong is that
+  `GREP_COLORS='ms='` does not produce the default output minus one escape — it
+  produces a *differently shaped* output, because switching off the match colour
+  switches off the whole middle stage, so the line becomes one closed `sl` run
+  instead of a sequence of unclosed ones.
+* **A value capability written without `=` is ignored, not set to empty.**
+  `GREP_COLORS='ms'` leaves the match colour at its default; `GREP_COLORS='ms='`
+  turns it off. The booleans `rv` and `ne` fire either way. This is the second
+  thing recall gets wrong, and it is the difference between "no highlight" and
+  "the default highlight".
+* An unknown key, a value that is not SGR parameters (digits and `;`), and an
+  empty item between two colons are all ignored in silence. `mt` sets `ms` and
+  `mc` together, and the last assignment in the string wins.
+* **`-T`'s padding goes inside the number's escape**, not before it: the dump is
+  `\e[32m\e[K  12\e[m\e[K`, which matters on a terminal whose `ln` sets a
+  background. `-T`'s tab and `-Z`'s NUL are the two delimiters that stay
+  *outside* every escape — painting whitespace would drag a background across
+  the gutter, and the NUL is for a machine.
+* Every other prefix field carries its own capability: the file name in `fn`,
+  the line number in `ln`, the byte offset in `bn`, and **every** separator
+  (`:`, `-`, and the `--` between groups) in `se`. The newline after a group
+  separator is plain.
+* **`-o` ignores `sl` and `cx` entirely.** Everything it prints is matched text,
+  so everything it prints is `ms` — there is no line to colour.
+* `-c` paints the name and the `:` but never the count; there is no capability
+  for a count. `-l`/`-L` paint the name and nothing else.
+* A `\r` that ends a line is terminator, not text: the tail run stops before it.
+  A `\r` in the middle of a line is ordinary text and is painted. Hence the
+  `crlf` fixture in the harness.
+* An empty match is not painted, for the same reason `-o` does not print one:
+  it occurs at every position, and highlighting it would bury the line in
+  escapes.
+* `GREP_COLOR` (singular) is deprecated: it warns on stderr and sets both match
+  colours. An empty value warns nothing and changes nothing. Neither variable is
+  read when colour is off, so `GREP_COLOR=1;32 grep --color=never` is silent.
+* `--color=auto` and a bare `--color` mean "only if stdout is a terminal", which
+  is `IsTerminal` — and off in the harness, which is why the harness always says
+  `always`.
+
 **Diagnostic wording** (four more `?` cases, lower value than the above):
 `grep` with no operands answers `grep: missing PATTERN` where GNU prints the
 usage summary; `--zzz` is `unknown option: --zzz` against GNU's `unrecognized
@@ -75907,8 +75973,8 @@ exiting 0. The first two belong with
 **Severity.** Medium, and lower than it was: the four defects are gone, which
 removes the only hang and the only silently-wrong exit status. What is left
 produces no wrong answer to a query that works — the matching itself agrees
-with GNU across 305 cases — but `--color` is common enough that a script or a
-habit that uses it simply does not run.
+with GNU across 370 cases — but a script that names a directory operand, or one
+that filters a recursive search, still fails outright rather than degrading.
 
 #### TD-A-POISON-CHECK-READS-EVERY-BYTE-ONE-AT-A-TIME-WHILE-THE-FILL-USES-REP-STOSB (lane A, 2026-08-25) — **open**
 

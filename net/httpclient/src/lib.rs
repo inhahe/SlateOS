@@ -402,36 +402,62 @@ impl Request {
     ///
     /// Returns the complete byte sequence including request line, headers,
     /// blank line separator, and body (if present).
+    ///
+    /// Only four of the seven fields reach the wire. The other three —
+    /// `timeout_ms`, `follow_redirects`, `max_redirects` — are instructions to
+    /// *this client* about how to conduct the exchange, and HTTP/1.1 has no
+    /// way to express them: there is no header that asks a server to follow a
+    /// redirect on your behalf. They are handled by the caller that drives
+    /// this request, not here.
     pub fn serialize(&self) -> Vec<u8> {
+        // Destructured with no `..` so that an eighth field cannot be added to
+        // `Request` without this function refusing to compile. The split above
+        // is the reason: whether a new field belongs on the wire or is local
+        // policy is a judgement only its author can make, and the failure mode
+        // when nobody makes it is silent -- a request that omits something the
+        // server needed still parses, still sends, and comes back with an
+        // answer to a question slightly different from the one asked.
+        //
+        // Binding the three policy fields to `_`-prefixed names rather than
+        // eliding them with `..` is what keeps that decision compulsory: `..`
+        // would absorb the new field without comment. Note the compiler only
+        // guarantees the author is brought *here* -- naming a field and then
+        // ignoring it is a warning at most. See known-issues.md lesson 44.
+        let Self {
+            method,
+            url,
+            headers,
+            body,
+            timeout_ms: _,
+            follow_redirects: _,
+            max_redirects: _,
+        } = self;
+
         let mut output = Vec::with_capacity(256);
 
         // Request line: METHOD /path HTTP/1.1\r\n
-        let request_line = format!(
-            "{} {} HTTP/1.1\r\n",
-            self.method.as_str(),
-            self.url.request_path()
-        );
+        let request_line = format!("{} {} HTTP/1.1\r\n", method.as_str(), url.request_path());
         output.extend_from_slice(request_line.as_bytes());
 
         // Host header (required in HTTP/1.1)
-        let host_header = if (self.url.scheme == "http" && self.url.port == 80)
-            || (self.url.scheme == "https" && self.url.port == 443)
+        let host_header = if (url.scheme == "http" && url.port == 80)
+            || (url.scheme == "https" && url.port == 443)
         {
-            format!("Host: {}\r\n", self.url.host)
+            format!("Host: {}\r\n", url.host)
         } else {
-            format!("Host: {}:{}\r\n", self.url.host, self.url.port)
+            format!("Host: {}:{}\r\n", url.host, url.port)
         };
         output.extend_from_slice(host_header.as_bytes());
 
         // User-specified headers
-        for (name, value) in self.headers.iter() {
+        for (name, value) in headers.iter() {
             let header_line = format!("{name}: {value}\r\n");
             output.extend_from_slice(header_line.as_bytes());
         }
 
         // Content-Length if body is present and not already set
-        if let Some(ref body_data) = self.body
-            && !self.headers.contains("Content-Length")
+        if let Some(body_data) = body
+            && !headers.contains("Content-Length")
         {
             let cl = format!("Content-Length: {}\r\n", body_data.len());
             output.extend_from_slice(cl.as_bytes());
@@ -441,7 +467,7 @@ impl Request {
         output.extend_from_slice(b"\r\n");
 
         // Body
-        if let Some(ref body_data) = self.body {
+        if let Some(body_data) = body {
             output.extend_from_slice(body_data);
         }
 

@@ -38,6 +38,9 @@
 #     DIFF_PROG=cat
 #     . "$(dirname "$0")/diff-wsl.sh"
 #
+# The harness's own arguments survive the re-exec, so a harness may parse `$@`
+# after sourcing this as if it had never left the host.
+#
 # | knob | default | meaning |
 # |---|---|---|
 # | `DIFF_PROG`      | *required* | the utility's name: used for messages, for finding the reference, and as the one name both binaries are reached by |
@@ -100,14 +103,28 @@ if ! command -v wslpath >/dev/null 2>&1; then
     echo "$DIFF_PROG-diff: could not map $diff_here into WSL; skipping"
     exit 0
   }
-  # The forwarded variables are built into the positional parameters because
-  # this file is sourced by a `sh` that may have no arrays. Nothing returns
-  # from here, so clobbering them is free.
-  set --
+  # The command line for `wsl -e` is built up in the positional parameters,
+  # because this file is sourced by a `sh` that may have no arrays. It has to
+  # end up as
+  #
+  #     env VAR=... VAR=... bash /path/to/harness ARG ARG ...
+  #
+  # and it starts out holding the harness's own arguments, so those are counted,
+  # the environment and the command are appended after them, and then exactly
+  # that many are rotated from the front to the back. A harness that takes
+  # options -- `--cases`, `--flip`, `--keep` -- would otherwise lose them at the
+  # WSL boundary and silently run its defaults.
+  diff_argc=$#
   for diff_v in OURS VERBOSE $DIFF_FORWARD; do
     eval "set -- \"\$@\" \"$diff_v=\${$diff_v:-}\""
   done
-  exec wsl -e env "$@" bash "$diff_inside/$(basename "$0")"
+  set -- "$@" bash "$diff_inside/$(basename "$0")"
+  while [ "$diff_argc" -gt 0 ]; do
+    set -- "$@" "$1"
+    shift
+    diff_argc=$((diff_argc - 1))
+  done
+  exec wsl -e env "$@"
 fi
 
 root=$(cd "$(dirname "$0")/.." && pwd) || exit 1

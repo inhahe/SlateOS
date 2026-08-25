@@ -78378,3 +78378,63 @@ shape for it; `cut`'s gained the bundling structure in `a24d8f5fa`.
 
 **Not a regression.** True since both commands were written. Deliberately left
 out of `a24d8f5fa` so that bundling and end-of-options stayed separate changes.
+
+---
+
+## `A-KSHELL-SED-I-TRUNCATES-A-FILE-IT-CANNOT-DECODE` (lane A, 2026-08-25) — **open**
+
+**Where.** `kernel/src/kshell.rs` — `cmd_sed` (~124158), `sed_apply` (~124286).
+
+**What.** This is the worst of the silent-guess family found so far, because it
+does not merely report a wrong answer — it **destroys the file** and reports
+success.
+
+```rust
+let text = core::str::from_utf8(&data).unwrap_or("");
+```
+
+A file that is not valid UTF-8 becomes the **empty string**. `sed_apply` then
+has no lines to work on and returns an empty result, and under `-i`:
+
+```rust
+crate::fs::Vfs::write_file(&path, output.as_bytes())
+```
+
+writes zero bytes over the original. `sed -i 's/a/b/' photo.jpg` empties
+`photo.jpg` and **exits 0**. Nothing in the run says anything happened.
+
+Without `-i` the same input prints nothing and exits 0, which is the ordinary
+silent-guess shape — indistinguishable from a file that really was empty.
+
+**The second bug, same cause.** `sed_apply` iterates `text.lines()`. Rust's
+`str::lines` splits on `\n` *and strips a trailing `\r`*, so every CRLF line
+ending is silently converted to LF. `sed -i 's/a/b/' dos.txt` rewrites the whole
+file with Unix endings whether or not any line matched. GNU sed does not do
+this: to sed, `\r` is an ordinary character in the pattern space.
+
+**Why it survived.** Every existing sed test uses ASCII text with LF endings —
+the one shape in which both bugs are invisible. This is the same reason the
+whole `str::contains` regex family survived its own suite.
+
+**What the proper fix looks like.** No new dependency: `ere` is **already a byte
+engine**. Its own docs say "POSIX regular expressions over byte strings"; `Ch`
+is a decoded scalar *or* one undecodable byte, and `Regex::is_match`/`find`/
+`captures` all take `BStr<'_>` = `&[u8]`. kshell's sed converts to `&str` purely
+to hand back bytes at the far end, discarding the capability on the way through.
+
+So the change is confined to lane A's own tree — `userspace/ere` needs nothing:
+
+- `sed_apply(&[u8], …) -> Vec<u8>`, `sed_emit`, `sed_substitute` and
+  `sed_addr_matches` all on bytes.
+- Split lines on `\n` only, keeping `\r` as an ordinary byte of the pattern
+  space, so CRLF survives a round trip.
+- `cmd_sed` passes `&data` straight in; the `from_utf8` disappears rather than
+  gaining a fallback.
+- `cmd_sed_input` currently takes `input: &str`, so the same conversion is
+  happening one level up at its caller; that goes too.
+
+The `-c` half of the `cut` fix is the precedent for what to do where characters
+genuinely are needed: report and skip the line, do not empty the file.
+
+**Severity.** Data destruction, silently, exit 0. This should be fixed before
+any remaining cosmetic item in the coreutils queue.

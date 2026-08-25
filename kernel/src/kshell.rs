@@ -10104,7 +10104,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // now scans characters.
         // `expand_tr_set` reports rather than returns, so these unwrap through
         // a helper that turns a refusal into a named test failure.
-        let tset = |s: &str| expand_tr_set(s, false).ok().unwrap_or_default();
+        let tset = |s: &str| expand_tr_set(s, None).ok().unwrap_or_default();
         assert_eq!(tset("é"), alloc::vec!['é']);
         assert_eq!(tset("aéb"), alloc::vec!['a', 'é', 'b']);
         assert_eq!(tset("a-c"), alloc::vec!['a', 'b', 'c']);
@@ -13318,7 +13318,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // `split_words` has already removed the quoting and what is left is
         // data. Two apostrophes are a set of two apostrophes.
         assert_eq!(
-            expand_tr_set("''", false).ok().unwrap_or_default(),
+            expand_tr_set("''", None).ok().unwrap_or_default(),
             alloc::vec!['\'', '\'']
         );
 
@@ -13932,6 +13932,95 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(out.as_slice(), b"xxxd\n", "a plain range still works");
         let out = piped("tr -d '\\t'", b"a\tb\n");
         assert_eq!(out.as_slice(), b"ab\n", "an escape still works");
+    }
+
+    serial_println!("  kshell::self_test 51: tr's repeat constructs count");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // The row this rung exists for. `[x*3]` was five literal characters, so
+        // this mapped `a` to `[`, `b` to `x` and `c` to `*` and exited 0.
+        let out = piped("tr 'abc' '[x*3]'", b"abcd\n");
+        assert_eq!(out.as_slice(), b"xxxd\n", "[x*3] is three copies of x");
+
+        // A repeat is allowed in SET1 too, where it changes which position a
+        // character is found at. Under the old literal reading `a` sat at
+        // index 1 of `[a*3]` and so mapped to `y`, not `x`.
+        let out = piped("tr '[a*3]' 'xyz'", b"abc\n");
+        assert_eq!(out.as_slice(), b"xbc\n", "a repeat in SET1");
+
+        // The count-less form, which is the one that needs SET1's length. Note
+        // that the answer is *not* what SET2's ordinary last-character padding
+        // gives: `d` maps to `z` because the pad stops where the literal
+        // begins.
+        let out = piped("tr abcd '[x*]z'", b"abcd\n");
+        assert_eq!(out.as_slice(), b"xxxz\n", "[x*] pads to SET1's length");
+        let out = piped("tr abcd 'z[x*]'", b"abcd\n");
+        assert_eq!(out.as_slice(), b"zxxx\n", "and pads where it stands");
+        // `[x*0]` is the same construct spelled with an explicit zero.
+        let out = piped("tr abcd '[x*0]z'", b"abcd\n");
+        assert_eq!(out.as_slice(), b"xxxz\n", "[x*0] is [x*]");
+
+        // A count beginning with 0 is octal, so this is eight copies and not
+        // ten. If it were read as decimal, SET2 would be two characters longer
+        // and `i` would map to `x` rather than reaching the `y`.
+        let out = piped("tr abcdefghi '[x*010]y'", b"abcdefghi\n");
+        assert_eq!(out.as_slice(), b"xxxxxxxxy\n", "[x*010] is octal: 8 copies");
+
+        // The repeat is recognised before `[:` and `[=` are, which is what lets
+        // the repeated character be a colon or an equals sign.
+        let out = piped("tr 'abc' '[:*3]'", b"abc\n");
+        assert_eq!(out.as_slice(), b":::\n", "[:*3] is three colons");
+        // And the repeated character may be escaped.
+        let out = piped("tr 'ab' '[\\n*2]'", b"ab\n");
+        assert_eq!(out.as_slice(), b"\n\n\n", "[\\n*2] is two newlines");
+
+        // Not a construct: no `]` means the `[` began nothing, so these stay
+        // literal characters rather than becoming an error.
+        let out = piped("tr -d '[a*'", b"x[a*y\n");
+        assert_eq!(out.as_slice(), b"xy\n", "[a* with no ] is three literals");
+
+        // Refusals. Each must exit 1 and emit no translated text at all.
+        for (script, want) in [
+            // A pad measures SET2 against SET1, so in SET1 it measures against
+            // itself and means nothing.
+            ("tr '[a*]' 'x'", b"may not appear in SET1" as &[u8]),
+            ("tr -d '[a*]'", b"may not appear in SET1"),
+            // Two pads each claim the whole remaining length.
+            ("tr abcd '[x*][y*]'", b"only one"),
+            // A count that is not a number. The construct has a repeat's
+            // shape, so this is malformed rather than a run of literals.
+            ("tr 'a' '[x*b]'", b"invalid repeat count"),
+            // Octal is what makes this one an error: `9` is not an octal digit.
+            ("tr 'a' '[x*09]'", b"invalid repeat count"),
+            // A set has to fit in memory; an absurd count is refused rather
+            // than saturated into a size nobody asked for.
+            ("tr 'a' '[x*99999]'", b"invalid repeat count"),
+        ] {
+            let out = piped(script, b"zz_repeat\n");
+            assert_output_contains(script, &out, want);
+            assert_eq!(last_exit(), 1, "{} is refused", script);
+            assert!(
+                !out.windows(9).any(|w| w == b"zz_repeat"),
+                "{} does not also transform its input",
+                script
+            );
+        }
+
+        // What must not change: the constructs rung 50 added, which the repeat
+        // parser now runs ahead of.
+        let out = piped("tr -d '[:digit:]'", b"a1b2\n");
+        assert_eq!(out.as_slice(), b"ab\n", "a class is still a class");
+        let out = piped("tr -d '[=a=]'", b"abc\n");
+        assert_eq!(out.as_slice(), b"bc\n", "an equivalence class still is");
+        let out = piped("tr -d '[abc]'", b"a[b]c\n");
+        assert_eq!(out.as_slice(), b"\n", "[abc] is still five literals");
+        let out = piped("tr -d '\\101'", b"aAb\n");
+        assert_eq!(out.as_slice(), b"ab\n", "octal escapes still decode");
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -109091,6 +109180,17 @@ enum TrParseError {
     EquivNotSingle(String),
     /// `[=c=]` in SET2, which has no meaning as a replacement.
     EquivInSet2(String),
+    /// `[c*n]` whose count is not a number. It has the shape of a repeat, so
+    /// it is a malformed construct rather than a run of literal characters —
+    /// the same rule that makes `[:alhpa:]` an error.
+    BadRepeatCount(String),
+    /// `[c*]` or `[c*0]` in SET1. The count-less form means "as many as it
+    /// takes to reach SET1's length", which is a statement about SET2 and has
+    /// no reading at all in the set it is measuring against.
+    PadInSet1(char),
+    /// Two count-less repeats in one SET2. Each claims the whole remaining
+    /// length, so together they do not determine one.
+    TwoPads,
 }
 
 impl TrParseError {
@@ -109148,6 +109248,24 @@ impl TrParseError {
                     "tr: '[={}=]': equivalence classes may not appear in SET2 when translating",
                     body
                 );
+            }
+            Self::BadRepeatCount(ref count) => {
+                shell_println!("tr: invalid repeat count '{}' in [c*n] construct", count);
+                shell_println!("      a count starting with 0 is octal, otherwise decimal");
+            }
+            Self::PadInSet1(c) => {
+                shell_println!("tr: the [c*] repeat construct may not appear in SET1");
+                shell_println!(
+                    "      it means 'enough copies of {} to reach SET1's length', which",
+                    c
+                );
+                shell_println!(
+                    "      SET1 cannot say about itself; give a count, as in [{}*4]",
+                    c
+                );
+            }
+            Self::TwoPads => {
+                shell_println!("tr: only one [c*] repeat construct may appear in SET2");
             }
         }
     }
@@ -109251,11 +109369,16 @@ fn parse_tr_args(args: &str) -> Result<TrSpec, TrParseError> {
     // `-d` has no SET2, so SET1 is never a replacement and the SET2-only
     // restrictions do not apply to it: `tr -d '[:punct:]'` is a perfectly
     // ordinary thing to write.
-    let set1 = expand_tr_set(operands.first().map_or("", String::as_str), false)?;
+    //
+    // `None` versus `Some(len)` is what tells the two sets apart, and it
+    // carries the length rather than a bare flag because SET2's `[c*]` pads to
+    // SET1's length — so SET1 has to be expanded first, and the order of these
+    // two lines is load-bearing.
+    let set1 = expand_tr_set(operands.first().map_or("", String::as_str), None)?;
     let set2 = if delete {
         Vec::new()
     } else {
-        expand_tr_set(operands.get(1).map_or("", String::as_str), true)?
+        expand_tr_set(operands.get(1).map_or("", String::as_str), Some(set1.len()))?
     };
     Ok(TrSpec {
         set1,
@@ -109266,6 +109389,28 @@ fn parse_tr_args(args: &str) -> Result<TrSpec, TrParseError> {
 }
 
 /// `tr SET1 SET2` — translate characters; `tr -d SET1` — delete them.
+///
+/// A set is written with these constructs, all of which are read by
+/// [`expand_tr_set`]:
+///
+/// | written | means |
+/// |---|---|
+/// | `a-z` | the code points from `a` to `z` |
+/// | `\n \t \r \a \b \f \v` | the control character |
+/// | `\NNN` | up to three octal digits, at most `\177` |
+/// | `[:alpha:]` | a POSIX class — ASCII, in code-point order |
+/// | `[=c=]` | `c` (a character is equivalent only to itself here) |
+/// | `[c*n]` | `n` copies of `c`; `n` is octal if it starts with `0` |
+/// | `[c*]` | in SET2 only: enough copies of `c` to reach SET1's length |
+///
+/// A `[` that begins none of the bracket forms is an ordinary character, which
+/// is what makes `tr -d '[]'` mean anything. A `[` that begins one *badly* —
+/// `[:alhpa:]`, `[x*b]` — is an error rather than a run of literals, so a typo
+/// is loud instead of quietly translating punctuation.
+///
+/// SET2 shorter than SET1 is padded with SET2's last character (GNU's default;
+/// `-t`, which truncates SET1 instead, is refused rather than ignored). `[c*]`
+/// exists for when the padding character should not be that last one.
 fn cmd_tr(args: &str) {
     match parse_tr_args(args) {
         Ok(spec) => tr_run(&spec, None),
@@ -109458,10 +109603,16 @@ fn tr_delete(text: &str, s1: &[char]) {
 /// [`split_words`], which removes the quoting itself, so a quote reaching here
 /// is data. Stripping it would eat the outer pair of `tr "''" x`, which is how
 /// you ask to translate two apostrophes.
-fn expand_tr_set(set: &str, set2: bool) -> Result<Vec<char>, TrParseError> {
+fn expand_tr_set(set: &str, pad_to: Option<usize>) -> Result<Vec<char>, TrParseError> {
+    let set2 = pad_to.is_some();
     let src: Vec<char> = set.chars().collect();
     let len = src.len();
     let mut chars = Vec::new();
+    // Where a `[c*]` sat, and what to fill with. Held rather than expanded on
+    // sight because its length depends on the rest of the set, which has not
+    // been read yet: in `tr abcd '[x*]z'` the pad is two characters, and that
+    // is only knowable after the `z`.
+    let mut pad: Option<(usize, char)> = None;
     let mut i = 0;
 
     while i < len {
@@ -109474,65 +109625,26 @@ fn expand_tr_set(set: &str, set2: bool) -> Result<Vec<char>, TrParseError> {
         // end of one. A `[` that begins no construct falls through to the
         // ordinary paths and stays a literal character.
         if cur == '[' {
-            if let Some((members, used)) = tr_bracket(&src, i, set2)? {
-                chars.extend(members);
-                i = i.saturating_add(used);
-                continue;
+            match tr_bracket(&src, i, set2)? {
+                Some((TrBracket::Members(members), used)) => {
+                    chars.extend(members);
+                    i = i.saturating_add(used);
+                    continue;
+                }
+                Some((TrBracket::Pad(c), used)) => {
+                    if pad.is_some() {
+                        return Err(TrParseError::TwoPads);
+                    }
+                    pad = Some((chars.len(), c));
+                    i = i.saturating_add(used);
+                    continue;
+                }
+                None => {}
             }
         }
         if cur == '\\' && next.is_some() {
-            // Every escape consumes the backslash and one character unless it
-            // says otherwise; only the octal form is longer.
-            let mut used = 2usize;
-            match next {
-                Some('n') => chars.push('\n'),
-                Some('t') => chars.push('\t'),
-                Some('r') => chars.push('\r'),
-                // The four that were missing. Each of them used to fall into
-                // the catch-all below and stand for its own letter, so
-                // `tr -d '\a'` deleted every `a` — a wrong answer reported as
-                // success, and a particularly quiet one because deleting the
-                // letter `a` is a perfectly plausible thing to have asked for.
-                Some('a') => chars.push('\x07'),
-                Some('b') => chars.push('\x08'),
-                Some('f') => chars.push('\x0c'),
-                Some('v') => chars.push('\x0b'),
-                Some(first @ '0'..='7') => {
-                    // Up to three octal digits, as every tr reads them. These
-                    // fell into the catch-all too, so `tr -d '\0'` — deleting
-                    // NUL bytes, and the example this file's own byte-table
-                    // documentation gives as a common shape — deleted the
-                    // digit `0` instead, and `\101` deleted `1` and `0`.
-                    let mut val: u32 = first.to_digit(8).unwrap_or(0);
-                    let mut digits = alloc::string::String::from(first);
-                    for k in 0..2usize {
-                        let at = i.saturating_add(2).saturating_add(k);
-                        let Some(d) = src.get(at).copied().and_then(|c| c.to_digit(8)) else {
-                            break;
-                        };
-                        val = val.saturating_mul(8).saturating_add(d);
-                        digits.push(char::from_digit(d, 8).unwrap_or('0'));
-                        used = used.saturating_add(1);
-                    }
-                    // Above `\177` an octal escape means a *byte* in every tr,
-                    // and this one's sets are code points — a deliberate choice
-                    // recorded above, and the only one under which `à-â` is a
-                    // range of three characters rather than of six bytes. There
-                    // is no reading of `\303` that is right under both, so it is
-                    // refused instead of silently answered as U+00C3.
-                    if val > 0o177 {
-                        return Err(TrParseError::OctalTooLarge(digits));
-                    }
-                    let Some(c) = char::from_u32(val) else {
-                        return Err(TrParseError::OctalTooLarge(digits));
-                    };
-                    chars.push(c);
-                }
-                // Any other escaped character stands for itself — including a
-                // multi-byte one, which is the case the byte scan mangled.
-                Some(c) => chars.push(c),
-                None => {}
-            }
+            let (c, used) = tr_escape(&src, i)?;
+            chars.push(c);
             i = i.saturating_add(used);
         } else if next == Some('-') && i.saturating_add(2) < len {
             // Range: `a-z`. Over `char`s this is a code-point range, which is
@@ -109550,7 +109662,88 @@ fn expand_tr_set(set: &str, set2: bool) -> Result<Vec<char>, TrParseError> {
             i = i.saturating_add(1);
         }
     }
+
+    // Resolve the pad, now that the length it has to make up is known. The
+    // deficit is measured against the *whole* of the rest of SET2, not against
+    // what preceded the construct, which is why this could not be done inline.
+    if let (Some((at, c)), Some(want)) = (pad, pad_to) {
+        let deficit = want.saturating_sub(chars.len());
+        let tail = chars.split_off(at.min(chars.len()));
+        chars.extend(core::iter::repeat_n(c, deficit));
+        chars.extend(tail);
+    }
     Ok(chars)
+}
+
+/// Decode the escape sequence beginning at `src[at]`, which must be `\`.
+///
+/// Returns the character it names and how many source characters it consumed.
+///
+/// Lifted out of [`expand_tr_set`]'s scan because [`tr_bracket`] needs the same
+/// reading: the character in a repeat construct may itself be escaped, and
+/// `[\n*3]` has to mean three newlines. Left inline, the bracket parser would
+/// have had to either duplicate the octal scan — two copies of a decoder is how
+/// one command comes to disagree with itself — or read the `\` as a literal
+/// backslash and expand `[\n*3]` to a backslash, an `n` and a repeat of
+/// something never asked for.
+///
+/// A trailing `\` with nothing after it stands for itself, which is what the
+/// inline version did by falling through to its literal arm.
+fn tr_escape(src: &[char], at: usize) -> Result<(char, usize), TrParseError> {
+    let Some(next) = src.get(at.saturating_add(1)).copied() else {
+        return Ok(('\\', 1));
+    };
+    // Every escape consumes the backslash and one character unless it says
+    // otherwise; only the octal form is longer.
+    match next {
+        'n' => Ok(('\n', 2)),
+        't' => Ok(('\t', 2)),
+        'r' => Ok(('\r', 2)),
+        // The four that were missing before rung 49. Each used to fall into
+        // the catch-all below and stand for its own letter, so `tr -d '\a'`
+        // deleted every `a` — a wrong answer reported as success, and a
+        // particularly quiet one because deleting the letter `a` is a
+        // perfectly plausible thing to have asked for.
+        'a' => Ok(('\x07', 2)),
+        'b' => Ok(('\x08', 2)),
+        'f' => Ok(('\x0c', 2)),
+        'v' => Ok(('\x0b', 2)),
+        first @ '0'..='7' => {
+            // Up to three octal digits, as every tr reads them. These fell into
+            // the catch-all too, so `tr -d '\0'` — deleting NUL bytes, and the
+            // example this file's own byte-table documentation gives as a
+            // common shape — deleted the digit `0` instead, and `\101` deleted
+            // `1` and `0`.
+            let mut val: u32 = first.to_digit(8).unwrap_or(0);
+            let mut digits = alloc::string::String::from(first);
+            let mut used = 2usize;
+            for k in 0..2usize {
+                let idx = at.saturating_add(2).saturating_add(k);
+                let Some(d) = src.get(idx).copied().and_then(|c| c.to_digit(8)) else {
+                    break;
+                };
+                val = val.saturating_mul(8).saturating_add(d);
+                digits.push(char::from_digit(d, 8).unwrap_or('0'));
+                used = used.saturating_add(1);
+            }
+            // Above `\177` an octal escape means a *byte* in every tr, and this
+            // one's sets are code points — a deliberate choice recorded in
+            // `design-decisions.md` §276, and the only one under which `à-â` is
+            // a range of three characters rather than of six bytes. There is no
+            // reading of `\303` that is right under both, so it is refused
+            // instead of silently answered as U+00C3.
+            if val > 0o177 {
+                return Err(TrParseError::OctalTooLarge(digits));
+            }
+            let Some(c) = char::from_u32(val) else {
+                return Err(TrParseError::OctalTooLarge(digits));
+            };
+            Ok((c, used))
+        }
+        // Any other escaped character stands for itself — including a
+        // multi-byte one, which is the case the old byte scan mangled.
+        c => Ok((c, 2)),
+    }
 }
 
 /// The members of a POSIX `[:name:]` character class, in code-point order.
@@ -109588,11 +109781,23 @@ fn tr_class_members(name: &str) -> Option<Vec<char>> {
     Some((0u8..=0x7f).map(char::from).filter(|&c| keep(c)).collect())
 }
 
+/// What a bracket construct expands to.
+enum TrBracket {
+    /// A definite list of characters: `[:digit:]`, `[=c=]`, or `[c*n]` with a
+    /// count.
+    Members(Vec<char>),
+    /// `[c*]` (or `[c*0]`): repeat this character as many times as it takes to
+    /// bring SET2 to SET1's length. How many that is cannot be known where the
+    /// construct is read — the rest of SET2 has not been scanned yet — so it
+    /// is carried out and resolved once the whole set is expanded.
+    Pad(char),
+}
+
 /// Try to read a bracket construct at `src[at]`, which is known to be `[`.
 ///
-/// Returns the members it expands to and how many characters it consumed, or
-/// `None` if what follows is not a construct at all — in which case the `[` is
-/// an ordinary character, which is the rule every `tr` follows and the only one
+/// Returns what it expands to and how many characters it consumed, or `None` if
+/// what follows is not a construct at all — in which case the `[` is an
+/// ordinary character, which is the rule every `tr` follows and the only one
 /// under which `tr -d '[]'` can mean anything.
 ///
 /// The distinction that matters is between *not a construct* and *a malformed
@@ -109607,7 +109812,7 @@ fn tr_bracket(
     src: &[char],
     at: usize,
     set2: bool,
-) -> Result<Option<(Vec<char>, usize)>, TrParseError> {
+) -> Result<Option<(TrBracket, usize)>, TrParseError> {
     /// Scan for a two-character terminator, returning the text before it and
     /// the index just past it.
     fn scan_to(src: &[char], from: usize, a: char, b: char) -> Option<(String, usize)> {
@@ -109620,6 +109825,58 @@ fn tr_bracket(
             }
             body.push(c);
             j = j.saturating_add(1);
+        }
+    }
+
+    /// The same, for a one-character terminator.
+    fn scan_to_one(src: &[char], from: usize, term: char) -> Option<(String, usize)> {
+        let mut j = from;
+        let mut body = String::new();
+        loop {
+            let c = src.get(j).copied()?;
+            if c == term {
+                return Some((body, j.saturating_add(1)));
+            }
+            body.push(c);
+            j = j.saturating_add(1);
+        }
+    }
+
+    // `[c*n]` — c repeated n times. Tried before the `:`/`=` arms would be
+    // wrong to try it, because the character being repeated may be either of
+    // those: `[:*3]` is three colons, and reading it as a malformed character
+    // class would refuse a set that is perfectly well formed.
+    {
+        let cat = at.saturating_add(1);
+        let esc = src.get(cat).copied() == Some('\\');
+        let read = if esc {
+            Some(tr_escape(src, cat)?)
+        } else {
+            src.get(cat).copied().map(|c| (c, 1usize))
+        };
+        if let Some((c, used)) = read {
+            let star = cat.saturating_add(used);
+            if src.get(star).copied() == Some('*') {
+                // Only now is this definitely a repeat, so only now may a
+                // missing `]` be an error rather than a `[` that begins
+                // nothing. It stays a non-construct: `[a*` with no close is
+                // three literal characters, as it is in GNU.
+                if let Some((count, end)) = scan_to_one(src, star.saturating_add(1), ']') {
+                    let n = parse_tr_repeat_count(&count)?;
+                    let used = end.saturating_sub(at);
+                    // A count of zero — written `[c*]` or `[c*0]`, which are
+                    // the same thing — is the padding form, and is a statement
+                    // about SET2's length relative to SET1. In SET1 it would be
+                    // measuring against itself.
+                    if n == 0 {
+                        if !set2 {
+                            return Err(TrParseError::PadInSet1(c));
+                        }
+                        return Ok(Some((TrBracket::Pad(c), used)));
+                    }
+                    return Ok(Some((TrBracket::Members(alloc::vec![c; n]), used)));
+                }
+            }
         }
     }
 
@@ -109637,7 +109894,7 @@ fn tr_bracket(
             if set2 && !matches!(name.as_str(), "upper" | "lower") {
                 return Err(TrParseError::ClassInSet2(name));
             }
-            Ok(Some((members, end.saturating_sub(at))))
+            Ok(Some((TrBracket::Members(members), end.saturating_sub(at))))
         }
         // `[=c=]` — an equivalence class. In the C locale, and therefore here,
         // a character is equivalent to itself and nothing else, so this is a
@@ -109654,10 +109911,58 @@ fn tr_bracket(
             if set2 {
                 return Err(TrParseError::EquivInSet2(body));
             }
-            Ok(Some((alloc::vec![c], end.saturating_sub(at))))
+            Ok(Some((
+                TrBracket::Members(alloc::vec![c]),
+                end.saturating_sub(at),
+            )))
         }
         _ => Ok(None),
     }
+}
+
+/// Read the `n` of a `[c*n]` construct.
+///
+/// Empty is zero, which is the padding form — `[c*]` and `[c*0]` are the same
+/// construct, and both this and GNU treat them so.
+///
+/// **A count beginning with `0` is octal**, which is not a quirk worth
+/// dropping: it is what every `tr` does, so `[x*010]` is eight copies here and
+/// eight everywhere else. Reading it as decimal ten would be a silent
+/// disagreement of exactly the kind this command has been shedding — the set
+/// would come out two characters short and nothing would say so.
+///
+/// A count that is not a number at all is an error rather than a set of
+/// literals, because `[a*b]` has a repeat's shape; see [`tr_bracket`]'s note on
+/// malformed constructs.
+fn parse_tr_repeat_count(text: &str) -> Result<usize, TrParseError> {
+    if text.is_empty() {
+        return Ok(0);
+    }
+    let (radix, digits) = if let Some(rest) = text.strip_prefix('0') {
+        // `"0"` itself leaves an empty remainder, which is the padding form
+        // again rather than an empty octal number.
+        if rest.is_empty() {
+            return Ok(0);
+        }
+        (8u32, rest)
+    } else {
+        (10u32, text)
+    };
+    let mut n: usize = 0;
+    for c in digits.chars() {
+        let Some(d) = c.to_digit(radix) else {
+            return Err(TrParseError::BadRepeatCount(String::from(text)));
+        };
+        // A count is a length, and the set it builds has to fit in memory. An
+        // absurd one is refused rather than saturated: saturating would build a
+        // set of a size the user did not ask for and report success.
+        n = n
+            .checked_mul(radix as usize)
+            .and_then(|v| v.checked_add(d as usize))
+            .filter(|&v| v <= 4096)
+            .ok_or_else(|| TrParseError::BadRepeatCount(String::from(text)))?;
+    }
+    Ok(n)
 }
 
 /// `yes [STRING]` — repeatedly output STRING (default "y").

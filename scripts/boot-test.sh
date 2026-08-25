@@ -2582,6 +2582,52 @@ check_vfs_permission_gate() {
 
 check_vfs_permission_gate
 
+# Keep the shell's exit statuses honest: a usage message is a failure report.
+#
+# When a kshell command prints `Usage: ...` because it could not do what it was
+# asked, it must also set a non-zero exit status.  Otherwise the diagnostic goes
+# to the screen and a success goes to the caller -- and a script reads the
+# caller's copy, so `cmd && next` runs `next` after a typo and `set -e` does not
+# stop.
+#
+# This is checked rather than reviewed because it has now been got wrong twice.
+# A sweep in August fixed 710 sites by searching for the shape they had (a usage
+# print followed by a bare `return;`) and reported itself complete, having
+# missed 87 that leave by falling off the end of a `match` arm instead.  A sweep
+# keyed on a syntactic pattern defines its own blind spot and cannot report it;
+# the checker is keyed on the property instead, so it does not care what shape
+# the next one is written in.  See design-decisions.md §296.
+check_usage_status() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== usage-status check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking that usage messages report failure ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-usage-status.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each site above prints a usage message and" >&2
+    echo "then tells its caller the command succeeded." >&2
+    echo "" >&2
+    echo "Add set_exit(1) after the diagnostic.  If the site is NOT an error --" >&2
+    echo "a bare subcommand printing its current setting is a query, and it" >&2
+    echo "succeeded -- add it to ALLOWED in the script with a reason instead." >&2
+    echo "Get that distinction backwards and you produce the mirror-image bug:" >&2
+    echo "'elog echo' and 'fc algo' answered correctly and reported failure for" >&2
+    echo "a month because the previous sweep patched their query paths." >&2
+    exit 1
+}
+
+check_usage_status
+
 # Keep self-test skips honest: looked up, and reported.
 #
 # A self-test may legitimately skip -- there is no second CPU to offline on a

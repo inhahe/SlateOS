@@ -111,6 +111,23 @@
 #                                       # TCG/no-PMU QEMU this is the only NMI
 #                                       # source that can catch a single-CPU
 #                                       # IF=0 spin.
+#   ./scripts/boot-test.sh --no-monitor
+#                                       # do NOT attach QEMU's HMP monitor on a
+#                                       # TCP socket.  The monitor is ON by
+#                                       # default: it is what lets a timeout or
+#                                       # a serial stall read the wedged guest's
+#                                       # RIP straight out of the emulator, and
+#                                       # it works even when the guest takes no
+#                                       # interrupts at all (IF=0), because the
+#                                       # read is host-side.  Unlike
+#                                       # --hard-lockup-watchdog above it adds no
+#                                       # guest device and changes no PCI
+#                                       # topology, so it is invisible to the
+#                                       # guest — which is why it defaults on and
+#                                       # the watchdog does not.  Use this flag
+#                                       # only if the host TCP listen itself is a
+#                                       # problem (e.g. a sandbox that forbids
+#                                       # binding a port).
 #   ./scripts/boot-test.sh --bootstrap  # if a git-ignored prerequisite is
 #                                       # missing (one of the six ring-3 service
 #                                       # binaries the kernel embeds, or the
@@ -1191,6 +1208,12 @@ STALL_SECS=0
 # default so the shared harness is byte-for-byte unchanged on normal runs;
 # only --hard-lockup-watchdog opts in (see Q20 in open-questions.md).
 HARD_LOCKUP_WATCHDOG=0
+# Attach QEMU's HMP monitor on a TCP socket so a timeout or a serial stall can
+# read the frozen guest's RIP straight out of the emulator?  ON by default;
+# --no-monitor opts out.  Unlike the watchdog above this adds no guest device
+# and is invisible to the guest — see the MONITOR_ARGS block for why the two
+# used to be coupled and why that was wrong.
+MONITOR_ENABLED=1
 # Which serial marker the wait loop treats as "boot finished".  Default is
 # BOOT_OK (the fast path); --bench switches it to BENCH_OK so we wait for the
 # deferred micro-benchmark task to finish and can scrape its numbers.
@@ -1296,6 +1319,7 @@ for arg in "$@"; do
         --timeout=*) TIMEOUT="${arg#*=}"; TIMEOUT_EXPLICIT=1 ;;
         --stall-secs=*) STALL_SECS="${arg#*=}" ;;
         --hard-lockup-watchdog) HARD_LOCKUP_WATCHDOG=1 ;;
+        --no-monitor) MONITOR_ENABLED=0 ;;
         --host-load=*) HOST_LOAD="${arg#*=}" ;;
         --min-free-gb=*) MIN_FREE_GB="${arg#*=}" ;;
         --min-free-temp-gb=*) MIN_FREE_TEMP_GB="${arg#*=}" ;;
@@ -1715,13 +1739,30 @@ fi
 # harness default is byte-for-byte unchanged.
 WATCHDOG_ACTION="${WATCHDOG_ACTION:-inject-nmi}"
 WATCHDOG_ARGS=()
-# Diagnostic HMP monitor for capturing the wedged guest RIP on timeout.  Only
-# attached alongside the hard-lockup watchdog (i.e. deliberate hang-repro runs),
-# so the default harness command line is byte-for-byte unchanged.  On timeout we
-# query `info registers`/`info cpus` over this socket BEFORE killing QEMU, which
-# captures the frozen CPU's RIP directly from the emulator — bypassing in-guest
-# NMI delivery entirely (the silent BSP-dead wedge never takes the injected NMI,
-# so the in-guest handler dump is blind; the emulator's own view is not).
+# Diagnostic HMP monitor for capturing the wedged guest RIP on timeout.  ON BY
+# DEFAULT; --no-monitor opts out.  On timeout we query `info registers`/`info
+# cpus` over this socket BEFORE killing QEMU, which captures the frozen CPU's
+# RIP directly from the emulator — bypassing in-guest NMI delivery entirely (the
+# silent BSP-dead wedge never takes the injected NMI, so the in-guest handler
+# dump is blind; the emulator's own view is not).
+#
+# It used to be attached only alongside --hard-lockup-watchdog, which made both
+# RIP-capture paths (the stall capture and the timeout capture) dead code on
+# every ordinary run.  That cost a real diagnosis on 2026-08-25: a
+# B-FORKEXEC-BOOT-HANG recurrence consumed the full 900 s timeout and produced
+# no RIP, and the immediately-following re-run *with* the flag booted green —
+# which is the normal outcome for a hang that appears once in a few dozen boots.
+# An opt-in detector for an intermittent fault is a detector that is off when
+# the fault happens.
+#
+# Coupling the two was a category error rather than a policy: §61 kept the
+# hard-lockup watchdog opt-in so the *guest* is unperturbed, because
+# `-device i6300esb` changes the guest's PCI topology.  `-monitor tcp:` adds no
+# device and changes nothing the guest can observe — it is a host-side control
+# socket — so §61's rationale never applied to it.  Verified empirically across
+# the 2026-08-25 pair: the run with the monitor attached and the run without
+# produced no difference in harness stdout (no `(qemu)` banner either way,
+# since -serial already goes to a file rather than stdio).
 MONITOR_ARGS=()
 
 # Pick a TCP port for the HMP monitor that QEMU can actually bind.  On Windows,
@@ -1759,17 +1800,28 @@ pick_monitor_port() {
     echo "$base"  # nothing free found; let QEMU try the base and report
 }
 
-if [ -n "${MONITOR_PORT:-}" ]; then
-    MONITOR_PORT_SRC="env override"
-else
-    MONITOR_PORT="$(pick_monitor_port 57000)"
-    MONITOR_PORT_SRC="auto-selected (excluded-range aware)"
+# Port selection is inside the enable test on purpose: pick_monitor_port shells
+# out to netsh and netstat, which cost a second or two on Windows, and a run
+# that will not attach the monitor has no use for the answer.
+if [ "$MONITOR_ENABLED" -eq 1 ]; then
+    if [ -n "${MONITOR_PORT:-}" ]; then
+        MONITOR_PORT_SRC="env override"
+    else
+        MONITOR_PORT="$(pick_monitor_port 57000)"
+        MONITOR_PORT_SRC="auto-selected (excluded-range aware)"
+    fi
+    MONITOR_ARGS=(-monitor "tcp:127.0.0.1:$MONITOR_PORT,server,nowait")
+    echo "=== Diagnostic HMP monitor ENABLED (tcp:127.0.0.1:$MONITOR_PORT, $MONITOR_PORT_SRC) ==="
 fi
 if [ "$HARD_LOCKUP_WATCHDOG" -eq 1 ]; then
     WATCHDOG_ARGS=(-device i6300esb,id=hwdog0 -action "watchdog=$WATCHDOG_ACTION")
-    MONITOR_ARGS=(-monitor "tcp:127.0.0.1:$MONITOR_PORT,server,nowait")
     echo "=== Hard-lockup watchdog ENABLED (i6300esb -> $WATCHDOG_ACTION) ==="
-    echo "=== Diagnostic HMP monitor ENABLED (tcp:127.0.0.1:$MONITOR_PORT, $MONITOR_PORT_SRC) ==="
+    if [ "$MONITOR_ENABLED" -ne 1 ]; then
+        # The watchdog's whole value is the RIP the monitor reads back, so
+        # --no-monitor alongside it is almost certainly a mistake.  Say so
+        # rather than silently arming a detector whose output is discarded.
+        echo "=== WARNING: --no-monitor disables the RIP capture the watchdog exists to feed ===" >&2
+    fi
 fi
 
 # Capture the guest CPU state over the HMP monitor socket, then resolve RIP to a
@@ -4200,9 +4252,16 @@ if [ -f "$SERIAL_FILE" ]; then
     echo "=== Last 25 serial lines before the wedge (freeze point) ==="
     tail -n 25 "$SERIAL_FILE" || true
     echo "=== (end serial tail) ==="
+    # The RIP for this timeout was already captured above, from the emulator,
+    # over the always-on HMP monitor — look for the "RIP at timeout" block.
+    # The hint below is about the *other* half: an in-guest task-table dump,
+    # which needs an NMI to interrupt an IF=0 wedge and therefore needs the
+    # opt-in device.  Only worth suggesting when the RIP alone was not enough.
     if [ "$HARD_LOCKUP_WATCHDOG" -eq 0 ]; then
-        echo "Hint: re-run with --hard-lockup-watchdog to capture the wedged"
-        echo "      guest RIP via the i6300esb NMI + HMP monitor (see Q20)."
+        echo "Hint: the wedged RIP is above (HMP monitor).  If it is not enough,"
+        echo "      re-run with --hard-lockup-watchdog for an in-guest NMI task-table"
+        echo "      dump as well (see Q20) — note an intermittent hang usually does"
+        echo "      not reproduce on the next boot, so prefer reading the RIP first."
     fi
 fi
 echo "=== Boot test FAILED ==="

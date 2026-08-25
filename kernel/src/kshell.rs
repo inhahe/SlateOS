@@ -12085,6 +12085,112 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = crate::fs::Vfs::remove(two);
     }
 
+    serial_println!("  kshell::self_test 38: sed writes the same bytes from a pipe as from a file");
+    // The two halves of `sed` used to hold two copies of the transform loop, and
+    // the copies disagreed about the trailing newline: the file half popped it
+    // and printed with `shell_println!` (putting one back), the pipe half popped
+    // it and printed with `shell_print!` (leaving it off). So the same script
+    // over the same bytes produced a different byte count depending on which end
+    // the text arrived from, and `cat f | sed s/a/b/ | wc -l` counted one short.
+    //
+    // The interesting assertions here are about *bytes*, not about which lines
+    // appear -- both halves already agreed on the lines. That is why each one
+    // compares whole captured output rather than searching it.
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+        fn plain(cmd: &str) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch(cmd);
+            capture.finish()
+        }
+
+        let path = "/tmp/zz_sed_nl";
+        let body: &[u8] = b"zz_alpha\nzz_beta\n";
+        assert!(
+            crate::fs::Vfs::write_file(path, body).is_ok(),
+            "fixture for the sed newline rung must be writable"
+        );
+
+        // The whole point: same script, same bytes, both ends.
+        let from_pipe = piped("sed s/zz_alpha/zz_gamma/", body);
+        let from_file = plain(&alloc::format!("sed s/zz_alpha/zz_gamma/ {path}"));
+        assert_eq!(
+            from_pipe, from_file,
+            "the pipe half and the file half must write identical bytes"
+        );
+        let want: &[u8] = b"zz_gamma\nzz_beta\n";
+        assert_eq!(
+            from_file.as_slice(),
+            want,
+            "and both must write every line with its newline"
+        );
+        assert_eq!(last_exit(), 0, "and succeed");
+
+        // An input with no final newline keeps not having one. `str::lines`
+        // cannot tell `"a\nb"` from `"a\nb\n"`, so a loop that appends a newline
+        // per line invents one -- which is a silent edit to the user's data, the
+        // same class of fault as the pass-throughs rungs 33-37 are about.
+        let out = piped("sed s/zz_alpha/zz_gamma/", b"zz_alpha\nzz_beta");
+        let want: &[u8] = b"zz_gamma\nzz_beta";
+        assert_eq!(
+            out.as_slice(),
+            want,
+            "input without a final newline is written back without one"
+        );
+
+        // ... and that is a property of the *input*, not of whether the last
+        // line survived the script. Deleting the unterminated last line leaves
+        // `zz_alpha` as the final output line, and `zz_alpha` did have a
+        // newline, so it keeps it. A rule written as "pop the last newline"
+        // instead of "the last input line is special" gets this one wrong.
+        let out = piped("sed /zz_beta/d", b"zz_alpha\nzz_beta");
+        let want: &[u8] = b"zz_alpha\n";
+        assert_eq!(
+            out.as_slice(),
+            want,
+            "a surviving line keeps the newline it came with"
+        );
+
+        // Empty output is empty. The file half used to pop a newline that was
+        // not there and then print one, so a script that deleted everything
+        // emitted a blank line -- output where there should be none.
+        let out = piped("sed /zz_/d", body);
+        assert!(
+            out.is_empty(),
+            "a script that deletes every line prints nothing at all, got {out:?}"
+        );
+        assert_eq!(last_exit(), 0, "deleting everything is not an error");
+
+        // `-n` with no `p` is the same case reached from the other direction.
+        let out = plain(&alloc::format!("sed -n s/zz_alpha/zz_gamma/ {path}"));
+        assert!(
+            out.is_empty(),
+            "-n without p prints nothing at all, got {out:?}"
+        );
+
+        // `-i` goes through the identical string, so the file on disk must gain
+        // the same bytes the terminal would have seen. The old code wrote the
+        // pre-pop string here and the post-pop string to the terminal, which is
+        // a third spelling of the same output.
+        dispatch(&alloc::format!("sed -i s/zz_alpha/zz_gamma/ {path}"));
+        assert_eq!(last_exit(), 0, "an in-place edit succeeds");
+        let want: &[u8] = b"zz_gamma\nzz_beta\n";
+        match crate::fs::Vfs::read_file(path) {
+            Ok(d) => assert_eq!(
+                d.as_slice(),
+                want,
+                "-i writes the bytes the terminal would have shown"
+            ),
+            Err(e) => panic!("re-reading the sed -i fixture failed: {e:?}"),
+        }
+
+        let _ = crate::fs::Vfs::remove(path);
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -120219,53 +120325,7 @@ fn cmd_sed(args: &str) {
         };
 
         let text = core::str::from_utf8(&data).unwrap_or("");
-        let mut output = alloc::string::String::new();
-
-        for (line_idx, line) in text.lines().enumerate() {
-            let line_num = line_idx.wrapping_add(1);
-            let mut current = alloc::string::String::from(line);
-            let mut deleted = false;
-            let mut print_this = false;
-
-            for cmd in &parsed {
-                match cmd {
-                    SedCmd::Substitute {
-                        pattern,
-                        replacement,
-                        global,
-                        addr,
-                    } => {
-                        if sed_addr_matches(addr, line_num, &current) {
-                            if *global {
-                                current = sed_replace_all(&current, pattern, replacement);
-                            } else {
-                                current = sed_replace_first(&current, pattern, replacement);
-                            }
-                        }
-                    }
-                    SedCmd::Delete { addr } => {
-                        if sed_addr_matches(addr, line_num, &current) {
-                            deleted = true;
-                        }
-                    }
-                    SedCmd::Print { addr } => {
-                        if sed_addr_matches(addr, line_num, &current) {
-                            print_this = true;
-                        }
-                    }
-                }
-            }
-
-            if !deleted {
-                if !suppress || print_this {
-                    output.push_str(&current);
-                    output.push('\n');
-                }
-                if suppress && print_this {
-                    // Already added above.
-                }
-            }
-        }
+        let output = sed_apply(text, &parsed, suppress);
 
         if in_place {
             match crate::fs::Vfs::write_file(&path, output.as_bytes()) {
@@ -120276,11 +120336,13 @@ fn cmd_sed(args: &str) {
                 }
             }
         } else {
-            // Print output (without trailing newline already in output).
-            if output.ends_with('\n') {
-                output.pop();
-            }
-            shell_println!("{}", output);
+            // Verbatim: `sed_apply` has already put a newline after every line
+            // that gets one. The old code popped that newline and handed the
+            // string to `shell_println!`, which put one back — the same result
+            // for a non-empty output, and a spurious blank line for an empty
+            // one, so `sed '/./d' f` printed a line where it should print
+            // nothing at all.
+            shell_print!("{}", output);
         }
     }
 }
@@ -120317,6 +120379,73 @@ fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &str) -> bool {
         SedAddr::Line(n) => line_num == *n,
         SedAddr::Pattern(pat) => line.contains(pat.as_str()),
     }
+}
+
+/// Run a parsed script over `text` and return exactly what `sed` should write.
+///
+/// `cmd_sed` and `cmd_sed_input` each carried a copy of this loop, and the
+/// copies kept drifting. `classify_sed_args` was extracted for the same reason
+/// after the pipe copy lost the `-i` arm; the `filter_map` fix had to be made
+/// twice; and by the time this was written the two disagreed about the trailing
+/// newline — the file half popped it and printed with `shell_println!`, the pipe
+/// half popped it and printed with `shell_print!`, so the piped form dropped the
+/// final newline outright. Two copies of a loop is how one command comes to
+/// disagree with itself; one copy is the fix that stops it recurring.
+///
+/// The newline rule is now GNU's, and it is why the last line is special-cased:
+/// `str::lines` cannot tell `"a\nb"` from `"a\nb\n"`, so a naive loop invents a
+/// final newline for input that had none. A newline follows every emitted line
+/// *except* the last line of an input that did not end in one — which is a
+/// property of the input, not of whether that line survived the script.
+fn sed_apply(text: &str, script: &[SedCmd], suppress: bool) -> alloc::string::String {
+    let final_newline = text.ends_with('\n');
+    let total = text.lines().count();
+    let mut output = alloc::string::String::new();
+
+    for (line_idx, line) in text.lines().enumerate() {
+        let line_num = line_idx.wrapping_add(1);
+        let mut current = alloc::string::String::from(line);
+        let mut deleted = false;
+        let mut print_this = false;
+
+        for cmd in script {
+            match cmd {
+                SedCmd::Substitute {
+                    pattern,
+                    replacement,
+                    global,
+                    addr,
+                } => {
+                    if sed_addr_matches(addr, line_num, &current) {
+                        if *global {
+                            current = sed_replace_all(&current, pattern, replacement);
+                        } else {
+                            current = sed_replace_first(&current, pattern, replacement);
+                        }
+                    }
+                }
+                SedCmd::Delete { addr } => {
+                    if sed_addr_matches(addr, line_num, &current) {
+                        deleted = true;
+                    }
+                }
+                SedCmd::Print { addr } => {
+                    if sed_addr_matches(addr, line_num, &current) {
+                        print_this = true;
+                    }
+                }
+            }
+        }
+
+        if !deleted && (!suppress || print_this) {
+            output.push_str(&current);
+            if final_newline || line_num != total {
+                output.push('\n');
+            }
+        }
+    }
+
+    output
 }
 
 /// Why a `sed` script could not be turned into a [`SedCmd`].
@@ -120585,52 +120714,11 @@ fn cmd_sed_input(args: &str, input: &str) {
         return;
     };
 
-    let mut output = alloc::string::String::new();
-    for (line_idx, line) in input.lines().enumerate() {
-        let line_num = line_idx.wrapping_add(1);
-        let mut current = alloc::string::String::from(line);
-        let mut deleted = false;
-        let mut print_this = false;
-
-        for cmd in &parsed {
-            match cmd {
-                SedCmd::Substitute {
-                    pattern,
-                    replacement,
-                    global,
-                    addr,
-                } => {
-                    if sed_addr_matches(addr, line_num, &current) {
-                        if *global {
-                            current = sed_replace_all(&current, pattern, replacement);
-                        } else {
-                            current = sed_replace_first(&current, pattern, replacement);
-                        }
-                    }
-                }
-                SedCmd::Delete { addr } => {
-                    if sed_addr_matches(addr, line_num, &current) {
-                        deleted = true;
-                    }
-                }
-                SedCmd::Print { addr } => {
-                    if sed_addr_matches(addr, line_num, &current) {
-                        print_this = true;
-                    }
-                }
-            }
-        }
-
-        if !deleted && (!suppress || print_this) {
-            output.push_str(&current);
-            output.push('\n');
-        }
-    }
-
-    if output.ends_with('\n') {
-        output.pop();
-    }
-    shell_print!("{}", output);
+    // Same call, same string, same rules as the file half — which is the point
+    // of the extraction. The pop that used to stand here is what lost the final
+    // newline on every piped `sed`, so `cat f | sed 's/a/b/' | wc -l` counted
+    // one line short.
+    shell_print!("{}", sed_apply(input, &parsed, suppress));
 }
 
 /// Replace all occurrences of `pattern` in `text` with `replacement`.

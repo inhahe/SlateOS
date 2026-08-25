@@ -10104,7 +10104,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // now scans characters.
         // `expand_tr_set` reports rather than returns, so these unwrap through
         // a helper that turns a refusal into a named test failure.
-        let tset = |s: &str| expand_tr_set(s).ok().unwrap_or_default();
+        let tset = |s: &str| expand_tr_set(s, false).ok().unwrap_or_default();
         assert_eq!(tset("é"), alloc::vec!['é']);
         assert_eq!(tset("aéb"), alloc::vec!['a', 'é', 'b']);
         assert_eq!(tset("a-c"), alloc::vec!['a', 'b', 'c']);
@@ -13318,7 +13318,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // `split_words` has already removed the quoting and what is left is
         // data. Two apostrophes are a set of two apostrophes.
         assert_eq!(
-            expand_tr_set("''").ok().unwrap_or_default(),
+            expand_tr_set("''", false).ok().unwrap_or_default(),
             alloc::vec!['\'', '\'']
         );
 
@@ -13852,6 +13852,86 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(out.as_slice(), b"ab\n", "\\z is still the letter z");
         let out = piped("tr -d '\\\\'", b"a\\b\n");
         assert_eq!(out.as_slice(), b"ab\n", "\\\\ is still a backslash");
+    }
+
+    serial_println!("  kshell::self_test 50: tr knows its bracket constructs");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // The row this rung exists for. `[:space:]` was expanding to its own
+        // punctuation and letters, so this deleted the `c` from `abc` and left
+        // the spaces exactly where they were.
+        let out = piped("tr -d '[:space:]'", b"a b\tc\n");
+        assert_eq!(out.as_slice(), b"abc", "[:space:] is whitespace");
+
+        let out = piped("tr -d '[:digit:]'", b"a1b2c3\n");
+        assert_eq!(out.as_slice(), b"abc\n", "[:digit:]");
+        let out = piped("tr -d '[:alpha:]'", b"a1b2c3\n");
+        assert_eq!(out.as_slice(), b"123\n", "[:alpha:]");
+        let out = piped("tr -d '[:punct:]'", b"a.b,c!\n");
+        assert_eq!(out.as_slice(), b"abc\n", "[:punct:]");
+        let out = piped("tr -d '[:upper:]'", b"aAbBcC\n");
+        assert_eq!(out.as_slice(), b"abc\n", "[:upper:]");
+        let out = piped("tr -d '[:xdigit:]'", b"afgAF\n");
+        assert_eq!(out.as_slice(), b"g\n", "[:xdigit:] is 0-9 A-F a-f");
+
+        // The positional correspondence, which is why the classes are an
+        // ordered list rather than a set.
+        let out = piped("tr '[:lower:]' '[:upper:]'", b"abz\n");
+        assert_eq!(
+            out.as_slice(),
+            b"ABZ\n",
+            "lower to upper, position by position"
+        );
+        let out = piped("tr '[:upper:]' '[:lower:]'", b"ABZ\n");
+        assert_eq!(out.as_slice(), b"abz\n", "and back");
+
+        // A class may be part of a larger set rather than the whole of it.
+        let out = piped("tr -d '[:digit:]x'", b"a1x2b\n");
+        assert_eq!(out.as_slice(), b"ab\n", "a class next to a literal");
+
+        // `[=c=]` is a long spelling of `c` in the C locale, which is the only
+        // locale here.
+        let out = piped("tr -d '[=a=]'", b"abc\n");
+        assert_eq!(out.as_slice(), b"bc\n", "[=a=] is a");
+
+        // A `[` that begins no construct is an ordinary character, which is
+        // what makes it possible to translate brackets at all.
+        let out = piped("tr -d '[]'", b"a[b]c\n");
+        assert_eq!(out.as_slice(), b"abc\n", "a bare [ and ] are literals");
+        let out = piped("tr '[' 'X'", b"a[b\n");
+        assert_eq!(out.as_slice(), b"aXb\n", "[ alone is a literal");
+        // Including one that merely looks like a construct.
+        let out = piped("tr -d '[abc]'", b"a[b]c\n");
+        assert_eq!(out.as_slice(), b"\n", "[abc] is five literal characters");
+
+        // A malformed construct is an error, not a literal. This is the
+        // distinction that decides whether a typo is loud or silent.
+        for (script, want) in [
+            ("tr -d '[:alhpa:]'", b"invalid character class" as &[u8]),
+            ("tr -d '[=ab=]'", b"single character"),
+            ("tr 'a' '[:punct:]'", b"only character classes"),
+            ("tr 'a' '[=b=]'", b"may not appear in SET2"),
+        ] {
+            let out = piped(script, b"zz_bracket\n");
+            assert_output_contains(script, &out, want);
+            assert_eq!(last_exit(), 1, "{} is refused", script);
+            assert!(
+                !out.windows(10).any(|w| w == b"zz_bracket"),
+                "{} does not also transform its input",
+                script
+            );
+        }
+
+        // What must not change: sets without brackets in them.
+        let out = piped("tr a-c x", b"abcd\n");
+        assert_eq!(out.as_slice(), b"xxxd\n", "a plain range still works");
+        let out = piped("tr -d '\\t'", b"a\tb\n");
+        assert_eq!(out.as_slice(), b"ab\n", "an escape still works");
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -108999,6 +109079,18 @@ enum TrParseError {
     /// character. Carries the digits as written, so the message can quote
     /// back what the user typed rather than a normalised form.
     OctalTooLarge(String),
+    /// `[:name:]` with a name that is not one of POSIX's twelve. An error and
+    /// not a literal: a typo must not silently become a set of punctuation.
+    InvalidClass(String),
+    /// A character class in SET2 other than `upper` or `lower`. The others
+    /// have no positional meaning as a replacement — SET2 is a list to be
+    /// indexed into, and `[:punct:]` is not in any useful correspondence with
+    /// whatever SET1 happens to be.
+    ClassInSet2(String),
+    /// `[=abc=]` — an equivalence class names exactly one character.
+    EquivNotSingle(String),
+    /// `[=c=]` in SET2, which has no meaning as a replacement.
+    EquivInSet2(String),
 }
 
 impl TrParseError {
@@ -109030,6 +109122,31 @@ impl TrParseError {
                 );
                 shell_println!(
                     "      one answer here; write the character itself, or a range of them"
+                );
+            }
+            Self::InvalidClass(ref name) => {
+                shell_println!("tr: invalid character class '{}'", name);
+                shell_println!(
+                    "      known: alnum alpha blank cntrl digit graph lower print punct"
+                );
+                shell_println!("             space upper xdigit");
+            }
+            Self::ClassInSet2(ref name) => {
+                shell_println!(
+                    "tr: when translating, the only character classes that may appear in"
+                );
+                shell_println!("      SET2 are 'upper' and 'lower' (got '{}')", name);
+            }
+            Self::EquivNotSingle(ref body) => {
+                shell_println!(
+                    "tr: '[={}=]': equivalence class operand must be a single character",
+                    body
+                );
+            }
+            Self::EquivInSet2(ref body) => {
+                shell_println!(
+                    "tr: '[={}=]': equivalence classes may not appear in SET2 when translating",
+                    body
                 );
             }
         }
@@ -109131,11 +109248,14 @@ fn parse_tr_args(args: &str) -> Result<TrSpec, TrParseError> {
         return Err(TrParseError::ExtraOperand(extra.clone()));
     }
 
-    let set1 = expand_tr_set(operands.first().map_or("", String::as_str))?;
+    // `-d` has no SET2, so SET1 is never a replacement and the SET2-only
+    // restrictions do not apply to it: `tr -d '[:punct:]'` is a perfectly
+    // ordinary thing to write.
+    let set1 = expand_tr_set(operands.first().map_or("", String::as_str), false)?;
     let set2 = if delete {
         Vec::new()
     } else {
-        expand_tr_set(operands.get(1).map_or("", String::as_str))?
+        expand_tr_set(operands.get(1).map_or("", String::as_str), true)?
     };
     Ok(TrSpec {
         set1,
@@ -109338,7 +109458,7 @@ fn tr_delete(text: &str, s1: &[char]) {
 /// [`split_words`], which removes the quoting itself, so a quote reaching here
 /// is data. Stripping it would eat the outer pair of `tr "''" x`, which is how
 /// you ask to translate two apostrophes.
-fn expand_tr_set(set: &str) -> Result<Vec<char>, TrParseError> {
+fn expand_tr_set(set: &str, set2: bool) -> Result<Vec<char>, TrParseError> {
     let src: Vec<char> = set.chars().collect();
     let len = src.len();
     let mut chars = Vec::new();
@@ -109349,6 +109469,17 @@ fn expand_tr_set(set: &str) -> Result<Vec<char>, TrParseError> {
             break;
         };
         let next = src.get(i.saturating_add(1)).copied();
+        // Bracket constructs come first, before the range check below could
+        // read `[:a-z:]`'s interior as a range and before `[` could become one
+        // end of one. A `[` that begins no construct falls through to the
+        // ordinary paths and stays a literal character.
+        if cur == '[' {
+            if let Some((members, used)) = tr_bracket(&src, i, set2)? {
+                chars.extend(members);
+                i = i.saturating_add(used);
+                continue;
+            }
+        }
         if cur == '\\' && next.is_some() {
             // Every escape consumes the backslash and one character unless it
             // says otherwise; only the octal form is longer.
@@ -109420,6 +109551,113 @@ fn expand_tr_set(set: &str) -> Result<Vec<char>, TrParseError> {
         }
     }
     Ok(chars)
+}
+
+/// The members of a POSIX `[:name:]` character class, in code-point order.
+///
+/// **ASCII only, deliberately.** That is what GNU does in the C locale; it is
+/// the reading that keeps a class inside [`tr_apply`]'s byte-clean fast path,
+/// since no member can then occur inside a multi-byte UTF-8 sequence; and a
+/// Unicode reading would have to answer questions `tr` cannot express anyway —
+/// `tr '[:lower:]' '[:upper:]'` is a *positional* correspondence between two
+/// lists, and there is no useful position-for-position pairing between the
+/// lowercase and uppercase halves of Unicode.
+///
+/// Ascending code-point order is not incidental for the same reason: it is what
+/// makes that pairing well defined, so `[:lower:]`'s 26th member is `z` and
+/// `[:upper:]`'s is `Z`.
+///
+/// `None` is an unknown name, which is an error rather than a literal — a typo
+/// like `[:alhpa:]` must not quietly become the set `{[, :, a, l, h, p, ]}`.
+fn tr_class_members(name: &str) -> Option<Vec<char>> {
+    let keep: fn(char) -> bool = match name {
+        "alnum" => |c: char| c.is_ascii_alphanumeric(),
+        "alpha" => |c: char| c.is_ascii_alphabetic(),
+        "blank" => |c: char| c == ' ' || c == '\t',
+        "cntrl" => |c: char| c.is_ascii_control(),
+        "digit" => |c: char| c.is_ascii_digit(),
+        "graph" => |c: char| c.is_ascii_graphic(),
+        "lower" => |c: char| c.is_ascii_lowercase(),
+        "print" => |c: char| c.is_ascii_graphic() || c == ' ',
+        "punct" => |c: char| c.is_ascii_punctuation(),
+        "space" => |c: char| matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r'),
+        "upper" => |c: char| c.is_ascii_uppercase(),
+        "xdigit" => |c: char| c.is_ascii_hexdigit(),
+        _ => return None,
+    };
+    Some((0u8..=0x7f).map(char::from).filter(|&c| keep(c)).collect())
+}
+
+/// Try to read a bracket construct at `src[at]`, which is known to be `[`.
+///
+/// Returns the members it expands to and how many characters it consumed, or
+/// `None` if what follows is not a construct at all — in which case the `[` is
+/// an ordinary character, which is the rule every `tr` follows and the only one
+/// under which `tr -d '[]'` can mean anything.
+///
+/// The distinction that matters is between *not a construct* and *a malformed
+/// construct*. `[abc]` is not a construct, so it is five literal characters.
+/// `[:alhpa:]` is a malformed one — it has the shape and a bad name — and is an
+/// error. Treating the second as the first is how a typo turns into a
+/// confident wrong answer.
+///
+/// `set2` selects the rules for the replacement set, where a class is far more
+/// restricted: see [`TrParseError::ClassInSet2`].
+fn tr_bracket(
+    src: &[char],
+    at: usize,
+    set2: bool,
+) -> Result<Option<(Vec<char>, usize)>, TrParseError> {
+    /// Scan for a two-character terminator, returning the text before it and
+    /// the index just past it.
+    fn scan_to(src: &[char], from: usize, a: char, b: char) -> Option<(String, usize)> {
+        let mut j = from;
+        let mut body = String::new();
+        loop {
+            let c = src.get(j).copied()?;
+            if c == a && src.get(j.saturating_add(1)).copied() == Some(b) {
+                return Some((body, j.saturating_add(2)));
+            }
+            body.push(c);
+            j = j.saturating_add(1);
+        }
+    }
+
+    match src.get(at.saturating_add(1)).copied() {
+        // `[:name:]`
+        Some(':') => {
+            let Some((name, end)) = scan_to(src, at.saturating_add(2), ':', ']') else {
+                return Ok(None);
+            };
+            let Some(members) = tr_class_members(&name) else {
+                return Err(TrParseError::InvalidClass(name));
+            };
+            // Only the two case classes are meaningful as a replacement, and
+            // only those two are accepted, which is GNU's rule.
+            if set2 && !matches!(name.as_str(), "upper" | "lower") {
+                return Err(TrParseError::ClassInSet2(name));
+            }
+            Ok(Some((members, end.saturating_sub(at))))
+        }
+        // `[=c=]` — an equivalence class. In the C locale, and therefore here,
+        // a character is equivalent to itself and nothing else, so this is a
+        // long spelling of `c`. It is accepted rather than refused because a
+        // script using it is asking for something this tr can honour exactly.
+        Some('=') => {
+            let Some((body, end)) = scan_to(src, at.saturating_add(2), '=', ']') else {
+                return Ok(None);
+            };
+            let mut it = body.chars();
+            let (Some(c), None) = (it.next(), it.next()) else {
+                return Err(TrParseError::EquivNotSingle(body));
+            };
+            if set2 {
+                return Err(TrParseError::EquivInSet2(body));
+            }
+            Ok(Some((alloc::vec![c], end.saturating_sub(at))))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// `yes [STRING]` — repeatedly output STRING (default "y").

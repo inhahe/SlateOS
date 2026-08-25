@@ -76548,7 +76548,7 @@ than a bug: the fix is for `net::http` and `kshell` to share one, most
 naturally in a small `base64` module, and the `net/websocket.rs` caller at
 `:193` moves with it.
 
-#### TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH (lane A, 2026-08-25) — ⚠️ **awk fixed, `sed` still open**
+#### TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH (lane A, 2026-08-25) — ✅ FIXED
 
 **Update, 2026-08-25.** Lane B made `ere` unconditionally `no_std` (their reply
 is `requests/b-a-ere-is-no-std-now-take-it.md`; no feature flag, because Cargo
@@ -76562,13 +76562,37 @@ per record. `kshell::self_test` rung 45 pins the three rows lane B asked for —
 brackets, alternation, groups, an undecodable record, and the two distinct
 refusals (`invalid regular expression` vs `unsupported pattern`).
 
-**Still open: `sed`.** `sed_addr_matches` and `sed_replace_first`/
-`sed_replace_all` are still `str::contains` / `str::find`, so `sed '/^a/d'` and
-`sed 's/a.c/x/'` are both substring operations that exit 0. Those want
-`ere::bre::compile` and **not** the ERE entry point: without `-E`, sed's
-addresses and `s///` patterns are *basic* regular expressions, where `a+b` is
-three literal characters rather than a repetition. They are the next commit;
-this entry flips to FIXED when they land.
+**`sed` followed in the same shape** — addresses *and* `s///` in one commit, so
+the command was never half a regex engine. `sed_addr_matches` takes a compiled
+`SedAddr::Regex`; `sed_replace_first`/`sed_replace_all` (`str::find` and a
+`str::find` loop) are gone, replaced by `sed_substitute`, which walks
+`capture_spans_iter`. Three deliberate differences from `awk`:
+
+- **BRE, not ERE.** `ere::bre::compile`, because without `-E` sed's patterns are
+  *basic* regular expressions: `a+b` is three literal characters, `a\+b` is the
+  repetition, `\(…\)` is a group and `(` is ordinary. Compiling them as EREs
+  would pass every anchor and `.` test and still silently change what a working
+  script means.
+- **`&` and `\1`…`\9` are now replacement references** rather than literal text,
+  parsed once into a `Vec<SedRepl>` template at script-parse time. `\N` with no
+  group `N` is a *script* error (GNU: `invalid reference \3 on 's' command's
+  RHS`), not an empty expansion at run time; `\U` and the other GNU case
+  conversions are refused rather than emitted as their own letters.
+- **An empty pattern is refused.** GNU's `s//X/` means "the last regexp used",
+  which this shell does not keep; matching the empty string everywhere instead
+  would interleave the replacement between every character and exit 0.
+
+`find_unescaped` was fixed in the same commit: it looked *back* one byte from a
+candidate delimiter, which cannot tell `\/` from `\\/`, so `sed 's/x/\\/'` — a
+replacement of one literal backslash — was reported `unterminated command`. It
+now steps over an escape instead.
+
+`kshell::self_test` rung 46 pins all of it: the two anchors in an address and in
+`s///`, `.`, the four BRE-vs-ERE spellings, `\1`, `&`, `\&`, `\\`, `g` vs not,
+the zero-width-match advance (`s/x*/-/g` on `ab` is `-a-b-`, as GNU has it), an
+escaped delimiter, and the four refusals — each of which must exit non-zero
+*and* print nothing, since a sed that emits its input unchanged and exits 0 is
+indistinguishable from one that did the edit.
 
 **In short:** `awk '/^err/ {print}'` in the kernel shell does not match lines
 that *start* with `err`. It matches lines that *contain* the four characters
@@ -76603,10 +76627,10 @@ The third row is the worst of them: a pattern that in awk matches *everything*
 here matches almost nothing, so a filter that should be a no-op silently
 discards the whole input.
 
-**Why it is still open.** This is the same bug as
-`B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-str::contains`, and it has
-the same right answer: use the `ere` crate lane B wrote for it. But `ere`
-cannot be linked into the kernel today —
+**Why it was open** (the original entry; lane B has since answered). This is the
+same bug as `B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-str::contains`,
+and it has the same right answer: use the `ere` crate lane B wrote for it. But
+`ere` could not be linked into the kernel —
 
 ```toml
 bstr = { version = "1.13.0", default-features = false, features = ["std"] }
@@ -76624,7 +76648,8 @@ engines that must agree about `[[:alpha:]]`, leftmost-longest and backreference
 semantics will not agree for long. A kernel-resident copy would also have to be
 re-verified against gawk independently, duplicating `scripts/awk-diff.sh`.
 
-**The fallback, if lane B declines.** Refuse rather than guess: any `/.../`
+**The fallback, had lane B declined** — not needed; they said yes. Refuse rather
+than guess: any `/.../`
 pattern containing a metacharacter reports `awk: regular expressions are not
 supported in the kernel shell` and exits 2. Worse for the user, but a refusal
 is detectable and a wrong answer is not.

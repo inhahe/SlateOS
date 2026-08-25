@@ -519,12 +519,25 @@ impl NonogramApp {
         }
     }
 
-    /// Count how many cells the player has correctly filled.
-    fn filled_correct_count(&self) -> usize {
-        (0..self.solution.len())
-            .filter(|&i| self.cells[i] == CellMark::Filled && self.solution[i])
-            .count()
-    }
+    // There was a `filled_correct_count` here -- filled cells that the
+    // solution agrees with -- with three tests and no caller.  It is deleted
+    // rather than wired in, because the obvious place to wire it is the
+    // footer counter, and putting it there would break the game.
+    //
+    // The footer reads `player_filled_count()/total_filled_in_solution()`:
+    // how many cells you have committed against how many the picture needs.
+    // That leaks nothing.  Swapping in the correct-count would make the
+    // footer a free error detector -- fill a cell, watch whether the number
+    // moves -- which is exactly what the `C` key exists to reveal, on
+    // purpose, as a deliberate act.  A nonogram is deduction; ambient
+    // correctness feedback is not a better version of the same game.
+    //
+    // Nor does check mode want it: it already flags every wrong cell
+    // individually (`is_error`, used at the grid draw), so a summary count
+    // would say strictly less than what is already on screen.
+    //
+    // See known-issues.md lesson 45: a green test on an uncalled function
+    // reads to the next person as a statement about the running program.
 
     /// Count how many cells should be filled in the solution.
     fn total_filled_in_solution(&self) -> usize {
@@ -1833,26 +1846,12 @@ mod tests {
 
     // ── Counting ───────────────────────────────────────────────────
 
-    #[test]
-    fn test_filled_correct_count_none() {
-        let app = app_playing_heart();
-        assert_eq!(app.filled_correct_count(), 0);
-    }
-
-    #[test]
-    fn test_filled_correct_count_partial() {
-        let mut app = app_playing_heart();
-        // Fill (0,1) which is correct
-        app.set_cell(0, 1, CellMark::Filled);
-        assert_eq!(app.filled_correct_count(), 1);
-    }
-
-    #[test]
-    fn test_filled_correct_count_full() {
-        let mut app = app_playing_heart();
-        fill_solution(&mut app);
-        assert_eq!(app.filled_correct_count(), app.total_filled_in_solution());
-    }
+    // The three `test_filled_correct_count_*` tests went with the function
+    // they exercised; see the comment where it used to be defined.  Their
+    // assertions are not lost: `test_check_win_*` covers "the player's
+    // filled cells agree with the solution" as the thing the game actually
+    // decides on, and `test_is_error_*` covers the per-cell version that
+    // check mode draws.
 
     #[test]
     fn test_total_filled_in_solution_heart() {

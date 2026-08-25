@@ -99,6 +99,34 @@ const PHASE_INDICATOR_Y: f32 = 370.0;
 const MAX_HISTORY: usize = 20;
 const MAX_GRAPH_POINTS: usize = 120;
 
+// ============================================================================
+// Simulated Measurement Parameters
+// ============================================================================
+//
+// Until there is a network stack to talk to, the numbers a run produces are
+// synthesised. These constants were literals buried in the middle of the run
+// itself; they are up here because the run is now driven a frame at a time
+// from `Event::Tick`, so the same parameters are read from two places (the
+// live path and the batch fixture the regression tests use) and a second copy
+// would be a second answer.
+
+/// Target rate the simulated download phase converges on, in Mbps.
+const SIM_DOWNLOAD_MBPS: f64 = 450.0;
+/// Target rate the simulated upload phase converges on, in Mbps.
+const SIM_UPLOAD_MBPS: f64 = 120.0;
+/// Round-trip time the simulated latency probes centre on, in milliseconds.
+const SIM_LATENCY_BASE_MS: f64 = 12.5;
+/// Half-width of the simulated latency jitter, in milliseconds.
+const SIM_LATENCY_VARIANCE_MS: f64 = 3.0;
+/// Wall-clock gap between latency probes, in seconds.
+///
+/// With the default 20 probes this makes the latency phase two seconds long --
+/// long enough to see the phase strip light up, short enough that it is not
+/// the part of the test you wait through.
+const LATENCY_PROBE_INTERVAL_SECS: f32 = 0.1;
+/// Fraction of a throughput phase spent ramping up to the target rate.
+const THROUGHPUT_RAMP_FRACTION: f64 = 0.2;
+
 /// Speed markers on the gauge (in Mbps).
 const GAUGE_MARKERS: &[f32] = &[0.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0];
 
@@ -431,7 +459,13 @@ impl LatencyTester {
         self.samples.len()
     }
 
-    /// Populate with simulated latency data for development.
+    /// Send one simulated probe.
+    ///
+    /// One probe rather than a whole run, because the run is paced by the
+    /// clock: [`SpeedTestUI::tick`] calls this once per
+    /// [`LATENCY_PROBE_INTERVAL_SECS`] so the probe counter fills in visible
+    /// time. A method that filled the whole tester in one call could only ever
+    /// be reached from a frame the user does not get to see.
     ///
     /// The generator is a parameter rather than a field because a tester is a
     /// collector of measurements, not an owner of randomness: the app holds one
@@ -446,15 +480,25 @@ impl LatencyTester {
     /// therefore always negative and every simulated probe came in *under* the
     /// base latency -- measured, 0 of 20 samples above 12.5 ms with a stated
     /// variance of 3.0. The graph showed a line that only ever dipped.
-    pub fn simulate(&mut self, rng: &mut impl RandomSource, base_ms: f64, variance_ms: f64) {
+    pub fn simulate_probe(&mut self, rng: &mut impl RandomSource, base_ms: f64, variance_ms: f64) {
+        let frac = f64::from(rng.unit_f32());
+        let rtt = base_ms + (frac - 0.5) * 2.0 * variance_ms;
+        if rtt > 0.0 {
+            self.record_sample(rtt);
+        } else {
+            self.record_loss();
+        }
+    }
+
+    /// Fill the whole tester in one call, for tests that want a finished one.
+    ///
+    /// Deliberately test-only: the app reaches [`Self::simulate_probe`] from
+    /// the clock, and a batch version on the production path would be a test
+    /// that completes in a frame nothing renders.
+    #[cfg(test)]
+    fn simulate_all(&mut self, rng: &mut impl RandomSource, base_ms: f64, variance_ms: f64) {
         for _ in 0..self.probe_count {
-            let frac = f64::from(rng.unit_f32());
-            let rtt = base_ms + (frac - 0.5) * 2.0 * variance_ms;
-            if rtt > 0.0 {
-                self.record_sample(rtt);
-            } else {
-                self.record_loss();
-            }
+            self.simulate_probe(rng, base_ms, variance_ms);
         }
     }
 }
@@ -573,35 +617,59 @@ impl ThroughputTester {
         self.total_bytes
     }
 
-    /// Populate with simulated throughput data for development.
+    /// Advance `delta_secs` worth of simulated traffic aimed at `target_mbps`.
     ///
-    /// Carried the same one-sided-noise defect as [`LatencyTester::simulate`]
-    /// and for the same reason: 0 of 60 steps drew a fraction at or above 0.5,
-    /// so the simulated line never rose above the target rate, only sagged
-    /// below it. See that method for the arithmetic.
-    pub fn simulate(&mut self, rng: &mut impl RandomSource, target_mbps: f64) {
+    /// One step rather than a whole run, for the reason given on
+    /// [`LatencyTester::simulate_probe`]: the run is paced by the clock, and
+    /// this is what one frame of it looks like. The ramp is read off
+    /// [`Self::progress`] *before* the step is applied, which is what the old
+    /// batch loop's `i / steps` meant.
+    ///
+    /// The noise this produces is now two-sided. It carried the same defect as
+    /// [`LatencyTester::simulate_probe`] and for the same reason: 0 of 60 steps
+    /// drew a fraction at or above 0.5, so the simulated line never rose above
+    /// the target rate, only sagged below it. See that method for the
+    /// arithmetic.
+    pub fn advance_simulated(
+        &mut self,
+        rng: &mut impl RandomSource,
+        delta_secs: f32,
+        target_mbps: f64,
+    ) {
+        let frac = f64::from(rng.unit_f32());
+        // Ramp up over the first fifth of the test, then fluctuate.
+        let ramp = (f64::from(self.progress()) / THROUGHPUT_RAMP_FRACTION)
+            .min(1.0)
+            .powi(2);
+        let noise = (frac - 0.5) * 0.2 * target_mbps;
+        let mbps = (target_mbps * ramp + noise).max(0.0);
+        self.tick(delta_secs, mbps);
+
+        // Simulate some bytes transferred.
+        let bytes_this_tick = (mbps * 1_000_000.0 / 8.0 * f64::from(delta_secs)) as u64;
+        // `NonZeroU64` rather than an `if conn_count > 0` guard: the guard
+        // convinces a reader but not the compiler, so the division is still
+        // a division by a value that could be zero. This way the type
+        // carries the fact.
+        let conn_count = self.num_connections as usize;
+        if let Some(conns) = NonZeroU64::new(self.num_connections.into()) {
+            let per_conn = bytes_this_tick / conns;
+            for c in 0..conn_count {
+                self.record_bytes(c, per_conn);
+            }
+        }
+    }
+
+    /// Run the whole phase in one call, for tests that want a finished tester.
+    ///
+    /// Test-only for the reason given on [`LatencyTester::simulate_all`]. The
+    /// 60 steps are what the regression tests below count their samples in.
+    #[cfg(test)]
+    fn simulate_all(&mut self, rng: &mut impl RandomSource, target_mbps: f64) {
         let steps = 60u32;
         let dt = self.duration_secs / steps as f32;
-        for i in 0..steps {
-            let frac = f64::from(rng.unit_f32());
-            // Ramp up over the first 20% of the test, then fluctuate.
-            let ramp = ((i as f64 / (steps as f64 * 0.2)).min(1.0)).powi(2);
-            let noise = (frac - 0.5) * 0.2 * target_mbps;
-            let mbps = (target_mbps * ramp + noise).max(0.0);
-            self.tick(dt, mbps);
-            // Simulate some bytes transferred.
-            let bytes_this_tick = (mbps * 1_000_000.0 / 8.0 * dt as f64) as u64;
-            // `NonZeroU64` rather than an `if conn_count > 0` guard: the guard
-            // convinces a reader but not the compiler, so the division is still
-            // a division by a value that could be zero. This way the type
-            // carries the fact.
-            let conn_count = self.num_connections as usize;
-            if let Some(conns) = NonZeroU64::new(self.num_connections.into()) {
-                let per_conn = bytes_this_tick / conns;
-                for c in 0..conn_count {
-                    self.record_bytes(c, per_conn);
-                }
-            }
+        for _ in 0..steps {
+            self.advance_simulated(rng, dt, target_mbps);
         }
     }
 }
@@ -857,6 +925,14 @@ pub struct SpeedTestUI {
     server_dropdown_open: bool,
     /// Graph data points (speed over time for the current test phase).
     graph_points: Vec<ThroughputSample>,
+    /// Time banked since the last latency probe went out, in seconds.
+    ///
+    /// The latency phase measures out in probes, not in seconds, so it needs
+    /// somewhere to keep the fraction of a probe interval that a frame does
+    /// not fill. Dropping it -- probing once per frame that crosses the
+    /// interval and discarding the remainder -- would tie the probe rate to
+    /// the frame rate, so the same test would take longer on a slower machine.
+    probe_timer_secs: f32,
     /// Index of the history item being hovered.
     history_hover: Option<usize>,
     /// Scroll offset for history list.
@@ -904,6 +980,7 @@ impl SpeedTestUI {
             selected_server: 0,
             server_dropdown_open: false,
             graph_points: Vec::with_capacity(MAX_GRAPH_POINTS),
+            probe_timer_secs: 0.0,
             history_hover: None,
             history_scroll: 0.0,
             width: WINDOW_WIDTH,
@@ -933,34 +1010,92 @@ impl SpeedTestUI {
         self.graph_points.clear();
         self.current_speed_mbps = 0.0;
         self.current_latency_ms = 0.0;
+        self.probe_timer_secs = 0.0;
 
         // Begin with latency phase.
         self.phase = SpeedTestPhase::Testing(TestKind::Latency);
     }
 
-    /// Simulate a complete speed test run (for development without network).
-    pub fn simulate_test(&mut self) {
-        self.start_test();
-        if matches!(self.phase, SpeedTestPhase::Error(_)) {
+    /// Advance a running test by `delta_secs` of wall clock.
+    ///
+    /// This is the whole test. Until 2026-08-25 there was no such method and
+    /// Start called a `simulate_test` that ran latency, download and upload
+    /// back to back inside one call: it assigned `Testing(Latency)`,
+    /// `Testing(Download)` and `Testing(Upload)` in turn and returned in
+    /// `Complete`, so no frame was ever drawn in a testing phase. Everything
+    /// the app is built around was therefore unreachable -- the live graph
+    /// (`graph_points` arrived full), the gauge sweep (`current_speed_mbps`
+    /// jumped straight to the final average), the phase strip's
+    /// currently-running highlight, and Escape's cancel, which is guarded on
+    /// `phase.is_testing()` and so could never fire. A ten-second test
+    /// finished in a frame and showed a plausible result. See
+    /// known-issues.md lesson 47.
+    ///
+    /// Seconds rather than milliseconds because both testers measure in
+    /// seconds; the conversion from [`Event::Tick`]'s `elapsed_ms` happens
+    /// once, at the event.
+    pub fn tick(&mut self, delta_secs: f32) {
+        let SpeedTestPhase::Testing(kind) = self.phase else {
+            return;
+        };
+        if !delta_secs.is_finite() || delta_secs <= 0.0 {
             return;
         }
 
-        // Simulate latency phase.
-        self.latency_tester.simulate(&mut self.rng, 12.5, 3.0);
+        match kind {
+            TestKind::Latency => self.tick_latency(delta_secs),
+            TestKind::Download => {
+                self.download_tester.advance_simulated(
+                    &mut self.rng,
+                    delta_secs,
+                    SIM_DOWNLOAD_MBPS,
+                );
+                // The gauge wants the instantaneous rate while the test runs;
+                // `finalize_test` replaces it with the average at the end.
+                self.current_speed_mbps = self.download_tester.current_mbps();
+                self.graph_points = self.download_tester.samples().to_vec();
+                if self.download_tester.is_complete() {
+                    self.phase = SpeedTestPhase::Testing(TestKind::Upload);
+                }
+            }
+            TestKind::Upload => {
+                self.upload_tester
+                    .advance_simulated(&mut self.rng, delta_secs, SIM_UPLOAD_MBPS);
+                self.current_speed_mbps = self.upload_tester.current_mbps();
+                self.graph_points = self.upload_tester.samples().to_vec();
+                if self.upload_tester.is_complete() {
+                    self.finalize_test();
+                }
+            }
+        }
+    }
+
+    /// Send however many probes `delta_secs` has paid for, then hand on.
+    ///
+    /// A loop rather than one probe per frame because a frame can be long --
+    /// the window was unmapped, the machine stalled -- and a phase that only
+    /// ever advances one probe per frame would stretch to fit the stall. The
+    /// loop is bounded by the probe count, which `is_complete` caps.
+    fn tick_latency(&mut self, delta_secs: f32) {
+        self.probe_timer_secs += delta_secs;
+        while self.probe_timer_secs >= LATENCY_PROBE_INTERVAL_SECS
+            && !self.latency_tester.is_complete()
+        {
+            self.probe_timer_secs -= LATENCY_PROBE_INTERVAL_SECS;
+            self.latency_tester.simulate_probe(
+                &mut self.rng,
+                SIM_LATENCY_BASE_MS,
+                SIM_LATENCY_VARIANCE_MS,
+            );
+        }
         self.current_latency_ms = self.latency_tester.avg_rtt().unwrap_or(0.0);
 
-        // Simulate download phase.
-        self.phase = SpeedTestPhase::Testing(TestKind::Download);
-        self.download_tester.simulate(&mut self.rng, 450.0);
-        self.current_speed_mbps = self.download_tester.avg_mbps();
-        self.graph_points = self.download_tester.samples().to_vec();
-
-        // Simulate upload phase.
-        self.phase = SpeedTestPhase::Testing(TestKind::Upload);
-        self.upload_tester.simulate(&mut self.rng, 120.0);
-
-        // Complete.
-        self.finalize_test();
+        if self.latency_tester.is_complete() {
+            // Whatever is left in the timer belongs to the download phase's
+            // first frame, not to a probe that will never be sent.
+            self.probe_timer_secs = 0.0;
+            self.phase = SpeedTestPhase::Testing(TestKind::Download);
+        }
     }
 
     /// Finalize the test and record results.
@@ -1126,6 +1261,22 @@ impl SpeedTestUI {
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
             Event::Key(key_event) => self.handle_key(key_event),
+            // A speed test is a measurement over time, so this is the event
+            // that makes the app work at all. It was falling into the
+            // `_ => EventResult::Ignored` arm below; see [`Self::tick`] for
+            // what that cost.
+            //
+            // `Consumed` only while a test is running: an idle window has no
+            // reason to claim the clock, and saying so lets a caller tell a
+            // frame that changed something from one that did not.
+            Event::Tick { elapsed_ms } => {
+                if self.phase.is_testing() {
+                    self.tick(*elapsed_ms as f32 / 1000.0);
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
             Event::Mouse(mouse_event) => {
                 let x = mouse_event.x;
                 let y = mouse_event.y;
@@ -1162,7 +1313,7 @@ impl SpeedTestUI {
         match key.key {
             Key::Enter | Key::Space => {
                 if self.phase.is_idle() || self.phase.is_complete() {
-                    self.simulate_test();
+                    self.start_test();
                     return EventResult::Consumed;
                 }
                 EventResult::Ignored
@@ -1201,7 +1352,7 @@ impl SpeedTestUI {
                 || self.phase.is_complete()
                 || matches!(self.phase, SpeedTestPhase::Error(_)))
         {
-            self.simulate_test();
+            self.start_test();
             return EventResult::Consumed;
         }
 
@@ -2121,6 +2272,44 @@ mod tests {
     // builds a `MouseEvent` -- the app only ever destructures one.
     use guitk::event::MouseEvent;
 
+    /// A frame at roughly 60 Hz, the interval `oswindow` would hand us.
+    const FRAME_MS: u64 = 16;
+
+    /// Enough frames for the default run -- 2 s of probes plus two 10 s
+    /// throughput phases -- with room to spare, so the bound is a deadlock
+    /// guard rather than a second definition of how long a test takes.
+    const FRAME_BUDGET: usize = 4000;
+
+    /// Press Enter, then feed frames until the run finishes.
+    ///
+    /// Every test that wants a completed run goes through the keyboard and
+    /// the clock rather than calling an internal, because a test that calls
+    /// the internal cannot tell a wired app from an unwired one -- which is
+    /// exactly how this app shipped with `Event::Tick` in its `_` arm.
+    fn run_a_full_test(ui: &mut SpeedTestUI) {
+        press(ui, Key::Enter);
+        assert!(ui.phase().is_testing(), "Enter did not start a test");
+        for _ in 0..FRAME_BUDGET {
+            if ui.phase().is_complete() {
+                return;
+            }
+            ui.handle_event(&Event::Tick {
+                elapsed_ms: FRAME_MS,
+            });
+        }
+        panic!("the run did not finish within {FRAME_BUDGET} frames");
+    }
+
+    /// Send an unmodified key press.
+    fn press(ui: &mut SpeedTestUI, key: Key) -> EventResult {
+        ui.handle_event(&Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::default(),
+            text: String::new(),
+        }))
+    }
+
     // --- SpeedTestPhase tests ---
 
     #[test]
@@ -2298,7 +2487,7 @@ mod tests {
     #[test]
     fn latency_tester_simulate() {
         let mut t = LatencyTester::new(50);
-        t.simulate(&mut SeededRng::new(1), 10.0, 2.0);
+        t.simulate_all(&mut SeededRng::new(1), 10.0, 2.0);
         assert!(t.is_complete());
         assert!(t.sample_count() > 0);
         assert!(t.avg_rtt().is_some());
@@ -2317,7 +2506,7 @@ mod tests {
         const PROBES: u32 = 40;
         const BASE: f64 = 12.5;
         let mut t = LatencyTester::new(PROBES);
-        t.simulate(&mut SeededRng::new(0x51EE_D7E5_7A11_C0DE), BASE, 3.0);
+        t.simulate_all(&mut SeededRng::new(0x51EE_D7E5_7A11_C0DE), BASE, 3.0);
 
         let above = t.samples.iter().filter(|r| **r > BASE).count();
         let below = t.samples.iter().filter(|r| **r < BASE).count();
@@ -2335,14 +2524,14 @@ mod tests {
     #[test]
     fn two_simulated_runs_of_one_app_differ() {
         let mut app = SpeedTestUI::with_seed(0xA5A5_1234_5678_9ABC);
-        app.simulate_test();
+        run_a_full_test(&mut app);
         let first: Vec<f64> = app
             .download_tester
             .samples()
             .iter()
             .map(|s| s.mbps)
             .collect();
-        app.simulate_test();
+        run_a_full_test(&mut app);
         let second: Vec<f64> = app
             .download_tester
             .samples()
@@ -2364,7 +2553,7 @@ mod tests {
     #[test]
     fn a_fresh_app_is_seeded_by_the_system_and_not_by_a_literal() {
         fn first_run(mut app: SpeedTestUI) -> Vec<f64> {
-            app.simulate_test();
+            run_a_full_test(&mut app);
             app.download_tester
                 .samples()
                 .iter()
@@ -2443,7 +2632,7 @@ mod tests {
     #[test]
     fn throughput_tester_simulate() {
         let mut t = ThroughputTester::new(4, 10.0);
-        t.simulate(&mut SeededRng::new(2), 500.0);
+        t.simulate_all(&mut SeededRng::new(2), 500.0);
         assert!(t.is_complete());
         assert!(t.avg_mbps() > 0.0);
         assert!(t.total_bytes() > 0);
@@ -2461,7 +2650,7 @@ mod tests {
     fn simulated_throughput_overshoots_the_target_sometimes() {
         const TARGET: f64 = 500.0;
         let mut t = ThroughputTester::new(4, 10.0);
-        t.simulate(&mut SeededRng::new(0x7B0E_4C11_9D2F_A063), TARGET);
+        t.simulate_all(&mut SeededRng::new(0x7B0E_4C11_9D2F_A063), TARGET);
         let after_ramp: Vec<f64> = t.samples().iter().skip(12).map(|s| s.mbps).collect();
         let above = after_ramp.iter().filter(|m| **m > TARGET).count();
         let below = after_ramp.iter().filter(|m| **m < TARGET).count();
@@ -2642,21 +2831,205 @@ mod tests {
     }
 
     #[test]
-    fn ui_simulate_test_completes() {
+    fn a_run_driven_by_the_clock_completes() {
         let mut ui = SpeedTestUI::new();
-        ui.simulate_test();
+        run_a_full_test(&mut ui);
         assert!(ui.phase().is_complete());
         assert_eq!(ui.history().len(), 1);
     }
 
     #[test]
-    fn ui_simulate_test_has_results() {
+    fn a_completed_run_has_results() {
         let mut ui = SpeedTestUI::new();
-        ui.simulate_test();
+        run_a_full_test(&mut ui);
         let result = ui.history().latest().unwrap();
         assert!(result.download_mbps > 0.0);
         assert!(result.upload_mbps > 0.0);
         assert!(result.latency_ms > 0.0);
+    }
+
+    // ====================================================================
+    // The clock
+    //
+    // `handle_event` matched `Event::Key` and `Event::Mouse` and dropped
+    // everything else, so a speed test -- a measurement over time -- had no
+    // source of time. Start ran the whole thing inside one call instead.
+    // These tests all go in through `handle_event`, because that is the only
+    // way to tell a wired app from an unwired one: the phase machine below
+    // was correct the whole time, and nothing but a test ever reached it.
+    // ====================================================================
+
+    /// The event that makes the app work.
+    #[test]
+    fn a_tick_event_advances_a_running_test() {
+        let mut ui = SpeedTestUI::new();
+        press(&mut ui, Key::Enter);
+        assert_eq!(ui.latency_tester.probes_sent, 0);
+
+        for _ in 0..20 {
+            ui.handle_event(&Event::Tick { elapsed_ms: 50 });
+        }
+
+        assert!(
+            ui.latency_tester.probes_sent > 0,
+            "a second of ticks sent no probes"
+        );
+    }
+
+    /// An idle window does not claim the clock.
+    #[test]
+    fn a_tick_while_idle_is_ignored() {
+        let mut ui = SpeedTestUI::new();
+        let res = ui.handle_event(&Event::Tick { elapsed_ms: 100 });
+        assert_eq!(res, EventResult::Ignored);
+        assert!(ui.phase().is_idle());
+        assert_eq!(ui.latency_tester.probes_sent, 0);
+    }
+
+    /// Every phase gets frames of its own.
+    ///
+    /// The old Start assigned all three `Testing` phases inside one call, so
+    /// the phase strip could only ever be drawn in `Idle` or `Complete` --
+    /// its "currently running" highlight was unreachable code.
+    #[test]
+    fn the_run_is_drawn_in_every_phase_it_passes_through() {
+        let mut ui = SpeedTestUI::new();
+        press(&mut ui, Key::Enter);
+
+        let mut seen = Vec::new();
+        for _ in 0..FRAME_BUDGET {
+            let now = ui.phase().clone();
+            if seen.last() != Some(&now) {
+                seen.push(now);
+            }
+            if ui.phase().is_complete() {
+                break;
+            }
+            ui.handle_event(&Event::Tick {
+                elapsed_ms: FRAME_MS,
+            });
+        }
+
+        assert_eq!(
+            seen,
+            vec![
+                SpeedTestPhase::Testing(TestKind::Latency),
+                SpeedTestPhase::Testing(TestKind::Download),
+                SpeedTestPhase::Testing(TestKind::Upload),
+                SpeedTestPhase::Complete,
+            ]
+        );
+    }
+
+    /// The graph fills in over the run rather than arriving complete.
+    #[test]
+    fn the_graph_grows_while_the_download_runs() {
+        let mut ui = SpeedTestUI::new();
+        press(&mut ui, Key::Enter);
+
+        // Past the latency phase and a little way into the download.
+        let mut early = 0;
+        for _ in 0..FRAME_BUDGET {
+            ui.handle_event(&Event::Tick {
+                elapsed_ms: FRAME_MS,
+            });
+            if *ui.phase() == SpeedTestPhase::Testing(TestKind::Download) {
+                early = ui.graph_points.len();
+                if early > 0 {
+                    break;
+                }
+            }
+        }
+        assert!(early > 0, "the download phase drew no graph points");
+
+        for _ in 0..100 {
+            ui.handle_event(&Event::Tick {
+                elapsed_ms: FRAME_MS,
+            });
+        }
+        assert!(
+            ui.graph_points.len() > early,
+            "the graph stopped growing at {early} points"
+        );
+    }
+
+    /// The probe rate is the clock's, not the frame rate's.
+    ///
+    /// Two runs over the same 750 ms of wall clock, at 20 Hz and at 40 Hz.
+    /// Both frame intervals are shorter than a probe interval, so an
+    /// implementation that probed once per frame that crossed the interval
+    /// and threw away the remainder would send no probes at all in either;
+    /// one that probed at most once per frame would disagree between them.
+    #[test]
+    fn the_probe_rate_does_not_follow_the_frame_rate() {
+        fn probes_after(frame_ms: u64, frames: usize) -> u32 {
+            let mut ui = SpeedTestUI::new();
+            press(&mut ui, Key::Enter);
+            for _ in 0..frames {
+                ui.handle_event(&Event::Tick {
+                    elapsed_ms: frame_ms,
+                });
+            }
+            ui.latency_tester.probes_sent
+        }
+
+        let slow = probes_after(50, 15);
+        let fast = probes_after(25, 30);
+        assert_eq!(slow, fast, "{slow} probes at 20 Hz but {fast} at 40 Hz");
+        assert_eq!(slow, 7, "750 ms should pay for seven 100 ms probes");
+    }
+
+    /// Escape gets to cancel, now that there is a running test to cancel.
+    ///
+    /// The branch is guarded on `phase.is_testing()`, which was false at
+    /// every moment a key could be pressed.
+    #[test]
+    fn escape_cancels_a_running_test() {
+        let mut ui = SpeedTestUI::new();
+        press(&mut ui, Key::Enter);
+        ui.handle_event(&Event::Tick { elapsed_ms: 500 });
+        assert!(ui.phase().is_testing());
+
+        assert_eq!(press(&mut ui, Key::Escape), EventResult::Consumed);
+        assert!(ui.phase().is_idle());
+
+        // And a cancelled run records nothing.
+        for _ in 0..FRAME_BUDGET {
+            ui.handle_event(&Event::Tick {
+                elapsed_ms: FRAME_MS,
+            });
+        }
+        assert!(ui.phase().is_idle());
+        assert_eq!(ui.history().len(), 0);
+    }
+
+    /// A run takes about as long as it says it will.
+    ///
+    /// Two 10-second throughput phases plus 20 probes 100 ms apart is 22
+    /// seconds. The tolerance is a frame either way; the point is that the
+    /// duration is honoured at all, which it was not when the whole run
+    /// happened inside one call.
+    #[test]
+    fn a_run_lasts_the_configured_duration() {
+        let mut ui = SpeedTestUI::new();
+        press(&mut ui, Key::Enter);
+        let mut frames = 0u64;
+        for _ in 0..FRAME_BUDGET {
+            if ui.phase().is_complete() {
+                break;
+            }
+            ui.handle_event(&Event::Tick {
+                elapsed_ms: FRAME_MS,
+            });
+            frames += 1;
+        }
+        let secs = (frames * FRAME_MS) as f64 / 1000.0;
+        let expected = 2.0 * f64::from(ui.config.test_duration_secs)
+            + f64::from(ui.latency_tester.probe_count) * f64::from(LATENCY_PROBE_INTERVAL_SECS);
+        assert!(
+            (secs - expected).abs() < 0.5,
+            "a {expected} s test took {secs} s"
+        );
     }
 
     #[test]
@@ -2687,7 +3060,7 @@ mod tests {
         let idle_cmds = idle_ui.render().len();
 
         let mut tested_ui = SpeedTestUI::new();
-        tested_ui.simulate_test();
+        run_a_full_test(&mut tested_ui);
         let tested_cmds = tested_ui.render().len();
 
         // After a test, we should have more render commands due to

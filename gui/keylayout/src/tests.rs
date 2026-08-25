@@ -492,6 +492,10 @@ fn caps_applies_is_decided_by_both_faces_of_the_key() {
 /// Every level a key can be asked about, so that a sweep is a sweep. Caps Lock
 /// is included because it selects between the first two faces and is therefore
 /// capable of selecting the wrong one.
+///
+/// The claim that this is *every* level is checked by
+/// [`all_levels_really_is_every_level`] — see there for why the check is here
+/// and not in the tree-wide variant gate.
 const ALL_LEVELS: [Level; 8] = [
     Level {
         shift: false,
@@ -534,6 +538,70 @@ const ALL_LEVELS: [Level; 8] = [
         alt_gr: true,
     },
 ];
+
+/// `ALL_LEVELS` claims to hold every value of [`Level`], and every sweep below
+/// is only as complete as that claim. Nothing in the language checks it: add a
+/// fourth modifier to `Level` and the array stays a perfectly valid array of
+/// eight `Level`s, having simply stopped being all of them — and the sweeps go
+/// on passing while asking about half the levels they used to.
+///
+/// `scripts/check-variant-lists.py` is the tree-wide gate for exactly this
+/// claim, but it can only count *variants*, and `Level` is a struct of three
+/// bools rather than an enum, so it reports this list as unresolved and always
+/// will. Lane A raised that as a choice between living with a permanent skip
+/// and writing a second script that understands 2ⁿ-over-n-bools
+/// (`requests/a-c-the-variant-list-gate-is-wired-in-and-tree-wide.md`). This
+/// test is the third option and the better one, for the reason the variant
+/// gate's own docstring gives about `variant_count`: **an error at the list
+/// beats a report about the list.** A script sees this file once a build; this
+/// runs with the tests that depend on it, names the missing combination, and
+/// needs no scanner to be sound.
+///
+/// It is load-bearing in two independent ways, and the second is the one worth
+/// preserving if this is ever edited:
+///
+/// 1. It builds the eight combinations from a bit pattern, independently of
+///    the list above, and checks them **by content**. Count alone would not
+///    do: deleting an entry is already caught by the declared `[Level; 8]`
+///    (E0308), so the failure actually left for a test is the one that keeps
+///    the length — a typo in one entry, which drops one combination and
+///    duplicates another. Falsified: flipping `shift` in the last entry
+///    reports `ALL_LEVELS is missing Level { shift: true, caps: true,
+///    alt_gr: true }`.
+/// 2. The literals below name all three fields explicitly and do not use
+///    `..Level::PLAIN`. That is deliberate: adding a field to `Level` makes
+///    *this test fail to compile* (E0063, verified), which drags whoever
+///    added it to the list that needs a ninth through sixteenth entry.
+///    Filling the gap with a struct-update base would buy brevity at the
+///    price of the whole mechanism — the test would keep compiling, keep
+///    passing, and keep checking 8 of the now-16 levels.
+#[test]
+fn all_levels_really_is_every_level() {
+    let mut expected = Vec::new();
+    for bits in 0u8..8 {
+        expected.push(Level {
+            shift: bits & 0b001 != 0,
+            caps: bits & 0b010 != 0,
+            alt_gr: bits & 0b100 != 0,
+        });
+    }
+
+    for want in &expected {
+        assert!(
+            ALL_LEVELS.contains(want),
+            "ALL_LEVELS is missing {want:?}, so every sweep that walks it is \
+             silently skipping that level"
+        );
+    }
+    assert_eq!(
+        ALL_LEVELS.len(),
+        expected.len(),
+        "ALL_LEVELS holds every level but is {} long rather than {} — it has a \
+         duplicate, which makes one level count twice in every sweep",
+        ALL_LEVELS.len(),
+        expected.len()
+    );
+}
 
 #[test]
 fn a_face_is_selected_exactly_when_a_character_is() {

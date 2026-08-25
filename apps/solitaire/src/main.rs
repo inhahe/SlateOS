@@ -201,25 +201,22 @@ impl Rank {
         self as u8
     }
 
-    /// Build a Rank from a numeric value (1..=13).
-    fn from_value(v: u8) -> Option<Rank> {
-        match v {
-            1 => Some(Self::Ace),
-            2 => Some(Self::Two),
-            3 => Some(Self::Three),
-            4 => Some(Self::Four),
-            5 => Some(Self::Five),
-            6 => Some(Self::Six),
-            7 => Some(Self::Seven),
-            8 => Some(Self::Eight),
-            9 => Some(Self::Nine),
-            10 => Some(Self::Ten),
-            11 => Some(Self::Jack),
-            12 => Some(Self::Queen),
-            13 => Some(Self::King),
-            _ => None,
-        }
-    }
+    // There was a `from_value(u8) -> Option<Rank>` here -- a hand-written
+    // thirteen-arm inverse of `value()` -- with a round-trip test and no
+    // caller.  Nothing in solitaire turns a number back into a rank: ranks
+    // become numbers at exactly two places, both comparisons that stay in
+    // number space (`can_stack_on_tableau`, `can_stack_on_foundation`), and
+    // the game has no save file to read one back out of.  See
+    // known-issues.md lesson 45.
+    //
+    // Its test was a round trip through `value()`, so it asserted nothing
+    // about the game either; `test_rank_value` already pins Ace=1 and
+    // King=13, which is what the two comparisons above actually rely on.
+    //
+    // If a saved game ever needs to name a rank, write it as the `label()`
+    // string rather than reviving this: `label` is already the tested,
+    // used-in-anger spelling, and a second numeric mapping beside the
+    // explicit discriminants is a second thing to keep in step.
 }
 
 /// A playing card with suit and rank.
@@ -1613,15 +1610,6 @@ mod tests {
         assert_eq!(Rank::Jack.label(), "J");
         assert_eq!(Rank::Queen.label(), "Q");
         assert_eq!(Rank::King.label(), "K");
-    }
-
-    #[test]
-    fn test_rank_from_value() {
-        for r in &Rank::ALL {
-            assert_eq!(Rank::from_value(r.value()), Some(*r));
-        }
-        assert_eq!(Rank::from_value(0), None);
-        assert_eq!(Rank::from_value(14), None);
     }
 
     #[test]

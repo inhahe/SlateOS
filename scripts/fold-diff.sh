@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
 # Differential test: our fold against GNU fold.
 #
-# ## Why the reference is glibc, and only glibc
+# ## Why both sides run inside WSL
 #
-# The host's `fold` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll`
-# rather than glibc, whose `getopt` words every option diagnostic differently
-# (`unknown option -- x` against `invalid option -- 'x'`). A harness pointed at
-# it would certify sentences no GNU/Linux system prints. See `known-issues.md`
-# → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, and the identical
-# note at the top of `expand-diff.sh`, `head-diff.sh`, `wc-diff.sh`,
-# `cut-diff.sh`, `uniq-diff.sh` and `nl-diff.sh`.
+# `scripts/diff-wsl.sh` gives the reasons. The reference has to be glibc's: the
+# host's `fold` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll` rather
+# than glibc, whose `getopt` words every option diagnostic differently
+# (`unknown option -- x` against `invalid option -- 'x'`), so a harness pointed
+# at it certifies sentences no GNU/Linux system prints (`known-issues.md` →
+# `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`). This file already
+# avoided that by reaching for `wsl -e env LC_ALL=C.UTF-8 fold`, at the cost of
+# a WSL process per case and a probe to check that `wsl`'s inherited Windows
+# cwd landed on the same bytes under `/mnt/...`.
+#
+# The subject moving with it is the part that changed an answer — see the
+# directory-operand case at the foot of this file, which was an expected
+# difference only because a Windows `File::open` refuses a directory outright.
 #
 # Run `OURS=/usr/bin/fold ./scripts/fold-diff.sh` to confirm the harness still
-# discriminates: it should report dozens of differences, not zero.
+# discriminates: every expected difference should turn into an XPASS.
 #
 # ## Why `od -An -c`
 #
@@ -28,10 +34,10 @@
 # usefully probe the ceiling through *output*. The bounds are tested through the
 # diagnostics instead.
 #
-# ## Two cases that differ on purpose
+# ## The cases that differ on purpose
 #
 # `--help` and `--version`, whose text is ours rather than the GNU project's,
-# plus a directory operand, which a Windows host refuses to open at all.
+# and the two abbreviations that reach them.
 #
 # The locale is `C.UTF-8` throughout, including for the diagnostics that pass
 # an argument through gnulib's `quote()`. Those used to be referenced under
@@ -40,55 +46,39 @@
 # GNU prints under any UTF-8 locale, so `C` is now the setting in which the
 # reference would be wrong.
 #
-# The locale matters for a second reason here, and it is the reason every
-# *output* case is `C.UTF-8` on both sides rather than left to the environment:
-# `fold` counts a multi-byte character as one column per *byte* (upstream's
-# `isprint` test is commented out), so a locale that changed how the reference
-# decoded input would change where it wrapped. It does not — but a harness that
-# did not pin it could not say so.
+# The locale matters for a second reason here, and it is the reason the
+# preamble's pin is load-bearing rather than housekeeping: `fold` counts a
+# multi-byte character as one column per *byte* (upstream's `isprint` test is
+# commented out), so a locale that changed how the reference decoded input
+# would change where it wrapped. It does not — but a harness that did not pin
+# it could not say so.
 set -u
 
-# Our fold is a native Windows binary, so MSYS would rewrite an argument that
-# looks like a path.
-export MSYS2_ARG_CONV_EXCL='*'
-
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils fold "${OURS:-}") || exit 1
-export LC_ALL=${LC_ALL:-C.UTF-8}
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `fold` so `argv[0]` matches. See `scripts/diff-wsl.sh`. `timeout` is
+# named because every invocation below is bounded with it; see `run_side`.
+DIFF_PROG=fold
+DIFF_NEED=timeout
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d)
-trap 'rm -rf "$fixtures"' EXIT
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
 cd "$fixtures" >/dev/null || exit 1
-OURS_ABS=$OURS
-case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$OLDPWD/$OURS" ;; esac
 
+# One invocation of one side. `$1` is `ours` or `gnu`; each is reached through
+# a symlink named `fold` in a directory that is the whole of `PATH` for that
+# one invocation, so `argv[0]` is the bare word on both sides.
+#
 # Every invocation is bounded, on both sides. A `-s` implementation that got the
 # rescan wrong does not produce wrong output — it loops forever emitting empty
 # lines, because the remainder it moved to the next line is the same remainder
 # it moved last time. That is the specific failure this timeout exists for, and
 # it is why the *reference* is wrapped too: a harness that only bounded our side
 # would hang on the day the reference was the buggy one.
-run_ours() { timeout -k 2 30 "$OURS_ABS" "$@"; }
-run_gnu()  { local loc=$1; shift; timeout -k 2 30 wsl -e env "LC_ALL=$loc" fold "$@"; }
-
-# WSL is invoked with the Windows cwd, which for an MSYS temp directory lands on
-# the same bytes under `/mnt/c/...`. Verified rather than assumed, because a
-# reference that silently ran somewhere else would report every file operand as
-# missing and still "agree" on the ones fed through stdin.
-printf 'abcd\n' > .probe
-if [ "$(run_gnu C.UTF-8 -w2 .probe 2>/dev/null)" = "$(printf 'ab\ncd')" ]; then
-  HAVE_GNU=yes
-else
-  HAVE_GNU=no
-  echo "fold-diff: glibc fold not reachable in this directory; skipping"
-fi
-rm -f .probe
+run_side() { local side=$1; shift; timeout -k 2 30 env PATH="$bindir/$side" fold "$@"; }
 
 # --- fixtures ----------------------------------------------------------------
 printf 'abcdefghij\n'                     > plain.txt
@@ -128,18 +118,18 @@ printf '\xc3\xa9\xc3\xa9\xc3\xa9x\n\xe4\xb8\xad\xe4\xb8\xady\n' > utf8.txt
 printf '%0.sz' $(seq 1 300) > long.txt; printf '\n' >> long.txt
 
 compare() {
-  local o_out g_out o_err g_err o_rc g_rc stdin=$1 loc=$2; shift 2
+  local o_out g_out o_err g_err o_rc g_rc stdin=$1; shift
   o_err=$(mktemp); g_err=$(mktemp)
   # stdout through a file, not a pipe: in `x=$(fold | od)` the recorded status
   # is od's, and `PIPESTATUS` is set in the substitution's subshell where it
   # cannot be read. See the same note in cat-diff.sh.
   local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
   if [ "$stdin" = "-" ]; then
-    run_ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    run_gnu "$loc" "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    run_side ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    run_side gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   else
-    printf '%b' "$stdin" | run_ours "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
-    printf '%b' "$stdin" | run_gnu "$loc" "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
+    printf '%b' "$stdin" | run_side ours "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
+    printf '%b' "$stdin" | run_side gnu  "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
   fi
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   rm -f "$o_bin" "$g_bin"
@@ -173,20 +163,18 @@ report() {
   return 0
 }
 
-run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C.UTF-8 "$@"; report "fold $*"; }
+run_case()  { compare - "$@"; report "fold $*"; }
 run_stdin() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
-  compare "$input" C.UTF-8 "$@"
+  compare "$input" "$@"
   report "printf '$input' | fold $*"
 }
 # A case we expect to differ, with the reason. Counted separately so that a case
 # that starts agreeing is reported too — an xfail that silently becomes correct
 # is a stale note in the harness.
 xfail_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local why="$1"; shift
-  compare - C.UTF-8 "$@"
+  compare - "$@"
   if [ "$AGREED" = yes ]; then
     xpass=$((xpass+1)); printf 'XPASS fold %s  (expected to differ: %s)\n' "$*" "$why"
   else
@@ -407,15 +395,16 @@ run_case -w 3 plain.txt -s
 run_case -- -w3
 run_case plain.txt -- -w3
 
-# --- differ on purpose -------------------------------------------------------
-# On SlateOS, and on any POSIX host, opening a directory succeeds and the *read*
-# fails, so GNU says `.: Is a directory` and so do we. This harness runs a
-# Windows build, where `File::open` of a directory fails outright and the errno
-# is the host's. The difference is the host's, not the code's — see the same
-# trap in `cut-diff.sh` and in `filekind.rs`, where a Windows `is_file()` calls
-# a pipe a regular file.
-xfail_case 'a directory operand cannot be opened on a Windows host' .
+# A directory operand, which used to be an expected difference and is not one
+# any more: opening a directory succeeds on POSIX and the *read* fails, so GNU
+# says `.: Is a directory` and so do we. It differed only while the subject was
+# a Windows build, where `File::open` refuses a directory outright and the
+# errno was the host's — see the same trap in `filekind.rs`, where a Windows
+# `is_file()` calls a pipe a regular file. Moving both sides into WSL deleted
+# it, and `cut-diff.sh` lost the identical case for the identical reason.
+run_case .
 
+# --- differ on purpose -------------------------------------------------------
 xfail_case 'our --help omits the GNU project ancillary block' --help
 xfail_case 'our --version names SlateOS' --version
 # The abbreviated spellings are here too, and as xfails rather than as ordinary
@@ -427,9 +416,7 @@ xfail_case 'our --version names SlateOS' --version
 xfail_case 'an abbreviation of --help reaches our help text' --he plain.txt
 xfail_case 'an abbreviation of --version reaches our version text' --vers plain.txt
 
-if [ "$HAVE_GNU" = yes ]; then
-  printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
-  [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"
-  printf '\n'
-fi
+printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
+[ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"
+printf '\n'
 [ "$fail" -eq 0 ] || exit 1

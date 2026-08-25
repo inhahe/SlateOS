@@ -76141,10 +76141,15 @@ their absence are now 33 plain cases. Both were measured against GNU 3.11 with
   < file` is *not* that case, because redirected stdin is a regular file. This
   is why `scripts/grep-diff.sh` grew a `w99` fixture: every other fixture is
   small enough that a hardcoded width of 1 would pass.
-* **The tab goes after the last separator, with no backspace.** GNU's
-  `print_line_head` reads as if it emitted `"	"` *before* the separator;
-  the dump says `a.txt: 1:	foo`. And `-Z` does not suppress it —
-  `a.txt  1:	foo`, and `a.txt 	foo` with no numbers at all. What *does*
+* **The tab goes after the last separator, with no backspace.** (`\t`, `\b`
+  and `\0` below are this entry's notation for the bytes themselves; grep
+  emits the bytes. They were written literally here until 2026-08-25, and the
+  two raw NULs made git treat the whole 4.5 MB file as binary -- so it stopped
+  normalising line endings in it, and a CRLF-rewriting edit script went
+  straight into the object store unnoticed.) GNU's
+  `print_line_head` reads as if it emitted `"\t\b"` *before* the separator;
+  the dump says `a.txt: 1:\tfoo`. And `-Z` does not suppress it —
+  `a.txt\0 1:\tfoo`, and `a.txt\0\tfoo` with no numbers at all. What *does*
   suppress it is having no field to follow: bare `-T` prints no tab, and
   neither do `-c`, `-l` or `-L`, which print no line prefix.
 * **`-b` reports the offset of what is printed, not of the line.** Under `-o`

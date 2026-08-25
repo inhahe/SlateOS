@@ -74100,3 +74100,51 @@ three moved from 1 to 2 as part of it, for the same reason — inside them, 1 is
 spent. Everywhere else in the shell a usage error is still 1, and the 17
 `"Syntax error: …"` sites remain queued for flat `set_exit(1)` exactly as
 originally planned.
+
+---
+
+## TD-B-SED-MISSING-COMMANDS — `l`, `W` and `R` are unimplemented, so `-l N` and `--sandbox` have nothing to act on (lane B, 2026-08-24) — **open**
+
+**What it is.** Our `sed` implements most of the GNU command set, but three
+commands are missing outright, and two options exist only to be accepted:
+
+| Missing | What GNU does | What ours does |
+|---|---|---|
+| `l` | prints the pattern space unambiguously — non-printing bytes as octal escapes, a trailing `$`, wrapped at the `-l` width with a `\` at each break | ``unknown command: `l'`` (status 1) |
+| `W FILE` | writes the *first line* of the pattern space to FILE | ``unknown command: `W'`` |
+| `R FILE` | reads *one line* from FILE per cycle and queues it for output | ``unknown command: `R'`` |
+| `-l N` | sets the wrap width `l` uses (default 70; `0` means never wrap) | parsed and discarded |
+| `--sandbox` | makes `e`, `r`, `w`, `R`, `W` a *parse-time* error: `e/r/w commands disabled in sandbox mode` | accepted and ignored |
+
+**Why `-l` is discarded rather than stored.** A field holding a width that
+nothing reads is a claim the program does not honour; the next reader would
+have to prove the absence rather than see it. The option is consumed with a
+comment pointing here instead. Restore the field in the same change that adds
+`l`, not before.
+
+**Reproduce.** `bash scripts/sed-diff.sh` — the cases
+`sed -n l`, `sed -n l 0`, `sed -l 3 's/.*/aaaaaaaa/;l'`, `sed -n '$!N;W …'`,
+`sed 'R def.txt'`, `sed '1R def.txt'` and `sed --sandbox 'w /tmp/x'` all report
+DIFF, each showing our parse error against GNU's output.
+
+**The proper fix.** Implement all three commands and give the two options
+something to act on:
+
+1. `l` — escape with GNU's table: a backslash followed by one of `abfnrtv`, or
+   a doubled backslash for a backslash itself, and a three-digit octal
+   `\ooo` for every other byte outside `[[:print:]]`. Then append `$`,
+   and wrap so that each output line is at most `N` columns *including* the
+   continuation `\`. `l 0` and `-l 0` disable wrapping; an explicit operand on
+   the command (`l 5`) overrides `-l` for that command only. Note that the
+   width counts *escaped* columns, not input bytes.
+2. `W` — like `w`, but stops at the first newline in the pattern space; shares
+   `w`'s open-file table so two `W`s to one name append to one handle.
+3. `R` — one line per cycle from a lazily-opened file, appended to the same
+   append-queue `r` uses; end of file makes it a silent no-op, and an
+   unopenable file is *not* an error (GNU ignores it, unlike `r`'s sibling
+   `w`).
+4. `--sandbox` — a flag consulted by the *parser*, rejecting `e/r/w/R/W` with
+   `e/r/w commands disabled in sandbox mode` at the character where the
+   command starts.
+
+Scoped as sed tranche 2b.

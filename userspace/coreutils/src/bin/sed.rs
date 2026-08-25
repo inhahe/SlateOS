@@ -14,8 +14,15 @@
 //! | `-E` / `-r` | patterns are Extended regular expressions |
 //! | `-s` | treat the files as separate streams rather than one |
 //! | `-z` | lines are separated by NUL rather than newline |
-//! | `-u` | accepted and ignored: this sed does not buffer between files |
+//! | `-u`, `-b` | accepted and ignored: nothing here buffers or translates |
+//! | `-l N` | accepted; the `l` command it sizes is not implemented yet |
 //! | `--` | end of options; what follows is a file |
+//!
+//! Long options are resolved by [`coreutils::getopt`], so they abbreviate to
+//! any unambiguous prefix as every GNU utility's do: `--expr=p` works and
+//! `--s` is refused as ambiguous between `--silent`, `--sandbox` and
+//! `--separate`. `--posix`, `--debug`, `--sandbox` and `--follow-symlinks` are
+//! accepted and do nothing yet; see `known-issues.md`.
 //!
 //! Exit status: 0 normally, 1 for a bad script or usage, 2 for an input file
 //! that could not be opened (the rest are still processed), 4 for a failure
@@ -53,14 +60,17 @@
 //! is why writing goes through [`Out`], which holds a newline back until it
 //! knows something follows it.
 
-use coreutils::diag;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process;
 use std::rc::Rc;
 
 use coreutils::errmsg::strerror;
+use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::quote::{os_bytes, os_from_bytes};
+use coreutils::stdfd;
 use ere::{Regex, bre};
 
 /// The status for a failure that stops the run where it stands.
@@ -75,14 +85,56 @@ use ere::{Regex, bre};
 /// from.
 const EXIT_PANIC: i32 = 4;
 
-/// Report a failure sed cannot continue past, and leave with status 4.
+/// Print one diagnostic, with sed's pending output delivered first.
 ///
-/// The pending output is flushed *first*: the diagnostic is about the stream
-/// whose bytes were already written, so it has to arrive after them, and
-/// `process::exit` does not run the runtime's own flush-at-exit.
-fn panic_out(msg: &str) -> ! {
+/// `error(3)` opens with `fflush (stdout)` so that a complaint about a stream
+/// arrives *after* the bytes already written to it, and
+/// [`coreutils::stdfd::diag_bytes`] does the same for the descriptor-level
+/// buffer every converted utility writes through. sed does not use that buffer
+/// — it writes through `io::stdout()`, a `LineWriter` that holds back a line
+/// with no separator yet, which is exactly what [`Out`] leaves pending at end
+/// of input — so the flush has to be repeated for the buffer sed does use.
+fn diag_line(line: &str) {
     let _ = io::stdout().flush();
+    stdfd::diag_line(line);
+}
+
+/// [`diag_line`] for a message that names a file.
+///
+/// GNU sed prints a name with a plain `%s`: no quoting, no substitution, so a
+/// name that is not valid UTF-8 reaches the terminal unchanged. Going through
+/// `format!` would render those bytes as U+FFFD, which names a different file
+/// from the one that failed.
+fn diag_path(before: &str, path: &OsStr, after: &str) {
+    let _ = io::stdout().flush();
+    let mut line = Vec::from(before.as_bytes());
+    line.extend_from_slice(&os_bytes(path));
+    line.extend_from_slice(after.as_bytes());
+    line.push(b'\n');
+    stdfd::diag_bytes(&line);
+}
+
+/// `eprintln!`-shaped diagnostic, routed through [`diag_line`].
+///
+/// This shadows [`coreutils::diag`] on purpose rather than adding a second
+/// spelling beside it: every diagnostic sed prints owes the same flush, and a
+/// rule that is enforced by the only macro in scope cannot be forgotten at a
+/// call site.
+macro_rules! diag {
+    ($($arg:tt)*) => {
+        crate::diag_line(&::std::format!($($arg)*))
+    };
+}
+
+/// Report a failure sed cannot continue past, and leave with status 4.
+fn panic_out(msg: &str) -> ! {
     diag!("sed: {msg}");
+    process::exit(EXIT_PANIC)
+}
+
+/// [`panic_out`] for a message that names a file. See [`diag_path`].
+fn panic_path(before: &str, path: &OsStr, after: &str) -> ! {
+    diag_path(before, path, after);
     process::exit(EXIT_PANIC)
 }
 
@@ -913,24 +965,24 @@ struct Line {
 /// whether anything follows — and with several files that question crosses a
 /// file boundary.
 struct Input {
-    paths: Vec<String>,
+    paths: Vec<OsString>,
     next_path: usize,
     cur: Option<Box<dyn BufRead>>,
     /// What to call the file now open, in a read-error diagnostic. Upstream
     /// names standard input `stdin` there even though the operand was `-`.
-    cur_name: String,
+    cur_name: OsString,
     peeked: Option<Line>,
     sep: u8,
     had_error: bool,
 }
 
 impl Input {
-    fn new(paths: Vec<String>, sep: u8) -> Input {
+    fn new(paths: Vec<OsString>, sep: u8) -> Input {
         Input {
             paths,
             next_path: 0,
             cur: None,
-            cur_name: "stdin".to_string(),
+            cur_name: OsString::from("stdin"),
             peeked: None,
             sep,
             had_error: false,
@@ -943,7 +995,7 @@ impl Input {
             self.next_path = self.next_path.saturating_add(1);
             if path == "-" {
                 self.cur = Some(Box::new(BufReader::new(io::stdin())));
-                self.cur_name = "stdin".to_string();
+                self.cur_name = OsString::from("stdin");
                 return true;
             }
             match File::open(&path) {
@@ -953,7 +1005,7 @@ impl Input {
                     return true;
                 }
                 Err(e) => {
-                    diag!("sed: can't read {path}: {}", strerror(&e));
+                    diag_path("sed: can't read ", &path, &format!(": {}", strerror(&e)));
                     self.had_error = true;
                 }
             }
@@ -989,11 +1041,11 @@ impl Input {
                 // A read that fails part-way through a file is not the same
                 // as a file that would not open: there is no sensible way to
                 // carry on with the rest of the stream, so this ends the run.
-                Err(e) => panic_out(&format!(
-                    "read error on {}: {}",
-                    self.cur_name,
-                    strerror(&e)
-                )),
+                Err(e) => panic_path(
+                    "sed: read error on ",
+                    &self.cur_name,
+                    &format!(": {}", strerror(&e)),
+                ),
             }
         }
     }
@@ -1688,6 +1740,59 @@ fn render(parts: &[Rep], hay: &[u8], caps: &[Option<(usize, usize)>], out: &mut 
 
 // ------------------------------------------------------------------- the CLI
 
+/// The program name and the status a usage error leaves with, for
+/// [`coreutils::getopt`]. Measured: `sed --zzz-bogus; echo $?` answers 1.
+const SED: Program = Program::new("sed", 1);
+
+/// The `getopt_long` short-option string, exactly as upstream declares it.
+///
+/// `V` is there because upstream declares it, not because it does anything: it
+/// takes a required argument and then always fails. See [`Request::BadUsage`].
+const SHORT_OPTIONS: &str = "bEe:f:i::l:nrsuzV:";
+
+/// Every long option `sed` knows, with what it takes.
+///
+/// **The order is GNU's declaration order, not alphabetical**, because
+/// `getopt_long` lists an ambiguous prefix's candidates in table order, and an
+/// empty prefix matches every option — which is the one command that shows the
+/// whole table, measured rather than recalled:
+///
+/// ```text
+/// $ sed --=x
+/// sed: option '--=x' is ambiguous; possibilities: '--binary' '--regexp-extended'
+///      '--debug' '--expression' '--file' '--in-place' '--line-length'
+///      '--null-data' '--zero-terminated' '--quiet' '--posix' '--silent'
+///      '--sandbox' '--separate' '--unbuffered' '--version' '--help'
+///      '--follow-symlinks'
+/// ```
+///
+/// That order is what makes `sed --s` ambiguous between `--silent`, `--sandbox`
+/// and `--separate` *in that sequence*, which is the string GNU prints.
+const LONG_OPTIONS: &[(&str, Takes)] = &[
+    ("binary", Takes::Nothing),
+    ("regexp-extended", Takes::Nothing),
+    ("debug", Takes::Nothing),
+    ("expression", Takes::Required),
+    ("file", Takes::Required),
+    ("in-place", Takes::Optional),
+    ("line-length", Takes::Required),
+    ("null-data", Takes::Nothing),
+    ("zero-terminated", Takes::Nothing),
+    ("quiet", Takes::Nothing),
+    ("posix", Takes::Nothing),
+    ("silent", Takes::Nothing),
+    ("sandbox", Takes::Nothing),
+    ("separate", Takes::Nothing),
+    ("unbuffered", Takes::Nothing),
+    ("version", Takes::Nothing),
+    // `--help` and `--version` are ordinary table entries rather than names
+    // special-cased ahead of it, because getopt sees them too: they appear
+    // among an ambiguous prefix's possibilities, and `sed --help=x` is measured
+    // to be `option '--help' doesn't allow an argument`, not a printed usage.
+    ("help", Takes::Nothing),
+    ("follow-symlinks", Takes::Nothing),
+];
+
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct SedArgs {
@@ -1696,158 +1801,191 @@ struct SedArgs {
     separate: bool,
     null_data: bool,
     /// `Some(suffix)` for `-i`; an empty suffix means no backup.
-    in_place: Option<String>,
+    in_place: Option<OsString>,
     /// The `-e` fragments and `-f` files, in the order they were given.
     script_parts: Vec<ScriptPart>,
-    files: Vec<String>,
+    files: Vec<OsString>,
 }
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 enum ScriptPart {
-    Text(String),
-    File(String),
+    /// A `-e` fragment, or the first operand when there is no `-e`/`-f`. Bytes,
+    /// not text: a script may hold any byte, and a `y/…/…/` over binary data is
+    /// a real use.
+    Text(Vec<u8>),
+    /// A `-f` file, named as argv named it.
+    File(OsString),
+}
+
+/// What the command line asked for.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum Request {
+    Run(SedArgs),
+    /// `--help`: the usage block on standard output, status 0.
+    Help,
+    /// `--version`.
+    Version,
+    /// The usage block on standard error with no sentence above it, status 1.
+    ///
+    /// Two ways in, both measured. `-V` — POSIX's obsolete "version of the
+    /// language" request — takes a required argument and then rejects whatever
+    /// it was given. And a command line with no script at all is refused the
+    /// same way, without a sentence, because upstream has nothing to say beyond
+    /// the usage it prints.
+    BadUsage,
 }
 
 /// Parse sed's argv.
 ///
-/// The first bare argument is the script *only if* no `-e` or `-f` has been
-/// given; otherwise every bare argument is a file. That rule is why
-/// `sed -e p file` edits `file` rather than looking for a file called `p`.
-fn parse_args(args: &[String]) -> Result<SedArgs, String> {
+/// Option resolution is [`coreutils::getopt`]'s, so long options abbreviate to
+/// any unambiguous prefix the way every GNU utility's do — `sed --expr=p` and
+/// `sed --sil` work, and `sed --s` is refused as ambiguous.
+///
+/// The script is chosen **after** the whole command line has been read, not
+/// while reading it. Whether the first operand is the script depends on whether
+/// a `-e` or `-f` appears *anywhere*, including after that operand: measured,
+/// `sed foo -e p` edits the file `foo`, where deciding as the operand arrives
+/// would have made `foo` the script.
+fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     let mut out = SedArgs::default();
-    let mut i = 0usize;
-    let mut no_more_options = false;
+    let mut operands: Vec<&OsString> = Vec::new();
+    // A `-e` or `-f` anywhere means every operand is a file.
     let mut have_script = false;
 
-    while let Some(arg) = args.get(i) {
-        i = i.saturating_add(1);
-        let bytes = arg.as_bytes();
-
-        if no_more_options || bytes.first() != Some(&b'-') || arg == "-" {
-            if have_script {
-                out.files.push(arg.clone());
-            } else {
-                out.script_parts.push(ScriptPart::Text(arg.clone()));
+    for item in SED.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
+        match item? {
+            Opt::Operand(word) => operands.push(word),
+            Opt::Short(b'n', _) | Opt::Long("quiet" | "silent", _) => out.suppress = true,
+            Opt::Short(b'E' | b'r', _) | Opt::Long("regexp-extended", _) => out.ere = true,
+            Opt::Short(b's', _) | Opt::Long("separate", _) => out.separate = true,
+            Opt::Short(b'z', _) | Opt::Long("null-data" | "zero-terminated", _) => {
+                out.null_data = true;
+            }
+            // Accepted and ignored, each for its own reason. `-u` asks for less
+            // buffering, and this sed already flushes at every boundary that
+            // matters. `-b` asks for binary mode, which is the only mode there
+            // is here: nothing translates CR+LF. `--follow-symlinks` and
+            // `--posix` are answered in tranche 2b and 2c; `--debug` and
+            // `--sandbox` are known gaps, see `known-issues.md`.
+            Opt::Short(b'u', _)
+            | Opt::Long(
+                "unbuffered" | "binary" | "posix" | "debug" | "sandbox" | "follow-symlinks",
+                _,
+            ) => {}
+            Opt::Short(b'i', value) | Opt::Long("in-place", value) => {
+                // `-i` takes an *optional* value, so it is never the next word:
+                // GNU reads `sed -i backup f` as an in-place edit of `backup`
+                // and `f`, not as a `.backup` suffix.
+                out.in_place = Some(value.unwrap_or_default());
+                out.separate = true;
+            }
+            Opt::Short(b'e', value) | Opt::Long("expression", value) => {
+                out.script_parts
+                    .push(ScriptPart::Text(value.map(as_bytes).unwrap_or_default()));
                 have_script = true;
             }
-            continue;
-        }
-
-        if arg == "--" {
-            no_more_options = true;
-            continue;
-        }
-
-        if let Some(long) = arg.strip_prefix("--") {
-            let (name, value) = match long.split_once('=') {
-                Some((n, v)) => (n, Some(v)),
-                None => (long, None),
-            };
-            match name {
-                "quiet" | "silent" => out.suppress = true,
-                "regexp-extended" => out.ere = true,
-                "separate" => out.separate = true,
-                "null-data" | "zero-terminated" => out.null_data = true,
-                "posix" | "unbuffered" | "debug" | "sandbox" | "follow-symlinks" => {}
-                "in-place" => {
-                    out.in_place = Some(value.unwrap_or("").to_string());
-                    out.separate = true;
-                }
-                "expression" => {
-                    let v = value.ok_or_else(|| "--expression needs a script".to_string())?;
-                    out.script_parts.push(ScriptPart::Text(v.to_string()));
-                    have_script = true;
-                }
-                "file" => {
-                    let v = value.ok_or_else(|| "--file needs a file name".to_string())?;
-                    out.script_parts.push(ScriptPart::File(v.to_string()));
-                    have_script = true;
-                }
-                "help" => return Err("help".to_string()),
-                other => return Err(format!("unrecognized option '--{other}'")),
+            Opt::Short(b'f', value) | Opt::Long("file", value) => {
+                out.script_parts
+                    .push(ScriptPart::File(value.unwrap_or_default()));
+                have_script = true;
             }
-            continue;
-        }
-
-        // Short options bundle, and `-e`/`-f`/`-i` may carry their value in the
-        // same argument: `-ne p`, `-i.bak`, `-eS`.
-        let mut j = 1usize;
-        while let Some(&c) = bytes.get(j) {
-            j = j.saturating_add(1);
-            match c {
-                b'n' => out.suppress = true,
-                b'E' | b'r' => out.ere = true,
-                b's' => out.separate = true,
-                b'z' => out.null_data = true,
-                b'u' => {}
-                b'i' => {
-                    // Unlike `-e`, `-i` never takes the *next* argument: GNU
-                    // reads `-i backup` as an in-place edit of `backup`.
-                    let suffix = String::from_utf8_lossy(bytes.get(j..).unwrap_or_default());
-                    out.in_place = Some(suffix.into_owned());
-                    out.separate = true;
-                    j = bytes.len();
-                }
-                b'e' | b'f' => {
-                    let rest = bytes.get(j..).unwrap_or_default();
-                    let value = if rest.is_empty() {
-                        let v = args
-                            .get(i)
-                            .ok_or_else(|| format!("option -{} requires an argument", c as char))?
-                            .clone();
-                        i = i.saturating_add(1);
-                        v
-                    } else {
-                        String::from_utf8_lossy(rest).into_owned()
-                    };
-                    j = bytes.len();
-                    out.script_parts.push(if c == b'e' {
-                        ScriptPart::Text(value)
-                    } else {
-                        ScriptPart::File(value)
-                    });
-                    have_script = true;
-                }
-                other => return Err(format!("invalid option -- '{}'", other.escape_ascii())),
-            }
+            // Accepted, and with nothing yet to apply it to: the `l` command
+            // this sets the wrap width for is not implemented. The width is
+            // discarded rather than stored so that no field claims to carry a
+            // setting nothing reads. Tracked as TD-B-SED-MISSING-COMMANDS.
+            //
+            // Upstream reads it with `atoi`, which has no way to report a
+            // failure, so `sed -l x` is measured to be accepted and to mean 0
+            // rather than to be a usage error — worth recording here, because
+            // it is the reason this arm validates nothing.
+            Opt::Short(b'l', _) | Opt::Long("line-length", _) => {}
+            Opt::Long("help", _) => return Ok(Request::Help),
+            Opt::Long("version", _) => return Ok(Request::Version),
+            // See [`Request::BadUsage`].
+            Opt::Short(b'V', _) => return Ok(Request::BadUsage),
+            // Every letter of `SHORT_OPTIONS` and every name of
+            // `LONG_OPTIONS` is above, and getopt yields nothing else.
+            Opt::Short(_, _) | Opt::Long(_, _) => {}
         }
     }
 
-    Ok(out)
+    let mut operands = operands.into_iter();
+    if !have_script {
+        let Some(first) = operands.next() else {
+            return Ok(Request::BadUsage);
+        };
+        out.script_parts
+            .push(ScriptPart::Text(os_bytes(first).into_owned()));
+    }
+    out.files = operands.cloned().collect();
+    Ok(Request::Run(out))
 }
 
+/// An argv word as the bytes it was given.
+fn as_bytes(word: OsString) -> Vec<u8> {
+    os_bytes(&word).into_owned()
+}
+
+/// What `--help` prints, and what every usage error prints beneath its sentence.
+///
+/// Shorter than GNU's, which ends in three URLs that would be wrong here — but
+/// **complete**: every option this sed accepts has a line, because a usage
+/// message that omits half the options is worse than none, and the first line
+/// is GNU's word for word so that a caller matching on it still matches.
 const USAGE: &str = "\
-Usage: sed [OPTION]... {script} [input-file]...
+Usage: sed [OPTION]... {script-only-if-no-other-script} [input-file]...
 
   -n, --quiet, --silent    suppress automatic printing of pattern space
-  -e SCRIPT                add SCRIPT to the commands to be executed
-  -f FILE                  add the contents of FILE to the commands
-  -i[SUFFIX]               edit files in place (making a backup if SUFFIX)
-  -E, -r                   use extended regular expressions
-  -s                       consider files as separate rather than one stream
-  -z                       separate lines by NUL characters
-  -u                       accepted and ignored
-      --help               display this help and exit";
+      --debug              annotate program execution
+  -e SCRIPT, --expression=SCRIPT
+                           add SCRIPT to the commands to be executed
+  -f FILE, --file=FILE     add the contents of FILE to the commands
+      --follow-symlinks    follow symlinks when processing in place
+  -i[SUFFIX], --in-place[=SUFFIX]
+                           edit files in place (makes a backup if SUFFIX given)
+  -b, --binary             accepted and ignored: nothing is translated here
+  -l N, --line-length=N    the line-wrap length for the `l' command
+      --posix              disable all GNU extensions
+  -E, -r, --regexp-extended
+                           use extended regular expressions in the script
+  -s, --separate           consider the files separate rather than one stream
+      --sandbox            operate in sandbox mode (disable e/r/w commands)
+  -u, --unbuffered         accepted and ignored: this sed does not batch files
+  -z, --null-data          separate lines by NUL characters
+      --help               display this help and exit
+      --version            output version information and exit
+
+If no -e, --expression, -f, or --file option is given, then the first
+non-option argument is taken as the sed script to interpret.  All
+remaining arguments are names of input files; if no input files are
+specified, then the standard input is read.";
 
 /// Gather the script text from `-e` fragments and `-f` files.
-fn collect_script(parts: &[ScriptPart]) -> Result<Vec<u8>, String> {
+///
+/// The error is already formatted for [`panic_out`], and carries the name as
+/// bytes so a `-f` file whose name is not UTF-8 is reported as itself.
+fn collect_script(parts: &[ScriptPart]) -> Result<Vec<u8>, Vec<u8>> {
     let mut script: Vec<u8> = Vec::new();
     for part in parts {
         if !script.is_empty() {
             script.push(b'\n');
         }
         match part {
-            ScriptPart::Text(t) => script.extend_from_slice(t.as_bytes()),
+            ScriptPart::Text(t) => script.extend_from_slice(t),
             ScriptPart::File(path) => {
                 let bytes = if path == "-" {
                     let mut b = Vec::new();
                     io::stdin()
                         .read_to_end(&mut b)
                         .map(|_| b)
-                        .map_err(|e| format!("couldn't read -: {}", strerror(&e)))?
+                        .map_err(|e| format!("couldn't read -: {}", strerror(&e)).into_bytes())?
                 } else {
-                    fs::read(path)
-                        .map_err(|e| format!("couldn't open file {path}: {}", strerror(&e)))?
+                    fs::read(path).map_err(|e| {
+                        let mut msg = Vec::from(&b"couldn't open file "[..]);
+                        msg.extend_from_slice(&os_bytes(path));
+                        msg.extend_from_slice(format!(": {}", strerror(&e)).as_bytes());
+                        msg
+                    })?
                 };
                 script.extend_from_slice(&bytes);
             }
@@ -1857,31 +1995,45 @@ fn collect_script(parts: &[ScriptPart]) -> Result<Vec<u8>, String> {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
     let parsed = match parse_args(&args) {
-        Ok(p) => p,
-        Err(e) if e == "help" => {
+        Ok(Request::Run(p)) => p,
+        Ok(Request::Help) => {
             println!("{USAGE}");
+            let _ = io::stdout().flush();
             process::exit(0);
         }
-        Err(e) => {
-            diag!("sed: {e}");
+        Ok(Request::Version) => {
+            println!("sed (SlateOS coreutils)");
+            let _ = io::stdout().flush();
+            process::exit(0);
+        }
+        Ok(Request::BadUsage) => {
             diag!("{USAGE}");
             process::exit(1);
         }
+        Err(e) => {
+            // `e.sentence`, not `e.message()`: GNU sed answers a usage error
+            // with the whole usage block rather than with gnulib's
+            // `Try 'sed --help' for more information.` referral.
+            diag!("sed: {}", e.sentence);
+            diag!("{USAGE}");
+            process::exit(e.status);
+        }
     };
-
-    if parsed.script_parts.is_empty() {
-        diag!("sed: no script specified");
-        diag!("{USAGE}");
-        process::exit(1);
-    }
 
     let script_text = match collect_script(&parsed.script_parts) {
         Ok(s) => s,
         // Not status 1: the command line was well formed, and a `-f` file that
         // will not open is an I/O failure like any other.
-        Err(e) => panic_out(&e),
+        Err(msg) => {
+            let _ = io::stdout().flush();
+            let mut line = Vec::from(&b"sed: "[..]);
+            line.extend_from_slice(&msg);
+            line.push(b'\n');
+            stdfd::diag_bytes(&line);
+            process::exit(EXIT_PANIC);
+        }
     };
 
     let script = match compile_script(&script_text, parsed.ere) {
@@ -1903,7 +2055,7 @@ fn main() {
 
     let mut files = parsed.files.clone();
     if files.is_empty() {
-        files.push("-".to_string());
+        files.push(OsString::from("-"));
     }
 
     let mut job = Job {
@@ -1967,7 +2119,7 @@ impl Job<'_> {
     }
 
     /// All the files as one stream: line numbers and `$` run across them.
-    fn joined(&mut self, files: &[String]) -> i32 {
+    fn joined(&mut self, files: &[OsString]) -> i32 {
         let stdout = io::stdout();
         let mut sink = stdout.lock();
         let mut input = Input::new(files.to_vec(), self.sep);
@@ -1977,7 +2129,7 @@ impl Job<'_> {
     }
 
     /// `-s`: each file starts again at line 1, and each has its own last line.
-    fn separate(&mut self, files: &[String]) -> i32 {
+    fn separate(&mut self, files: &[OsString]) -> i32 {
         let stdout = io::stdout();
         let mut sink = stdout.lock();
         let mut bad = false;
@@ -1998,7 +2150,7 @@ impl Job<'_> {
     ///
     /// The result is built in memory and written once, so a script that fails
     /// part-way through does not leave the file half-edited.
-    fn in_place(&mut self, files: &[String], suffix: &str) -> i32 {
+    fn in_place(&mut self, files: &[OsString], suffix: &OsStr) -> i32 {
         let mut bad = false;
         for path in files {
             // A `-` operand is a file named `-`, not standard input: there is
@@ -2006,7 +2158,7 @@ impl Job<'_> {
             // and fails as any missing file would.
             match File::open(path) {
                 Err(e) => {
-                    diag!("sed: can't read {path}: {}", strerror(&e));
+                    diag_path("sed: can't read ", path, &format!(": {}", strerror(&e)));
                     bad = true;
                     continue;
                 }
@@ -2015,11 +2167,11 @@ impl Job<'_> {
                 // anything that is not a regular file names the real problem.
                 Ok(f) => match f.metadata() {
                     Ok(m) if !m.is_file() => {
-                        panic_out(&format!("couldn't edit {path}: not a regular file"));
+                        panic_path("sed: couldn't edit ", path, ": not a regular file");
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        diag!("sed: can't read {path}: {}", strerror(&e));
+                        diag_path("sed: can't read ", path, &format!(": {}", strerror(&e)));
                         bad = true;
                         continue;
                     }
@@ -2030,21 +2182,15 @@ impl Job<'_> {
             let (quit, exec_err) = self.run_one(&mut input, &mut buf);
             bad = bad || input.had_error || exec_err;
 
-            if !suffix.is_empty() {
-                // GNU puts the file name where a `*` is, and appends otherwise.
-                let backup = if suffix.contains('*') {
-                    suffix.replace('*', path)
-                } else {
-                    format!("{path}{suffix}")
-                };
-                if let Err(e) = fs::copy(path, &backup) {
-                    diag!("sed: cannot back up {path}: {}", strerror(&e));
-                    bad = true;
-                    continue;
-                }
+            if let Some(backup) = backup_name(path, suffix)
+                && let Err(e) = fs::copy(path, &backup)
+            {
+                diag_path("sed: cannot back up ", path, &format!(": {}", strerror(&e)));
+                bad = true;
+                continue;
             }
             if let Err(e) = fs::write(path, &buf) {
-                diag!("sed: couldn't write {path}: {}", strerror(&e));
+                diag_path("sed: couldn't write ", path, &format!(": {}", strerror(&e)));
                 bad = true;
             }
             if let Some(code) = quit {
@@ -2053,6 +2199,43 @@ impl Job<'_> {
         }
         status(None, bad)
     }
+}
+
+/// Where `-i`'s backup of `path` goes, or `None` for no backup at all.
+///
+/// Upstream builds this in two steps, and both are visible in the result.
+/// `-i SUFFIX` first becomes the *pattern* `*SUFFIX` unless the suffix already
+/// contains a `*`, and `-i` with no suffix becomes the bare pattern `*`. The
+/// pattern is then expanded by putting the whole file name — directories
+/// included — wherever a `*` stands, so `-i.bak` gives `f.bak`, `-i 'old/*'`
+/// gives `old/f`, and `-i '*.*'` gives `f.f`.
+///
+/// The bare `*` is how upstream spells "no backup": it is the one pattern that
+/// expands to the file itself, and copying a file over itself would empty it.
+/// Comparing the expansion rather than the suffix catches every spelling of it,
+/// including a `-i` whose suffix is literally `*`.
+fn backup_name(path: &OsStr, suffix: &OsStr) -> Option<OsString> {
+    let name = os_bytes(path);
+    let suffix = os_bytes(suffix);
+    let pattern: Vec<u8> = if suffix.contains(&b'*') {
+        suffix.into_owned()
+    } else {
+        let mut p = vec![b'*'];
+        p.extend_from_slice(&suffix);
+        p
+    };
+    let mut backup: Vec<u8> = Vec::with_capacity(pattern.len().saturating_add(name.len()));
+    for &b in &pattern {
+        if b == b'*' {
+            backup.extend_from_slice(&name);
+        } else {
+            backup.push(b);
+        }
+    }
+    if backup == *name {
+        return None;
+    }
+    Some(os_from_bytes(&backup))
 }
 
 fn status(quit: Option<i32>, bad: bool) -> i32 {
@@ -2076,8 +2259,8 @@ fn status(quit: Option<i32>, bad: bool) -> i32 {
 mod tests {
     use super::*;
 
-    fn s(items: &[&str]) -> Vec<String> {
-        items.iter().map(|x| (*x).to_string()).collect()
+    fn os(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
     }
 
     /// Run a script over some text and return what it wrote.
@@ -2092,7 +2275,7 @@ mod tests {
         let mut inp = Input {
             paths: Vec::new(),
             next_path: 0,
-            cur_name: "stdin".to_string(),
+            cur_name: OsString::from("stdin"),
             cur: Some(Box::new(BufReader::new(io::Cursor::new(
                 input.as_bytes().to_vec(),
             )))),
@@ -2162,7 +2345,7 @@ mod tests {
         let mut inp = Input {
             paths: Vec::new(),
             next_path: 0,
-            cur_name: "stdin".to_string(),
+            cur_name: OsString::from("stdin"),
             cur: Some(Box::new(BufReader::new(io::Cursor::new(line.into_bytes())))),
             peeked: None,
             sep: b'\n',
@@ -2425,7 +2608,7 @@ mod tests {
         let mut inp = Input {
             paths: Vec::new(),
             next_path: 0,
-            cur_name: "stdin".to_string(),
+            cur_name: OsString::from("stdin"),
             cur: Some(Box::new(BufReader::new(io::Cursor::new(raw)))),
             peeked: None,
             sep: b'\n',
@@ -2474,78 +2657,200 @@ mod tests {
 
     // ---------------- parse_args ----------------
 
+    /// The `SedArgs` of a command line that is expected to be a run.
+    fn run_args(items: &[&str]) -> SedArgs {
+        match parse_args(&os(items)) {
+            Ok(Request::Run(a)) => a,
+            other => panic!("{items:?} parsed as {other:?}"),
+        }
+    }
+
+    fn text(t: &str) -> ScriptPart {
+        ScriptPart::Text(t.as_bytes().to_vec())
+    }
+
+    fn names(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
+    }
+
     #[test]
     fn the_first_bare_argument_is_the_script_unless_e_gave_one() {
-        let a = parse_args(&s(&["s/a/b/", "in.txt"])).unwrap();
-        assert_eq!(a.script_parts, vec![ScriptPart::Text("s/a/b/".to_string())]);
-        assert_eq!(a.files, vec!["in.txt"]);
+        let a = run_args(&["s/a/b/", "in.txt"]);
+        assert_eq!(a.script_parts, vec![text("s/a/b/")]);
+        assert_eq!(a.files, names(&["in.txt"]));
 
-        let a = parse_args(&s(&["-e", "p", "in.txt"])).unwrap();
-        assert_eq!(a.script_parts, vec![ScriptPart::Text("p".to_string())]);
-        assert_eq!(a.files, vec!["in.txt"]);
+        let a = run_args(&["-e", "p", "in.txt"]);
+        assert_eq!(a.script_parts, vec![text("p")]);
+        assert_eq!(a.files, names(&["in.txt"]));
+    }
+
+    /// The rule is about the *whole* command line, not about what has been seen
+    /// so far. Measured: `sed foo -e p` reads the file `foo`, so an operand
+    /// cannot be classified until the last option has been parsed.
+    #[test]
+    fn an_e_after_the_first_operand_still_makes_that_operand_a_file() {
+        let a = run_args(&["foo", "-e", "p"]);
+        assert_eq!(a.script_parts, vec![text("p")]);
+        assert_eq!(a.files, names(&["foo"]));
     }
 
     #[test]
     fn short_options_bundle() {
-        let a = parse_args(&s(&["-ne", "p", "f"])).unwrap();
+        let a = run_args(&["-ne", "p", "f"]);
         assert!(a.suppress);
-        assert_eq!(a.script_parts, vec![ScriptPart::Text("p".to_string())]);
-        assert_eq!(a.files, vec!["f"]);
+        assert_eq!(a.script_parts, vec![text("p")]);
+        assert_eq!(a.files, names(&["f"]));
     }
 
     #[test]
     fn a_value_may_be_attached_to_its_option() {
-        let a = parse_args(&s(&["-ep", "f"])).unwrap();
-        assert_eq!(a.script_parts, vec![ScriptPart::Text("p".to_string())]);
-        assert_eq!(a.files, vec!["f"]);
+        let a = run_args(&["-ep", "f"]);
+        assert_eq!(a.script_parts, vec![text("p")]);
+        assert_eq!(a.files, names(&["f"]));
     }
 
     #[test]
     fn in_place_takes_its_suffix_attached_and_never_the_next_argument() {
-        let a = parse_args(&s(&["-i.bak", "s/a/b/", "f"])).unwrap();
-        assert_eq!(a.in_place, Some(".bak".to_string()));
+        let a = run_args(&["-i.bak", "s/a/b/", "f"]);
+        assert_eq!(a.in_place, Some(OsString::from(".bak")));
         assert!(a.separate);
-        assert_eq!(a.files, vec!["f"]);
+        assert_eq!(a.files, names(&["f"]));
 
         // `-i backup` edits `backup`; it does not name a suffix.
-        let a = parse_args(&s(&["-i", "s/a/b/", "f"])).unwrap();
-        assert_eq!(a.in_place, Some(String::new()));
-        assert_eq!(a.files, vec!["f"]);
+        let a = run_args(&["-i", "s/a/b/", "f"]);
+        assert_eq!(a.in_place, Some(OsString::new()));
+        assert_eq!(a.files, names(&["f"]));
     }
 
     #[test]
     fn extended_regular_expressions_have_two_spellings() {
-        assert!(parse_args(&s(&["-E", "p"])).unwrap().ere);
-        assert!(parse_args(&s(&["-r", "p"])).unwrap().ere);
-        assert!(parse_args(&s(&["--regexp-extended", "p"])).unwrap().ere);
+        assert!(run_args(&["-E", "p"]).ere);
+        assert!(run_args(&["-r", "p"]).ere);
+        assert!(run_args(&["--regexp-extended", "p"]).ere);
     }
 
     #[test]
     fn long_options_may_carry_a_value() {
-        let a = parse_args(&s(&["--expression=p", "--in-place=.bak", "f"])).unwrap();
-        assert_eq!(a.script_parts, vec![ScriptPart::Text("p".to_string())]);
-        assert_eq!(a.in_place, Some(".bak".to_string()));
-        assert_eq!(a.files, vec!["f"]);
+        let a = run_args(&["--expression=p", "--in-place=.bak", "f"]);
+        assert_eq!(a.script_parts, vec![text("p")]);
+        assert_eq!(a.in_place, Some(OsString::from(".bak")));
+        assert_eq!(a.files, names(&["f"]));
+    }
+
+    /// Every GNU utility's long options abbreviate, and sed's are no exception.
+    #[test]
+    fn long_options_abbreviate_to_an_unambiguous_prefix() {
+        let a = run_args(&["--expr=p", "f"]);
+        assert_eq!(a.script_parts, vec![text("p")]);
+        assert!(run_args(&["--sil", "p"]).suppress);
+    }
+
+    /// Measured: `sed --s` lists its candidates in the table's order, which is
+    /// GNU's declaration order rather than alphabetical.
+    #[test]
+    fn an_ambiguous_prefix_lists_the_candidates_in_gnus_order() {
+        let e = parse_args(&os(&["--s", "-e", "p"])).unwrap_err();
+        assert_eq!(
+            e.sentence,
+            "option '--s' is ambiguous; possibilities: '--silent' '--sandbox' '--separate'"
+        );
     }
 
     #[test]
     fn a_lone_dash_is_a_file_not_an_option() {
-        let a = parse_args(&s(&["p", "-"])).unwrap();
-        assert_eq!(a.files, vec!["-"]);
+        let a = run_args(&["p", "-"]);
+        assert_eq!(a.files, names(&["-"]));
     }
 
     #[test]
     fn double_dash_ends_the_options() {
-        let a = parse_args(&s(&["-n", "--", "p", "-weird"])).unwrap();
+        let a = run_args(&["-n", "--", "p", "-weird"]);
         assert!(a.suppress);
-        assert_eq!(a.files, vec!["-weird"]);
+        assert_eq!(a.files, names(&["-weird"]));
     }
 
     #[test]
     fn an_unknown_option_is_reported() {
-        assert!(parse_args(&s(&["-Z", "p"])).is_err());
-        assert!(parse_args(&s(&["--nope"])).is_err());
-        assert!(parse_args(&s(&["-e"])).is_err());
+        // The sentences are glibc's, measured against GNU sed under `C.UTF-8`.
+        let e = parse_args(&os(&["-Z", "p"])).unwrap_err();
+        assert_eq!(e.sentence, "invalid option -- 'Z'");
+        let e = parse_args(&os(&["--nope"])).unwrap_err();
+        assert_eq!(e.sentence, "unrecognized option '--nope'");
+        let e = parse_args(&os(&["-e"])).unwrap_err();
+        assert_eq!(e.sentence, "option requires an argument -- 'e'");
+        let e = parse_args(&os(&["--file"])).unwrap_err();
+        assert_eq!(e.sentence, "option '--file' requires an argument");
+        let e = parse_args(&os(&["--help=x"])).unwrap_err();
+        assert_eq!(e.sentence, "option '--help' doesn't allow an argument");
+    }
+
+    #[test]
+    fn help_and_version_are_requests_of_their_own() {
+        assert_eq!(parse_args(&os(&["--help"])).unwrap(), Request::Help);
+        assert_eq!(parse_args(&os(&["--version"])).unwrap(), Request::Version);
+    }
+
+    /// Both spellings of "print the usage and stop, with nothing above it":
+    /// nothing to run, and the obsolete `-V`, which takes a required argument
+    /// and rejects it whatever it is.
+    #[test]
+    fn a_command_line_with_no_script_is_a_bare_usage_error() {
+        assert_eq!(parse_args(&os(&[])).unwrap(), Request::BadUsage);
+        assert_eq!(parse_args(&os(&["-n"])).unwrap(), Request::BadUsage);
+        assert_eq!(
+            parse_args(&os(&["-V4.2", "-e", "p"])).unwrap(),
+            Request::BadUsage
+        );
+        // …but `-V` alone is still a missing argument, not a usage block.
+        let e = parse_args(&os(&["-V"])).unwrap_err();
+        assert_eq!(e.sentence, "option requires an argument -- 'V'");
+    }
+
+    /// The options sed takes and does nothing with are still options: they must
+    /// not fall through to `invalid option`, and must not become the script.
+    #[test]
+    fn the_accepted_and_ignored_options_are_accepted() {
+        let a = run_args(&[
+            "-u",
+            "-b",
+            "--posix",
+            "--debug",
+            "--sandbox",
+            "--follow-symlinks",
+            "-l",
+            "5",
+            "p",
+            "f",
+        ]);
+        assert_eq!(a.script_parts, vec![text("p")]);
+        assert_eq!(a.files, names(&["f"]));
+    }
+
+    /// The usage block is what a usage error prints, so its first line has to
+    /// be GNU's word for word — a caller that matches on it should still match.
+    #[test]
+    fn the_usage_first_line_is_gnus() {
+        assert_eq!(
+            USAGE.lines().next(),
+            Some("Usage: sed [OPTION]... {script-only-if-no-other-script} [input-file]...")
+        );
+    }
+
+    // ---------------- -i backup names ----------------
+
+    #[test]
+    fn a_backup_suffix_is_appended_and_a_star_is_the_whole_name() {
+        let name = |p: &str, sfx: &str| {
+            backup_name(OsStr::new(p), OsStr::new(sfx)).map(|b| b.to_string_lossy().into_owned())
+        };
+        assert_eq!(name("f", ".bak"), Some("f.bak".to_string()));
+        assert_eq!(name("d/f", ".bak"), Some("d/f.bak".to_string()));
+        assert_eq!(name("f", "old/*"), Some("old/f".to_string()));
+        assert_eq!(name("f", "*.*"), Some("f.f".to_string()));
+        // The two spellings of "no backup": no suffix, and the bare `*` that
+        // upstream turns a missing suffix into.
+        assert_eq!(name("f", ""), None);
+        assert_eq!(name("f", "*"), None);
     }
 
     // ---------------- exit status ----------------

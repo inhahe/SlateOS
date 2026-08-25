@@ -93,8 +93,20 @@ compare() {
   # stderr as text, not merely for presence. Sound only because the reference
   # is glibc's: our `errmsg` prints POSIX's strerror strings, which agree with
   # glibc and did not agree with the Cygwin host this harness used to run on.
+  #
+  # `ERR_MODE=first-line` keeps only the first line of each side. It exists for
+  # one shape of case: GNU sed answers *every* usage error by printing its whole
+  # usage block under the sentence, and ours prints a different block on purpose
+  # — shorter, and without the three GNU project URLs, which would be wrong here.
+  # Compared in full, a dozen cases would all be xfails saying the same thing
+  # about the block and nothing about the sentence, which is the part under test.
+  # The block itself is still compared, once, by the `--help` xfail below.
   local o_msg g_msg
-  o_msg=$(cat "$o_err"); g_msg=$(cat "$g_err")
+  if [ "${ERR_MODE:-full}" = first-line ]; then
+    o_msg=$(head -1 "$o_err"); g_msg=$(head -1 "$g_err")
+  else
+    o_msg=$(cat "$o_err"); g_msg=$(cat "$g_err")
+  fi
   rm -f "$o_err" "$g_err"
 
   if [ "$o_out" = "$g_out" ] && [ "$o_rc" = "$g_rc" ] && [ "$o_msg" = "$g_msg" ]; then
@@ -130,6 +142,19 @@ run_stdin() {
 run_case() {
   compare - "$@"
   report "sed $*"
+}
+
+# `usage_case ARGS...` — a command line sed should refuse, compared on its
+# stdout, its status and the *first line* of its stderr. See `ERR_MODE` above:
+# the usage block beneath that first line is deliberately not GNU's.
+usage_case() {
+  # Set and reset rather than `ERR_MODE=first-line compare …`: an assignment
+  # prefixed to a *function* call stays in effect after it returns in bash, so
+  # the prefix form would silently put every later case into first-line mode.
+  ERR_MODE=first-line
+  compare - "$@"
+  ERR_MODE=full
+  report "sed $* (first stderr line)"
 }
 
 xfail_case() {
@@ -514,18 +539,24 @@ run_stdin abc.txt -e 's/a/A/' -e 'Z'
 # --- usage errors -------------------------------------------------------------
 #
 # glibc's getopt on both sides now, so the quoting and the wording of these are
-# a real comparison rather than a Cygwin artefact.
-run_case
-run_case -x 'p' abc.txt
-run_case --nosuchopt 'p' abc.txt
+# a real comparison rather than a Cygwin artefact.  They go through
+# `usage_case`, which compares only the first stderr line: the usage block GNU
+# prints beneath it is deliberately not ours, and is compared once, in full, by
+# the `--help` xfail at the bottom of this section.
+usage_case
+usage_case -x 'p' abc.txt
+usage_case --nosuchopt 'p' abc.txt
+usage_case -f
+usage_case -e
+usage_case -i.bak
+# Not a usage error: a long option may be abbreviated to any unambiguous
+# prefix, and `--expr` is one.  It sits here, beside the errors, because it is
+# the boundary case for the ambiguity check they exercise.
 run_case --expr 'p' abc.txt
-run_case -f
-run_case -e
-run_case -i.bak
 # `--help` and `--version` reach the option table like any other long option,
 # so a value attached to one is a table question and is compared.
-run_case --help=x
-run_case --version=x
+usage_case --help=x
+usage_case --version=x
 # What they *print* is not: ours names SlateOS and omits the GNU project's
 # `Report bugs to:` block, exactly as every other utility here does.
 xfail_case 'help omits the GNU bug-report block' --help

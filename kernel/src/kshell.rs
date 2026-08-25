@@ -306,6 +306,34 @@ fn last_exit() -> u8 {
     LAST_EXIT.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Close a subcommand-dispatching command's catch-all help arm with the right
+/// status, and say so when the subcommand was not recognised.
+///
+/// These arms serve two callers at once, which is the whole problem.
+/// `nat help` asked for the synopsis and got it — that command succeeded.
+/// `nat banana` is a mistake, and the synopsis is a consolation prize. Before
+/// this existed the arm reported the same thing to both, so nothing downstream
+/// could tell a deliberate query from a typo: `nat banana && deploy` ran
+/// `deploy`. `cmd_nat` said as much in a comment — *`"help"` or any
+/// unrecognised subcommand falls through to the help text* — which named the
+/// defect without treating it as one.
+///
+/// The empty string counts as a request because commands whose bare form means
+/// "print the help" reach here through `parts.first().copied().unwrap_or("help")`,
+/// and one or two pass the empty string straight through.
+///
+/// The unrecognised-subcommand line is printed *after* the help text on
+/// purpose: it is the line that stays next to the prompt, and it is the one
+/// piece of information the help text cannot supply — that what you typed was
+/// not in it. Without it the shell answers a typo with a wall of correct-looking
+/// output and no hint that it is not what was asked for.
+fn end_help_arm(cmd: &str, sub: &str) {
+    if !matches!(sub, "" | "help" | "-h" | "--help" | "?") {
+        shell_println!("{}: unknown subcommand '{}'", cmd, sub);
+        set_exit(1);
+    }
+}
+
 /// Echo a captured command's output to serial if the command reported failure.
 ///
 /// For self-test rungs that assert a *checker* succeeded. When one does not,
@@ -7692,9 +7720,13 @@ fn dispatch(line: &str) {
         "fsck" => {
             // Auto-dispatch: try ext4 first, then FAT.
             if args.trim().is_empty() {
+                // Not a query with an answer, unlike the help arms below: `fsck`
+                // with no device checked nothing, so there is no result it could
+                // be reporting. A missing operand is a failure.
                 shell_println!("Usage: fsck DEVICE  (auto-detects fs type)");
                 shell_println!("  fsck.fat DEVICE   — check FAT filesystem");
                 shell_println!("  fsck.ext4 DEVICE  — check ext4 filesystem");
+                set_exit(1);
             } else {
                 let dev = args
                     .split_whitespace()
@@ -14753,14 +14785,117 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_contains("likewise for the compressor default", &out, b"Current:");
         assert_eq!(last_exit(), 0, "which is not a usage error");
 
-        // `wallpaper offset` is the harder relative: its branch serves the
-        // query *and* an unparseable pair, so no single status is right for it
-        // and it deliberately sets none. Pinned at 0 to record which way the
-        // ambiguity currently falls, so that splitting the arm later is a
-        // visible change rather than a silent one.
+        // `wallpaper offset` used to be the harder relative -- one branch
+        // served the query *and* an unparseable pair, so no single status was
+        // right for it and it deliberately set none. The branch has since been
+        // split; rung 59 exercises the other half.
         let out = capture_command("wallpaper offset");
         assert_output_contains("the offset query answers", &out, b"Offset: (");
         assert_eq!(last_exit(), 0, "and does not claim to have failed");
+    }
+
+    serial_println!("  kshell::self_test 59: asking for help is not the same as mistyping");
+    {
+        // Rung 58 pinned "a usage message is a failure report". The 33 arms it
+        // could not pin were the ones serving two callers at once: `nat help`
+        // asks for the synopsis and gets it, so it succeeded, while `nat
+        // banana` is a mistake. Both landed in the same `_ => { ...help... }`
+        // arm, so whichever status that arm set, one of the two was lied to --
+        // and it set none, which lied to the second. This rung is the pair of
+        // assertions the old arm could not have satisfied simultaneously.
+        let out = capture_command("nat help");
+        assert_output_contains(
+            "an explicit help request prints the help",
+            &out,
+            b"nat forward",
+        );
+        assert_output_lacks(
+            "and is not scolded for a subcommand it did not get wrong",
+            &out,
+            b"unknown subcommand",
+        );
+        assert_eq!(last_exit(), 0, "asking for help is a request, answered");
+
+        let out = capture_command("nat zz_not_a_subcommand");
+        assert_output_contains(
+            "a typo gets the help too -- it is the useful reply",
+            &out,
+            b"nat forward",
+        );
+        assert_output_contains(
+            "but is told what was actually wrong",
+            &out,
+            b"unknown subcommand 'zz_not_a_subcommand'",
+        );
+        assert_eq!(last_exit(), 1, "and reports failure, which `&&` can see");
+
+        // The bare form. Fourteen of these commands map no-argument to `""` and
+        // ten map it to `"help"`; both reach the arm and both must count as a
+        // request. `swapcfg` is one of the `""` commands, so this covers the
+        // half of the predicate `nat help` above does not.
+        let out = capture_command("swapcfg");
+        assert_output_contains("a bare invocation prints its help", &out, b"swapcfg");
+        assert_eq!(
+            last_exit(),
+            0,
+            "and succeeds -- that is what it was asked for"
+        );
+
+        // `nat` on its own maps to `"status"`, not to the help arm, so it must
+        // not be caught by the unrecognised-subcommand line. This is the exact
+        // regression the helper would cause if its request-set were consulted
+        // without checking that a `"status"` arm exists to intercept it.
+        let out = capture_command("nat");
+        assert_output_lacks(
+            "a command whose bare form means something else is not a typo",
+            &out,
+            b"unknown subcommand",
+        );
+        assert_eq!(last_exit(), 0, "and still succeeds");
+
+        // The query/error branches, which are the same conflation one level
+        // down: `fhist autoversion` asks, `fhist autoversion banana` mistypes.
+        let out = capture_command("fhist autoversion");
+        assert_output_contains("the query is answered", &out, b"Auto-versioning:");
+        assert_eq!(last_exit(), 0, "and succeeded");
+
+        let out = capture_command("fhist autoversion zzbanana");
+        assert_output_contains(
+            "an unusable setting says so",
+            &out,
+            b"unknown autoversion setting",
+        );
+        assert_eq!(last_exit(), 1, "and fails, having changed nothing");
+
+        // The other half of the `wallpaper offset` branch rung 58 left pinned
+        // as ambiguous. A single coordinate is not a query.
+        let out = capture_command("wallpaper offset 0.5");
+        assert_output_contains(
+            "half a coordinate pair is an error, not a question",
+            &out,
+            b"two numbers",
+        );
+        assert_eq!(last_exit(), 1, "and reports it");
+
+        // `lockdep` prints its summary either way, so before the split an
+        // unrecognised subcommand was completely invisible: same output, same
+        // status. Its recognised set is a chain of `if`s with no catch-all,
+        // which is why it needed its own treatment rather than the helper.
+        let out = capture_command("lockdep");
+        assert_output_contains(
+            "the bare form answers with the summary",
+            &out,
+            b"Violations:",
+        );
+        assert_eq!(last_exit(), 0, "which is a successful query");
+
+        let out = capture_command("lockdep zz_not_a_view");
+        assert_output_contains(
+            "and an unrecognised view no longer passes unnoticed",
+            &out,
+            b"unknown subcommand 'zz_not_a_view'",
+        );
+        assert_eq!(last_exit(), 1, "with a failure status");
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -18432,19 +18567,23 @@ fn cmd_fhist(args: &str) {
                     "VFS auto-versioning disabled (use `fhist record` for manual versioning)."
                 );
             }
-            _ => {
+            // The arm this replaces served `fhist autoversion` -- a query, which
+            // the line below answers -- and `fhist autoversion banana`, which
+            // is a mistake that changed nothing. It could not report both
+            // truthfully, so it was left reporting neither; now each has its
+            // own arm and its own status.
+            None => {
                 let st = history::stats();
                 shell_println!(
                     "Auto-versioning: {}",
                     if st.auto_version { "on" } else { "off" }
                 );
-                // No status here, deliberately. This arm answers `fhist
-                // autoversion` with no argument -- a query, correctly answered
-                // above -- as well as `fhist autoversion banana`, an error.
-                // Whichever status it set, one of the two callers would be told
-                // something false, so it stays silent until the arm is split.
-                // Tracked in known-issues.md under the help/query conflation.
                 shell_println!("Usage: fhist autoversion <on|off>");
+            }
+            Some(other) => {
+                shell_println!("fhist: unknown autoversion setting '{}'", other);
+                shell_println!("Usage: fhist autoversion <on|off>");
+                set_exit(1);
             }
         },
 
@@ -30710,13 +30849,18 @@ fn cmd_wallpaper(args: &str) {
                     x.clamp(0.0, 1.0),
                     y.clamp(0.0, 1.0)
                 );
+            } else if parts.get(1).is_some() {
+                // Arguments were supplied and at least one did not parse as a
+                // float, so the offset was not moved. This also catches
+                // `wallpaper offset 0.5` with the second coordinate missing --
+                // a pair is required, and half of one is not a query.
+                shell_println!("wallpaper: offset needs two numbers in 0.0-1.0");
+                shell_println!("Usage: wallpaper offset <x 0.0-1.0> <y 0.0-1.0>");
+                set_exit(1);
             } else {
+                // Bare `wallpaper offset` is a query, and this is its answer.
                 let cfg = wallpaper::current();
                 shell_println!("Offset: ({:.2}, {:.2})", cfg.offset_x, cfg.offset_y);
-                // No status here, deliberately: this `else` serves both a bare
-                // `wallpaper offset` -- a query, answered on the line above --
-                // and an unparseable pair, an error. Tracked with the other
-                // query/error conflations in known-issues.md.
                 shell_println!("Usage: wallpaper offset <x 0.0-1.0> <y 0.0-1.0>");
             }
         }
@@ -38295,7 +38439,7 @@ fn cmd_swapcfg(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             shell_println!("swapcfg — swap space configuration");
             shell_println!("  show             Show configuration");
             shell_println!("  list             List swap areas");
@@ -38312,6 +38456,7 @@ fn cmd_swapcfg(args: &str) {
             shell_println!("  stats            Show statistics");
             shell_println!("  init             Load defaults");
             shell_println!("  test             Run self-tests");
+            end_help_arm("swapcfg", other);
         }
     }
 }
@@ -43278,7 +43423,7 @@ fn cmd_appnotify(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             shell_println!("appnotify — per-app notification settings");
             shell_println!("Usage: appnotify <subcommand>");
             shell_println!("  list              List registered apps");
@@ -43303,6 +43448,7 @@ fn cmd_appnotify(args: &str) {
             shell_println!("  init              Load defaults");
             shell_println!("  stats             Show statistics");
             shell_println!("  test              Run self-tests");
+            end_help_arm("appnotify", other);
         }
     }
 }
@@ -43606,7 +43752,7 @@ fn cmd_kernelbuild(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             shell_println!("kernelbuild — kernel/OS component build configuration");
             shell_println!("Usage: kernelbuild <subcommand>");
             shell_println!("  list              List components");
@@ -43626,6 +43772,7 @@ fn cmd_kernelbuild(args: &str) {
             shell_println!("  init              Load defaults");
             shell_println!("  stats             Show statistics");
             shell_println!("  test              Run self-tests");
+            end_help_arm("kernelbuild", other);
         }
     }
 }
@@ -43966,7 +44113,7 @@ fn cmd_wakesensor(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             shell_println!("wakesensor — webcam/mic-based screen wake (opt-in)");
             shell_println!("Usage: wakesensor <subcommand>");
             shell_println!("  show              Show current configuration");
@@ -43985,6 +44132,7 @@ fn cmd_wakesensor(args: &str) {
             shell_println!("  init              Load defaults");
             shell_println!("  stats             Show statistics");
             shell_println!("  test              Run self-tests");
+            end_help_arm("wakesensor", other);
         }
     }
 }
@@ -44471,7 +44619,7 @@ fn cmd_netsettings(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             #[inline(never)]
             fn case() {
                 shell_println!("netsettings — comprehensive network configuration");
@@ -44498,6 +44646,7 @@ fn cmd_netsettings(args: &str) {
                 shell_println!("  test              Run self-tests");
             }
             case();
+            end_help_arm("netsettings", other);
         }
     }
 }
@@ -44724,7 +44873,7 @@ fn cmd_sysinfo(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             shell_println!("sysinfo — system information explorer");
             shell_println!("Usage: sysinfo <subcommand>");
             shell_println!("  (no args)         Full summary");
@@ -44738,6 +44887,7 @@ fn cmd_sysinfo(args: &str) {
             shell_println!("  init              Load defaults");
             shell_println!("  stats             Show statistics");
             shell_println!("  test              Run self-tests");
+            end_help_arm("sysinfo", other);
         }
     }
 }
@@ -44971,7 +45121,7 @@ fn cmd_perfmon(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             shell_println!("perfmon — performance monitor / resource tracker");
             shell_println!("Usage: perfmon <subcommand>");
             shell_println!("  (no args)         Show latest readings");
@@ -44986,6 +45136,7 @@ fn cmd_perfmon(args: &str) {
             shell_println!("  init              Load defaults");
             shell_println!("  stats             Show statistics");
             shell_println!("  test              Run self-tests");
+            end_help_arm("perfmon", other);
         }
     }
 }
@@ -45996,7 +46147,7 @@ fn cmd_sysdiag(args: &str) {
             sysdiag::init_defaults();
             shell_println!("Diagnostics subsystem initialized.");
         }
-        _ => {
+        other => {
             shell_println!("sysdiag — system diagnostics and troubleshooting");
             shell_println!("Usage: sysdiag|diag <subcommand>");
             shell_println!("");
@@ -46012,6 +46163,7 @@ fn cmd_sysdiag(args: &str) {
             shell_println!("");
             shell_println!("Categories: network, storage, memory, services, boot, security");
             shell_println!("Severities: info, warning, error, critical");
+            end_help_arm("sysdiag", other);
         }
     }
 }
@@ -46341,7 +46493,7 @@ fn cmd_nightlight(args: &str) {
             nightlight::init_defaults();
             shell_println!("Night light subsystem initialized.");
         }
-        _ => {
+        other => {
             shell_println!("nightlight — blue light filter / night mode");
             shell_println!("Usage: nightlight|nlight <subcommand>");
             shell_println!("");
@@ -46362,6 +46514,7 @@ fn cmd_nightlight(args: &str) {
             shell_println!("  stats              Show subsystem statistics");
             shell_println!("  init               Initialize subsystem");
             shell_println!("  test               Run self-tests");
+            end_help_arm("nightlight", other);
         }
     }
 }
@@ -46848,7 +47001,7 @@ fn cmd_tasksched(args: &str) {
             }
             case();
         }
-        _ => {
+        other => {
             #[inline(never)]
             fn case() {
                 shell_println!("tasksched — scheduled task management");
@@ -46876,6 +47029,7 @@ fn cmd_tasksched(args: &str) {
                 shell_println!("  test               Run self-tests");
             }
             case();
+            end_help_arm("tasksched", other);
         }
     }
 }
@@ -47135,7 +47289,7 @@ fn cmd_envvars(args: &str) {
             envvars::init_defaults();
             shell_println!("Environment variables initialized.");
         }
-        _ => {
+        other => {
             shell_println!("envvars — environment variable management");
             shell_println!("Usage: envvars|envmgr <subcommand>");
             shell_println!("");
@@ -47153,6 +47307,7 @@ fn cmd_envvars(args: &str) {
             shell_println!("  stats              Show statistics");
             shell_println!("  init               Initialize subsystem");
             shell_println!("  test               Run self-tests");
+            end_help_arm("envvars", other);
         }
     }
 }
@@ -47440,7 +47595,7 @@ fn cmd_bluetooth(args: &str) {
             bluetooth::init_defaults();
             shell_println!("Bluetooth subsystem initialized.");
         }
-        _ => {
+        other => {
             shell_println!("bluetooth — Bluetooth device management");
             shell_println!("Usage: bluetooth|bt <subcommand>");
             shell_println!("");
@@ -47461,6 +47616,7 @@ fn cmd_bluetooth(args: &str) {
             shell_println!("  stats              Show statistics");
             shell_println!("  init               Initialize subsystem");
             shell_println!("  test               Run self-tests");
+            end_help_arm("bluetooth", other);
         }
     }
 }
@@ -47721,7 +47877,7 @@ fn cmd_printmgr(args: &str) {
             printmgr::init_defaults();
             shell_println!("Print manager initialized.");
         }
-        _ => {
+        other => {
             shell_println!("printmgr — print management");
             shell_println!("Usage: printmgr|lp <subcommand>");
             shell_println!("");
@@ -47740,6 +47896,7 @@ fn cmd_printmgr(args: &str) {
             shell_println!("  stats              Show statistics");
             shell_println!("  init               Initialize print manager");
             shell_println!("  test               Run self-tests");
+            end_help_arm("printmgr", other);
         }
     }
 }
@@ -48039,7 +48196,7 @@ fn cmd_screenrec(args: &str) {
             screenrec::init_defaults();
             shell_println!("Screen recording initialized.");
         }
-        _ => {
+        other => {
             shell_println!("screenrec — screen recording");
             shell_println!("Usage: screenrec|srec <subcommand>");
             shell_println!("");
@@ -48060,6 +48217,7 @@ fn cmd_screenrec(args: &str) {
             shell_println!("  stats              Show statistics");
             shell_println!("  init               Initialize subsystem");
             shell_println!("  test               Run self-tests");
+            end_help_arm("screenrec", other);
         }
     }
 }
@@ -48243,9 +48401,18 @@ fn cmd_datausage(args: &str) {
                     set_exit(1);
                 }
             },
-            _ => {
+            // Split because the two callers want opposite answers. `datausage
+            // metered` is a query and the status line is its result, so it
+            // succeeded; `datausage metered banana` set nothing, so it failed.
+            // One arm served both and reported success for both.
+            None => {
                 shell_println!("Metered: {}", datausage::metered_status().label());
                 shell_println!("Usage: datausage metered <on|off|roaming>");
+            }
+            Some(other) => {
+                shell_println!("datausage: unknown metered mode '{}'", other);
+                shell_println!("Usage: datausage metered <on|off|roaming>");
+                set_exit(1);
             }
         },
         "limit" => {
@@ -61265,8 +61432,12 @@ fn cmd_nat(args: &str) {
                 }
             }
         }
-        // "help" or any unrecognised subcommand falls through to the help text.
-        _ => {
+        // "help" or any unrecognised subcommand falls through to the help text,
+        // which is the useful reply to both. They differ in the status, and in
+        // the extra line `end_help_arm` prints for the second: this comment
+        // used to describe the two as interchangeable, which is exactly the
+        // assumption that let a typo report success.
+        other => {
             shell_println!("nat — NAT/masquerade management");
             shell_println!("Usage:");
             shell_println!("  nat                  — show status (default)");
@@ -61278,6 +61449,7 @@ fn cmd_nat(args: &str) {
             shell_println!("  nat forward list     — list port-forwarding rules");
             shell_println!("  nat forward add <tcp|udp> <host_port> <ip> <port> <ns_id>");
             shell_println!("  nat forward del <tcp|udp> <host_port>");
+            end_help_arm("nat", other);
         }
     }
 }
@@ -61422,7 +61594,7 @@ fn cmd_socks(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("socks — SOCKS5 proxy client (RFC 1928)");
             shell_println!();
             shell_println!("Usage:");
@@ -61430,6 +61602,7 @@ fn cmd_socks(args: &str) {
             shell_println!("  socks codes                — show SOCKS5 reply codes");
             shell_println!("  socks status               — show statistics");
             shell_println!("  socks test                 — run self-tests");
+            end_help_arm("socks", other);
         }
     }
 }
@@ -61667,7 +61840,7 @@ fn cmd_qos(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("qos — Quality of Service traffic management");
             shell_println!();
             shell_println!("Usage:");
@@ -61681,6 +61854,7 @@ fn cmd_qos(args: &str) {
             shell_println!("  qos dscp                                  — show DSCP values");
             shell_println!("  qos status                                — show status");
             shell_println!("  qos test                                  — run self-tests");
+            end_help_arm("qos", other);
         }
     }
 }
@@ -61792,7 +61966,7 @@ fn cmd_vlan(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("vlan — IEEE 802.1Q VLAN management");
             shell_println!();
             shell_println!("Usage:");
@@ -61802,6 +61976,7 @@ fn cmd_vlan(args: &str) {
             shell_println!("  vlan pcp                    — show PCP priority values");
             shell_println!("  vlan status                 — show statistics");
             shell_println!("  vlan test                   — run self-tests");
+            end_help_arm("vlan", other);
         }
     }
 }
@@ -61890,7 +62065,7 @@ fn cmd_smtp(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("smtp — SMTP client for sending email");
             shell_println!();
             shell_println!("Usage:");
@@ -61898,6 +62073,7 @@ fn cmd_smtp(args: &str) {
             shell_println!("  smtp codes                 — show SMTP reply codes");
             shell_println!("  smtp status                — show statistics");
             shell_println!("  smtp test                  — run self-tests");
+            end_help_arm("smtp", other);
         }
     }
 }
@@ -62077,7 +62253,7 @@ fn cmd_ftp(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("ftp — FTP client for file transfer");
             shell_println!();
             shell_println!("Usage:");
@@ -62087,6 +62263,7 @@ fn cmd_ftp(args: &str) {
             shell_println!("  ftp codes                              — show FTP reply codes");
             shell_println!("  ftp status                             — show statistics");
             shell_println!("  ftp test                               — run self-tests");
+            end_help_arm("ftp", other);
         }
     }
 }
@@ -62421,7 +62598,7 @@ fn cmd_snmp(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("snmp — Simple Network Management Protocol client");
             shell_println!();
             shell_println!("Usage:");
@@ -62434,6 +62611,7 @@ fn cmd_snmp(args: &str) {
             shell_println!("  snmp oids                             — list well-known OIDs");
             shell_println!("  snmp status                           — show statistics");
             shell_println!("  snmp test                             — run self-tests");
+            end_help_arm("snmp", other);
         }
     }
 }
@@ -62710,7 +62888,7 @@ fn cmd_iperf(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("iperf — network bandwidth measurement tool (IPv4 + IPv6)");
             shell_println!();
             shell_println!("Usage:");
@@ -62720,6 +62898,7 @@ fn cmd_iperf(args: &str) {
             shell_println!("  iperf udp6 <host> <port> [count] [size] — UDP6 throughput test");
             shell_println!("  iperf status                            — show statistics");
             shell_println!("  iperf test                              — run self-tests");
+            end_help_arm("iperf", other);
         }
     }
 }
@@ -63163,7 +63342,7 @@ fn cmd_nc(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("nc — TCP/UDP networking swiss army knife");
             shell_println!();
             shell_println!("Usage:");
@@ -63179,6 +63358,7 @@ fn cmd_nc(args: &str) {
             shell_println!("  nc service <port>                     — look up well-known service");
             shell_println!("  nc status                             — show statistics");
             shell_println!("  nc test                               — run self-tests");
+            end_help_arm("nc", other);
         }
     }
 }
@@ -76424,6 +76604,14 @@ fn cmd_notifgroup(args: &str) {
                         set_exit(1);
                     }
                 }
+            } else if let Some(bad) = parts.get(1) {
+                // An argument was given and `parse_grouping_mode` rejected it,
+                // so the mode was not changed. Distinguished from the bare
+                // query below, which the single `else` used to conflate with
+                // it: both printed the current mode and both claimed success.
+                shell_println!("notifgroup: unknown grouping mode '{}'", bad);
+                shell_println!("Usage: notifgroup mode <app|category|conversation|none>");
+                set_exit(1);
             } else {
                 let current = notifgroup::get_mode();
                 shell_println!("Current mode: {}", current.label());
@@ -77125,6 +77313,13 @@ fn cmd_faceunlock(args: &str) {
                         set_exit(1);
                     }
                 }
+            } else if let Some(bad) = parts.get(1) {
+                // Same split as `notifgroup mode`: an argument that no level
+                // matched changed nothing, so it failed, while a bare
+                // `faceunlock security` is answered by the line below.
+                shell_println!("faceunlock: unknown security level '{}'", bad);
+                shell_println!("Usage: faceunlock security <low|standard|high|maximum>");
+                set_exit(1);
             } else {
                 shell_println!("Current: {}", faceunlock::get_security().label());
                 shell_println!("Usage: faceunlock security <low|standard|high|maximum>");
@@ -92595,12 +92790,13 @@ fn cmd_pmcstat(args: &str) {
             );
         }
         "test" => pmcstat::self_test(),
-        _ => {
+        other => {
             shell_println!("Usage: pmcstat <init|sample|ipc|cmr|cpus|stats|test>");
             shell_println!("  sample <cpu> <event> [value]    — record counter sample");
             shell_println!(
                 "    events: cycles|insns|cache-miss|cache-ref|br-miss|br-insn|bus|stall"
             );
+            end_help_arm("pmcstat", other);
         }
     }
 }
@@ -101126,7 +101322,7 @@ fn cmd_dhcpv6(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             shell_println!("dhcpv6 — DHCPv6 client (IPv6 address/config)");
             shell_println!();
             shell_println!("Usage:");
@@ -101134,6 +101330,7 @@ fn cmd_dhcpv6(args: &str) {
             shell_println!("  dhcpv6 info        — stateless (DNS/domain only)");
             shell_println!("  dhcpv6 status      — show client state and stats");
             shell_println!("  dhcpv6 test        — run self-tests");
+            end_help_arm("dhcpv6", other);
         }
     }
 }
@@ -119547,12 +119744,24 @@ fn cmd_lockdep(args: &str) {
         shell_println!("");
     }
 
+    // `lockdep` on its own is a query: the status summary above is its answer,
+    // and the synopsis is a hint about what else it can show. `lockdep banana`
+    // is a mistake, and used to be indistinguishable from it -- the summary went
+    // up either way and the status said success either way, so the unrecognised
+    // subcommand vanished without trace. Unlike the `match sub` commands, the
+    // subcommands here are tested by a chain of `if`s with no catch-all, so the
+    // recognised set has to be repeated; keep it in step with the four `if`s
+    // above.
     if subcmd.is_empty() {
         shell_println!("  Usage: lockdep [classes|edges|held|all]");
         shell_println!("    classes — show registered lock classes");
         shell_println!("    edges   — show dependency graph edges");
         shell_println!("    held    — show per-CPU held lock depth");
         shell_println!("    all     — show everything");
+    } else if !matches!(subcmd, "classes" | "edges" | "graph" | "held" | "all") {
+        shell_println!("lockdep: unknown subcommand '{}'", subcmd);
+        shell_println!("  Usage: lockdep [classes|edges|held|all]");
+        set_exit(1);
     }
 }
 
@@ -127763,7 +127972,14 @@ fn cmd_tsession(args: &str) {
     use crate::termsession;
 
     if !termsession::is_initialized() {
+        // Nothing was done and nothing was answered, so this is a failure --
+        // found by reading the function rather than by the usage-status
+        // checker, which cannot see it: it prints no `Usage:` line, so it is
+        // invisible to a search keyed on that word. The general form of the
+        // rule is "a command that did not do what it was asked reports so",
+        // and `Usage:` is only the most common way of saying it.
         shell_println!("Terminal session system not initialized");
+        set_exit(1);
         return;
     }
 

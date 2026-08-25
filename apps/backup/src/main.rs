@@ -643,7 +643,7 @@ fn parse_number(input: &str) -> Result<(JsonValue, &str), String> {
 // ============================================================================
 
 /// Type of backup.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BackupType {
     Full,
     Incremental,
@@ -684,7 +684,7 @@ impl fmt::Display for BackupType {
 const MANIFEST_VERSION: u64 = 2;
 
 /// Metadata about a single file in a backup manifest.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct FileEntry {
     /// Relative path from backup source root.
     ///
@@ -705,15 +705,37 @@ struct FileEntry {
 }
 
 impl FileEntry {
+    /// This entry as the object written to the manifest on disk.
+    ///
+    /// A field missing from here is a field the backup does not record, and so
+    /// one the restore cannot put back: the value is set, the backup reports
+    /// success, and the loss surfaces only when someone needs the file.
+    /// Nothing in the language ties a writer to the struct it writes, so the
+    /// destructure below does it — see known-issues.md lesson 44.
     fn to_json(&self) -> JsonValue {
+        // Exhaustive (no `..`), so a new `FileEntry` field stops this
+        // compiling until someone decides whether it belongs on disk. Without
+        // it the addition errors only in `from_json`'s struct literal, which
+        // is the *reader*: fix that and the writer silently drops the field.
+        let Self {
+            path,
+            size,
+            mtime,
+            hash,
+            is_symlink,
+            link_target,
+        } = self;
         let mut entries = vec![
-            ("path".to_string(), JsonValue::Str(encode_path(&self.path))),
-            ("size".to_string(), JsonValue::Number(self.size as f64)),
-            ("mtime".to_string(), JsonValue::Number(self.mtime as f64)),
-            ("hash".to_string(), JsonValue::Str(self.hash.clone())),
-            ("is_symlink".to_string(), JsonValue::Bool(self.is_symlink)),
+            ("path".to_string(), JsonValue::Str(encode_path(path))),
+            ("size".to_string(), JsonValue::Number(*size as f64)),
+            ("mtime".to_string(), JsonValue::Number(*mtime as f64)),
+            ("hash".to_string(), JsonValue::Str(hash.clone())),
+            ("is_symlink".to_string(), JsonValue::Bool(*is_symlink)),
         ];
-        if let Some(ref target) = self.link_target {
+        // Absent rather than null when there is no target: `from_json` reads
+        // this key with `.and_then`, so absent and null mean the same to the
+        // reader, and a non-symlink has no target to record.
+        if let Some(target) = link_target {
             entries.push((
                 "link_target".to_string(),
                 JsonValue::Str(encode_path(target)),
@@ -844,7 +866,7 @@ fn os_string_from_bytes(bytes: Vec<u8>) -> OsString {
 }
 
 /// Manifest for a single backup — lists all files included.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Manifest {
     files: Vec<FileEntry>,
 }
@@ -854,7 +876,14 @@ impl Manifest {
         Self { files: Vec::new() }
     }
 
+    /// The manifest as written to disk.
+    ///
+    /// Destructured for the reason [`FileEntry::to_json`] gives. `version` is
+    /// in the object but not in the struct: it is a property of the on-disk
+    /// format rather than of this value, and is always written as the current
+    /// one because that is the format being written.
     fn to_json(&self) -> JsonValue {
+        let Self { files } = self;
         JsonValue::Object(vec![
             (
                 "version".to_string(),
@@ -862,7 +891,7 @@ impl Manifest {
             ),
             (
                 "files".to_string(),
-                JsonValue::Array(self.files.iter().map(|f| f.to_json()).collect()),
+                JsonValue::Array(files.iter().map(FileEntry::to_json).collect()),
             ),
         ])
     }
@@ -892,7 +921,7 @@ impl Manifest {
 }
 
 /// Metadata about a backup.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct BackupMeta {
     /// Unique backup ID (timestamp-based).
     id: String,
@@ -915,39 +944,60 @@ struct BackupMeta {
 }
 
 impl BackupMeta {
+    /// This record as the object written beside the backup on disk.
+    ///
+    /// Held to the struct by the destructure, for the reason
+    /// [`FileEntry::to_json`] gives: a field omitted here is not recorded, and
+    /// on the next read comes back as whatever `from_json`'s `unwrap_or`
+    /// supplies — a wrong number reported confidently, which is worse than a
+    /// missing one.
     fn to_json(&self) -> JsonValue {
+        let Self {
+            id,
+            backup_type,
+            timestamp,
+            source,
+            parent_id,
+            file_count,
+            total_size,
+            new_blobs,
+            dedup_blobs,
+        } = self;
         let mut entries = vec![
-            ("id".to_string(), JsonValue::Str(self.id.clone())),
+            ("id".to_string(), JsonValue::Str(id.clone())),
             (
                 "backup_type".to_string(),
-                JsonValue::Str(self.backup_type.as_str().to_string()),
+                JsonValue::Str(backup_type.as_str().to_string()),
             ),
             (
                 "timestamp".to_string(),
-                JsonValue::Number(self.timestamp as f64),
+                JsonValue::Number(*timestamp as f64),
             ),
-            ("source".to_string(), JsonValue::Str(self.source.clone())),
+            ("source".to_string(), JsonValue::Str(source.clone())),
             (
                 "file_count".to_string(),
-                JsonValue::Number(self.file_count as f64),
+                JsonValue::Number(*file_count as f64),
             ),
             (
                 "total_size".to_string(),
-                JsonValue::Number(self.total_size as f64),
+                JsonValue::Number(*total_size as f64),
             ),
             (
                 "new_blobs".to_string(),
-                JsonValue::Number(self.new_blobs as f64),
+                JsonValue::Number(*new_blobs as f64),
             ),
             (
                 "dedup_blobs".to_string(),
-                JsonValue::Number(self.dedup_blobs as f64),
+                JsonValue::Number(*dedup_blobs as f64),
             ),
         ];
-        if let Some(ref pid) = self.parent_id {
-            entries.push(("parent_id".to_string(), JsonValue::Str(pid.clone())));
-        } else {
-            entries.push(("parent_id".to_string(), JsonValue::Null));
+        // Explicitly null rather than absent, unlike `FileEntry::link_target`:
+        // a full backup having no parent is a fact about the backup, and one
+        // worth being able to read back off the disk rather than infer from a
+        // key that is not there.
+        match parent_id {
+            Some(pid) => entries.push(("parent_id".to_string(), JsonValue::Str(pid.clone()))),
+            None => entries.push(("parent_id".to_string(), JsonValue::Null)),
         }
         JsonValue::Object(entries)
     }
@@ -990,7 +1040,7 @@ impl BackupMeta {
 }
 
 /// Schedule entry for automated backups.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ScheduleEntry {
     source: String,
     dest: String,
@@ -998,14 +1048,21 @@ struct ScheduleEntry {
 }
 
 impl ScheduleEntry {
+    /// This entry as the object written to the schedule file.
+    ///
+    /// Destructured for the reason [`FileEntry::to_json`] gives — a schedule
+    /// field that is not written is a setting the user chose and the next run
+    /// will not honour.
     fn to_json(&self) -> JsonValue {
+        let Self {
+            source,
+            dest,
+            interval,
+        } = self;
         JsonValue::Object(vec![
-            ("source".to_string(), JsonValue::Str(self.source.clone())),
-            ("dest".to_string(), JsonValue::Str(self.dest.clone())),
-            (
-                "interval".to_string(),
-                JsonValue::Str(self.interval.clone()),
-            ),
+            ("source".to_string(), JsonValue::Str(source.clone())),
+            ("dest".to_string(), JsonValue::Str(dest.clone())),
+            ("interval".to_string(), JsonValue::Str(interval.clone())),
         ])
     }
 
@@ -3551,11 +3608,16 @@ mod tests {
         let serialized = manifest.serialize();
         let deserialized = Manifest::deserialize(&serialized).unwrap();
 
-        assert_eq!(deserialized.files.len(), 2);
-        assert_eq!(deserialized.files[0].path, Path::new("src/main.rs"));
-        assert_eq!(deserialized.files[0].size, 1024);
-        assert_eq!(deserialized.files[0].hash, "abcdef0123456789");
-        assert_eq!(deserialized.files[1].path, Path::new("README.md"));
+        // Compared whole rather than field by field. The list this used to be
+        // checked four of the six `FileEntry` fields and one of the two
+        // entries; `mtime` and `is_symlink` went through the disk format
+        // unexamined, so a writer that dropped either would have round-tripped
+        // "successfully". A whole-value comparison has no list to fall behind
+        // the struct — a seventh field is checked the day it is added.
+        assert_eq!(
+            deserialized, manifest,
+            "a manifest did not survive the trip through its own disk format"
+        );
     }
 
     #[test]
@@ -3574,10 +3636,14 @@ mod tests {
         let serialized = manifest.serialize();
         let deserialized = Manifest::deserialize(&serialized).unwrap();
 
-        assert!(deserialized.files[0].is_symlink);
+        // The symlink case is separate from `test_manifest_roundtrip` because
+        // `link_target` is the one field whose *key* is conditional — written
+        // only when there is a target — so it is the one that can be dropped
+        // without the object changing shape. Compared whole for the reason
+        // given there.
         assert_eq!(
-            deserialized.files[0].link_target.as_deref(),
-            Some(Path::new("/usr/bin/target"))
+            deserialized, manifest,
+            "a symlink entry did not survive the trip through the disk format"
         );
     }
 
@@ -3598,12 +3664,15 @@ mod tests {
         let serialized = meta.serialize();
         let deserialized = BackupMeta::deserialize(&serialized).unwrap();
 
-        assert_eq!(deserialized.id, "1700000000-full");
-        assert_eq!(deserialized.backup_type, BackupType::Full);
-        assert_eq!(deserialized.timestamp, 1700000000);
-        assert_eq!(deserialized.source, "/home/user");
-        assert!(deserialized.parent_id.is_none());
-        assert_eq!(deserialized.file_count, 42);
+        // This was a list of six assertions over a nine-field struct, and the
+        // three it left out — `total_size`, `new_blobs`, `dedup_blobs` — are
+        // exactly the ones a reader cannot sanity-check by eye, so a writer
+        // that dropped one would have shown a plausible wrong number and no
+        // failing test. Compared whole, there is no list left to fall behind.
+        assert_eq!(
+            deserialized, meta,
+            "backup metadata did not survive the trip through its own format"
+        );
     }
 
     #[test]
@@ -3623,8 +3692,14 @@ mod tests {
         let serialized = meta.serialize();
         let deserialized = BackupMeta::deserialize(&serialized).unwrap();
 
-        assert_eq!(deserialized.backup_type, BackupType::Incremental);
-        assert_eq!(deserialized.parent_id.as_deref(), Some("1700000000-full"));
+        // Separate from `test_meta_roundtrip` for the same reason the symlink
+        // manifest is separate: `parent_id` is the only `Option` here, so
+        // `Some` and `None` are two different objects on disk and both need
+        // walking. Compared whole either way.
+        assert_eq!(
+            deserialized, meta,
+            "an incremental backup's parent did not survive the disk format"
+        );
     }
 
     // --- Pruning Retention Policy Tests ---

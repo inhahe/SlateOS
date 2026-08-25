@@ -62874,7 +62874,6 @@ const HELP_BODIES: &[(&str, &str)] = &[
               hashall      same as -h
               histexpand   same as -H
               history      enable command history
-              igncr        on Cygwin, ignore \r in line endings
               ignoreeof    the shell will not exit upon reading EOF
               interactive-comments
                            allow comments to appear in interactive commands
@@ -63025,6 +63024,9 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
       FILE1 -ef FILE2  True if file1 is a hard link to file2.
     
+    All file operators except -h and -L are acting on the target of a symbolic
+    link, not on the symlink itself, if FILE is a symbolic link.
+    
     String operators:
     
       -z STRING      True if string is empty.
@@ -63057,6 +63059,9 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Arithmetic binary operators return true if ARG1 is equal, not-equal,
     less-than, less-than-or-equal, greater-than, or greater-than-or-equal
     than ARG2.
+    
+    See the bash manual page bash(1) for the handling of parameters (i.e.
+    missing parameters).
     
     Exit Status:
     Returns success if EXPR evaluates to true; fails if EXPR evaluates to

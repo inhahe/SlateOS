@@ -75140,3 +75140,59 @@ so the shell speaks one convention rather than two.
   bugs above there is no single correct answer to match, and our behaviour is
   already one of the two real ones. Left alone deliberately; noted so the next
   reader does not "fix" it into GNU's shape without knowing it is a fork.
+
+## TD-AWK-RUNTIME-DIAGNOSTICS-CARRY-NO-SOURCE-LOCATION (lane B, 2026-08-24) — **open**
+
+**In short:** when an `awk` program dies partway through — a division by zero,
+say — we print `awk: fatal: division by zero attempted` and stop. gawk prints
+`awk: cmd. line:1: fatal: division by zero attempted`, naming the line of the
+user's script that blew up. On a one-liner the difference is cosmetic; on a
+200-line `-f` script it is the difference between a fixable error and a hunt.
+
+**Where.** `userspace/coreutils/src/bin/awk/`. The gap is structural, not a
+missing `format!`: **nothing in the front end records a source position at
+all.** `lex.rs` tracks newlines only for their grammatical role (a newline
+terminates a statement), never as a counter; `ast.rs` has no line field on any
+node; so `interp.rs` has nothing to report even if it wanted to. The two
+`Fatal(...)` sites for division and modulo in `interp.rs` are representative —
+every runtime diagnostic in the file is in the same position.
+
+**Reproduce.**
+
+```
+$ awk 'BEGIN {x = 0; print 1 % x}'
+awk: fatal: division by zero attempted in `%'          # ours
+awk: cmd. line:1: fatal: division by zero attempted in `%'   # gawk
+```
+
+`scripts/awk-diff.sh` records both of these as xfails with this entry's reason;
+they will XPASS (and so fail the harness) the moment the locations land, which
+is the intended prompt to convert them back to `msg_case`.
+
+**What the target format is.** gawk's runtime diagnostic is
+
+```
+awk: <source>:<line>: [(FILENAME=<f> FNR=<n>) ]<severity>: <message>
+```
+
+where `<source>` is the literal `cmd. line` for a program given in argv or with
+`-e`, and the file name for one given with `-f`; the parenthesised input
+position is present only when a *main rule* is executing (not in `BEGIN`/`END`);
+`<severity>` is `fatal`, `error` or `warning`. Note that gawk emits it only once
+a rule has been entered — see the deliberate divergence already recorded in
+`awk-diff.sh` for the unopenable-second-operand case, where gawk's prefix is
+*stale* state pointing at a line unrelated to the failure. We should not
+reproduce that half: a location we print should be the location that failed.
+
+**Proper fix.** Thread a position through the front end: give `lex.rs` a line
+counter and attach it to each token, carry it into the statement and expression
+nodes in `ast.rs` that can fail at runtime, and have `interp.rs` hold a "current
+statement" position that its `Fatal` constructor reads. The source name is
+already known at that point — `main.rs` distinguishes an argv/`-e` program from
+a `-f` one when it assembles the text, and needs to keep that distinction rather
+than discarding it after concatenation. This is a tranche of its own, not a
+patch.
+
+**Severity.** Low for correctness — the exit status, the message text and
+everything already written to stdout all match gawk exactly. Medium for
+usability on long scripts, which is the case that most needs it.

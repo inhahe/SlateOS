@@ -79589,7 +79589,14 @@ reuse the helper that fix introduced:
   correct byte-level line diff of a binary file is correct but unreadable, and
   floods a serial console. GNU's rule is a NUL in the first buffer. This is a
   separate judgement from the correctness fix and should not be smuggled into
-  it.
+  it. ✅ **DONE 2026-08-25**, in its own commit as this note asked. Two
+  departures from GNU, both argued at the function: the test is a NUL
+  *anywhere* in the file (GNU's first-buffer rule is an artefact of streaming;
+  we already hold the whole file, so the answer becomes a property of the files
+  rather than of a buffer size), and the check runs *after* the byte-equality
+  early return, so two identical binary files stay silent with status 0 —
+  they do not differ, and saying they do would be a false positive no flag
+  could switch off. `-a`/`--text` restores GNU's line diff exactly.
 
 **`comm` has the identical defect** (~119460): `from_utf8_lossy` on both files,
 then `lines()`, then equality on the decoded lines. Two lines differing only in
@@ -79674,11 +79681,13 @@ one of the two files, and none is invented by a decoder.
   see, and it is the one that misfiles a line. Rationale in
   **design-decisions.md §295**; pinned by self-test rung 56, whose third case
   exists to fail if the check is ever widened to whole files.
-- `diff` has no `Binary files X and Y differ`. A byte-exact line diff of a
-  binary file is now *correct*, but it is unreadable and floods a serial
-  console. GNU's rule is a NUL in the first buffer. That is a judgement about
-  output policy rather than about correctness, which is why it was not smuggled
-  into a correctness fix.
+- ~~`diff` has no `Binary files X and Y differ`.~~ ✅ **FIXED 2026-08-25.** A
+  byte-exact line diff of a binary file was *correct* but unreadable and
+  flooded a serial console. `diff` now reports `Binary files X and Y differ`
+  with status 1 when either file contains a NUL, and gained `-a`/`--text` to
+  force the line diff back on. Our test is a NUL anywhere in the file rather
+  than GNU's first-buffer rule, and it runs after the byte-equality early
+  return so identical binaries stay silent — see the two bullets above.
 - `column` still decodes lossily (~14868, ~14908). It is a display formatter
   writing only to stdout, so a mangled character is visible as mangled rather
   than mistaken for data — the lowest severity of the four and the last to do.
@@ -80146,7 +80155,8 @@ correctness fix, and it was found while fixing
 `A-KSHELL-COLUMN-PADS-TO-BYTES-AND-REWRITES-WHAT-IT-CANNOT-DECODE` above.
 Smuggling it into that commit would have made a bug fix and a semantic change
 indistinguishable in the history — the same reason `diff`'s missing
-`Binary files X and Y differ` was kept out of the `diff` byte fix. The
+`Binary files X and Y differ` was kept out of the `diff` byte fix (and was
+then landed on its own, 2026-08-25). The
 character-not-set reading is documented in `column_parse_args`'s doc comment so
 it stays a decision rather than an oversight.
 

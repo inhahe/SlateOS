@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""Find work that no path from `main` reaches, but a test does.
+"""Find work that no path from an entry point reaches, but a test does.
 
 The shape this looks for is lesson 45 in known-issues.md: a function that does
 real work, has a test proving it works, and is never called by the program.
 `apps/indexer`'s `index_file_content` was exactly this -- content search had a
 config option, a search path and a green test, and could not be reached.
+`apps/diskimager`'s `load_image` was the same shape with a bigger blast radius:
+an entire ISO 9660 parser, a directory-tree tab and an info card behind one
+function no key press could reach, while the window printed "Open an .iso"
+at a user it gave no way to do so.
 
-**Reachability from `main`, not "has a non-test caller".**  The first version
-of this script asked only whether some line outside `#[cfg(test)]` mentioned
+**Reachability from the entry points, not "has a non-test caller".**  The
+first version asked only whether some line outside `#[cfg(test)]` mentioned
 the function, and that is too weak: a helper called only by another unwired
 function has a production caller and is still unreachable.  It is also the
 question that produces the noise, because a stub `main` makes every function
 in the file callerless in exactly the same way, which is a *crate*-level fact
-reported 335 times.  Walking the call graph forward from `main` answers both
-at once.
+reported 335 times.  Walking the call graph forward answers both at once.
+
+The roots are `ENTRY_POINTS`, not `main` alone -- see the comment there.  A GUI
+app whose `main` is a demo harness is a known debt, and rooting only at `main`
+reports that one debt once per function in its input layer.
 
 A hit is not automatically a bug.  Three benign explanations are common:
 
@@ -24,6 +31,12 @@ A hit is not automatically a bug.  Three benign explanations are common:
 Only the fourth kind matters: a function that some *option or command* claims
 to invoke and does not.  Triage by asking what user-visible promise depends on
 it.
+
+**What it still cannot see.**  Edges are matched by name over source text, so
+a method dispatched through `dyn Trait`, a callback registered by a macro, or
+a call written in another file are all invisible.  It never proves a function
+is dead; it produces a short list worth a person's attention, and the checks
+above exist to keep that list short enough to actually be read.
 """
 
 import pathlib
@@ -195,11 +208,32 @@ def mentions(line):
     return CALL.findall(line) + IDENT.findall(line)
 
 
-def reachable_from(graph, root):
-    if root not in graph:
-        return set()
-    seen = {root}
-    stack = [root]
+# The entry points the *outside world* calls, beyond `main`.
+#
+# Sixty of lane C's app binaries have a `main` that loads demo data, renders
+# once and prints some counts -- there is no event loop, because no app is
+# connected to the compositor yet (`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`).
+# Rooted at `main` alone, every one of those apps reports its whole input
+# layer as unreachable: `apps/procexplorer`'s `handle_mouse`,
+# `apps/sysmonitor`'s six handlers, `apps/emojipicker`'s `grid_hit_test`.
+# That is true and it is *one* fact, and it drowns the findings that are not.
+#
+# `handle_event` and `render` are what the compositor will call the day that
+# debt is paid, so treating them as roots asks the sharper question: is this
+# function unreachable because the app has no event loop yet, or would it
+# still be unreachable if it had one?  `apps/diskimager`'s `load_image` was
+# the second kind -- its `handle_event` ran in every test and had no binding
+# that reached the image loader -- and that is the kind worth a person's time.
+ENTRY_POINTS = ("main", "handle_event", "render")
+
+
+def reachable_from(graph, roots):
+    seen = set()
+    stack = []
+    for root in roots:
+        if root in graph and root not in seen:
+            seen.add(root)
+            stack.append(root)
     while stack:
         for callee in graph[stack.pop()][1]:
             if callee not in seen:
@@ -213,8 +247,8 @@ def scan_file(path):
 
     Returns `(reached, total, findings)`, where `findings` is a list of
     `(line, name, test_calls)` for private non-trait functions that tests
-    exercise and no path from `main` reaches.  `None` if there is nothing to
-    say about the file at all.
+    exercise and no path from any of `ENTRY_POINTS` reaches.  `None` if there
+    is nothing to say about the file at all.
     """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -228,7 +262,7 @@ def scan_file(path):
     graph = call_graph(lines, spans)
     if "main" not in graph or not graph:
         return None
-    live = reachable_from(graph, "main")
+    live = reachable_from(graph, ENTRY_POINTS)
 
     out = []
     for name, (defline, _) in graph.items():
@@ -277,24 +311,28 @@ def main():
                 binaries.append((reached / total, reached, total, f.as_posix(), findings))
 
     # Highest reach share last, because that end of the list is the one worth
-    # reading and a terminal shows the end of it.  A binary whose `main` reaches
-    # nearly everything and strands three tested functions is the `apps/indexer`
-    # shape; one that reaches a tenth of itself has no entry point at all, which
-    # is a single known debt and not a list of findings.
+    # reading and a terminal shows the end of it.  A binary whose entry points
+    # reach nearly everything and strand three tested functions is the
+    # `apps/indexer` shape; one that reaches a tenth of itself has no entry
+    # point at all, which is a single known debt and not a list of findings.
     binaries.sort()
     stranded = 0
     for share, reached, total, path, findings in binaries:
-        print(f"\n{path}  --  main reaches {reached}/{total} fns ({share:.0%})")
+        print(f"\n{path}  --  entry points reach {reached}/{total} fns ({share:.0%})")
         for line_no, name, count in findings:
-            print(f"  :{line_no}: fn {name} -- {count} test call(s), no path from main")
+            print(
+                f"  :{line_no}: fn {name} -- {count} test call(s),"
+                " no path from an entry point"
+            )
             stranded += 1
 
     print(f"\n{stranded} stranded function(s) across {len(binaries)} binary/binaries.")
+    print(f"Entry points: {', '.join(ENTRY_POINTS)}.")
     print(
-        "Read from the bottom: a low reach share means the binary has no entry"
-        " point at all\n(one known debt, not one finding per function); a high"
-        " one means the program runs and\nthese particular functions are what it"
-        " never calls."
+        "Read from the bottom: a low reach share means the binary is barely"
+        " wired up at all\n(one known debt, not one finding per function); a"
+        " high one means the program runs and\nthese particular functions are"
+        " what it never calls."
     )
     return 0
 

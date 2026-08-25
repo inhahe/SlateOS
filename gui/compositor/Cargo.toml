@@ -17,6 +17,15 @@ appearance = { path = "../appearance" }
 # two title-bar clicks are one double click, so it is the process that has to
 # know how long the user asked to be given between them.
 inputsettings = { path = "../inputsettings" }
+
+# The keyboard layouts. `design-decisions.md` §456 puts scancode-to-letter
+# translation here, in the one process every client's keystrokes pass through,
+# so that a layout change takes effect everywhere at once; this is the table it
+# translates with. A leaf crate with no dependencies of its own — the desktop
+# shell reads the same one to draw a picture of the keyboard, and neither of
+# them should have to link the other to agree about what a key produces.
+keylayout = { path = "../keylayout" }
+
 guitk = { path = "../toolkit" }
 guiremote = { path = "../remote" }
 osfont = { path = "../font" }

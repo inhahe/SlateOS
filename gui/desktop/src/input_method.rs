@@ -6,13 +6,37 @@
 //! - Layout preview (visual keyboard showing the current layout)
 //! - Keyboard shortcut for switching layouts (Alt+Shift or Super+Space)
 //! - Per-application layout memory
-//! - Dead key / compose key support tracking
 //! - Custom layout support
+//!
+//! # What this module is, and what it is not
+//!
+//! It is a **selector**, not a keymap. Choosing a layout here says which of
+//! [`keylayout`]'s tables the user wants; *applying* that choice — turning a
+//! scancode into a letter — happens in the compositor, because that is the one
+//! process every client's keystrokes pass through (`design-decisions.md`
+//! §456). The path from here to there runs through the settings file:
+//! `inputsettings`' `keyboard.layout`, which the compositor resolves on
+//! reload.
+//!
+//! This module used to carry its own copies of the layout tables — four
+//! unshifted and four shifted row strings per layout, written out by hand
+//! beside a second set in the compositor that had no letters in it at all. The
+//! two described one keyboard and could not be made to agree: the compositor's
+//! was what you typed with, and this one was only ever what you were *shown*,
+//! so picking Dvorak in the tray redrew the preview and changed nothing you
+//! typed. They are now one table, read from here for the picture and from the
+//! compositor for the letters. See `known-issues.md`
+//! `TD-ONLY-ONE-KEYBOARD-LAYOUT`.
+//!
+//! Dead keys and compose sequences are not modelled anywhere yet — the layouts
+//! reachable here are the ones that need none. Tracking a `has_dead_keys` flag
+//! that no code consulted was worse than not tracking it: it read as support.
 
 use appearance::Palette;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::step;
 use guitk::style::CornerRadii;
+use keylayout::Layout;
 
 // ============================================================================
 // Colour
@@ -48,175 +72,6 @@ use guitk::style::CornerRadii;
 /// locates by colour silently asserts a role, and stops working the moment the
 /// role changes.
 const KEY_SIZE: f32 = 28.0;
-
-// ============================================================================
-// Keyboard layouts
-// ============================================================================
-
-/// Identifier for a keyboard layout.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct LayoutId(pub String);
-
-impl LayoutId {
-    pub fn new(id: &str) -> Self {
-        Self(id.to_string())
-    }
-}
-
-/// A keyboard layout definition.
-#[derive(Clone, Debug)]
-pub struct KeyboardLayout {
-    /// Unique identifier (e.g., "us-qwerty", "uk", "dvorak").
-    pub id: LayoutId,
-    /// Display name (e.g., "US English (QWERTY)").
-    pub display_name: String,
-    /// Short label for the tray indicator (e.g., "EN", "UK", "DV").
-    pub short_label: String,
-    /// Language code (e.g., "en", "de", "fr").
-    pub language: String,
-    /// Whether this layout uses dead keys (accents).
-    pub has_dead_keys: bool,
-    /// Whether this is a right-to-left layout.
-    pub is_rtl: bool,
-    /// Key mapping for the main 4 rows (unshifted). Each row is a string
-    /// where each char is the key at that position.
-    pub rows_unshifted: [String; 4],
-    /// Key mapping for shifted state.
-    pub rows_shifted: [String; 4],
-}
-
-impl KeyboardLayout {
-    /// Create the US QWERTY layout.
-    pub fn us_qwerty() -> Self {
-        Self {
-            id: LayoutId::new("us-qwerty"),
-            display_name: "US English (QWERTY)".to_string(),
-            short_label: "EN".to_string(),
-            language: "en".to_string(),
-            has_dead_keys: false,
-            is_rtl: false,
-            rows_unshifted: [
-                "`1234567890-=".to_string(),
-                "qwertyuiop[]\\".to_string(),
-                "asdfghjkl;'".to_string(),
-                "zxcvbnm,./".to_string(),
-            ],
-            rows_shifted: [
-                "~!@#$%^&*()_+".to_string(),
-                "QWERTYUIOP{}|".to_string(),
-                "ASDFGHJKL:\"".to_string(),
-                "ZXCVBNM<>?".to_string(),
-            ],
-        }
-    }
-
-    /// Create the Dvorak layout.
-    pub fn dvorak() -> Self {
-        Self {
-            id: LayoutId::new("dvorak"),
-            display_name: "Dvorak".to_string(),
-            short_label: "DV".to_string(),
-            language: "en".to_string(),
-            has_dead_keys: false,
-            is_rtl: false,
-            rows_unshifted: [
-                "`1234567890[]".to_string(),
-                "',.pyfgcrl/=\\".to_string(),
-                "aoeuidhtns-".to_string(),
-                ";qjkxbmwvz".to_string(),
-            ],
-            rows_shifted: [
-                "~!@#$%^&*(){}".to_string(),
-                "\"<>PYFGCRL?+|".to_string(),
-                "AOEUIDHTNS_".to_string(),
-                ":QJKXBMWVZ".to_string(),
-            ],
-        }
-    }
-
-    /// Create the Colemak layout.
-    pub fn colemak() -> Self {
-        Self {
-            id: LayoutId::new("colemak"),
-            display_name: "Colemak".to_string(),
-            short_label: "CO".to_string(),
-            language: "en".to_string(),
-            has_dead_keys: false,
-            is_rtl: false,
-            rows_unshifted: [
-                "`1234567890-=".to_string(),
-                "qwfpgjluy;[]\\".to_string(),
-                "arstdhneio'".to_string(),
-                "zxcvbkm,./".to_string(),
-            ],
-            rows_shifted: [
-                "~!@#$%^&*()_+".to_string(),
-                "QWFPGJLUY:{}|".to_string(),
-                "ARSTDHNEIO\"".to_string(),
-                "ZXCVBKM<>?".to_string(),
-            ],
-        }
-    }
-
-    /// Create German QWERTZ layout.
-    pub fn german_qwertz() -> Self {
-        Self {
-            id: LayoutId::new("de-qwertz"),
-            display_name: "German (QWERTZ)".to_string(),
-            short_label: "DE".to_string(),
-            language: "de".to_string(),
-            has_dead_keys: true,
-            is_rtl: false,
-            rows_unshifted: [
-                "^1234567890ß´".to_string(),
-                "qwertzuiopü+".to_string(),
-                "asdfghjklöä#".to_string(),
-                "<yxcvbnm,.-".to_string(),
-            ],
-            rows_shifted: [
-                "°!\"§$%&/()=?`".to_string(),
-                "QWERTZUIOPÜ*".to_string(),
-                "ASDFGHJKLÖÄ'".to_string(),
-                ">YXCVBNM;:_".to_string(),
-            ],
-        }
-    }
-
-    /// Create French AZERTY layout.
-    pub fn french_azerty() -> Self {
-        Self {
-            id: LayoutId::new("fr-azerty"),
-            display_name: "French (AZERTY)".to_string(),
-            short_label: "FR".to_string(),
-            language: "fr".to_string(),
-            has_dead_keys: true,
-            is_rtl: false,
-            rows_unshifted: [
-                "²&é\"'(-è_çà)=".to_string(),
-                "azertyuiop^$".to_string(),
-                "qsdfghjklmù*".to_string(),
-                "<wxcvbn,;:!".to_string(),
-            ],
-            rows_shifted: [
-                " 1234567890°+".to_string(),
-                "AZERTYUIOP¨£".to_string(),
-                "QSDFGHJKLM%µ".to_string(),
-                ">WXCVBN?./§".to_string(),
-            ],
-        }
-    }
-
-    /// All built-in layouts.
-    pub fn all_builtins() -> Vec<Self> {
-        vec![
-            Self::us_qwerty(),
-            Self::dvorak(),
-            Self::colemak(),
-            Self::german_qwertz(),
-            Self::french_azerty(),
-        ]
-    }
-}
 
 // ============================================================================
 // Input method manager
@@ -261,7 +116,12 @@ impl SwitchShortcut {
 #[derive(Clone, Debug)]
 pub struct InputMethodManager {
     /// Installed layouts (in switching order).
-    pub layouts: Vec<KeyboardLayout>,
+    ///
+    /// Owned copies rather than `&'static` references to the built-ins, so
+    /// that a layout the user wrote themselves sits in this list on the same
+    /// terms as `keylayout`'s own. A `Layout` is forty-odd `Copy` records; the
+    /// list is built once when the shell starts.
+    pub layouts: Vec<Layout>,
     /// Index of the currently active layout.
     pub active_index: usize,
     /// Shortcut for cycling layouts.
@@ -277,7 +137,7 @@ pub struct InputMethodManager {
 impl Default for InputMethodManager {
     fn default() -> Self {
         Self {
-            layouts: vec![KeyboardLayout::us_qwerty()],
+            layouts: vec![keylayout::default_layout().clone()],
             active_index: 0,
             switch_shortcut: SwitchShortcut::AltShift,
             per_app_layout: false,
@@ -289,23 +149,56 @@ impl Default for InputMethodManager {
 
 impl InputMethodManager {
     /// Create with specific layouts.
-    pub fn new(layouts: Vec<KeyboardLayout>) -> Self {
+    pub fn new(layouts: Vec<Layout>) -> Self {
         Self {
             layouts,
             ..Self::default()
         }
     }
 
+    /// Create with every layout this build ships, in catalogue order.
+    ///
+    /// The list a layout picker offers, and — until there is a way to install
+    /// one — the widest list there is.
+    pub fn with_builtins() -> Self {
+        Self::new(keylayout::builtins().to_vec())
+    }
+
+    /// Create with the named layouts, in the order named.
+    ///
+    /// Names this build does not know are skipped rather than refused: a
+    /// settings file written by a later build must still leave the user with a
+    /// keyboard. If *none* of them are known the manager falls back to the
+    /// default layout, which is the same rule the compositor applies.
+    pub fn with_ids(ids: &[&str]) -> Self {
+        let layouts: Vec<Layout> = ids
+            .iter()
+            .filter_map(|id| keylayout::by_id(id))
+            .cloned()
+            .collect();
+        if layouts.is_empty() {
+            Self::default()
+        } else {
+            Self::new(layouts)
+        }
+    }
+
     /// Get the active layout.
-    pub fn active_layout(&self) -> Option<&KeyboardLayout> {
+    pub fn active_layout(&self) -> Option<&Layout> {
         self.layouts.get(self.active_index)
     }
 
     /// Get the short label for the tray indicator.
     pub fn tray_label(&self) -> &str {
-        self.active_layout()
-            .map(|l| l.short_label.as_str())
-            .unwrap_or("??")
+        self.active_layout().map_or("??", |l| l.short_label)
+    }
+
+    /// The id of the active layout, as `inputsettings` spells it.
+    ///
+    /// This is the whole output of the selector: what the shell writes to
+    /// `keyboard.layout` so the compositor starts translating with it.
+    pub fn active_layout_id(&self) -> Option<&'static str> {
+        self.active_layout().map(|l| l.id)
     }
 
     /// Cycle to the next layout.
@@ -319,8 +212,8 @@ impl InputMethodManager {
     }
 
     /// Switch to a specific layout by id.
-    pub fn switch_to(&mut self, id: &LayoutId) -> bool {
-        if let Some(idx) = self.layouts.iter().position(|l| l.id == *id) {
+    pub fn switch_to(&mut self, id: &str) -> bool {
+        if let Some(idx) = self.layouts.iter().position(|l| l.id == id) {
             self.active_index = idx;
             true
         } else {
@@ -329,7 +222,7 @@ impl InputMethodManager {
     }
 
     /// Add a layout (if not already installed).
-    pub fn add_layout(&mut self, layout: KeyboardLayout) -> bool {
+    pub fn add_layout(&mut self, layout: Layout) -> bool {
         if self.layouts.iter().any(|l| l.id == layout.id) {
             return false;
         }
@@ -337,12 +230,17 @@ impl InputMethodManager {
         true
     }
 
+    /// Add the built-in layout with this id, if this build has one.
+    pub fn add_builtin(&mut self, id: &str) -> bool {
+        keylayout::by_id(id).is_some_and(|l| self.add_layout(l.clone()))
+    }
+
     /// Remove a layout by id. Cannot remove the last layout.
-    pub fn remove_layout(&mut self, id: &LayoutId) -> bool {
+    pub fn remove_layout(&mut self, id: &str) -> bool {
         if self.layouts.len() <= 1 {
             return false;
         }
-        if let Some(idx) = self.layouts.iter().position(|l| l.id == *id) {
+        if let Some(idx) = self.layouts.iter().position(|l| l.id == id) {
             self.layouts.remove(idx);
             // Clamp rather than subtract: the `len() <= 1` guard above is four
             // statements and one `remove` away from this line, which is where
@@ -466,7 +364,7 @@ impl InputMethodManager {
         cmds.push(RenderCommand::Text {
             x: popup_x + 12.0,
             y: popup_y + 8.0,
-            text: layout.display_name.clone(),
+            text: layout.display_name.to_string(),
             font_size: 13.0,
             color: title_ink,
             font_weight: FontWeightHint::Bold,
@@ -480,11 +378,16 @@ impl InputMethodManager {
         let row_offsets = [0.0_f32, 12.0, 20.0, 32.0]; // Stagger offsets
         let start_y = popup_y + 32.0;
 
-        for (row_idx, row_chars) in layout.rows_unshifted.iter().enumerate() {
+        // The rows come from the same table the compositor types with, so a
+        // cap can only ever be drawn with the character that key produces.
+        // Unshifted: the preview answers "where is the letter", and a board
+        // photographed with every cap shifted is not what anyone looks at.
+        for row_idx in 0..4 {
             let row_y = start_y + row_idx as f32 * (key_size + key_gap);
             let stagger = row_offsets.get(row_idx).copied().unwrap_or(0.0);
 
-            for (col_idx, ch) in row_chars.chars().enumerate() {
+            for (col_idx, def) in layout.row(row_idx).iter().enumerate() {
+                let ch = def.plain;
                 let key_x = popup_x + 8.0 + stagger + col_idx as f32 * (key_size + key_gap);
 
                 // Key background
@@ -527,39 +430,83 @@ impl InputMethodManager {
         out.push_str(&format!("per_app_layout={}\n", self.per_app_layout));
 
         for (i, layout) in self.layouts.iter().enumerate() {
-            out.push_str(&format!("layout_{}={}\n", i, layout.id.0));
+            out.push_str(&format!("layout_{}={}\n", i, layout.id));
         }
         out.push_str(&format!("active={}\n", self.active_index));
 
         out
     }
 
-    /// Parse config from text (only reads shortcut and active index; layouts
-    /// must be resolved separately).
+    /// Parse config from text.
+    ///
+    /// The `layout_N=` lines used to be ignored — the doc comment said
+    /// "layouts must be resolved separately" — because there was no catalogue
+    /// to resolve a name against, so the caller had to hand the manager a list
+    /// and hope it matched the file it was about to parse. [`keylayout`] is
+    /// that catalogue, and the file's own list is now honoured.
+    ///
+    /// Two rules keep a bad file from costing the user their keyboard:
+    ///
+    /// * A name is resolved against the **installed** layouts first and the
+    ///   catalogue second, so a layout the user wrote themselves survives a
+    ///   round trip through the file even though the catalogue has never
+    ///   heard of it.
+    /// * If the file names no layouts at all, or none that resolve, the
+    ///   installed list is left alone rather than emptied.
+    ///
+    /// `active` is applied against the list the file asked for, not the one
+    /// that was installed when parsing began — otherwise an index would be
+    /// checked against the wrong list and the file's own last line could
+    /// select nothing.
     pub fn apply_config_text(&mut self, text: &str) {
+        let mut named: Vec<(usize, String)> = Vec::new();
+        let mut active: Option<usize> = None;
+
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            if let Some((key, val)) = line.split_once('=') {
-                match key.trim() {
-                    "switch_shortcut" => {
-                        self.switch_shortcut = SwitchShortcut::from_id(val.trim());
+            let Some((key, val)) = line.split_once('=') else {
+                continue;
+            };
+            let (key, val) = (key.trim(), val.trim());
+            match key {
+                "switch_shortcut" => self.switch_shortcut = SwitchShortcut::from_id(val),
+                "per_app_layout" => self.per_app_layout = val == "true",
+                "active" => active = val.parse::<usize>().ok(),
+                _ => {
+                    if let Some(n) = key.strip_prefix("layout_")
+                        && let Ok(position) = n.parse::<usize>()
+                    {
+                        named.push((position, val.to_string()));
                     }
-                    "per_app_layout" => {
-                        self.per_app_layout = val.trim() == "true";
-                    }
-                    "active" => {
-                        if let Ok(idx) = val.trim().parse::<usize>()
-                            && idx < self.layouts.len()
-                        {
-                            self.active_index = idx;
-                        }
-                    }
-                    _ => {}
                 }
             }
+        }
+
+        // By declared position, so a file whose lines were reordered still
+        // installs the layouts in the order it names them.
+        named.sort_by_key(|(position, _)| *position);
+        let resolved: Vec<Layout> = named
+            .iter()
+            .filter_map(|(_, id)| {
+                self.layouts
+                    .iter()
+                    .find(|l| l.id == id.as_str())
+                    .or_else(|| keylayout::by_id(id))
+                    .cloned()
+            })
+            .collect();
+        if !resolved.is_empty() {
+            self.layouts = resolved;
+            self.active_index = self.active_index.min(self.layouts.len().saturating_sub(1));
+        }
+
+        if let Some(idx) = active
+            && idx < self.layouts.len()
+        {
+            self.active_index = idx;
         }
     }
 }
@@ -603,30 +550,49 @@ mod tests {
     /// written out by hand instead of derived from the same rows the renderer
     /// reads — an expectation computed from the code under test asserts nothing.
     /// The empty third row also exercises a row that contributes no keys.
-    fn tiny_layout() -> KeyboardLayout {
-        KeyboardLayout {
-            id: LayoutId::new("tiny"),
-            display_name: "Tiny".to_string(),
-            short_label: "TY".to_string(),
-            language: "xx".to_string(),
-            has_dead_keys: false,
-            is_rtl: false,
-            rows_unshifted: [
-                "ab".to_string(),
-                "c".to_string(),
-                String::new(),
-                "d".to_string(),
-            ],
-            rows_shifted: [
-                "AB".to_string(),
-                "C".to_string(),
-                String::new(),
-                "D".to_string(),
-            ],
+    fn tiny_layout() -> Layout {
+        keylayout::LayoutSpec {
+            id: "tiny",
+            display_name: "Tiny",
+            short_label: "TY",
+            language: "xx",
+            plain: ["ab", "c", "", "d"],
+            shifted: ["AB", "C", "", "D"],
+            iso_extra: None,
+            altgr: &[],
         }
+        .build()
     }
 
-    fn previewing(layout: KeyboardLayout) -> InputMethodManager {
+    /// A layout that takes a built-in's *name* and puts different characters
+    /// under it — someone who edited the layout they had rather than inventing
+    /// a new one, which is the ordinary way a custom layout comes about.
+    ///
+    /// It is the only fixture that can tell "installed first" from "catalogue
+    /// first" apart: while a custom layout carries an id the catalogue has
+    /// never heard of, both orders resolve it identically.
+    fn shadow_of_dvorak() -> Layout {
+        keylayout::LayoutSpec {
+            id: "dvorak",
+            display_name: "Dvorak, edited here",
+            short_label: "DV*",
+            language: "en",
+            plain: ["zzzzzzzzzzzzz", "", "", ""],
+            shifted: ["ZZZZZZZZZZZZZ", "", "", ""],
+            iso_extra: None,
+            altgr: &[],
+        }
+        .build()
+    }
+
+    /// A built-in, by the name the settings file uses for it.
+    fn builtin(id: &str) -> Layout {
+        keylayout::by_id(id)
+            .unwrap_or_else(|| panic!("this build ships no layout called {id}"))
+            .clone()
+    }
+
+    fn previewing(layout: Layout) -> InputMethodManager {
         let mut mgr = InputMethodManager::new(vec![layout]);
         mgr.preview_visible = true;
         mgr
@@ -684,50 +650,70 @@ mod tests {
         ]
     }
 
-    // ---- KeyboardLayout tests ----
+    // ---- The catalogue this module selects from ----
 
+    /// The refactor's own regression test.
+    ///
+    /// This module used to hold its own copy of every layout table, and the
+    /// copy is what the preview drew. So the preview could — and did — show a
+    /// keyboard nobody could type on: picking Dvorak here changed the picture
+    /// and left the compositor typing QWERTY. The guard is that the caps come
+    /// out of `keylayout`, the same table the compositor translates with, so
+    /// there is no second copy left to disagree with.
     #[test]
-    fn test_us_qwerty_layout() {
-        let l = KeyboardLayout::us_qwerty();
-        assert_eq!(l.short_label, "EN");
-        assert!(!l.has_dead_keys);
-        assert!(!l.is_rtl);
-        assert!(l.rows_unshifted[1].contains('q'));
+    fn the_preview_draws_the_catalogues_own_characters() {
+        let dvorak = builtin("dvorak");
+        let caps: String = previewing(dvorak.clone())
+            .render_preview(&dark(), 0.0, 0.0, 400.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text, font_size, ..
+                } if (*font_size - 12.0).abs() < f32::EPSILON => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        let from_table: String = dvorak.keys().iter().map(|k| k.plain).collect();
+        assert_eq!(
+            caps, from_table,
+            "the preview drew something other than the layout's own characters"
+        );
+        assert!(
+            caps.contains("aoeuidhtns"),
+            "Dvorak's home row should be legible in the caps: {caps}"
+        );
     }
 
     #[test]
-    fn test_dvorak_layout() {
-        let l = KeyboardLayout::dvorak();
-        assert_eq!(l.short_label, "DV");
-        // In Dvorak, top row starts with ',.p
-        assert!(l.rows_unshifted[1].starts_with("',.p"));
+    fn every_builtin_can_be_selected_by_the_name_the_settings_file_uses() {
+        // The one join between this selector and the compositor is the id
+        // string in `inputsettings`' `keyboard.layout`. A layout that cannot
+        // be named cannot be chosen.
+        let mgr = InputMethodManager::with_builtins();
+        assert!(mgr.layouts.len() >= 5, "the catalogue lost layouts");
+        for l in &mgr.layouts {
+            let mut one = InputMethodManager::with_builtins();
+            assert!(one.switch_to(l.id), "cannot switch to {}", l.id);
+            assert_eq!(one.active_layout_id(), Some(l.id));
+        }
     }
 
     #[test]
-    fn test_colemak_layout() {
-        let l = KeyboardLayout::colemak();
-        assert_eq!(l.short_label, "CO");
+    fn a_layout_this_build_does_not_know_still_leaves_a_keyboard() {
+        let mgr = InputMethodManager::with_ids(&["klingon-plqaD"]);
+        assert_eq!(mgr.layouts.len(), 1);
+        assert_eq!(mgr.active_layout_id(), Some(keylayout::DEFAULT_ID));
     }
 
     #[test]
-    fn test_german_layout_has_dead_keys() {
-        let l = KeyboardLayout::german_qwertz();
-        assert!(l.has_dead_keys);
-        assert_eq!(l.language, "de");
-    }
-
-    #[test]
-    fn test_french_layout() {
-        let l = KeyboardLayout::french_azerty();
-        assert_eq!(l.short_label, "FR");
-        // AZERTY: first row starts with 'a'
-        assert!(l.rows_unshifted[1].starts_with('a'));
-    }
-
-    #[test]
-    fn test_all_builtins_count() {
-        let builtins = KeyboardLayout::all_builtins();
-        assert_eq!(builtins.len(), 5);
+    fn named_layouts_are_installed_in_the_order_they_were_named() {
+        let mgr = InputMethodManager::with_ids(&["dvorak", "nonsense", "us-qwerty"]);
+        let ids: Vec<&str> = mgr.layouts.iter().map(|l| l.id).collect();
+        assert_eq!(
+            ids,
+            vec!["dvorak", "us-qwerty"],
+            "the unknown one is skipped"
+        );
     }
 
     // ---- SwitchShortcut tests ----
@@ -760,8 +746,7 @@ mod tests {
 
     #[test]
     fn test_manager_next_layout() {
-        let mut mgr =
-            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
+        let mut mgr = InputMethodManager::with_ids(&["us-qwerty", "dvorak"]);
         assert_eq!(mgr.tray_label(), "EN");
         mgr.next_layout();
         assert_eq!(mgr.tray_label(), "DV");
@@ -771,69 +756,61 @@ mod tests {
 
     #[test]
     fn test_manager_prev_layout() {
-        let mut mgr = InputMethodManager::new(vec![
-            KeyboardLayout::us_qwerty(),
-            KeyboardLayout::dvorak(),
-            KeyboardLayout::colemak(),
-        ]);
+        let mut mgr = InputMethodManager::with_ids(&["us-qwerty", "dvorak", "colemak"]);
         mgr.prev_layout();
         assert_eq!(mgr.tray_label(), "CO"); // wraps to last
     }
 
     #[test]
     fn test_manager_switch_to() {
-        let mut mgr =
-            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
-        assert!(mgr.switch_to(&LayoutId::new("dvorak")));
+        let mut mgr = InputMethodManager::with_ids(&["us-qwerty", "dvorak"]);
+        assert!(mgr.switch_to("dvorak"));
         assert_eq!(mgr.tray_label(), "DV");
     }
 
     #[test]
     fn test_manager_switch_to_nonexistent() {
         let mut mgr = InputMethodManager::default();
-        assert!(!mgr.switch_to(&LayoutId::new("nonexistent")));
+        assert!(!mgr.switch_to("nonexistent"));
     }
 
     #[test]
     fn test_manager_add_layout() {
         let mut mgr = InputMethodManager::default();
-        assert!(mgr.add_layout(KeyboardLayout::dvorak()));
+        assert!(mgr.add_builtin("dvorak"));
         assert_eq!(mgr.layouts.len(), 2);
     }
 
     #[test]
     fn test_manager_add_duplicate_fails() {
         let mut mgr = InputMethodManager::default();
-        assert!(!mgr.add_layout(KeyboardLayout::us_qwerty()));
+        assert!(!mgr.add_builtin("us-qwerty"));
     }
 
     #[test]
     fn test_manager_remove_layout() {
-        let mut mgr =
-            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
-        assert!(mgr.remove_layout(&LayoutId::new("dvorak")));
+        let mut mgr = InputMethodManager::with_ids(&["us-qwerty", "dvorak"]);
+        assert!(mgr.remove_layout("dvorak"));
         assert_eq!(mgr.layouts.len(), 1);
     }
 
     #[test]
     fn test_manager_remove_last_fails() {
         let mut mgr = InputMethodManager::default();
-        assert!(!mgr.remove_layout(&LayoutId::new("us-qwerty")));
+        assert!(!mgr.remove_layout("us-qwerty"));
     }
 
     #[test]
     fn test_manager_remove_adjusts_active_index() {
-        let mut mgr =
-            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
+        let mut mgr = InputMethodManager::with_ids(&["us-qwerty", "dvorak"]);
         mgr.active_index = 1;
-        mgr.remove_layout(&LayoutId::new("dvorak"));
+        mgr.remove_layout("dvorak");
         assert_eq!(mgr.active_index, 0);
     }
 
     #[test]
     fn test_manager_per_app_layout() {
-        let mut mgr =
-            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
+        let mut mgr = InputMethodManager::with_ids(&["us-qwerty", "dvorak"]);
         mgr.per_app_layout = true;
 
         // Set dvorak for terminal
@@ -854,8 +831,7 @@ mod tests {
 
     #[test]
     fn test_manager_per_app_disabled() {
-        let mut mgr =
-            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
+        let mut mgr = InputMethodManager::with_ids(&["us-qwerty", "dvorak"]);
         mgr.per_app_layout = false;
         mgr.active_index = 0;
         mgr.on_app_focus("anything");
@@ -896,20 +872,98 @@ mod tests {
 
     #[test]
     fn test_manager_config_roundtrip() {
-        let mut mgr =
-            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
+        let mut mgr = InputMethodManager::with_ids(&["us-qwerty", "dvorak"]);
         mgr.switch_shortcut = SwitchShortcut::SuperSpace;
         mgr.per_app_layout = true;
         mgr.active_index = 1;
 
         let text = mgr.to_config_text();
-        let mut mgr2 =
-            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
+        let mut mgr2 = InputMethodManager::with_ids(&["us-qwerty", "dvorak"]);
         mgr2.apply_config_text(&text);
 
         assert_eq!(mgr2.switch_shortcut, SwitchShortcut::SuperSpace);
         assert!(mgr2.per_app_layout);
         assert_eq!(mgr2.active_index, 1);
+    }
+
+    #[test]
+    fn the_config_carries_which_layouts_are_installed_and_in_what_order() {
+        // `to_config_text` always wrote the `layout_N=` lines and
+        // `apply_config_text` always threw them away, so a shell restarted
+        // from its own config came back with whatever list its caller happened
+        // to hand it. There was no catalogue to resolve a name against; now
+        // there is.
+        let mut mgr = InputMethodManager::with_ids(&["de-qwertz", "dvorak", "us-qwerty"]);
+        mgr.active_index = 1;
+
+        let mut restored = InputMethodManager::default();
+        restored.apply_config_text(&mgr.to_config_text());
+
+        let ids: Vec<&str> = restored.layouts.iter().map(|l| l.id).collect();
+        assert_eq!(ids, vec!["de-qwertz", "dvorak", "us-qwerty"]);
+        assert_eq!(restored.active_layout_id(), Some("dvorak"));
+    }
+
+    #[test]
+    fn a_layout_the_catalogue_never_heard_of_survives_a_round_trip() {
+        // The rule that makes a user-written layout a first-class member of
+        // the list: a name is looked up among the *installed* layouts before
+        // the catalogue, so saving and reloading cannot quietly drop the one
+        // layout that only exists on this machine.
+        let mut mgr = InputMethodManager::new(vec![tiny_layout(), builtin("dvorak")]);
+        mgr.active_index = 0;
+        let text = mgr.to_config_text();
+
+        let mut restored = InputMethodManager::new(vec![tiny_layout()]);
+        restored.apply_config_text(&text);
+
+        let ids: Vec<&str> = restored.layouts.iter().map(|l| l.id).collect();
+        assert_eq!(ids, vec!["tiny", "dvorak"]);
+    }
+
+    #[test]
+    fn a_layout_that_shadows_a_builtin_name_keeps_the_installed_version() {
+        // The other half of the rule above, and the half a custom *name* can
+        // never test: when the installed layout and the catalogue both answer
+        // to `dvorak`, the installed one wins. Resolving against the catalogue
+        // first would silently hand the user back the stock Dvorak on every
+        // reload — their edits still on disk, no error, and nothing to see
+        // except that the keyboard went back to how it shipped.
+        let mut mgr = InputMethodManager::new(vec![shadow_of_dvorak()]);
+        let text = mgr.to_config_text();
+        mgr.apply_config_text(&text);
+
+        assert_eq!(mgr.layouts.len(), 1);
+        assert_eq!(
+            mgr.active_layout()
+                .map(|l| l.character(u32::from(keylayout::sc::GRAVE), keylayout::Level::PLAIN)),
+            Some(Some('z')),
+            "stock Dvorak puts ` there; the installed copy puts z"
+        );
+    }
+
+    #[test]
+    fn a_config_that_names_no_layout_leaves_the_installed_list_alone() {
+        // A truncated or half-written file must not be able to empty the list
+        // — a manager with no layouts has no keyboard to show and no id to
+        // hand the compositor.
+        let mut mgr = InputMethodManager::with_ids(&["us-qwerty", "dvorak"]);
+        mgr.apply_config_text("per_app_layout=true\nactive=1\n");
+        assert_eq!(mgr.layouts.len(), 2);
+        assert_eq!(mgr.active_layout_id(), Some("dvorak"));
+    }
+
+    #[test]
+    fn an_active_index_past_the_end_of_the_file_s_own_list_is_refused() {
+        // The ordering trap this parser had: `active` used to be range-checked
+        // against the list installed *before* parsing, so a file listing one
+        // layout and `active=4` could be accepted against a longer list that
+        // was about to be replaced.
+        let mut mgr = InputMethodManager::with_ids(&["us-qwerty", "dvorak", "colemak"]);
+        mgr.apply_config_text("layout_0=dvorak\nactive=2\n");
+        assert_eq!(mgr.layouts.len(), 1);
+        assert_eq!(mgr.active_index, 0, "an out-of-range index selects nothing");
+        assert_eq!(mgr.active_layout_id(), Some("dvorak"));
     }
 
     #[test]
@@ -1001,7 +1055,7 @@ mod tests {
             let p = accented(light);
             crate::palette_check::assert_drawn_from(
                 &p,
-                &previewing(KeyboardLayout::german_qwertz()).render_preview(&p, 0.0, 0.0, 400.0),
+                &previewing(builtin("de-qwertz")).render_preview(&p, 0.0, 0.0, 400.0),
                 &[],
                 "the keyboard layout preview",
             );

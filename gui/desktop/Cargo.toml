@@ -68,5 +68,13 @@ appearance = { path = "../appearance" }
 # panel in `mouse_settings` renders them, so none of the three can own them.
 inputsettings = { path = "../inputsettings" }
 
+# The keyboard layouts, shared with the compositor. The tray indicator and the
+# layout preview in `input_method` are a *picture* of a keyboard, and the
+# compositor is what the keyboard actually types through; when each of them
+# carried its own table the picture could show a board nobody could type on.
+# A leaf crate with no dependencies of its own, so reading it costs the shell
+# nothing and does not drag a display server in behind it.
+keylayout = { path = "../keylayout" }
+
 [lints]
 workspace = true

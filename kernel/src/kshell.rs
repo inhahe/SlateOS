@@ -14678,6 +14678,91 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = capture_command("unset ZZBARE");
     }
 
+    serial_println!("  kshell::self_test 58: printing a usage message is reporting a failure");
+    {
+        // 87 subcommand arms printed `Usage: ...` and returned without touching
+        // the exit status, so the shell reported success for a command that had
+        // not run. `cmd && next` therefore ran `next` after a typo, and a script
+        // testing `$?` saw 0. The diagnostic was on the screen the whole time --
+        // it was the *status* that lied, which is the worse half: a script does
+        // not read the screen.
+        //
+        // Three arms, one per syntactic shape that the sweep had to handle, so a
+        // regression in any one of them is caught here rather than in whichever
+        // of the 87 happens to be noticed first.
+
+        // Shape 1: `_ =>` on one line -- an unrecognised value.
+        let out = capture_command("speech tts zz_not_a_toggle");
+        assert_output_contains(
+            "an unrecognised value still prints the usage line",
+            &out,
+            b"Usage: speech tts <on|off>",
+        );
+        assert_eq!(last_exit(), 1, "and now says so in the exit status");
+
+        // Shape 2: `None =>` on one line -- a required argument omitted. Worth
+        // pinning separately because it is a different arm reached by a
+        // different route (a failed parse, not an unmatched value).
+        let out = capture_command("dynlock grace");
+        assert_output_contains(
+            "a missing argument still prints the usage line",
+            &out,
+            b"Usage: dynlock grace <seconds>",
+        );
+        assert_eq!(last_exit(), 1, "and is a failure too");
+
+        // Shape 3: the usage print inside a braced block rather than as the
+        // whole arm -- the form the first pass of the sweep could not see.
+        let out = capture_command("wallpaper bgcolor");
+        assert_output_contains(
+            "and the block form reports it as well",
+            &out,
+            b"Usage: wallpaper bgcolor <#hex>",
+        );
+        assert_eq!(last_exit(), 1, "with the same status");
+
+        // The control, and the reason it is here: the sweep inserted `set_exit(1)`
+        // into 87 blocks mechanically, and the way that goes wrong is by landing
+        // in the sibling arm that *succeeded*. This runs the good path of the
+        // same subcommand as shape 3, so a misplaced insertion turns a passing
+        // command into a failing one and this line catches it.
+        let out = capture_command("wallpaper bgcolor #112233");
+        assert_output_lacks("the good path prints no usage line", &out, b"Usage:");
+        assert_eq!(last_exit(), 0, "and still succeeds");
+
+        // The mirror-image defect, which is the one this sweep actually
+        // *created* -- twice, and the sweep before it shipped two more. A
+        // subcommand with no argument is often a query: it prints the current
+        // value and appends the usage line as a hint. That command did what was
+        // asked, so it succeeded, and stapling a failure status onto the usage
+        // line turns a working query into a failing one.
+        //
+        // These three are guarded on "no argument given", so nothing but the
+        // query reaches them -- there is no error case whose status could be
+        // argued for. They are pinned because the shape is a magnet for the
+        // next person sweeping usage lines, this session included.
+        let out = capture_command("elog echo");
+        assert_output_contains(
+            "a bare query prints its answer",
+            &out,
+            b"Serial echo level:",
+        );
+        assert_eq!(last_exit(), 0, "and reports success, because it answered");
+
+        let out = capture_command("fc algo");
+        assert_output_contains("likewise for the compressor default", &out, b"Current:");
+        assert_eq!(last_exit(), 0, "which is not a usage error");
+
+        // `wallpaper offset` is the harder relative: its branch serves the
+        // query *and* an unparseable pair, so no single status is right for it
+        // and it deliberately sets none. Pinned at 0 to record which way the
+        // ambiguity currently falls, so that splitting the arm later is a
+        // visible change rather than a silent one.
+        let out = capture_command("wallpaper offset");
+        assert_output_contains("the offset query answers", &out, b"Offset: (");
+        assert_eq!(last_exit(), 0, "and does not claim to have failed");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -18353,6 +18438,12 @@ fn cmd_fhist(args: &str) {
                     "Auto-versioning: {}",
                     if st.auto_version { "on" } else { "off" }
                 );
+                // No status here, deliberately. This arm answers `fhist
+                // autoversion` with no argument -- a query, correctly answered
+                // above -- as well as `fhist autoversion banana`, an error.
+                // Whichever status it set, one of the two callers would be told
+                // something false, so it stays silent until the arm is split.
+                // Tracked in known-issues.md under the help/query conflation.
                 shell_println!("Usage: fhist autoversion <on|off>");
             }
         },
@@ -21414,9 +21505,14 @@ fn cmd_fcompress(args: &str) {
         }
         "algo" | "algorithm" => {
             if parts.len() < 2 {
+                // `fc algo` with no argument is a *query*, and the line above is
+                // its answer. The guard is `parts.len() < 2`, so nothing else
+                // reaches here -- there is no error case to report. The usage
+                // line is a hint on a correct answer, not a diagnostic, and the
+                // `set_exit(1)` that used to follow it made every successful
+                // query look like a failed command to `&&`, `set -e` and `$?`.
                 shell_println!("Current: {}", fcompress::default_algorithm().name());
                 shell_println!("Usage: fc algo <lz4|gzip|zstd|bzip2|xz>");
-                set_exit(1);
                 return;
             }
             match fcompress::Algorithm::from_name(parts[1]) {
@@ -21512,7 +21608,10 @@ fn cmd_fcompress(args: &str) {
                 fcompress::clear_rules();
                 shell_println!("All rules cleared.");
             }
-            _ => shell_println!("Usage: fc rule <add|rm|list|clear>"),
+            _ => {
+                shell_println!("Usage: fc rule <add|rm|list|clear>");
+                set_exit(1);
+            }
         },
         "info" => {
             if parts.len() < 2 {
@@ -21718,7 +21817,10 @@ fn cmd_encrypt(args: &str) {
                     }
                 }
             }
-            _ => shell_println!("Usage: encrypt key <add|rm|list>"),
+            _ => {
+                shell_println!("Usage: encrypt key <add|rm|list>");
+                set_exit(1);
+            }
         },
         "file" | "enc" => {
             if parts.len() < 3 {
@@ -25592,7 +25694,10 @@ fn cmd_recent(args: &str) {
                         }
                     }
                 }
-                _ => shell_println!("Usage: recent exclude <add|remove|list> [prefix]"),
+                _ => {
+                    shell_println!("Usage: recent exclude <add|remove|list> [prefix]");
+                    set_exit(1);
+                }
             }
         }
         "enable" => {
@@ -28371,7 +28476,10 @@ fn cmd_queryable(args: &str) {
                         }
                     }
                 }
-                _ => shell_println!("Usage: qattr index <create|drop|list> [attr_name]"),
+                _ => {
+                    shell_println!("Usage: qattr index <create|drop|list> [attr_name]");
+                    set_exit(1);
+                }
             }
         }
         "schema" => {
@@ -28409,7 +28517,10 @@ fn cmd_queryable(args: &str) {
                         }
                     }
                 }
-                _ => shell_println!("Usage: qattr schema <init|list>"),
+                _ => {
+                    shell_println!("Usage: qattr schema <init|list>");
+                    set_exit(1);
+                }
             }
         }
         "test" => match queryable::self_test() {
@@ -28746,7 +28857,10 @@ fn cmd_rundialog(args: &str) {
                         }
                     }
                 }
-                _ => shell_println!("Usage: rundialog alias <add|rm|list>"),
+                _ => {
+                    shell_println!("Usage: rundialog alias <add|rm|list>");
+                    set_exit(1);
+                }
             }
         }
         "bookmark" | "bm" => {
@@ -28795,7 +28909,10 @@ fn cmd_rundialog(args: &str) {
                         }
                     }
                 }
-                _ => shell_println!("Usage: rundialog bookmark <add|rm|list>"),
+                _ => {
+                    shell_println!("Usage: rundialog bookmark <add|rm|list>");
+                    set_exit(1);
+                }
             }
         }
         "path" => {
@@ -28823,7 +28940,10 @@ fn cmd_rundialog(args: &str) {
                     rundialog::clear_path_cache();
                     shell_println!("PATH cache cleared");
                 }
-                _ => shell_println!("Usage: rundialog path <show|refresh|clear>"),
+                _ => {
+                    shell_println!("Usage: rundialog path <show|refresh|clear>");
+                    set_exit(1);
+                }
             }
         }
         "init" => match rundialog::init_defaults() {
@@ -30574,6 +30694,7 @@ fn cmd_wallpaper(args: &str) {
             let color = parts.get(1).copied().unwrap_or("");
             if color.is_empty() {
                 shell_println!("Usage: wallpaper bgcolor <#hex>");
+                set_exit(1);
             } else {
                 wallpaper::set_background_color(color);
                 shell_println!("Background color: {}", color);
@@ -30592,6 +30713,10 @@ fn cmd_wallpaper(args: &str) {
             } else {
                 let cfg = wallpaper::current();
                 shell_println!("Offset: ({:.2}, {:.2})", cfg.offset_x, cfg.offset_y);
+                // No status here, deliberately: this `else` serves both a bare
+                // `wallpaper offset` -- a query, answered on the line above --
+                // and an unparseable pair, an error. Tracked with the other
+                // query/error conflations in known-issues.md.
                 shell_println!("Usage: wallpaper offset <x 0.0-1.0> <y 0.0-1.0>");
             }
         }
@@ -31002,6 +31127,7 @@ fn cmd_credentials(args: &str) {
             let app = parts.get(1).copied().unwrap_or("");
             if app.is_empty() {
                 shell_println!("Usage: cred deleteapp <app_id>");
+                set_exit(1);
             } else {
                 let n = credentials::delete_app(app);
                 shell_println!("Deleted {} credential(s) for '{}'", n, app);
@@ -31048,6 +31174,7 @@ fn cmd_credentials(args: &str) {
             };
             if query.is_empty() {
                 shell_println!("Usage: cred search <query>");
+                set_exit(1);
             } else {
                 let results = credentials::search(&query);
                 if results.is_empty() {
@@ -31940,6 +32067,7 @@ fn cmd_vdesktop(args: &str) {
                 .unwrap_or(0);
             if wid == 0 {
                 shell_println!("Usage: vd where <window_id>");
+                set_exit(1);
             } else {
                 match vdesktop::desktop_of(wid) {
                     Some(did) => shell_println!("Window {} on desktop #{}", wid, did),
@@ -33170,6 +33298,7 @@ fn cmd_ime(args: &str) {
             let emoji = parts.get(1).copied().unwrap_or("");
             if emoji.is_empty() {
                 shell_println!("Usage: ime pick <emoji>");
+                set_exit(1);
             } else {
                 ime::select_emoji(emoji);
                 shell_println!("Selected: {}", emoji);
@@ -33374,6 +33503,7 @@ fn cmd_netindicator(args: &str) {
                 .unwrap_or(6);
             if ssid.is_empty() {
                 shell_println!("Usage: netind report <ssid> [signal] [security] [channel]");
+                set_exit(1);
             } else {
                 netindicator::report_wifi(ssid, sig, sec, ch, 2437);
                 shell_println!("Reported {} {}% {}", ssid, sig, sec.label());
@@ -33405,6 +33535,7 @@ fn cmd_netindicator(args: &str) {
             let ssid = parts.get(1).copied().unwrap_or("");
             if ssid.is_empty() {
                 shell_println!("Usage: netind save <ssid>");
+                set_exit(1);
             } else {
                 let _ = netindicator::save_profile(ssid, netindicator::WifiSecurity::WPA2, true);
                 shell_println!("Saved profile for {}", ssid);
@@ -33458,6 +33589,7 @@ fn cmd_netindicator(args: &str) {
                 let servers: Vec<&str> = parts[2..].to_vec();
                 if servers.is_empty() {
                     shell_println!("Usage: netind dns manual <server1> [server2]");
+                    set_exit(1);
                 } else {
                     let _ = netindicator::set_dns_manual(&servers);
                     shell_println!("DNS: manual {:?}", servers);
@@ -34908,6 +35040,7 @@ fn cmd_detailcols(args: &str) {
             let types: Vec<&str> = parts[1..].to_vec();
             if types.is_empty() {
                 shell_println!("Usage: dcols query <mime> [mime...]");
+                set_exit(1);
             } else {
                 let cols = detailcols::columns_for_types(&types);
                 shell_println!("Columns for {:?}:", types);
@@ -37030,6 +37163,7 @@ fn cmd_scriptlang(args: &str) {
         "lookup" => {
             if parts.len() < 2 {
                 shell_println!("Usage: scriptlang lookup <extension>");
+                set_exit(1);
             } else {
                 match scriptlang::engine_for_extension(parts[1]) {
                     Some(e) => shell_println!(
@@ -42627,7 +42761,10 @@ fn cmd_loginscreen(args: &str) {
                 loginscreen::set_background_image(path);
                 shell_println!("Set background image to {}.", path);
             }
-            None => shell_println!("Usage: loginscreen image <path>"),
+            None => {
+                shell_println!("Usage: loginscreen image <path>");
+                set_exit(1);
+            }
         },
         "sync" => {
             loginscreen::sync_with_desktop();
@@ -42721,7 +42858,10 @@ fn cmd_loginscreen(args: &str) {
                 loginscreen::set_logo(path);
                 shell_println!("Set logo to {}.", path);
             }
-            None => shell_println!("Usage: loginscreen logo <path>"),
+            None => {
+                shell_println!("Usage: loginscreen logo <path>");
+                set_exit(1);
+            }
         },
         "keyboard" | "vkb" => {
             let on = parts.get(1).copied() == Some("on") || parts.get(1).copied() == Some("true");
@@ -43080,6 +43220,7 @@ fn cmd_appnotify(args: &str) {
         "effective" | "eff" => {
             if parts.len() < 3 {
                 shell_println!("Usage: appnotify effective <app-id> <type-key>");
+                set_exit(1);
             } else {
                 let eff = appnotify::effective_settings(parts[1], parts[2]);
                 shell_println!("Show:     {}", eff.show);
@@ -45257,7 +45398,10 @@ fn cmd_focusassist(args: &str) {
                     let _ = focusassist::set_auto_fullscreen(false);
                     shell_println!("Auto fullscreen: OFF");
                 }
-                _ => shell_println!("Usage: focusassist autofs <on|off>"),
+                _ => {
+                    shell_println!("Usage: focusassist autofs <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "autogame" => {
@@ -45271,7 +45415,10 @@ fn cmd_focusassist(args: &str) {
                     let _ = focusassist::set_auto_gaming(false);
                     shell_println!("Auto gaming: OFF");
                 }
-                _ => shell_println!("Usage: focusassist autogame <on|off>"),
+                _ => {
+                    shell_println!("Usage: focusassist autogame <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "autopres" => {
@@ -45285,7 +45432,10 @@ fn cmd_focusassist(args: &str) {
                     let _ = focusassist::set_auto_presentation(false);
                     shell_println!("Auto presentation: OFF");
                 }
-                _ => shell_println!("Usage: focusassist autopres <on|off>"),
+                _ => {
+                    shell_println!("Usage: focusassist autopres <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -45504,7 +45654,10 @@ fn cmd_storageclean(args: &str) {
                     let _ = storageclean::set_auto_enabled(false);
                     shell_println!("Auto-cleanup: OFF");
                 }
-                _ => shell_println!("Usage: sclean auto <on|off>"),
+                _ => {
+                    shell_println!("Usage: sclean auto <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "threshold" => {
@@ -46887,6 +47040,7 @@ fn cmd_envvars(args: &str) {
             let input = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
             if input.is_empty() {
                 shell_println!("Usage: envvars expand <uid> <string with $VAR>");
+                set_exit(1);
             } else {
                 let result = envvars::expand(uid, &input);
                 shell_println!("{}", result);
@@ -47113,6 +47267,7 @@ fn cmd_bluetooth(args: &str) {
                 shell_println!(
                     "Types: headphones, speaker, headset, keyboard, mouse, gamepad, phone, computer, printer, other"
                 );
+                set_exit(1);
             }
         }
         "unpair" | "remove" => {
@@ -48316,7 +48471,10 @@ fn cmd_mousesettings(args: &str) {
                     set_exit(1);
                 }
             }
-            None => shell_println!("Usage: mouse accel <flat|adaptive|0-10>"),
+            None => {
+                shell_println!("Usage: mouse accel <flat|adaptive|0-10>");
+                set_exit(1);
+            }
         },
         "lefthanded" => {
             let val = matches!(
@@ -48361,7 +48519,10 @@ fn cmd_mousesettings(args: &str) {
                     set_exit(1);
                 }
             }
-            None => shell_println!("Usage: mouse scroll <wheel|smooth|none|speed>"),
+            None => {
+                shell_println!("Usage: mouse scroll <wheel|smooth|none|speed>");
+                set_exit(1);
+            }
         },
         "dblclick" => {
             if let Some(val) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
@@ -48517,7 +48678,10 @@ fn cmd_touchpad(args: &str) {
                 let _ = touchpad::set_scroll_method(touchpad::TouchScrollMethod::None);
                 shell_println!("Scroll: Disabled");
             }
-            _ => shell_println!("Usage: touchpad scroll <twofinger|edge|none>"),
+            _ => {
+                shell_println!("Usage: touchpad scroll <twofinger|edge|none>");
+                set_exit(1);
+            }
         },
         "click" => match parts.get(1).copied() {
             Some("areas") => {
@@ -48532,7 +48696,10 @@ fn cmd_touchpad(args: &str) {
                 let _ = touchpad::set_click_method(touchpad::ClickMethod::None);
                 shell_println!("Click: None");
             }
-            _ => shell_println!("Usage: touchpad click <areas|finger|none>"),
+            _ => {
+                shell_println!("Usage: touchpad click <areas|finger|none>");
+                set_exit(1);
+            }
         },
         "palm" => match parts.get(1).copied() {
             Some("on") | Some("yes") => {
@@ -48557,7 +48724,10 @@ fn cmd_touchpad(args: &str) {
                     set_exit(1);
                 }
             }
-            None => shell_println!("Usage: touchpad palm <on|off|1-10>"),
+            None => {
+                shell_println!("Usage: touchpad palm <on|off|1-10>");
+                set_exit(1);
+            }
         },
         "gestures" => {
             let gestures = touchpad::list_gestures();
@@ -48777,7 +48947,10 @@ fn cmd_powerprofile(args: &str) {
                     set_exit(1);
                 }
             }
-            None => shell_println!("Usage: powerprofile autoswitch <on|off|threshold%>"),
+            None => {
+                shell_println!("Usage: powerprofile autoswitch <on|off|threshold%>");
+                set_exit(1);
+            }
         },
         "stats" => {
             let (count, active, switches, batt, bstate, ops) = powerprofile::stats();
@@ -49184,7 +49357,10 @@ fn cmd_monitors(args: &str) {
                 let _ = monitors::set_layout_mode(monitors::LayoutMode::Single);
                 shell_println!("Layout: Single");
             }
-            _ => shell_println!("Usage: monitors layout <extend|mirror|single>"),
+            _ => {
+                shell_println!("Usage: monitors layout <extend|mirror|single>");
+                set_exit(1);
+            }
         },
         "arrange" => match monitors::auto_arrange() {
             Ok(()) => shell_println!("Monitors auto-arranged."),
@@ -49295,7 +49471,10 @@ fn cmd_fwsettings(args: &str) {
                 let _ = fwsettings::set_zone(fwsettings::NetworkZone::Public);
                 shell_println!("Zone: Public");
             }
-            _ => shell_println!("Usage: firewall zone <home|work|public>"),
+            _ => {
+                shell_println!("Usage: firewall zone <home|work|public>");
+                set_exit(1);
+            }
         },
         "rules" => {
             let rules = fwsettings::list_rules();
@@ -49452,7 +49631,10 @@ fn cmd_fwsettings(args: &str) {
                 let _ = fwsettings::remove_app_permission(app);
                 shell_println!("App '{}' permission removed.", app);
             }
-            _ => shell_println!("Usage: firewall app <list|allow|block|outonly|rm> [app_id]"),
+            _ => {
+                shell_println!("Usage: firewall app <list|allow|block|outonly|rm> [app_id]");
+                set_exit(1);
+            }
         },
         "stealth" => {
             let val = !matches!(parts.get(1).copied(), Some("off") | Some("no"));
@@ -49665,7 +49847,10 @@ fn cmd_updatemgr(args: &str) {
                 let _ = updatemgr::set_channel(updatemgr::UpdateChannel::Nightly);
                 shell_println!("Channel: Nightly");
             }
-            _ => shell_println!("Usage: updates channel <stable|beta|nightly>"),
+            _ => {
+                shell_println!("Usage: updates channel <stable|beta|nightly>");
+                set_exit(1);
+            }
         },
         "auto" => match parts.get(1).copied() {
             Some("on") | Some("yes") => {
@@ -49905,7 +50090,10 @@ fn cmd_notifprefs(args: &str) {
                 let _ = notifprefs::set_position(notifprefs::NotifPosition::BottomLeft);
                 shell_println!("Position: Bottom Left");
             }
-            _ => shell_println!("Usage: notifprefs position <tr|tl|br|bl>"),
+            _ => {
+                shell_println!("Usage: notifprefs position <tr|tl|br|bl>");
+                set_exit(1);
+            }
         },
         "timeout" => {
             if let Some(val) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
@@ -53460,7 +53648,10 @@ fn cmd_battery(args: &str) {
                     battery::set_critical_action(parts[2]).ok();
                     shell_println!("Critical action set to '{}'.", parts[2]);
                 }
-                _ => shell_println!("Usage: batt alert low|critical|action <value>"),
+                _ => {
+                    shell_println!("Usage: batt alert low|critical|action <value>");
+                    set_exit(1);
+                }
             }
         }
         "limit" => {
@@ -55889,9 +56080,12 @@ fn cmd_elog(args: &str) {
         "echo" => {
             if parts.len() < 2 {
                 let level = eventlog::serial_echo_level();
+                // Same as `fc algo`: guarded by `parts.len() < 2`, so this is
+                // only ever the query path, and the level printed above is the
+                // answer. The trailing "to change" says as much -- it is a hint
+                // appended to a result, not a complaint about an argument.
                 shell_println!("Serial echo level: {} (and above)", level.as_str());
                 shell_println!("Usage: elog echo <level>  to change");
-                set_exit(1);
                 return;
             }
             match Severity::from_str_loose(parts[1]) {
@@ -57109,7 +57303,10 @@ fn cmd_initproc(args: &str) {
                             set_exit(1);
                         }
                     }
-                    _ => shell_println!("Usage: initproc critical <add|remove> <name>"),
+                    _ => {
+                        shell_println!("Usage: initproc critical <add|remove> <name>");
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: initproc critical <add|remove> <name>");
@@ -57726,6 +57923,7 @@ fn cmd_vmguest(args: &str) {
         "resize" => {
             if parts.len() < 3 {
                 shell_println!("Usage: vmguest resize <width> <height>");
+                set_exit(1);
             } else {
                 let w: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                 let h: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -60558,7 +60756,10 @@ fn cmd_ndisc(args: &str) {
                         }
                     }
                 }
-                None => shell_println!("Usage: ndisc probe <IP>"),
+                None => {
+                    shell_println!("Usage: ndisc probe <IP>");
+                    set_exit(1);
+                }
             }
         }
         "probe6" => {
@@ -64194,6 +64395,7 @@ fn cmd_printqueue(args: &str) {
             let job_str = parts.get(2).copied().unwrap_or("");
             if printer_str.is_empty() || job_str.is_empty() {
                 shell_println!("Usage: pqueue cancel <printer_id> <job_id>");
+                set_exit(1);
             } else if let (Ok(pid), Ok(jid)) = (printer_str.parse::<u32>(), job_str.parse::<u32>())
             {
                 match printqueue::cancel_job(pid, jid) {
@@ -64213,6 +64415,7 @@ fn cmd_printqueue(args: &str) {
             let job_str = parts.get(2).copied().unwrap_or("");
             if printer_str.is_empty() || job_str.is_empty() {
                 shell_println!("Usage: pqueue complete <printer_id> <job_id>");
+                set_exit(1);
             } else if let (Ok(pid), Ok(jid)) = (printer_str.parse::<u32>(), job_str.parse::<u32>())
             {
                 match printqueue::complete_job(pid, jid) {
@@ -66701,7 +66904,10 @@ fn cmd_speechio(args: &str) {
                     speechio::set_tts_enabled(false).ok();
                     shell_println!("TTS disabled.");
                 }
-                _ => shell_println!("Usage: speech tts <on|off>"),
+                _ => {
+                    shell_println!("Usage: speech tts <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "listen" => {
@@ -66721,7 +66927,10 @@ fn cmd_speechio(args: &str) {
                     speechio::stop_listening().ok();
                     shell_println!("Stopped listening.");
                 }
-                _ => shell_println!("Usage: speech listen <start|stop>"),
+                _ => {
+                    shell_println!("Usage: speech listen <start|stop>");
+                    set_exit(1);
+                }
             }
         }
         "results" => {
@@ -67602,6 +67811,7 @@ fn cmd_wintiling(args: &str) {
                 .unwrap_or(0);
             if ws == 0 {
                 shell_println!("Usage: tile gap <workspace> <pixels>");
+                set_exit(1);
             } else {
                 wintiling::set_gap(ws, gap).ok();
                 shell_println!("Gap → {}px", gap);
@@ -67618,6 +67828,7 @@ fn cmd_wintiling(args: &str) {
                 .unwrap_or(55);
             if ws == 0 {
                 shell_println!("Usage: tile ratio <workspace> <percent>");
+                set_exit(1);
             } else {
                 wintiling::set_master_ratio(ws, ratio).ok();
                 shell_println!("Master ratio → {}%", ratio);
@@ -67786,6 +67997,7 @@ fn cmd_peninput(args: &str) {
             let action = parts.get(2).copied().unwrap_or("contact");
             if pen_id == 0 {
                 shell_println!("Usage: pen sim <pen_id> <proxin|proxout|contact|release|move>");
+                set_exit(1);
             } else {
                 match action {
                     "proxin" => {
@@ -71127,7 +71339,10 @@ fn cmd_fontsettings(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: fontsettings size <decipoints>"),
+                None => {
+                    shell_println!("Usage: fontsettings size <decipoints>");
+                    set_exit(1);
+                }
             }
         }
         "scale" => {
@@ -71140,7 +71355,10 @@ fn cmd_fontsettings(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: fontsettings scale <percent>"),
+                None => {
+                    shell_println!("Usage: fontsettings scale <percent>");
+                    set_exit(1);
+                }
             }
         }
         "ligatures" | "lig" => {
@@ -71160,7 +71378,10 @@ fn cmd_fontsettings(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: fontsettings ligatures <on|off>"),
+                _ => {
+                    shell_println!("Usage: fontsettings ligatures <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -71549,7 +71770,10 @@ fn cmd_lockwallpaper(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: lockwallpaper blur <on|off>"),
+                _ => {
+                    shell_println!("Usage: lockwallpaper blur <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -71860,7 +72084,10 @@ fn cmd_hotcorners(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: hotcorners delay <corner> <ms>"),
+                None => {
+                    shell_println!("Usage: hotcorners delay <corner> <ms>");
+                    set_exit(1);
+                }
             }
         }
         "trigger" => {
@@ -72036,7 +72263,10 @@ fn cmd_dynlock(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: dynlock grace <seconds>"),
+                None => {
+                    shell_println!("Usage: dynlock grace <seconds>");
+                    set_exit(1);
+                }
             }
         }
         "autounlock" => {
@@ -72056,7 +72286,10 @@ fn cmd_dynlock(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: dynlock autounlock <on|off>"),
+                _ => {
+                    shell_println!("Usage: dynlock autounlock <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "check" => match dynlock::check_proximity() {
@@ -72156,7 +72389,10 @@ fn cmd_snaplayout(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: snaplayout use <id>"),
+                None => {
+                    shell_println!("Usage: snaplayout use <id>");
+                    set_exit(1);
+                }
             }
         }
         "snap" => {
@@ -72178,7 +72414,10 @@ fn cmd_snaplayout(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: snaplayout snap <window_id> <zone_id>"),
+                _ => {
+                    shell_println!("Usage: snaplayout snap <window_id> <zone_id>");
+                    set_exit(1);
+                }
             }
         }
         "suggest" => {
@@ -72206,7 +72445,10 @@ fn cmd_snaplayout(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: snaplayout remove <id>"),
+                None => {
+                    shell_println!("Usage: snaplayout remove <id>");
+                    set_exit(1);
+                }
             }
         }
         "groups" => {
@@ -72329,7 +72571,10 @@ fn cmd_haptfeedback(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: haptfeedback remove <id>"),
+                None => {
+                    shell_println!("Usage: haptfeedback remove <id>");
+                    set_exit(1);
+                }
             }
         }
         "intensity" | "int" => {
@@ -72343,7 +72588,10 @@ fn cmd_haptfeedback(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: haptfeedback intensity <device_id> <0-100>"),
+                _ => {
+                    shell_println!("Usage: haptfeedback intensity <device_id> <0-100>");
+                    set_exit(1);
+                }
             }
         }
         "pattern" => {
@@ -72546,7 +72794,10 @@ fn cmd_eyeprotect(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: eyeprotect interval <profile_id> <minutes>"),
+                _ => {
+                    shell_println!("Usage: eyeprotect interval <profile_id> <minutes>");
+                    set_exit(1);
+                }
             }
         }
         "duration" => {
@@ -72560,7 +72811,10 @@ fn cmd_eyeprotect(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: eyeprotect duration <profile_id> <seconds>"),
+                _ => {
+                    shell_println!("Usage: eyeprotect duration <profile_id> <seconds>");
+                    set_exit(1);
+                }
             }
         }
         "profile" => {
@@ -72573,7 +72827,10 @@ fn cmd_eyeprotect(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: eyeprotect profile <id>"),
+                None => {
+                    shell_println!("Usage: eyeprotect profile <id>");
+                    set_exit(1);
+                }
             }
         }
         "enable" => {
@@ -72759,7 +73016,10 @@ fn cmd_pinnedapps(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: pinnedapps move <location> <app> <position>"),
+                None => {
+                    shell_println!("Usage: pinnedapps move <location> <app> <position>");
+                    set_exit(1);
+                }
             }
         }
         "icon" | "exec" => {
@@ -72919,7 +73179,10 @@ fn cmd_inputmethod(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: inputmethod remove <id>"),
+                None => {
+                    shell_println!("Usage: inputmethod remove <id>");
+                    set_exit(1);
+                }
             }
         }
         "switch" => {
@@ -72932,7 +73195,10 @@ fn cmd_inputmethod(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: inputmethod switch <id>"),
+                None => {
+                    shell_println!("Usage: inputmethod switch <id>");
+                    set_exit(1);
+                }
             }
         }
         "cycle" => match inputmethod::cycle_engine() {
@@ -72975,7 +73241,10 @@ fn cmd_inputmethod(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: inputmethod select <index>"),
+                None => {
+                    shell_println!("Usage: inputmethod select <index>");
+                    set_exit(1);
+                }
             }
         }
         "commit" => match inputmethod::commit() {
@@ -73200,7 +73469,10 @@ fn cmd_storagesense(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: storagesense age <category> <days>"),
+                None => {
+                    shell_println!("Usage: storagesense age <category> <days>");
+                    set_exit(1);
+                }
             }
         }
         "estimate" => match storagesense::estimate_savings() {
@@ -73295,7 +73567,10 @@ fn cmd_autofix(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: autofix fix <issue_id>"),
+                None => {
+                    shell_println!("Usage: autofix fix <issue_id>");
+                    set_exit(1);
+                }
             }
         }
         "fixall" => match autofix::fix_all() {
@@ -73315,7 +73590,10 @@ fn cmd_autofix(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: autofix ignore <issue_id>"),
+                None => {
+                    shell_println!("Usage: autofix ignore <issue_id>");
+                    set_exit(1);
+                }
             }
         }
         "clear" => match autofix::clear_resolved() {
@@ -73599,7 +73877,10 @@ fn cmd_sysmaint(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: sysmaint enable <task_id>"),
+                None => {
+                    shell_println!("Usage: sysmaint enable <task_id>");
+                    set_exit(1);
+                }
             }
         }
         "disable" => {
@@ -73612,7 +73893,10 @@ fn cmd_sysmaint(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: sysmaint disable <task_id>"),
+                None => {
+                    shell_println!("Usage: sysmaint disable <task_id>");
+                    set_exit(1);
+                }
             }
         }
         "interval" => {
@@ -73626,7 +73910,10 @@ fn cmd_sysmaint(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: sysmaint interval <task_id> <hours>"),
+                _ => {
+                    shell_println!("Usage: sysmaint interval <task_id> <hours>");
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -73758,7 +74045,10 @@ fn cmd_multiclip(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: multiclip setslot <id> <name>"),
+                _ => {
+                    shell_println!("Usage: multiclip setslot <id> <name>");
+                    set_exit(1);
+                }
             }
         }
         "pin" => {
@@ -73771,7 +74061,10 @@ fn cmd_multiclip(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: multiclip pin <id>"),
+                None => {
+                    shell_println!("Usage: multiclip pin <id>");
+                    set_exit(1);
+                }
             }
         }
         "unpin" => {
@@ -73784,7 +74077,10 @@ fn cmd_multiclip(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: multiclip unpin <id>"),
+                None => {
+                    shell_println!("Usage: multiclip unpin <id>");
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
@@ -73797,7 +74093,10 @@ fn cmd_multiclip(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: multiclip remove <id>"),
+                None => {
+                    shell_println!("Usage: multiclip remove <id>");
+                    set_exit(1);
+                }
             }
         }
         "clear" => match multiclip::clear_history() {
@@ -74461,6 +74760,7 @@ fn cmd_appcompat(args: &str) {
                     shell_println!(
                         "         singlethread, legacytimer, permissive, configredirect"
                     );
+                    set_exit(1);
                 }
             }
         }
@@ -76418,7 +76718,10 @@ fn cmd_kbmacro(args: &str) {
                         }
                     }
                 }
-                _ => shell_println!("Usage: kbmacro event <type|delay|key> [args]"),
+                _ => {
+                    shell_println!("Usage: kbmacro event <type|delay|key> [args]");
+                    set_exit(1);
+                }
             }
         }
         "stop" => match kbmacro::stop_recording() {
@@ -84526,7 +84829,10 @@ fn cmd_kernlog(args: &str) {
                         shell_println!("  [{}] <{}> {}", e.seq, e.level.label(), e.message);
                     }
                 }
-                _ => shell_println!("Usage: kernlog filter <level|source> <value>"),
+                _ => {
+                    shell_println!("Usage: kernlog filter <level|source> <value>");
+                    set_exit(1);
+                }
             }
         }
         "clear" => {
@@ -87219,7 +87525,10 @@ fn cmd_prociso(args: &str) {
                         }
                     }
                 }
-                _ => shell_println!("Usage: prociso container [create <name>|list|delete <id>]"),
+                _ => {
+                    shell_println!("Usage: prociso container [create <name>|list|delete <id>]");
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -101192,12 +101501,18 @@ fn cmd_firewall(args: &str) {
         "policy" => match parts.get(1).copied() {
             Some("accept") => firewall::set_default_policy(firewall::DefaultPolicy::Accept),
             Some("drop") => firewall::set_default_policy(firewall::DefaultPolicy::Drop),
-            _ => shell_println!("Usage: firewall policy accept|drop"),
+            _ => {
+                shell_println!("Usage: firewall policy accept|drop");
+                set_exit(1);
+            }
         },
         "policy6" => match parts.get(1).copied() {
             Some("accept") => firewall::set_default_policy6(firewall::DefaultPolicy::Accept),
             Some("drop") => firewall::set_default_policy6(firewall::DefaultPolicy::Drop),
-            _ => shell_println!("Usage: firewall policy6 accept|drop"),
+            _ => {
+                shell_println!("Usage: firewall policy6 accept|drop");
+                set_exit(1);
+            }
         },
         "allow" | "deny" => {
             #[inline(never)]
@@ -105147,6 +105462,7 @@ fn cmd_container(args: &str) {
                         shell_println!(
                             "  container system prune  — remove stopped containers + unused networks"
                         );
+                        set_exit(1);
                     }
                 }
             }

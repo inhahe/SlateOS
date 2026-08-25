@@ -512,15 +512,26 @@ impl Yahtzee {
 
     // ── Score calculation ──────────────────────────────────────────
 
+    /// Sum of the scored categories that `in_section` accepts.
+    ///
+    /// The section split is asked of [`Category::is_upper`] rather than
+    /// written here as an index range.  Which section a category belongs to
+    /// is a property of the category; spelling it a second time as `0..6`
+    /// meant a reordering of `Category::ALL` would move a category between
+    /// sections in one place and not the other, and the disagreement would
+    /// show up as a wrong bonus rather than as an error.
+    fn section_total(&self, in_section: impl Fn(Category) -> bool) -> u16 {
+        Category::ALL
+            .iter()
+            .enumerate()
+            .filter(|&(_, &c)| in_section(c))
+            .filter_map(|(i, _)| self.scores.get(i).copied().flatten())
+            .fold(0u16, u16::saturating_add)
+    }
+
     /// Sum of the upper section (Ones-Sixes) scores.
     fn upper_total(&self) -> u16 {
-        let mut sum = 0u16;
-        for i in 0..6 {
-            if let Some(s) = self.scores[i] {
-                sum += s;
-            }
-        }
-        sum
+        self.section_total(Category::is_upper)
     }
 
     /// Upper section bonus (35 if upper total >= 63).
@@ -534,13 +545,7 @@ impl Yahtzee {
 
     /// Sum of the lower section scores.
     fn lower_total(&self) -> u16 {
-        let mut sum = 0u16;
-        for i in 6..NUM_CATEGORIES {
-            if let Some(s) = self.scores[i] {
-                sum += s;
-            }
-        }
-        sum
+        self.section_total(|c| !c.is_upper())
     }
 
     /// Total Yahtzee bonus points.
@@ -553,10 +558,13 @@ impl Yahtzee {
         self.upper_total() + self.upper_bonus() + self.lower_total() + self.yahtzee_bonus_total()
     }
 
-    /// Number of categories that have been scored.
-    fn categories_filled(&self) -> usize {
-        self.scores.iter().filter(|s| s.is_some()).count()
-    }
+    // There was a `categories_filled` here -- how many of the thirteen boxes
+    // hold a score -- with two tests and no caller.  It is redundant rather
+    // than merely unused: `score_category` refuses a box that already holds
+    // a score and then calls `advance_turn` exactly once, so the count is
+    // `turn_number` by construction, and `turn_number >= NUM_TURNS` is what
+    // actually ends the game.  Two ways to ask the same question is one more
+    // than the game needs.  See known-issues.md lesson 45.
 
     // ── Input handling ─────────────────────────────────────────────
 
@@ -2032,15 +2040,30 @@ mod tests {
         assert_eq!(g.turn_number, NUM_TURNS);
     }
 
+    /// The turn counter and the filled boxes never disagree.
+    ///
+    /// This replaces `test_categories_filled_count`, which exercised a
+    /// `categories_filled()` helper nothing called.  The reason that helper
+    /// was safe to delete is precisely this invariant -- one box filled per
+    /// turn, no box filled twice -- so the invariant is what is asserted
+    /// now, against the field the game really ends on.
     #[test]
-    fn test_categories_filled_count() {
+    fn the_turn_counter_equals_the_number_of_filled_boxes() {
         let mut g = game_with_dice([1, 2, 3, 4, 5]);
-        assert_eq!(g.categories_filled(), 0);
+        assert_eq!(g.turn_number, 0);
+        assert_eq!(g.scores.iter().filter(|s| s.is_some()).count(), 0);
+
         g.score_category(0);
         g.dice = [1, 2, 3, 4, 5];
         g.roll_number = 1;
         g.score_category(1);
-        assert_eq!(g.categories_filled(), 2);
+        // A repeat of a box already scored must change neither.
+        g.dice = [1, 2, 3, 4, 5];
+        g.roll_number = 1;
+        assert!(!g.score_category(1), "a filled box was scored twice");
+
+        assert_eq!(g.turn_number, 2);
+        assert_eq!(g.scores.iter().filter(|s| s.is_some()).count(), 2);
     }
 
     // ════════════════════════════════════════════════════════════════

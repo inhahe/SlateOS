@@ -1600,13 +1600,21 @@ impl ScanResult {
 /// which favours the low end of every range.
 type SimRng = SeededRng;
 
-/// A whole number in `min..=max`, for the simulation's discrete choices.
-fn sim_range(rng: &mut SimRng, min: u32, max: u32) -> u32 {
-    let drawn = rng.between(i64::from(min), i64::from(max));
-    u32::try_from(drawn).unwrap_or(min)
-}
+// There was a `sim_range(&mut SimRng, u32, u32) -> u32` here, identical to
+// `sim_octet` but wider.  No path from `main` reached it and no line outside
+// `#[cfg(test)]` named it: every discrete choice the simulation makes is an
+// address octet or a hop count, and all of them go through `sim_octet`.  It
+// had three tests, which is what made it look alive -- see known-issues.md
+// lesson 45.  If the simulation ever needs a draw that does not fit in a
+// `u8`, call `rng.between` directly; a second name for one method of
+// `SeededRng` earned nothing.
 
 /// One address octet in `min..=max`.
+///
+/// `min` when `max < min`: [`SeededRng::between`] answers a reversed range
+/// with its low bound, and the `try_from` fallback lands on the same value,
+/// so a caller that swapped its arguments gets a number inside whichever
+/// range it meant rather than a panic.
 fn sim_octet(rng: &mut SimRng, min: u8, max: u8) -> u8 {
     let drawn = rng.between(i64::from(min), i64::from(max));
     u8::try_from(drawn).unwrap_or(min)
@@ -5444,21 +5452,25 @@ mod tests {
     fn test_sim_rng_range() {
         let mut rng = SimRng::new(123);
         for _ in 0..100 {
-            let val = sim_range(&mut rng, 10, 20);
+            let val = sim_octet(&mut rng, 10, 20);
             assert!((10..=20).contains(&val));
         }
     }
 
+    /// These three assertions were written against `sim_range`, which nothing
+    /// outside the tests ever called. They are kept because the properties are
+    /// real -- they are simply properties of `sim_octet`, which the simulation
+    /// does call, and which shares every line of its body.
     #[test]
     fn a_degenerate_range_is_the_single_value_it_asks_for() {
         let mut rng = SimRng::new(9);
         for _ in 0..50 {
-            assert_eq!(sim_range(&mut rng, 7, 7), 7);
+            assert_eq!(sim_octet(&mut rng, 7, 7), 7);
             assert_eq!(sim_octet(&mut rng, 200, 200), 200);
         }
         // Reversed bounds are a caller's mistake; answering with the low bound
         // keeps the value inside whichever range was meant.
-        assert_eq!(sim_range(&mut rng, 20, 10), 20);
+        assert_eq!(sim_octet(&mut rng, 20, 10), 20);
     }
 
     #[test]

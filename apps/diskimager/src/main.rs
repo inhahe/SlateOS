@@ -14,11 +14,27 @@
 //! - Safety: confirmation before writes, drive locking, system drive protection
 //!
 //! Uses the guitk library for UI rendering with Catppuccin Mocha colors.
-
-#![allow(dead_code)]
+//!
+//! ## No `#![allow(dead_code)]`
+//!
+//! This file carried one until 2026-08-25, and it is why the defect below
+//! could exist unnoticed. `load_image` -- and behind it the whole ISO 9660
+//! volume descriptor parser, the Browse tab's directory tree, and the image
+//! info card -- had no caller outside the tests, while the Write tab printed
+//! the words "Open an .iso, .img, or .bin file" at a user the program gave no
+//! way to do that. `dead_code` is exactly the lint that names this, and it had
+//! been switched off crate-wide.
+//!
+//! The allow is now gone and the crate is clean without it, so the lint is
+//! armed rather than merely absent (checked by adding an unreachable function
+//! and confirming it warns). **Do not add it back.** If a new item is
+//! genuinely unreachable-for-now, `#[allow(dead_code)]` it individually with a
+//! comment saying what will call it; a crate-wide allow silences the one
+//! diagnostic that catches a feature with no way in.
 
 #[allow(unused_imports)]
 use guitk::color::Color;
+use guitk::dialog::{DialogAction, DirEntry, FileDialog};
 #[allow(unused_imports)]
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -37,6 +53,8 @@ use guitk::{scroll_window, wheel};
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::fs;
+use std::time::UNIX_EPOCH;
 
 // ============================================================================
 // Catppuccin Mocha color palette
@@ -1146,6 +1164,16 @@ pub struct DiskImagerApp {
     // Dialogs
     pub confirm_dialog: ConfirmDialog,
 
+    /// The file-open dialog, present only while it is on screen.
+    ///
+    /// Until this existed, `load_image` -- and with it the whole ISO 9660
+    /// volume parser, the Browse tab's file tree, and the image card that
+    /// shows format, volume label and creation date -- had no caller outside
+    /// the tests, while the Write tab told the user in as many words to "Open
+    /// an .iso, .img, or .bin file". There was no key, button or drop target
+    /// anywhere in the program that reached it. See known-issues.md lesson 45.
+    pub open_dialog: Option<FileDialog>,
+
     // Recent images
     pub recent_images: VecDeque<RecentImage>,
 
@@ -1193,6 +1221,7 @@ impl DiskImagerApp {
             write_options: WriteOptions::default(),
             create_options: CreateOptions::default(),
             confirm_dialog: ConfirmDialog::new(),
+            open_dialog: None,
             recent_images: VecDeque::new(),
             locked_drive_id: None,
             status_message: "Ready".to_string(),
@@ -1396,6 +1425,62 @@ impl DiskImagerApp {
     // ========================================================================
     // Image operations
     // ========================================================================
+
+    /// Put the file-open dialog on screen, listing `start_dir`.
+    ///
+    /// The dialog does no I/O of its own -- it is a toolkit widget and holds
+    /// whatever listing it is handed -- so every navigation has to be answered
+    /// with a fresh `read_dir` here. That split is deliberate on the toolkit's
+    /// side and means the two must be kept in step: a `NavigatedTo` that is
+    /// not answered leaves the dialog showing the previous directory's files
+    /// under the new directory's name, which is worse than showing nothing.
+    pub fn open_image_dialog(&mut self, start_dir: &str) {
+        let mut dialog = FileDialog::open()
+            .with_filter("Disk images", &["*.iso", "*.img", "*.bin"])
+            .with_initial_path(start_dir);
+        dialog.set_entries(read_directory(start_dir));
+        self.open_dialog = Some(dialog);
+    }
+
+    /// Feed a key to the open dialog and act on what it returns.
+    ///
+    /// Returns `None` when no dialog is up, so the caller can fall through to
+    /// its own bindings; `Some(EventResult::Consumed)` otherwise -- a modal
+    /// that let Ctrl+1 switch tabs behind it would not be one.
+    fn dispatch_to_open_dialog(&mut self, key: &KeyEvent) -> Option<EventResult> {
+        let dialog = self.open_dialog.as_mut()?;
+        match dialog.handle_event(key) {
+            DialogAction::Selected(path) => {
+                self.open_dialog = None;
+                self.load_image_from_path(&path);
+            }
+            DialogAction::NavigatedTo(path) => {
+                dialog.set_entries(read_directory(&path));
+            }
+            DialogAction::Cancelled => self.open_dialog = None,
+            DialogAction::None => {}
+        }
+        Some(EventResult::Consumed)
+    }
+
+    /// Read `path` off disk and load it as an image.
+    ///
+    /// A read failure is reported in the status bar rather than swallowed: the
+    /// user picked this file by name a moment ago, so "nothing happened" is
+    /// the one response that gives them no way to work out why.
+    pub fn load_image_from_path(&mut self, path: &str) {
+        match fs::read(path) {
+            Ok(data) => {
+                self.load_image(path, &data);
+                self.status_message = format!("Loaded {path}");
+                self.status_is_error = false;
+            }
+            Err(e) => {
+                self.status_message = format!("Cannot read {path}: {e}");
+                self.status_is_error = true;
+            }
+        }
+    }
 
     /// Load an image file and detect its format.
     pub fn load_image(&mut self, path: &str, data: &[u8]) {
@@ -1666,6 +1751,12 @@ impl DiskImagerApp {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // The file-open dialog is drawn over everything else, so it gets the
+        // key before anything else can claim it.
+        if let Some(result) = self.dispatch_to_open_dialog(key) {
+            return result;
+        }
+
         // Handle confirm dialog first
         if self.confirm_dialog.visible {
             match key.key {
@@ -1704,6 +1795,18 @@ impl DiskImagerApp {
                 }
                 Key::Num4 => {
                     self.active_tab = MainTab::Verify;
+                    return EventResult::Consumed;
+                }
+                // The one way into `load_image`. Opens on the directory the
+                // last image came from, so a user working through a folder of
+                // images does not start at the root every time.
+                Key::O => {
+                    let start = self
+                        .loaded_image
+                        .as_ref()
+                        .map(|img| parent_directory(&img.path))
+                        .unwrap_or_else(|| ".".to_string());
+                    self.open_image_dialog(&start);
                     return EventResult::Consumed;
                 }
                 _ => {}
@@ -1962,6 +2065,16 @@ impl DiskImagerApp {
         // Overlay: confirm dialog
         if self.confirm_dialog.visible {
             self.render_confirm_dialog(rt);
+        }
+
+        // Overlay: file-open dialog, last so it is over the confirm dialog
+        // too -- it is drawn at the full window size because the widget lays
+        // itself out from its own origin and there is no translate command to
+        // move a finished list of absolute coordinates somewhere else.
+        if let Some(dialog) = self.open_dialog.as_ref() {
+            for cmd in dialog.render(self.window_width, self.window_height) {
+                rt.push(cmd);
+            }
         }
     }
 
@@ -2273,7 +2386,11 @@ impl DiskImagerApp {
             rt.push(RenderCommand::Text {
                 x: px + PANEL_PADDING,
                 y: cy + 20.0,
-                text: "No image loaded. Open an .iso, .img, or .bin file.".to_string(),
+                // Names the key. The previous wording -- "Open an .iso, .img,
+                // or .bin file." -- was an instruction for an action the
+                // program did not offer.
+                text: "No image loaded. Press Ctrl+O to open an .iso, .img, or .bin file."
+                    .to_string(),
                 color: colors::SUBTEXT0,
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
@@ -3709,13 +3826,82 @@ pub fn truncate_path(path: &str, max_width: f32, size: f32) -> String {
     text::elide_start(path, max_width, "...", size, FontWeightHint::Regular)
 }
 
+/// The directory part of `path`, or `"."` when it has none.
+///
+/// Both separators are cut, not just `/`: an image loaded from a path this
+/// program was handed on a host that writes `\` would otherwise re-open the
+/// dialog on the whole string as if it were a directory name.
+fn parent_directory(path: &str) -> String {
+    match path.rfind(['/', '\\']) {
+        Some(0) => "/".to_string(),
+        Some(i) => path.get(..i).unwrap_or(".").to_string(),
+        None => ".".to_string(),
+    }
+}
+
+/// List `path` for the file-open dialog.
+///
+/// An unreadable directory yields an empty listing rather than an error: the
+/// dialog is a place the user is browsing, and a permission-denied folder they
+/// wandered into is a normal thing to find, not a failure of the program.
+/// Entries whose metadata cannot be read are skipped for the same reason.
+///
+/// The name is taken from `file_name` as an `OsStr` and converted once; a path
+/// component is a byte string on this OS, and a listing is the one place a
+/// filename with no UTF-8 reading still has to be *shown*, so lossy conversion
+/// is the right answer here and only here -- what is opened is rebuilt from
+/// `current_path` plus this name inside the dialog, so a substituted character
+/// would open the wrong file. That is a real limitation and it is the dialog's
+/// `String`-typed API, not this function; recorded in known-issues.md.
+fn read_directory(path: &str) -> Vec<DirEntry> {
+    let Ok(iter) = fs::read_dir(path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in iter.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let extension = name
+            .rsplit_once('.')
+            .map(|(_, ext)| ext.to_ascii_lowercase())
+            .unwrap_or_default();
+        out.push(DirEntry {
+            is_dir: meta.is_dir(),
+            size: if meta.is_dir() { 0 } else { meta.len() },
+            modified_timestamp: meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs()),
+            extension: if meta.is_dir() {
+                String::new()
+            } else {
+                extension
+            },
+            name,
+        });
+    }
+    out
+}
+
 /// Extract a trimmed ASCII string from ISO data at a given offset and length.
+///
+/// Trims NUL as well as whitespace. ECMA-119 §8.4.6 says these fields are
+/// padded with *spaces*, and a spec-conformant image is the easy case; but
+/// zero-padding is what you get from a tool that memset the descriptor and
+/// wrote the label over the front, and such images exist. Trimming only
+/// whitespace put the padding into the string, so the image info card
+/// displayed a volume label with twenty trailing NULs glued to it -- a
+/// disk imager's job is to read the images that exist, not the ones the
+/// standard describes.
 fn extract_iso_string(data: &[u8], offset: usize, max_len: usize) -> String {
     let end = offset.saturating_add(max_len).min(data.len());
     let Some(slice) = data.get(offset..end) else {
         return String::new();
     };
-    String::from_utf8_lossy(slice).trim().to_string()
+    String::from_utf8_lossy(slice)
+        .trim_matches(|c: char| c.is_whitespace() || c == '\0')
+        .to_string()
 }
 
 /// Extract ISO 9660 datetime (17 bytes, ASCII digits) at `offset`.
@@ -4234,6 +4420,267 @@ mod tests {
     fn test_iso_volume_descriptor_parse_bad_magic() {
         let data = vec![1u8; 2048];
         assert!(IsoVolumeDescriptor::parse(&data).is_none());
+    }
+
+    // ----------------------------------------------------------------
+    // Opening an image: the path from a keystroke to a parsed volume
+    // ----------------------------------------------------------------
+
+    /// A minimal ISO 9660 image: a primary volume descriptor at 0x8000 with
+    /// `CD001`, a volume label, and a 2048-byte logical block size.
+    ///
+    /// Built rather than checked in because the bytes that matter are the six
+    /// this test is about, and a real image would bury them in 300 KiB of
+    /// bytes that are not.
+    fn tiny_iso(label: &[u8]) -> Vec<u8> {
+        let mut data = vec![0u8; 0x8800];
+        data[0x8000] = 1; // primary volume descriptor
+        data[0x8001..0x8006].copy_from_slice(b"CD001");
+        // ISO 9660 pads the 32-byte volume identifier with *spaces*, not NULs
+        // (ECMA-119 §8.4.6, d-characters).  Filling the field first rather
+        // than letting the zeroed buffer show through is what makes this
+        // fixture resemble an image a mastering tool would actually write --
+        // a NUL-padded field is the separate, non-conformant case that
+        // `a_nul_padded_volume_label_is_not_shown_with_its_padding` covers.
+        data[0x8000 + 40..0x8000 + 72].fill(b' ');
+        data[0x8000 + 40..0x8000 + 40 + label.len()].copy_from_slice(label);
+        // Logical block size (both-endian u16 at offset 128 of the descriptor).
+        data[0x8000 + 128..0x8000 + 130].copy_from_slice(&2048u16.to_le_bytes());
+        data
+    }
+
+    fn ctrl(key: Key) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    fn plain(key: Key) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    /// Ctrl+O puts the dialog up with the directory's files already in it.
+    ///
+    /// The listing is checked, not just the dialog's presence: the widget does
+    /// no I/O of its own, so an open that forgot `set_entries` would show an
+    /// empty folder and look exactly like a folder with nothing in it.
+    #[test]
+    fn ctrl_o_opens_the_dialog_on_a_populated_listing() {
+        let scratch = scratchdir::ScratchDir::new("slate_diskimager_open");
+        let dir = scratch.dir();
+        fs::write(dir.join("disk.iso"), tiny_iso(b"OPEN_TEST")).expect("write iso");
+
+        let mut app = DiskImagerApp::new();
+        app.open_image_dialog(&dir.to_string_lossy());
+
+        let dialog = app.open_dialog.as_ref().expect("dialog is on screen");
+        assert!(
+            dialog.entries().iter().any(|e| e.name == "disk.iso"),
+            "the dialog was opened without being given the directory listing: {:?}",
+            dialog.entries().iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// A keystroke reaches `load_image`, and the ISO parser runs on real bytes
+    /// read off a real disk.
+    ///
+    /// This is the test the whole change exists for. `load_image` had no
+    /// caller outside the tests, so every assertion about the ISO volume
+    /// parser, the Browse tab's tree and the image info card was made about
+    /// code the running program could not reach. It drives `handle_event`
+    /// rather than calling `load_image_from_path` directly, because the defect
+    /// was never in `load_image` -- it was in the absence of anything that
+    /// called it.
+    #[test]
+    fn a_keystroke_loads_an_image_from_disk_and_parses_its_volume() {
+        let scratch = scratchdir::ScratchDir::new("slate_diskimager_e2e");
+        let dir = scratch.dir();
+        fs::write(dir.join("boot.iso"), tiny_iso(b"SLATEOS_LIVE")).expect("write iso");
+
+        let mut app = DiskImagerApp::new();
+        app.handle_event(&ctrl(Key::O));
+        assert!(app.open_dialog.is_some(), "Ctrl+O did not open the dialog");
+
+        // Point it at the scratch directory the way navigation would, then
+        // pick the only file in it.
+        app.open_image_dialog(&dir.to_string_lossy());
+        let index = app
+            .open_dialog
+            .as_ref()
+            .expect("dialog")
+            .entries()
+            .iter()
+            .position(|e| e.name == "boot.iso")
+            .expect("boot.iso is listed");
+        app.open_dialog
+            .as_mut()
+            .expect("dialog")
+            .select_entry(index);
+        app.handle_event(&plain(Key::Enter));
+
+        assert!(
+            app.open_dialog.is_none(),
+            "the dialog stayed up after a file was chosen"
+        );
+        let image = app.loaded_image.as_ref().expect("an image was loaded");
+        assert_eq!(image.format, ImageFormat::Iso9660);
+        // Compared untrimmed: the padding is the parser's to remove, and a
+        // `.trim()` here would hide it doing so badly.
+        assert_eq!(
+            image.volume_label, "SLATEOS_LIVE",
+            "the volume descriptor was not parsed from the bytes on disk"
+        );
+        assert!(
+            app.iso_root.is_some(),
+            "the Browse tab's file tree is still empty, so the tab has nothing to draw"
+        );
+    }
+
+    /// A label the mastering tool padded with NULs is shown without them.
+    ///
+    /// ECMA-119 says the field is space-padded and `tiny_iso` writes it that
+    /// way, so a parser that trims only whitespace passes every other test
+    /// here and still puts `SLATEOS_LIVE\0\0\0...` in the image info card
+    /// for an image built by a tool that zeroed the descriptor first. That
+    /// is not a hypothetical shape -- it is what a `vec![0; n]` buffer with
+    /// the label written over the front produces, which is how such tools
+    /// are usually written.
+    #[test]
+    fn a_nul_padded_volume_label_is_not_shown_with_its_padding() {
+        let mut data = tiny_iso(b"SLATEOS_LIVE");
+        // Undo the spec-conformant space padding: NULs from the label's end
+        // to the end of the 32-byte volume identifier field.
+        data[0x8000 + 40 + 12..0x8000 + 72].fill(0);
+
+        // `parse` takes the descriptor sector, not the whole image.
+        let sector = data
+            .get(0x8000..0x8800)
+            .expect("the fixture is 0x8800 long");
+        let descriptor = IsoVolumeDescriptor::parse(sector).expect("a valid descriptor");
+        assert_eq!(
+            descriptor.volume_id, "SLATEOS_LIVE",
+            "NUL padding was carried into the volume label"
+        );
+    }
+
+    /// Escape closes the dialog and loads nothing.
+    #[test]
+    fn escape_closes_the_dialog_without_loading() {
+        let scratch = scratchdir::ScratchDir::new("slate_diskimager_cancel");
+        let dir = scratch.dir();
+        fs::write(dir.join("x.img"), b"not an iso").expect("write img");
+
+        let mut app = DiskImagerApp::new();
+        app.open_image_dialog(&dir.to_string_lossy());
+        app.handle_event(&plain(Key::Escape));
+
+        assert!(app.open_dialog.is_none(), "Escape left the dialog up");
+        assert!(app.loaded_image.is_none(), "cancelling loaded an image");
+    }
+
+    /// While the dialog is up, the keys behind it do nothing.
+    ///
+    /// A modal that lets Ctrl+3 switch tabs underneath it is not modal, and
+    /// the user finds out by watching the page change behind a file list they
+    /// are still reading.
+    #[test]
+    fn the_open_dialog_swallows_the_bindings_behind_it() {
+        let scratch = scratchdir::ScratchDir::new("slate_diskimager_modal");
+        let mut app = DiskImagerApp::new();
+        app.active_tab = MainTab::Write;
+        app.open_image_dialog(&scratch.dir().to_string_lossy());
+
+        assert_eq!(app.handle_event(&ctrl(Key::Num3)), EventResult::Consumed);
+        assert_eq!(
+            app.active_tab,
+            MainTab::Write,
+            "Ctrl+3 switched tabs behind an open modal"
+        );
+    }
+
+    /// Navigating into a subdirectory replaces the listing.
+    ///
+    /// The dialog holds whatever entries it was last handed, so an
+    /// unanswered `NavigatedTo` leaves the *previous* directory's files
+    /// displayed under the new directory's name -- worse than an empty pane,
+    /// because opening one of them opens a path that does not exist.
+    #[test]
+    fn navigating_into_a_directory_replaces_the_listing() {
+        let scratch = scratchdir::ScratchDir::new("slate_diskimager_nav");
+        let dir = scratch.dir();
+        fs::write(dir.join("outer.iso"), b"o").expect("write outer");
+        fs::create_dir(dir.join("inner")).expect("mkdir");
+        fs::write(dir.join("inner").join("nested.iso"), b"n").expect("write nested");
+
+        let mut app = DiskImagerApp::new();
+        app.open_image_dialog(&dir.to_string_lossy());
+        let index = app
+            .open_dialog
+            .as_ref()
+            .expect("dialog")
+            .entries()
+            .iter()
+            .position(|e| e.name == "inner")
+            .expect("inner is listed");
+        app.open_dialog
+            .as_mut()
+            .expect("dialog")
+            .select_entry(index);
+        app.handle_event(&plain(Key::Enter));
+
+        let names: Vec<&str> = app
+            .open_dialog
+            .as_ref()
+            .expect("dialog is still up after navigating")
+            .entries()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"nested.iso"),
+            "listing not refreshed: {names:?}"
+        );
+        assert!(
+            !names.contains(&"outer.iso"),
+            "stale listing kept: {names:?}"
+        );
+    }
+
+    /// A file that cannot be read says so.
+    ///
+    /// The user named this file a moment ago, so silence is the one response
+    /// that leaves them no way to work out what happened.
+    #[test]
+    fn an_unreadable_choice_is_reported_rather_than_ignored() {
+        let scratch = scratchdir::ScratchDir::new("slate_diskimager_err");
+        let missing = scratch.dir().join("gone.iso");
+
+        let mut app = DiskImagerApp::new();
+        app.load_image_from_path(&missing.to_string_lossy());
+
+        assert!(app.loaded_image.is_none());
+        assert!(app.status_is_error, "a failed read was not flagged");
+        assert!(
+            app.status_message.contains("gone.iso"),
+            "the message does not name the file: {}",
+            app.status_message
+        );
+    }
+
+    #[test]
+    fn parent_directory_handles_both_separators_and_neither() {
+        assert_eq!(parent_directory("/mnt/images/a.iso"), "/mnt/images");
+        assert_eq!(parent_directory(r"C:\images\a.iso"), r"C:\images");
+        assert_eq!(parent_directory("/a.iso"), "/");
+        assert_eq!(parent_directory("a.iso"), ".");
     }
 
     #[test]

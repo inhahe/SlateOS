@@ -44,6 +44,12 @@ const COL_MAUVE: u32 = 0xCBA6F7;
 const MIN_BPM: u32 = 20;
 const MAX_BPM: u32 = 300;
 const TAP_HISTORY_SIZE: usize = 8;
+/// How long the beat indicator stays lit, in milliseconds.
+///
+/// Named rather than written twice: `toggle_play` lights beat one and `tick`
+/// lights every beat after it, and a flash that differs between the two would
+/// read as a stutter on the downbeat.
+const BEAT_FLASH_MS: u64 = 150;
 
 // ---------------------------------------------------------------------------
 // Time signature
@@ -197,6 +203,14 @@ struct MetronomeApp {
     last_beat_time_ms: u64,
     beat_flash_ms: u64, // time remaining for beat flash visual
 
+    /// The app's own monotonic clock, in milliseconds since it started.
+    ///
+    /// `Event::Tick` carries an *interval*, not a timestamp, so an app that
+    /// needs to compare two moments has to accumulate one itself.  A
+    /// metronome needs exactly that in two places: scheduling the next beat,
+    /// and tap tempo, which is nothing but the gaps between taps.
+    now_ms: u64,
+
     // Tap tempo
     tap_times_ms: Vec<u64>,
 
@@ -233,6 +247,7 @@ impl MetronomeApp {
             total_beats: 0,
             last_beat_time_ms: 0,
             beat_flash_ms: 0,
+            now_ms: 0,
             tap_times_ms: Vec::new(),
             accents,
             practice_mode: false,
@@ -318,6 +333,13 @@ impl MetronomeApp {
             self.current_beat = 0;
             self.current_sub = 0;
             self.total_beats = 0;
+            // Beat one lands on the keypress, not one interval after it: a
+            // metronome you start on the downbeat is the point of starting
+            // it there.  The flash is set here for the same reason -- the
+            // first beat is displayed by `toggle_play`, and `tick` takes
+            // over from the second.
+            self.last_beat_time_ms = self.now_ms;
+            self.beat_flash_ms = BEAT_FLASH_MS;
             if self.practice_mode {
                 self.bpm = self.practice_start_bpm;
                 self.practice_measure_count = 0;
@@ -325,24 +347,44 @@ impl MetronomeApp {
         }
     }
 
-    fn tick(&mut self, current_ms: u64) {
+    /// Advance the metronome by `delta_ms`, the interval since the last tick.
+    ///
+    /// An interval, not a timestamp: that is what [`Event::Tick`] carries
+    /// (`oswindow` computes `now - this window's previous tick`), and every
+    /// other tick consumer in the tree reads it that way.  This used to take
+    /// an absolute `current_ms`, which nothing could have supplied, because
+    /// nothing called it at all -- see known-issues.md lesson 45.  The old
+    /// body also decayed the beat flash by a hard-coded `16`, a guess at the
+    /// frame interval; the real one now arrives with the event.
+    fn tick(&mut self, delta_ms: u64) {
+        self.now_ms = self.now_ms.saturating_add(delta_ms);
+        self.beat_flash_ms = self.beat_flash_ms.saturating_sub(delta_ms);
+
         if !self.playing {
-            if self.beat_flash_ms > 0 {
-                self.beat_flash_ms = self.beat_flash_ms.saturating_sub(16);
-            }
             return;
         }
 
         let interval = self.beat_interval_ms();
-        let elapsed = current_ms.saturating_sub(self.last_beat_time_ms);
-
-        if elapsed >= interval {
-            self.last_beat_time_ms = current_ms;
-            self.advance_beat();
-            self.beat_flash_ms = 150; // flash duration
-        } else if self.beat_flash_ms > 0 {
-            self.beat_flash_ms = self.beat_flash_ms.saturating_sub(16);
+        if self.now_ms.saturating_sub(self.last_beat_time_ms) < interval {
+            return;
         }
+
+        // Advance the beat clock by exactly one interval rather than snapping
+        // it to now.  The tick that crosses a beat boundary is up to a frame
+        // late, and snapping would fold that lateness into every beat: at
+        // 60 fps and 120 BPM that is ~16 ms on a 500 ms beat, so the
+        // metronome would run about 3% slow and drift against anything it
+        // was played along with.  Advancing by the interval keeps the phase.
+        self.last_beat_time_ms = self.last_beat_time_ms.saturating_add(interval);
+        // Unless we are still a whole beat behind -- the window went
+        // unticked, or the tempo just jumped -- in which case resync to now
+        // rather than fire a burst of catch-up beats at the user.
+        if self.now_ms.saturating_sub(self.last_beat_time_ms) >= interval {
+            self.last_beat_time_ms = self.now_ms;
+        }
+
+        self.advance_beat();
+        self.beat_flash_ms = BEAT_FLASH_MS;
     }
 
     fn advance_beat(&mut self) {
@@ -399,8 +441,19 @@ impl MetronomeApp {
             Key::Up => self.increase_bpm(if event.modifiers.shift { 10 } else { 1 }),
             Key::Down => self.decrease_bpm(if event.modifiers.shift { 10 } else { 1 }),
             Key::T => {
-                // Tap tempo doesn't have real time in key events, use a simulation
-                // In a real app this would use system time
+                // Tap tempo needs a clock, and this arm was empty for want of
+                // one -- its comment said "in a real app this would use
+                // system time".  `now_ms` is that clock now, accumulated from
+                // the tick intervals, which is all tap tempo ever needed:
+                // it reads only the *gaps* between taps, so an origin of
+                // "when the app started" serves as well as a wall clock.
+                self.tap_tempo(self.now_ms);
+            }
+            Key::Backspace => {
+                // Clearing the tap history is the way out of a mistimed tap;
+                // without it a stray tap poisons the average until the ring
+                // buffer rolls it off.
+                self.clear_tap();
             }
             Key::S => {
                 self.subdivision = self.subdivision.cycle();
@@ -465,8 +518,14 @@ impl MetronomeApp {
     }
 
     fn handle_event(&mut self, event: &Event) {
-        if let Event::Key(ke) = event {
-            self.handle_key(ke);
+        match event {
+            Event::Key(ke) => self.handle_key(ke),
+            // Without this the metronome never beat: `tick` was correct and
+            // tested, and nothing called it.  known-issues.md lesson 45.
+            Event::Tick { elapsed_ms } => self.tick(*elapsed_ms),
+            // Without this the metronome never beat: `tick` was correct and
+            // tested, and nothing called it.  known-issues.md lesson 45.
+            _ => {}
         }
     }
 
@@ -715,6 +774,7 @@ impl MetronomeApp {
             "↑/↓: BPM ±1 (Shift: ±10)",
             "S: Subdivision  |  G: Time Sig",
             "1-9: Toggle accent  |  P: Practice",
+            "T: Tap tempo  |  Backspace: Clear taps",
             "R: Reset  |  Enter: Settings",
         ];
         for (i, line) in controls.iter().enumerate() {
@@ -1195,6 +1255,98 @@ mod tests {
         app.last_beat_time_ms = 0;
         app.tick(200);
         assert_eq!(app.current_beat, 0);
+    }
+
+    /// A real `Event::Tick` reaches the beat clock.
+    ///
+    /// Through `handle_event` on purpose: `tick` was correct and had its own
+    /// tests for months while `handle_event` matched only `Event::Key`, so a
+    /// test that calls `tick` directly cannot tell a metronome that beats
+    /// from one that sits silent.  Falsified by deleting the `Event::Tick`
+    /// arm and confirming this test, and only it, fails.
+    #[test]
+    fn a_tick_event_reaches_the_beat_clock() {
+        let mut app = MetronomeApp::new();
+        app.toggle_play();
+        app.handle_event(&Event::Tick { elapsed_ms: 501 });
+        assert_eq!(app.current_beat, 1, "Event::Tick did not reach `tick`");
+    }
+
+    /// Play starts on the downbeat, not one interval later.
+    #[test]
+    fn pressing_play_lights_beat_one_immediately() {
+        let mut app = MetronomeApp::new();
+        app.toggle_play();
+        assert_eq!(app.current_beat, 0);
+        assert!(app.beat_flash_ms > 0, "the downbeat did not flash");
+    }
+
+    /// The beat clock does not drift when ticks land late.
+    ///
+    /// This is why `tick` advances `last_beat_time_ms` by one interval rather
+    /// than snapping it to now.  Sixteen-millisecond frames at 120 BPM cross
+    /// each 500 ms beat 4 ms late; snapping would spend that 4 ms on every
+    /// beat, and after twenty beats the metronome would be most of a frame
+    /// behind and still counting.
+    #[test]
+    fn late_ticks_do_not_make_the_tempo_drift() {
+        let mut app = MetronomeApp::new();
+        app.toggle_play();
+        // Twenty beats at 120 BPM = 10 s, delivered as 16 ms frames.
+        for _ in 0..625 {
+            app.tick(16);
+        }
+        assert_eq!(app.now_ms, 10_000);
+        assert_eq!(
+            app.total_beats, 20,
+            "beats drifted against the clock that produced them"
+        );
+    }
+
+    /// A long gap in ticks resyncs instead of firing a burst.
+    #[test]
+    fn a_missed_second_does_not_fire_a_burst_of_beats() {
+        let mut app = MetronomeApp::new();
+        app.toggle_play();
+        app.tick(10_000); // the window was not ticked for ten seconds
+        assert_eq!(app.total_beats, 1, "catch-up beats were fired at the user");
+        assert_eq!(
+            app.last_beat_time_ms, app.now_ms,
+            "the beat clock did not resync"
+        );
+    }
+
+    // --- Tap tempo through the keyboard ---
+
+    /// `T` sets the tempo from the gaps between presses.
+    ///
+    /// The `Key::T` arm was empty, with a comment saying tap tempo "would use
+    /// system time in a real app".  It does not need one: tap tempo reads
+    /// only the gaps, so the app's own tick-accumulated clock serves.
+    #[test]
+    fn tapping_t_four_times_sets_the_tempo() {
+        let mut app = MetronomeApp::new();
+        // Four taps 400 ms apart = 150 BPM.
+        for _ in 0..4 {
+            app.handle_key(&make_key(Key::T));
+            app.tick(400);
+        }
+        assert_eq!(app.bpm, 150, "T did not reach tap_tempo");
+    }
+
+    /// Backspace throws away a mistimed tap history.
+    #[test]
+    fn backspace_clears_the_tap_history() {
+        let mut app = MetronomeApp::new();
+        app.handle_key(&make_key(Key::T));
+        app.tick(400);
+        app.handle_key(&make_key(Key::T));
+        assert!(!app.tap_times_ms.is_empty());
+        app.handle_key(&make_key(Key::Backspace));
+        assert!(
+            app.tap_times_ms.is_empty(),
+            "Backspace did not clear the taps"
+        );
     }
 
     // --- Practice mode ---

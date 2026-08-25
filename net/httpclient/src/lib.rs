@@ -160,9 +160,9 @@ impl Url {
             let host = authority[1..bracket_end].to_string();
             let after_bracket = &authority[bracket_end + 1..];
             let port = if let Some(port_str) = after_bracket.strip_prefix(':') {
-                port_str.parse::<u16>().map_err(|_| {
-                    HttpError::InvalidUrl(format!("invalid port: {port_str}"))
-                })?
+                port_str
+                    .parse::<u16>()
+                    .map_err(|_| HttpError::InvalidUrl(format!("invalid port: {port_str}")))?
             } else {
                 default_port
             };
@@ -263,7 +263,8 @@ impl Headers {
     pub fn set(&mut self, name: &str, value: &str) {
         let lower = name.to_ascii_lowercase();
         // Remove existing entries with same name
-        self.entries.retain(|(n, _)| n.to_ascii_lowercase() != lower);
+        self.entries
+            .retain(|(n, _)| n.to_ascii_lowercase() != lower);
         self.entries.push((name.to_string(), value.to_string()));
     }
 
@@ -289,7 +290,8 @@ impl Headers {
     /// Remove all headers with the given name (case-insensitive).
     pub fn remove(&mut self, name: &str) {
         let lower = name.to_ascii_lowercase();
-        self.entries.retain(|(n, _)| n.to_ascii_lowercase() != lower);
+        self.entries
+            .retain(|(n, _)| n.to_ascii_lowercase() != lower);
     }
 
     /// Iterate over all header name-value pairs.
@@ -697,9 +699,8 @@ impl Response {
 ///
 /// Returns `HttpError::InvalidResponse` if the response is malformed.
 pub fn parse_response(data: &[u8], request_url: &Url) -> Result<Response, HttpError> {
-    let header_end = find_header_end(data).ok_or_else(|| {
-        HttpError::InvalidResponse("no header/body separator found".to_string())
-    })?;
+    let header_end = find_header_end(data)
+        .ok_or_else(|| HttpError::InvalidResponse("no header/body separator found".to_string()))?;
 
     let header_bytes = &data[..header_end];
     let header_str = core::str::from_utf8(header_bytes)
@@ -708,9 +709,9 @@ pub fn parse_response(data: &[u8], request_url: &Url) -> Result<Response, HttpEr
     let mut lines = header_str.split("\r\n");
 
     // Parse status line
-    let status_line = lines.next().ok_or_else(|| {
-        HttpError::InvalidResponse("empty response".to_string())
-    })?;
+    let status_line = lines
+        .next()
+        .ok_or_else(|| HttpError::InvalidResponse("empty response".to_string()))?;
 
     let (status, status_text) = parse_status_line(status_line)?;
 
@@ -777,9 +778,9 @@ fn parse_status_line(line: &str) -> Result<(u16, String), HttpError> {
         HttpError::InvalidResponse("missing status code in status line".to_string())
     })?;
 
-    let status = status_str.parse::<u16>().map_err(|_| {
-        HttpError::InvalidResponse(format!("invalid status code: {status_str}"))
-    })?;
+    let status = status_str
+        .parse::<u16>()
+        .map_err(|_| HttpError::InvalidResponse(format!("invalid status code: {status_str}")))?;
 
     let reason = parts.next().unwrap_or("");
 
@@ -824,9 +825,8 @@ fn decode_chunked(data: &[u8]) -> Result<Vec<u8>, HttpError> {
         // The chunk size may have extensions after a semicolon; ignore them
         let size_hex = size_str.split(';').next().unwrap_or(size_str).trim();
 
-        let chunk_size = usize::from_str_radix(size_hex, 16).map_err(|_| {
-            HttpError::InvalidResponse(format!("invalid chunk size: {size_hex}"))
-        })?;
+        let chunk_size = usize::from_str_radix(size_hex, 16)
+            .map_err(|_| HttpError::InvalidResponse(format!("invalid chunk size: {size_hex}")))?;
 
         if chunk_size == 0 {
             // Terminal chunk
@@ -909,9 +909,8 @@ impl CookieJar {
         // Remove any existing cookie with same name+domain
         let name = cookie.name.clone();
         let domain = cookie.domain.clone();
-        self.cookies.retain(|c| {
-            !(c.name == name && c.domain == domain)
-        });
+        self.cookies
+            .retain(|c| !(c.name == name && c.domain == domain));
         self.cookies.push(cookie);
     }
 
@@ -959,9 +958,8 @@ impl CookieJar {
 
     /// Remove a cookie by name and domain.
     pub fn remove(&mut self, name: &str, domain: &str) {
-        self.cookies.retain(|c| {
-            !(c.name == name && c.domain.as_deref() == Some(domain))
-        });
+        self.cookies
+            .retain(|c| !(c.name == name && c.domain.as_deref() == Some(domain)));
     }
 
     /// Remove all cookies from the jar.
@@ -1168,9 +1166,8 @@ pub fn base64_encode(data: &[u8]) -> String {
     let mut i = 0;
 
     while i + 2 < data.len() {
-        let triple = (u32::from(data[i]) << 16)
-            | (u32::from(data[i + 1]) << 8)
-            | u32::from(data[i + 2]);
+        let triple =
+            (u32::from(data[i]) << 16) | (u32::from(data[i + 1]) << 8) | u32::from(data[i + 2]);
 
         result.push(BASE64_ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
         result.push(BASE64_ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
@@ -1214,22 +1211,15 @@ pub fn parse_content_type(header: &str) -> (String, Option<String>) {
     let mut parts = header.splitn(2, ';');
     let mime_type = parts.next().unwrap_or("").trim().to_ascii_lowercase();
     let charset = parts.next().and_then(|params| {
-        params
-            .split(';')
-            .find_map(|param| {
-                let trimmed = param.trim();
-                let lower = trimmed.to_ascii_lowercase();
-                if lower.starts_with("charset=") {
-                    Some(
-                        trimmed[8..]
-                            .trim()
-                            .trim_matches('"')
-                            .to_ascii_lowercase(),
-                    )
-                } else {
-                    None
-                }
-            })
+        params.split(';').find_map(|param| {
+            let trimmed = param.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            if lower.starts_with("charset=") {
+                Some(trimmed[8..].trim().trim_matches('"').to_ascii_lowercase())
+            } else {
+                None
+            }
+        })
     });
 
     (mime_type, charset)
@@ -1587,11 +1577,8 @@ mod tests {
     #[test]
     fn test_cookie_parse_set_cookie() {
         let url = Url::parse("http://example.com/path").unwrap();
-        let cookie = CookieJar::parse_set_cookie(
-            "session=abc; Path=/; HttpOnly; Secure",
-            &url,
-        )
-        .unwrap();
+        let cookie =
+            CookieJar::parse_set_cookie("session=abc; Path=/; HttpOnly; Secure", &url).unwrap();
         assert_eq!(cookie.name, "session");
         assert_eq!(cookie.value, "abc");
         assert_eq!(cookie.path, Some("/".to_string()));
@@ -1686,10 +1673,7 @@ mod tests {
             .basic_auth("user", "pass")
             .build();
         // "user:pass" in base64 = "dXNlcjpwYXNz"
-        assert_eq!(
-            req.headers.get("Authorization"),
-            Some("Basic dXNlcjpwYXNz")
-        );
+        assert_eq!(req.headers.get("Authorization"), Some("Basic dXNlcjpwYXNz"));
     }
 
     #[test]

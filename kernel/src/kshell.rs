@@ -1384,12 +1384,19 @@ fn remove_quotes(s: &str) -> String {
 /// and an action of `print` that prints an empty record. For `fold` and
 /// `base64` it is the ordinary case of a file name with a space in it.
 ///
+/// `cut` is here for a sharper reason: its delimiter can *be* a space, and
+/// `cut -d' ' -f1` is how you say so. Dequoted, that is `-d  -f1`, whose words
+/// are `-d` and `-f1` — so the delimiter became the string `-f1` and the
+/// command failed with `the delimiter must be a single character: '-f1'`,
+/// naming an argument the user never wrote as a delimiter. Splitting on spaces
+/// is the single most common thing anyone asks `cut` to do.
+///
 /// The list is the migration path, not a special case: a command moves onto
 /// it when it learns to parse quotes, and when everything is on it this
 /// function and [`remove_quotes`] both go away in favour of a real argv.
 /// See `known-issues.md` → `TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV`.
 fn command_parses_own_quotes(cmd: &str) -> bool {
-    matches!(cmd, "trap" | "awk" | "fold" | "base64")
+    matches!(cmd, "trap" | "awk" | "fold" | "base64" | "cut")
 }
 
 /// Expand a `${...}` brace expression.
@@ -13116,6 +13123,41 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"b\n",
             "a multi-byte delimiter splits where the character does"
         );
+
+        // A space delimiter is the most common thing anyone asks cut for, and
+        // it is only expressible with a quote. Dequoted at the dispatch
+        // boundary, `-d' ' -f1` became the words `-d` and `-f1`, so the
+        // delimiter was taken to be the string `-f1` and the command failed
+        // naming an argument the user never wrote as a delimiter.
+        let out = piped("cut -d' ' -f2", b"a b c\n");
+        assert_eq!(
+            out.as_slice(),
+            b"b\n",
+            "a quoted space delimiter is a space"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // Both spellings of the argument, since they take different paths
+        // through cut_opt_value: attached to the flag, and as the next word.
+        let out = piped("cut -d ' ' -f2,3", b"a b c\n");
+        assert_eq!(
+            out.as_slice(),
+            b"b c\n",
+            "the detached spelling means the same, and the delimiter rejoins the fields"
+        );
+
+        // The quoting must not swallow the rest of the line: a quoted operand
+        // is still an operand.
+        let spaced = "/tmp/zz cut spaced";
+        crate::fs::Vfs::write_file(spaced, b"x:y\n")?;
+        let out = plain(&alloc::format!("cut -d: -f2 '{spaced}'"));
+        assert_eq!(
+            out.as_slice(),
+            b"y\n",
+            "a file name with spaces in it is one operand"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+        let _ = crate::fs::Vfs::remove(spaced);
 
         let _ = crate::fs::Vfs::remove(bin);
     }

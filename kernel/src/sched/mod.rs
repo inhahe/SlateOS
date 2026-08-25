@@ -8229,7 +8229,8 @@ fn test_liveness_watchdog() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!(
-        "[sched]   liveness: watchdog breadcrumbs do not certify liveness, ordinary output does: OK"
+        "[sched]   liveness: breadcrumbs do not certify liveness, output does \
+         (console and captured): OK"
     );
 
     // Boot-deadline derivation (see LIVENESS_BOOT_DEADLINE_NS): the cmdline

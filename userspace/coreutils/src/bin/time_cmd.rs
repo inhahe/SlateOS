@@ -6,17 +6,28 @@
 //! Note: This is named time_cmd.rs to avoid conflict with Rust's
 //! std::time module. The binary is installed as "time".
 
+use coreutils::diag;
 use coreutils::quote::quotef_os;
+use coreutils::stdfd;
 use std::env;
-use std::process::{self, Command};
+use std::process::Command;
+use std::process::ExitCode;
 use std::time::Instant;
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
 
     if args.is_empty() {
-        eprintln!("time: missing command");
-        process::exit(1);
+        diag!("time: missing command");
+        return ExitCode::from(1);
     }
 
     let cmd = &args[0];
@@ -27,20 +38,31 @@ fn main() {
     let status = match Command::new(cmd).args(cmd_args).status() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("time: {}: {e}", quotef_os(cmd));
-            process::exit(127);
+            diag!("time: {}: {e}", quotef_os(cmd));
+            return ExitCode::from(127);
         }
     };
 
     let elapsed = start.elapsed();
     let total_secs = elapsed.as_secs_f64();
 
-    eprintln!();
-    eprintln!("real\t{}", format_real_line(total_secs));
+    // The blank line upstream prints before the timing block. `diag!("")` and
+    // not `eprintln!()`: an empty line is still a write to descriptor 2, and
+    // `eprintln!` answers a failed one with a panic that cannot print either.
+    diag!("");
+    diag!("real\t{}", format_real_line(total_secs));
     // We can't distinguish user/sys time without kernel support,
     // so just show real time.
 
-    process::exit(status.code().unwrap_or(126));
+    // `126` when the child left no ordinary exit code — it was killed by a
+    // signal, or (impossibly, but the type admits it) returned something that
+    // does not fit a wait status byte.
+    ExitCode::from(
+        status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .unwrap_or(126),
+    )
 }
 
 /// Format the `Mm.SSSs` real-time line.  Negative or NaN/Infinity values are

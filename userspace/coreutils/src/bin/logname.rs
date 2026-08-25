@@ -229,9 +229,9 @@ fn main() -> std::process::ExitCode {
 /// the environment-trusting behaviour this file was rewritten to remove. `id`
 /// and `whoami` say the same thing for the same reason.
 #[cfg(not(unix))]
-fn main() {
+fn main() -> std::process::ExitCode {
     diag!("logname: unix-only utility; not supported on this platform");
-    std::process::exit(1);
+    std::process::ExitCode::from(1)
 }
 
 #[cfg(test)]

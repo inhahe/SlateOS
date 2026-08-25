@@ -64,12 +64,16 @@
 #![cfg_attr(not(unix), allow(dead_code))]
 
 use charwidth::char_width;
+#[cfg(not(unix))]
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fnmatch::{Flags, fnmatch};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::human::{Opts, default_block_size, human_readable};
 use coreutils::pathname::{base_len, last_component, last_component_offset};
 use coreutils::quote::{Mb, Style, next_mb, os_bytes, quote, quoteaf, quotef};
+#[cfg(unix)]
+use coreutils::stdfd::{self, Stream};
 use coreutils::vercmp::version;
 use coreutils::xnum::{self, Status, strtol_fatal};
 use modechange::{
@@ -5101,7 +5105,7 @@ Exit status:
 
 #[cfg(not(unix))]
 fn main() -> ExitCode {
-    eprintln!("ls: unix-only utility; not supported on this platform");
+    diag!("ls: unix-only utility; not supported on this platform");
     ExitCode::from(2)
 }
 
@@ -5253,8 +5257,17 @@ fn stat_of(meta: &std::fs::Metadata) -> Stat {
     }
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 #[cfg(unix)]
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 2)
+}
+
+#[cfg(unix)]
+fn run_main() -> ExitCode {
     use std::io::IsTerminal;
 
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -5283,7 +5296,9 @@ fn main() -> ExitCode {
         ),
     };
 
-    let mut err = std::io::stderr();
+    // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
+    // diagnostic that never arrived has to reach `close_stderr`'s flag.
+    let mut err = Stream::stderr();
     let request = match parse_args(&argv, &env, &mut err) {
         Ok(request) => request,
         Err(refusal) => {

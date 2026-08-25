@@ -89,6 +89,8 @@
 
 #![cfg_attr(not(unix), allow(dead_code))]
 
+#[cfg(not(unix))]
+use coreutils::diag;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quote, quoteaf_os};
 use coreutils::userspec::{Spec, parse_user_spec};
@@ -538,9 +540,9 @@ fn name_text(bytes: &[u8]) -> String {
 }
 
 #[cfg(not(unix))]
-fn main() {
-    eprintln!("chown: unix-only utility; not supported on this platform");
-    std::process::exit(1);
+fn main() -> std::process::ExitCode {
+    diag!("chown: unix-only utility; not supported on this platform");
+    std::process::ExitCode::from(1)
 }
 
 // ------------------------------------------------------------------- unix ---
@@ -551,6 +553,7 @@ mod imp {
         ChangeStatus, Request, Settings, Source, Spec, Verbosity, describe_change, follow_child,
         follow_operand, help_text, parse_args, parse_user_spec, resolve_spec,
     };
+    use coreutils::diag;
     use coreutils::errmsg::strerror;
     use coreutils::quote::{os_bytes, quote, quoteaf_os, quotef_os};
     use coreutils::userspec::{gid_to_name, uid_to_name};
@@ -607,7 +610,7 @@ mod imp {
         /// way: silence is about the message, not about the answer.
         fn fail(&mut self, message: &str) {
             if !self.settings.force_silent {
-                eprintln!("chown: {message}");
+                diag!("chown: {message}");
             }
             self.status = 1;
         }
@@ -623,7 +626,7 @@ mod imp {
                 // Dereferenced: `metadata`, not `symlink_metadata`. GNU's help
                 // text promises this in as many words.
                 let meta = fs::metadata(Path::new(rfile)).map_err(|e| {
-                    eprintln!(
+                    diag!(
                         "chown: failed to get attributes of {}: {}",
                         quoteaf_os(rfile),
                         strerror(&e)
@@ -643,13 +646,13 @@ mod imp {
             Source::Spec(text) => {
                 let bytes = os_bytes(text);
                 let (spec, dotted) = resolve_spec(&bytes, db).map_err(|message| {
-                    eprintln!("chown: {message}: {}", quote(&bytes));
+                    diag!("chown: {message}: {}", quote(&bytes));
                     1u8
                 })?;
                 if dotted {
                     // Upstream calls `error (0, …)` here — a warning, not a
                     // failure — and carries on with the dot reading.
-                    eprintln!("chown: warning: '.' should be ':': {}", quote(&bytes));
+                    diag!("chown: warning: '.' should be ':': {}", quote(&bytes));
                 }
                 Ok(spec)
             }
@@ -663,11 +666,11 @@ mod imp {
         };
         let bytes = os_bytes(text);
         let (spec, dotted) = parse_user_spec(&bytes, db).map_err(|message| {
-            eprintln!("chown: {message}: {}", quote(&bytes));
+            diag!("chown: {message}: {}", quote(&bytes));
             1u8
         })?;
         if dotted {
-            eprintln!("chown: warning: '.' should be ':': {}", quote(&bytes));
+            diag!("chown: warning: '.' should be ':': {}", quote(&bytes));
         }
         Ok((spec.uid, spec.gid))
     }
@@ -685,7 +688,7 @@ mod imp {
             }
             Ok(Request::Run(settings)) => *settings,
             Err(e) => {
-                eprintln!("chown: {e}");
+                diag!("chown: {e}");
                 return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
             }
         };
@@ -708,7 +711,7 @@ mod imp {
             match fs::metadata(Path::new("/")) {
                 Ok(meta) => Some((meta.dev(), meta.ino())),
                 Err(e) => {
-                    eprintln!(
+                    diag!(
                         "chown: failed to get attributes of {}: {}",
                         quoteaf_os("/"),
                         strerror(&e)
@@ -1106,9 +1109,13 @@ mod imp {
     }
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`coreutils::stdfd::close_stderr`].
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
-    imp::main()
+    coreutils::stdfd::close_stderr(imp::main(), 1)
 }
 
 #[cfg(test)]

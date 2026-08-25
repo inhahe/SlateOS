@@ -81,6 +81,8 @@
 
 #![cfg_attr(not(unix), allow(dead_code))]
 
+#[cfg(not(unix))]
+use coreutils::diag;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quote, quoteaf_os};
 use modechange::{Changes, compile, permission_string};
@@ -387,9 +389,9 @@ fn surprise(new_mode: u32, naively_expected: u32) -> Option<String> {
 }
 
 #[cfg(not(unix))]
-fn main() {
-    eprintln!("chmod: unix-only utility; not supported on this platform");
-    std::process::exit(1);
+fn main() -> std::process::ExitCode {
+    diag!("chmod: unix-only utility; not supported on this platform");
+    std::process::ExitCode::from(1)
 }
 
 // ------------------------------------------------------------------- unix ---
@@ -400,6 +402,7 @@ mod imp {
         Outcome, Request, Settings, Source, Verbosity, describe_change, help_text, parse_args,
         surprise,
     };
+    use coreutils::diag;
     use coreutils::errmsg::strerror;
     use coreutils::quote::{quoteaf_os, quotef_os};
     use modechange::{Changes, adjust, from_reference};
@@ -441,7 +444,7 @@ mod imp {
         /// way: silence is about the message, not about the answer.
         fn fail(&mut self, message: &str) {
             if !self.settings.force_silent {
-                eprintln!("chmod: {message}");
+                diag!("chmod: {message}");
             }
             self.status = 1;
         }
@@ -464,7 +467,7 @@ mod imp {
             }
             Ok(Request::Run(settings)) => *settings,
             Err(e) => {
-                eprintln!("chmod: {e}");
+                diag!("chmod: {e}");
                 return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
             }
         };
@@ -479,7 +482,7 @@ mod imp {
                 match fs::metadata(Path::new(rfile)) {
                     Ok(meta) => (from_reference(meta.permissions().mode()), 0),
                     Err(e) => {
-                        eprintln!(
+                        diag!(
                             "chmod: failed to get attributes of {}: {}",
                             quoteaf_os(rfile),
                             strerror(&e)
@@ -494,7 +497,7 @@ mod imp {
             match fs::metadata(Path::new("/")) {
                 Ok(meta) => Some((meta.dev(), meta.ino())),
                 Err(e) => {
-                    eprintln!(
+                    diag!(
                         "chmod: failed to get attributes of {}: {}",
                         quoteaf_os("/"),
                         strerror(&e)
@@ -681,9 +684,13 @@ mod imp {
     }
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`coreutils::stdfd::close_stderr`].
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
-    imp::main()
+    coreutils::stdfd::close_stderr(imp::main(), 1)
 }
 
 #[cfg(test)]

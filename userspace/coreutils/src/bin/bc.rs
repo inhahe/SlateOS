@@ -7,16 +7,17 @@
 //! Architecture: hand-written lexer -> recursive-descent parser -> AST ->
 //! tree-walk interpreter.  The numbers are `bignum::Decimal`, shared with `dc`.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::{quoteaf_os, quotef_os};
+use coreutils::stdfd;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 #[cfg(not(test))]
 use std::io::Write;
 use std::io::{self, BufRead};
-use std::process;
 use std::process::ExitCode;
 
 // -------------------------------------------------------------------------
@@ -95,7 +96,12 @@ enum Token {
     Auto,
     Break,
     Continue,
+    /// `quit`, which ends the run when it is *read* — see [`Parser::saw_quit`].
+    /// It is deliberately not a statement: by the time there is a statement
+    /// list to execute, a chunk holding this token has already been discarded.
     Quit,
+    /// `halt`, which ends the run when it is *executed*.
+    Halt,
     Print,
     // End of input
     Eof,
@@ -104,6 +110,19 @@ enum Token {
 struct Lexer<'a> {
     input: &'a [u8],
     pos: usize,
+    /// Whether the scan ended in the middle of something that spans lines: an
+    /// unclosed `/* */` comment, or a `\` line continuation whose next line has
+    /// not arrived.
+    ///
+    /// These are the two constructs the *parser* cannot notice, because by the
+    /// time it sees tokens they have already been swallowed. `/* one` produces
+    /// no tokens at all and looks exactly like a blank line;
+    /// `1 + \` produces `1` and `+` and looks exactly like the missing-operand
+    /// syntax error the parser is right to refuse to wait for. Only the scanner
+    /// knows the difference, so only the scanner can say so — and [`Chunker`]
+    /// needs to be told, or `2 + /* one` and `two */ 2` are run as two separate
+    /// programs and answer `2` where GNU answers `4`.
+    unfinished: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -111,6 +130,7 @@ impl<'a> Lexer<'a> {
         Self {
             input: input.as_bytes(),
             pos: 0,
+            unfinished: false,
         }
     }
 
@@ -163,6 +183,14 @@ impl<'a> Lexer<'a> {
                     // A backslash-newline is a line continuation: both bytes go.
                     if b == b'\\' && self.peek_at(1) == Some(b'\n') {
                         self.bump(2);
+                        // Landing exactly at the end means the line being
+                        // continued *onto* has not been read yet. Every line the
+                        // chunker holds arrives with its newline attached, so a
+                        // continuation that is not at the end is one whose
+                        // successor is already in the buffer.
+                        if self.pos >= self.input.len() {
+                            self.unfinished = true;
+                        }
                     } else {
                         self.bump(1);
                     }
@@ -177,8 +205,10 @@ impl<'a> Lexer<'a> {
                     match (self.peek_byte(), self.peek_at(1)) {
                         // An unterminated comment runs to end of input, which
                         // is what `None` here means; stop rather than spin.
+                        // It also means the `*/` is on a line not yet read.
                         (None, _) | (_, None) => {
                             self.bump(1);
+                            self.unfinished = true;
                             break;
                         }
                         (Some(b'*'), Some(b'/')) => {
@@ -413,6 +443,7 @@ impl<'a> Lexer<'a> {
             "break" => Token::Break,
             "continue" => Token::Continue,
             "quit" => Token::Quit,
+            "halt" => Token::Halt,
             "print" => Token::Print,
             other => Token::Ident(other.to_string()),
         }
@@ -482,7 +513,12 @@ enum Stmt {
     Return(Option<Expr>),
     Break,
     Continue,
-    Quit,
+    /// `halt`: stop the session, from wherever this is reached.
+    ///
+    /// There is no `Stmt::Quit` beside it, and that absence *is* the difference
+    /// between the two keywords. `quit` never becomes a statement, because it
+    /// never gets as far as execution — see [`Parser::saw_quit`].
+    Halt,
     FuncDef(String, Vec<String>, Vec<String>, Vec<Stmt>),
     Block(Vec<Stmt>),
 }
@@ -500,6 +536,30 @@ enum PrintItem {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Whether the parse ran off the end of the token stream while a construct
+    /// was still open — `if (x)` with no body yet, a `define` whose `}` has not
+    /// arrived.
+    ///
+    /// This is what makes a *chunk* boundary something other than a line
+    /// boundary. GNU's parser pulls tokens from the scanner and the scanner
+    /// reads another line whenever it needs one, so `if (x)` and its body may
+    /// sit on separate lines and still be one statement. Ours parses a finished
+    /// string, so the equivalent is to notice that the string ended too early
+    /// and ask [`Chunker`] for the next line before running anything.
+    ///
+    /// The parser sets it at exactly two places, both positions where a token
+    /// was *required* and `Eof` arrived instead: [`Self::expect`] and
+    /// [`Self::parse_block_or_stmt`]'s empty body. Every other `Eof` is a legal
+    /// place to stop — including a missing operand, which GNU treats as an
+    /// error on the spot rather than as an invitation to read on. See the
+    /// measurement in [`Self::parse_primary`].
+    ///
+    /// It also starts out true when [`Lexer::unfinished`] says the scan ended
+    /// inside a construct the parser never gets to see. The two answers are
+    /// combined here rather than kept apart because [`Chunker`] asks a single
+    /// question — is there more of this to come? — and does not care which
+    /// layer noticed.
+    truncated: bool,
 }
 
 impl Parser {
@@ -514,7 +574,11 @@ impl Parser {
                 break;
             }
         }
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            truncated: lexer.unfinished,
+        }
     }
 
     fn peek(&self) -> &Token {
@@ -536,6 +600,13 @@ impl Parser {
             self.advance();
             true
         } else {
+            // A required token that is missing *because the input stopped* is a
+            // different thing from one that is missing because something else
+            // was written instead. The first wants another line; the second is
+            // an error. Only the first is recorded.
+            if *self.peek() == Token::Eof {
+                self.truncated = true;
+            }
             false
         }
     }
@@ -544,6 +615,23 @@ impl Parser {
         while *self.peek() == Token::Newline || *self.peek() == Token::Semicolon {
             self.advance();
         }
+    }
+
+    /// Whether this chunk of input contains a `quit` anywhere at all.
+    ///
+    /// `quit` is defined by *when it is read*, not by where it sits: the GNU
+    /// manual says "when this statement is read, the bc processor is
+    /// terminated, **regardless of where the quit statement is found**". So it
+    /// is answered here, from the token stream, before a single statement has
+    /// been built — and a chunk that contains one is discarded whole, including
+    /// whatever was written before it on the same line.
+    ///
+    /// That is why this asks about the *tokens* and not about the text. `print
+    /// "quit"` holds the four letters and is not a `quit`; the lexer has
+    /// already made that distinction, and re-deriving it here from the source
+    /// would be re-deriving it wrongly.
+    fn saw_quit(&self) -> bool {
+        self.tokens.contains(&Token::Quit)
     }
 
     fn parse_program(&mut self) -> Vec<Stmt> {
@@ -562,10 +650,15 @@ impl Parser {
         self.skip_newlines();
         match self.peek().clone() {
             Token::Eof => None,
-            Token::Quit => {
+            // `quit` should never reach the parser: [`run_chunk`] asks
+            // [`Self::saw_quit`] first and throws the chunk away. Treating it as
+            // `halt` is the backstop for a caller that forgets — it stops the
+            // session, which is at least the same direction, where a syntax
+            // error would be a wrong answer with a diagnostic attached.
+            Token::Quit | Token::Halt => {
                 self.advance();
                 self.skip_terminator();
-                Some(Stmt::Quit)
+                Some(Stmt::Halt)
             }
             Token::Print => {
                 self.advance();
@@ -766,6 +859,10 @@ impl Parser {
         } else if let Some(stmt) = self.parse_stmt() {
             vec![stmt]
         } else {
+            // `parse_stmt` answers `None` only at `Eof`, and a body position is
+            // the one place `Eof` is not a legal stopping point: `while (i < 3)`
+            // alone is half a loop, not a loop with an empty body.
+            self.truncated = true;
             Vec::new()
         }
     }
@@ -1012,6 +1109,15 @@ impl Parser {
             }
             _ => {
                 // Return zero for unexpected tokens.
+                //
+                // Deliberately *not* a [`Self::truncated`] site, though it looks
+                // like one. A missing operand is a missing operand, not a line
+                // that has yet to arrive: measured against GNU bc 1.07.1,
+                // `printf 'x = 1 +\n2\nx\n' | bc -q` answers
+                // `(standard_in) 2: syntax error`, then `2`, then `0` -- the
+                // newline ended the statement, `2` was a fresh one, and `x` was
+                // never assigned. Waiting for more input here would have joined
+                // those two lines into `1 + 2` and printed `3`.
                 Expr::Number("0".to_string())
             }
         }
@@ -1035,6 +1141,8 @@ enum StmtResult {
     Return(Decimal),
     Break,
     Continue,
+    /// `halt` was executed: the session is over, at whatever depth this is.
+    Halt,
 }
 
 /// What a loop should do after running its body once.
@@ -1043,6 +1151,30 @@ enum LoopFlow {
     Continue,
     Break,
     Return(Decimal),
+    /// `halt` in the body: unwind out of the loop and out of everything.
+    Halt,
+}
+
+/// Whether the caller of [`run_chunk`] has any more work to do.
+///
+/// The stop is carried back as a value rather than taken with `process::exit`,
+/// because the exit status is decided in `main`: exiting from inside the
+/// interpreter skips [`stdfd::close_stderr`], so a stop that followed output
+/// which could not be written would report success. Measured — GNU `bc` gives
+/// status 1 for `printf 'print "hi"\nquit\n' | bc > /dev/full`, reaching the
+/// same place by having `exit(3)` run the `atexit` handler that we do not have.
+///
+/// One variant covers both keywords, because from the caller's side they ask
+/// for the same thing — read no more input. What differs is *when* each is
+/// decided, and that is settled before this type is produced: `quit` in
+/// [`run_chunk`], from the tokens; `halt` in [`Interpreter::run`], from
+/// execution.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Session {
+    /// Keep reading.
+    Continue,
+    /// `quit` was read or `halt` was executed: stop, evaluating nothing more.
+    Stop,
 }
 
 /// Something that makes the rest of the current statement meaningless.
@@ -1061,6 +1193,18 @@ enum RuntimeError {
     UndefinedFunction(String),
     /// `l(x)` for `x <= 0`, where the logarithm is not defined over the reals.
     LogOfNonPositive,
+    /// Not an error: `halt` reached inside a called function.
+    ///
+    /// A `halt` in a statement position comes back as [`StmtResult::Halt`], but
+    /// `define f() { halt }` puts one under an *expression* — `f() + 1` — and
+    /// the only channel that unwinds an expression is this one. It is never
+    /// printed: [`Interpreter::run`] stops on it instead, exactly as it stops
+    /// on `StmtResult::Halt`, and the `Display` arm below exists only because
+    /// the trait requires it to be total.
+    ///
+    /// `quit` has no counterpart here, and cannot acquire one: it is decided
+    /// from the token stream before any function is defined, let alone called.
+    Halt,
 }
 
 impl From<DecimalError> for RuntimeError {
@@ -1075,6 +1219,7 @@ impl std::fmt::Display for RuntimeError {
             Self::Math(e) => write!(f, "{e}"),
             Self::UndefinedFunction(name) => write!(f, "undefined function {name}"),
             Self::LogOfNonPositive => f.write_str("log of non-positive number"),
+            Self::Halt => f.write_str("halt"),
         }
     }
 }
@@ -1171,7 +1316,7 @@ impl Interpreter {
     /// not captured in tests: a caller redirecting stdout must not find
     /// diagnostics mixed into the numbers.
     fn warn(&self, message: &str) {
-        eprintln!("Runtime warning (func=(main)): {message}");
+        diag!("Runtime warning (func=(main)): {message}");
     }
 
     fn get_var(&self, name: &str) -> Decimal {
@@ -1249,16 +1394,26 @@ impl Interpreter {
     /// expression discard the rest of a script; the alternative in the other
     /// direction, resuming inside the failed statement, is not available — the
     /// value it needed does not exist. See `design-decisions.md` §323.
-    fn run(&mut self, stmts: &[Stmt]) {
+    ///
+    /// The return value distinguishes the two ways this can stop early. A stray
+    /// `break` ends the *program text* it was given but leaves the session
+    /// alive; `quit` ends the session, and the caller must not read the next
+    /// line, let alone evaluate it.
+    fn run(&mut self, stmts: &[Stmt]) -> Session {
         for stmt in stmts {
             match self.exec_stmt(stmt) {
                 Ok(StmtResult::Normal) => {}
+                // Not a diagnostic, and not printed as one: `quit` under an
+                // expression has no other way out of `eval`. See
+                // [`RuntimeError::Halt`].
+                Ok(StmtResult::Halt) | Err(RuntimeError::Halt) => return Session::Stop,
                 // `break`, `continue` or `return` outside any enclosing
                 // construct ends the program, as there is nothing to return to.
-                Ok(_) => return,
-                Err(e) => eprintln!("Runtime error: {e}"),
+                Ok(_) => return Session::Continue,
+                Err(e) => diag!("Runtime error: {e}"),
             }
         }
+        Session::Continue
     }
 
     fn exec_stmt(&mut self, stmt: &Stmt) -> Result<StmtResult, RuntimeError> {
@@ -1318,6 +1473,7 @@ impl Interpreter {
                         LoopFlow::Continue => {}
                         LoopFlow::Break => break,
                         LoopFlow::Return(v) => return Ok(StmtResult::Return(v)),
+                        LoopFlow::Halt => return Ok(StmtResult::Halt),
                     }
                 }
                 Ok(StmtResult::Normal)
@@ -1336,6 +1492,7 @@ impl Interpreter {
                         LoopFlow::Continue => {}
                         LoopFlow::Break => break,
                         LoopFlow::Return(v) => return Ok(StmtResult::Return(v)),
+                        LoopFlow::Halt => return Ok(StmtResult::Halt),
                     }
                     if let Some(step_expr) = step {
                         self.eval(step_expr)?;
@@ -1352,9 +1509,9 @@ impl Interpreter {
             }
             Stmt::Break => Ok(StmtResult::Break),
             Stmt::Continue => Ok(StmtResult::Continue),
-            Stmt::Quit => {
-                process::exit(0);
-            }
+            // Returned rather than taken with `process::exit`, so that the
+            // status still passes through the `close_stderr` funnel in `main`.
+            Stmt::Halt => Ok(StmtResult::Halt),
             Stmt::FuncDef(name, params, auto_vars, body) => {
                 self.funcs.insert(
                     name.clone(),
@@ -1391,6 +1548,7 @@ impl Interpreter {
                 StmtResult::Break => return Ok(LoopFlow::Break),
                 StmtResult::Continue => return Ok(LoopFlow::Continue),
                 StmtResult::Return(v) => return Ok(LoopFlow::Return(v)),
+                StmtResult::Halt => return Ok(LoopFlow::Halt),
             }
         }
         Ok(LoopFlow::Continue)
@@ -1649,6 +1807,13 @@ impl Interpreter {
                     break;
                 }
                 Ok(StmtResult::Break | StmtResult::Continue) => break,
+                // The frame below is still torn down first — a `quit` must not
+                // leave the caller's variables shadowed by the callee's, since
+                // the session may yet print something from them on the way out.
+                Ok(StmtResult::Halt) => {
+                    outcome = Err(RuntimeError::Halt);
+                    break;
+                }
                 Err(e) => {
                     outcome = Err(e);
                     break;
@@ -2046,27 +2211,129 @@ fn suppresses_auto_print(expr: &Expr) -> bool {
     )
 }
 
-/// How many `{` in `text` are still unclosed.
+/// What a line of input turned out to be, once appended to whatever was pending.
+enum Feed {
+    /// The construct is not finished; nothing runs until another line arrives.
+    Incomplete,
+    /// A complete unit of program, ready to execute.
+    Ready(Vec<Stmt>),
+    /// A `quit` was read. The run stops here and the pending text is discarded
+    /// — including any statement written *before* the `quit` in the same unit.
+    Quit,
+}
+
+/// Assembles input lines into the units GNU bc compiles and runs as one.
 ///
-/// Interactive bc reads a `define` or a multi-line `while` across several
-/// lines, so it has to know when the construct is finished before it can parse
-/// anything. Counting the brace *characters* is the obvious way and is wrong:
-/// `print "{"` would leave the count at one and swallow every following line
-/// until the user typed a `}` that was never part of any block. Running the
-/// lexer instead costs a re-scan of a buffer that is at most a few lines long,
-/// and gets strings, `#` comments and `/* */` comments right by construction,
-/// because that is the one piece of code in this program that already knows
-/// what a brace inside a string is.
-fn open_brace_depth(text: &str) -> i32 {
-    let mut lexer = Lexer::new(text);
-    let mut depth: i32 = 0;
-    loop {
-        match lexer.next_token() {
-            Token::LBrace => depth = depth.saturating_add(1),
-            Token::RBrace => depth = depth.saturating_sub(1),
-            Token::Eof => return depth,
-            _ => {}
+/// # Why this exists at all
+///
+/// bc's two keywords for ending a session differ only in *when* they act, and
+/// the difference is invisible until input is divided the way GNU divides it.
+/// `halt` fires when it is executed; `quit` fires when it is **read** — the
+/// manual's words are "when this statement is read, the bc processor is
+/// terminated, regardless of where the quit statement is found". Measured
+/// against GNU bc 1.07.1:
+///
+/// ```text
+/// printf 'print "A"; quit\n'   | bc -q   ->  (nothing)
+/// printf 'print "A"\nquit\n'   | bc -q   ->  A
+/// printf 'if (0) { quit }\n'   | bc -q   ->  (nothing)
+/// printf 'if (0) { halt }\n'   | bc -q   ->  (nothing runs, session continues)
+/// ```
+///
+/// The first two lines carry the same characters in the same order and differ
+/// only in where the newline falls, so no rule phrased over statements can tell
+/// them apart. The rule that does fit is phrased over units of *reading*: GNU's
+/// scanner exits the moment it scans `quit`, and the statements it has compiled
+/// but not yet executed die with it. Hence [`Feed::Quit`] discards the buffer
+/// rather than running the part before the keyword.
+///
+/// # Why a unit is not simply a line
+///
+/// `if (x)` and its body may sit on separate lines. GNU gets this for free —
+/// its parser pulls tokens and its scanner reads another line whenever the
+/// parser wants one — whereas ours parses a finished string, so it must ask
+/// first whether the string ended too early. That question is
+/// [`Parser::truncated`], and it is a strictly better test than the brace
+/// counting this used to do: `if (0)` followed by its body on the next line has
+/// no braces to count, and under the old rule the body became a second unit and
+/// ran unconditionally.
+struct Chunker {
+    /// Lines read since the last unit was dispatched, each with its newline.
+    buffer: String,
+}
+
+impl Chunker {
+    fn new() -> Self {
+        Self {
+            buffer: String::new(),
         }
+    }
+
+    /// Add one line, without its terminator, and say what to do next.
+    fn feed(&mut self, line: &str) -> Feed {
+        self.buffer.push_str(line);
+        self.buffer.push('\n');
+        // The whole buffer is re-lexed, not just the new line, because a line is
+        // not independently lexable: it may open inside a `/* */` comment or a
+        // string started two lines up, where the same characters mean something
+        // else entirely. Re-scanning a few lines costs nothing next to getting
+        // that wrong.
+        let mut parser = Parser::new(&self.buffer);
+        if parser.saw_quit() {
+            self.buffer.clear();
+            return Feed::Quit;
+        }
+        let stmts = parser.parse_program();
+        if parser.truncated {
+            Feed::Incomplete
+        } else {
+            self.buffer.clear();
+            Feed::Ready(stmts)
+        }
+    }
+
+    /// Whatever is left when the input ends.
+    ///
+    /// It is run rather than discarded: a program is far more often missing its
+    /// final newline than genuinely half-written, and dropping the last line
+    /// would answer `printf '2+2' | bc` with silence.
+    fn finish(&mut self) -> Option<Vec<Stmt>> {
+        if self.buffer.is_empty() {
+            return None;
+        }
+        let text = std::mem::take(&mut self.buffer);
+        // No `saw_quit` check: every line in the buffer already went through
+        // `feed`, which stops at the first `quit` token.
+        Some(Parser::new(&text).parse_program())
+    }
+}
+
+/// Run a program already held in memory, in the same units the session on
+/// standard input would have run it in.
+///
+/// File operands and `-e` expressions go through here rather than being parsed
+/// whole, because `quit` is defined by reading order and reading order is
+/// exactly what parsing-whole throws away. Before this, `printf 'print "A"\nquit\n' > f; bc f`
+/// printed nothing, since the single parse saw the `quit` before anything ran.
+fn run_text(interp: &mut Interpreter, text: &str) -> Session {
+    let mut chunker = Chunker::new();
+    // `lines()` rather than `split('\n')`: it strips a trailing `\r` as well, so
+    // a script saved with CRLF endings is read the same as one without, and it
+    // does not invent a final empty line for text that ends in a newline.
+    for line in text.lines() {
+        match chunker.feed(line) {
+            Feed::Incomplete => {}
+            Feed::Quit => return Session::Stop,
+            Feed::Ready(stmts) => {
+                if interp.run(&stmts) == Session::Stop {
+                    return Session::Stop;
+                }
+            }
+        }
+    }
+    match chunker.finish() {
+        Some(stmts) => interp.run(&stmts),
+        None => Session::Continue,
     }
 }
 
@@ -2222,7 +2489,7 @@ impl Refusal {
     fn report(&self) -> ExitCode {
         let status = match self {
             Self::Getopt(e) => {
-                eprintln!("bc: {}", e.sentence);
+                diag!("bc: {}", e.sentence);
                 // GNU prints the sentence on stderr and the usage block on
                 // stdout, from two different pieces of code. Reproduced
                 // rather than tidied: a script doing `bc -x 2>/dev/null`
@@ -2231,7 +2498,7 @@ impl Refusal {
                 e.status
             }
             Self::Unimplemented(message) => {
-                eprintln!("bc: {message}");
+                diag!("bc: {message}");
                 println!("{USAGE}");
                 1
             }
@@ -2270,13 +2537,13 @@ impl Trouble {
         match self {
             // Mid-sentence, so the quotes are never elided: a bare name would
             // blur into the words either side of it.
-            Self::Unavailable(name) => eprintln!("File {} is unavailable.", quoteaf_os(name)),
+            Self::Unavailable(name) => diag!("File {} is unavailable.", quoteaf_os(name)),
             // Ends the clause, so it takes the bare form when it can, exactly
             // as `wc: missing.txt: No such file or directory` does.
-            Self::FileNotUtf8(name) => eprintln!("bc: {}: not valid UTF-8", quotef_os(name)),
-            Self::ExpressionNotUtf8 => eprintln!("bc: -e expression: not valid UTF-8"),
-            Self::StdinNotUtf8 => eprintln!("bc: standard input: not valid UTF-8"),
-            Self::StdinRead(message) => eprintln!("bc: standard input: {message}"),
+            Self::FileNotUtf8(name) => diag!("bc: {}: not valid UTF-8", quotef_os(name)),
+            Self::ExpressionNotUtf8 => diag!("bc: -e expression: not valid UTF-8"),
+            Self::StdinNotUtf8 => diag!("bc: standard input: not valid UTF-8"),
+            Self::StdinRead(message) => diag!("bc: standard input: {message}"),
         }
         ExitCode::FAILURE
     }
@@ -2286,7 +2553,15 @@ impl Trouble {
 // Main entry point
 // -------------------------------------------------------------------------
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     // `args_os`, not `args`: `env::args()` panics on an argument that is not
     // UTF-8, so `bc $'caf\xe9.bc'` aborted before the file name could even be
     // reported. A path may hold every byte but `/` and NUL.
@@ -2330,8 +2605,13 @@ fn main() -> ExitCode {
         // only safe one: a later file that uses a function an unreadable
         // earlier file was to have defined would otherwise compute a wrong
         // answer rather than report the missing file.
-        if let Err(trouble) = eval_input(&mut interp, input) {
-            return trouble.report();
+        match eval_input(&mut interp, input) {
+            Err(trouble) => return trouble.report(),
+            // `bc -e quit -e 'print "x"'` prints nothing, and neither does a
+            // file operand after one that quit: `quit` ends the run, not just
+            // the text it appeared in.
+            Ok(Session::Stop) => return ExitCode::SUCCESS,
+            Ok(Session::Continue) => {}
         }
     }
 
@@ -2345,7 +2625,7 @@ fn main() -> ExitCode {
 }
 
 /// Run one `-e` expression or one file operand.
-fn eval_input(interp: &mut Interpreter, input: &Input) -> Result<(), Trouble> {
+fn eval_input(interp: &mut Interpreter, input: &Input) -> Result<Session, Trouble> {
     // The second element is what to blame if the bytes turn out not to be
     // UTF-8, which for `-e` is the command line rather than any file.
     let (text, blame) = match input {
@@ -2359,17 +2639,14 @@ fn eval_input(interp: &mut Interpreter, input: &Input) -> Result<(), Trouble> {
         }
     };
     let text = String::from_utf8(text).map_err(|_| blame)?;
-    let mut parser = Parser::new(&text);
-    let stmts = parser.parse_program();
-    interp.run(&stmts);
-    Ok(())
+    Ok(run_text(interp, &text))
 }
 
 /// The interactive/pipe session: read until EOF, evaluating each construct as
 /// soon as its braces balance.
-fn eval_stdin(interp: &mut Interpreter, stdin: &io::Stdin) -> Result<(), Trouble> {
+fn eval_stdin(interp: &mut Interpreter, stdin: &io::Stdin) -> Result<Session, Trouble> {
     let mut handle = stdin.lock();
-    let mut buffer = String::new();
+    let mut chunker = Chunker::new();
 
     loop {
         // Bytes, then one explicit UTF-8 check. `BufRead::lines()` yields
@@ -2393,25 +2670,28 @@ fn eval_stdin(interp: &mut Interpreter, stdin: &io::Stdin) -> Result<(), Trouble
         // data genuinely ends in `\r\r` would come back shorter than it was.
         let line = line.strip_suffix('\n').unwrap_or(&line);
         let line = line.strip_suffix('\r').unwrap_or(line);
-        buffer.push_str(line);
-        buffer.push('\n');
 
-        // Once the braces balance, the construct is complete: parse and run it.
-        if open_brace_depth(&buffer) <= 0 {
-            let input = std::mem::take(&mut buffer);
-            let mut parser = Parser::new(&input);
-            let stmts = parser.parse_program();
-            interp.run(&stmts);
+        match chunker.feed(line) {
+            Feed::Incomplete => {}
+            // `quit` stops the read loop as well as the evaluation: the rest of
+            // the script is not the next thing to run, it is nothing at all.
+            // Reading no further is the point of the keyword — on a terminal it
+            // is how the session ends, and in a pipe it is what stops a script
+            // from being consumed after it asked to stop.
+            Feed::Quit => return Ok(Session::Stop),
+            Feed::Ready(stmts) => {
+                if interp.run(&stmts) == Session::Stop {
+                    return Ok(Session::Stop);
+                }
+            }
         }
     }
 
     // Process any remaining buffer.
-    if !buffer.is_empty() {
-        let mut parser = Parser::new(&buffer);
-        let stmts = parser.parse_program();
-        interp.run(&stmts);
+    match chunker.finish() {
+        Some(stmts) => Ok(interp.run(&stmts)),
+        None => Ok(Session::Continue),
     }
-    Ok(())
 }
 
 // -------------------------------------------------------------------- parsing
@@ -2654,37 +2934,147 @@ mod tests {
 
     // --- Reading input: where one line ends and the next construct begins ---
 
+    /// Feed a whole script to a fresh [`Chunker`] and report, one word per
+    /// line, what each line turned out to be. Lines that finished a construct
+    /// read `ready`; lines still waiting on more input read `incomplete`; a
+    /// line holding a `quit` reads `quit` and ends the list, because nothing
+    /// after it is read at all.
+    fn feed_lines(script: &str) -> Vec<&'static str> {
+        let mut chunker = Chunker::new();
+        let mut seen = Vec::new();
+        for line in script.lines() {
+            match chunker.feed(line) {
+                Feed::Incomplete => seen.push("incomplete"),
+                Feed::Ready(_) => seen.push("ready"),
+                Feed::Quit => {
+                    seen.push("quit");
+                    break;
+                }
+            }
+        }
+        seen
+    }
+
     #[test]
     fn a_brace_inside_a_string_does_not_open_a_block() {
-        // Interactive bc decides a construct is complete when its braces
-        // balance. Counting brace *characters* meant `print "{"` opened a
-        // block that nothing would ever close, and every line the user typed
-        // afterwards was swallowed into a buffer that never ran.
-        assert_eq!(open_brace_depth("print \"{\"\n"), 0);
-        assert_eq!(open_brace_depth("print \"}\"\n"), 0);
-        assert_eq!(open_brace_depth("s = \"{{{\"\n"), 0);
+        // The chunker decides a construct is complete by parsing it. Deciding
+        // by counting brace *characters* -- which is what this used to do --
+        // meant `print "{"` opened a block that nothing would ever close, and
+        // every line typed afterwards was swallowed into a buffer that never
+        // ran.
+        assert_eq!(feed_lines("print \"{\"\n"), ["ready"]);
+        assert_eq!(feed_lines("print \"}\"\n"), ["ready"]);
+        assert_eq!(feed_lines("s = \"{{{\"\n"), ["ready"]);
     }
 
     #[test]
     fn a_brace_inside_a_comment_does_not_open_a_block() {
-        assert_eq!(open_brace_depth("1 + 1 # }\n"), 0);
-        assert_eq!(open_brace_depth("1 + 1 /* { */\n"), 0);
+        assert_eq!(feed_lines("1 + 1 # }\n"), ["ready"]);
+        assert_eq!(feed_lines("1 + 1 /* { */\n"), ["ready"]);
     }
 
     #[test]
-    fn an_unfinished_block_reports_its_open_braces() {
-        assert_eq!(open_brace_depth("define f(x) {\n"), 1);
-        assert_eq!(open_brace_depth("define f(x) {\n  if (x) {\n"), 2);
-        assert_eq!(open_brace_depth("define f(x) {\n  return(x)\n}\n"), 0);
+    fn an_unfinished_block_waits_for_the_rest() {
+        assert_eq!(feed_lines("define f(x) {\n"), ["incomplete"]);
+        assert_eq!(
+            feed_lines("define f(x) {\n  if (x) {\n"),
+            ["incomplete", "incomplete"]
+        );
+        assert_eq!(
+            feed_lines("define f(x) {\n  return(x)\n}\n"),
+            ["incomplete", "incomplete", "ready"]
+        );
+    }
+
+    #[test]
+    fn a_construct_split_across_lines_without_braces_is_one_unit() {
+        // The reason the brace count had to go. GNU's scanner reads another
+        // line whenever its parser wants one, so a body on the line after its
+        // `if` is still that `if`'s body. Under brace counting these were two
+        // units, and the second ran unconditionally.
+        assert_eq!(feed_lines("if (0)\nprint \"x\"\n"), ["incomplete", "ready"]);
+        assert_eq!(
+            feed_lines("while (0)\nprint \"z\"\n"),
+            ["incomplete", "ready"]
+        );
+        assert_eq!(
+            feed_lines("for (i=0;i<2;i++)\nprint i\n"),
+            ["incomplete", "ready"]
+        );
+    }
+
+    #[test]
+    fn a_half_finished_expression_is_an_error_not_a_continuation() {
+        // The boundary of the rule above, and it was measured rather than
+        // reasoned: `printf 'x = 1 +\n2\nx\n' | bc -q` answers
+        // `(standard_in) 2: syntax error`, then `2`, then `0`. So the second
+        // line is a unit of its own and `x` is never assigned -- a missing
+        // *operand* ends the statement, where a missing *body* does not.
+        assert_eq!(feed_lines("x = 1 +\n2\n"), ["ready", "ready"]);
     }
 
     #[test]
     fn an_unterminated_comment_or_string_still_terminates_the_scan() {
-        // Both of these run to end of input. The lexer must reach `Eof`
-        // rather than spin, or the interactive loop hangs on a typo.
-        assert_eq!(open_brace_depth("1 /* never closed"), 0);
-        assert_eq!(open_brace_depth("\"never closed"), 0);
-        assert_eq!(open_brace_depth("{ /* never closed"), 1);
+        // These run to end of input. The lexer must reach `Eof` rather than
+        // spin, or the interactive loop hangs on a typo -- and `feed_lines`
+        // returning at all is the assertion that it does.
+        assert_eq!(feed_lines("1 /* never closed"), ["incomplete"]);
+        assert_eq!(feed_lines("\"never closed"), ["ready"]);
+        assert_eq!(feed_lines("{ /* never closed"), ["incomplete"]);
+    }
+
+    #[test]
+    fn a_comment_or_a_continuation_may_span_lines() {
+        // Both are invisible to the parser: `/* one` yields no tokens at all
+        // and reads exactly like a blank line, and `1 + \` yields `1` and `+`
+        // and reads exactly like the missing-operand error the parser is right
+        // not to wait for. The scanner is the only layer that can tell.
+        //
+        // Measured: `printf '/* one\ntwo */ 2+2\n' | bc -q` answers 4, and
+        // `printf '1 + \\\n2\n' | bc -q` answers 3. Splitting either into two
+        // units answers something else -- 2 and "1 then 2" respectively.
+        assert_eq!(feed_lines("/* one\ntwo */ 2+2\n"), ["incomplete", "ready"]);
+        assert_eq!(feed_lines("1 + \\\n2\n"), ["incomplete", "ready"]);
+    }
+
+    #[test]
+    fn a_quit_inside_a_comment_is_not_a_quit() {
+        // The chunker asks the token stream, and a comment produces no tokens
+        // -- so this holds by construction. It is asserted anyway because the
+        // construction is exactly what a later refactor would be tempted to
+        // replace with a substring search.
+        assert_eq!(feed_lines("/* quit */ 1\n"), ["ready"]);
+        assert_eq!(feed_lines("# quit\n1\n"), ["ready", "ready"]);
+    }
+
+    // --- `quit` is read-time, `halt` is execution-time ---
+
+    #[test]
+    fn quit_is_noticed_when_the_line_is_read_not_when_it_would_run() {
+        // Measured against GNU bc 1.07.1. The two scripts hold the same
+        // characters in the same order and differ only in where the newline
+        // falls, which is why no rule phrased over statements can separate
+        // them.
+        assert_eq!(feed_lines("print \"A\"; quit\n"), ["quit"]);
+        assert_eq!(feed_lines("print \"A\"\nquit\n"), ["ready", "quit"]);
+    }
+
+    #[test]
+    fn quit_fires_from_inside_a_branch_that_is_never_taken() {
+        // `if (0) { quit }` ends the session on GNU: the keyword is read, and
+        // reading is the whole trigger. `halt` in the same place does nothing,
+        // because it is reached only if the branch runs.
+        assert_eq!(feed_lines("if (0) { quit }\n"), ["quit"]);
+        assert_eq!(feed_lines("if (0) { halt }\n"), ["ready"]);
+    }
+
+    #[test]
+    fn the_letters_of_quit_are_not_a_quit() {
+        // The question is asked of the tokens, never of the text: a string and
+        // an identifier that merely start with those four letters are not the
+        // keyword, and the lexer has already drawn that line.
+        assert_eq!(feed_lines("print \"quit\"\n"), ["ready"]);
+        assert_eq!(feed_lines("quitx = 1\n"), ["ready"]);
     }
 
     // --- Expression evaluation tests ---

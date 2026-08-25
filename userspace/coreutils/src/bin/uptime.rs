@@ -3,13 +3,25 @@
 //! Usage: uptime
 //!   Reads /proc/uptime for system uptime information.
 
+use coreutils::stdfd;
 use std::fs;
+use std::process::ExitCode;
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     match fs::read_to_string("/proc/uptime") {
         Ok(content) => println!("{}", format_uptime_line(&content)),
         Err(_) => println!("uptime: cannot read /proc/uptime"),
     }
+
+    ExitCode::SUCCESS
 }
 
 /// Format `/proc/uptime` content into the human-readable line we print.

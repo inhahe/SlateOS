@@ -56,12 +56,14 @@
 //! makes grep read such a stream, so `find -print0 | xargs -0 grep -z` and
 //! `grep -rlZ … | xargs -0` are the spellings that are actually correct.
 
+use coreutils::diag;
 use coreutils::quote::{self, quotef_os};
+use coreutils::stdfd;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process;
+use std::process::ExitCode;
 
 use coreutils::errmsg::strerror;
 // Aliased: this file already has a `Syntax` — the `-G`/`-E`/`-F` selector —
@@ -554,13 +556,21 @@ fn line_prefix(
     prefix
 }
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 2)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let parsed = match parse_args(&args) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("grep: {e}");
-            process::exit(2);
+            diag!("grep: {e}");
+            return ExitCode::from(2);
         }
     };
 
@@ -575,8 +585,8 @@ fn main() {
         match raw {
             Ok(raw) => patterns.extend(split_patterns(&raw)),
             Err(e) => {
-                eprintln!("grep: {}: {}", quotef_os(pf), strerror(&e));
-                process::exit(2);
+                diag!("grep: {}: {}", quotef_os(pf), strerror(&e));
+                return ExitCode::from(2);
             }
         }
     }
@@ -584,8 +594,8 @@ fn main() {
     let pats = match compile_patterns(&patterns, &parsed.opts) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("grep: {e}");
-            process::exit(2);
+            diag!("grep: {e}");
+            return ExitCode::from(2);
         }
     };
 
@@ -618,7 +628,7 @@ fn main() {
             if Path::new(path).is_dir() {
                 if !parsed.opts.recursive {
                     if !parsed.opts.no_messages {
-                        eprintln!("grep: {}: Is a directory", quotef_os(path));
+                        diag!("grep: {}: Is a directory", quotef_os(path));
                     }
                     // Named but not searched, so the run's answer is about
                     // less than it was asked about — status 2, as for a file
@@ -631,7 +641,7 @@ fn main() {
                 Ok(f) => Box::new(f),
                 Err(e) => {
                     if !parsed.opts.no_messages {
-                        eprintln!("grep: {}: {}", quotef_os(path), strerror(&e));
+                        diag!("grep: {}: {}", quotef_os(path), strerror(&e));
                     }
                     // A file that could not be read is an error, not an absence
                     // of matches: exiting 1 would tell a script the file has
@@ -672,7 +682,7 @@ fn main() {
             }
             Err(e) => {
                 if !parsed.opts.no_messages {
-                    eprintln!("grep: {}: {}", quotef_os(path), strerror(&e));
+                    diag!("grep: {}: {}", quotef_os(path), strerror(&e));
                 }
                 had_error = true;
             }
@@ -683,11 +693,13 @@ fn main() {
     // An error outranks both answers: a script that distinguishes 0 from 1 is
     // asking about the content of files it believes were all read.
     if had_error {
-        process::exit(2);
+        return ExitCode::from(2);
     }
     if !any_match {
-        process::exit(1);
+        return ExitCode::from(1);
     }
+
+    ExitCode::SUCCESS
 }
 
 /// Search one stream, printing what the options ask for. Returns whether any
@@ -791,7 +803,7 @@ fn collect_files_recursive(dir: &Path, result: &mut Vec<String>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("grep: {}: {}", quotef_os(dir), strerror(&e));
+            diag!("grep: {}: {}", quotef_os(dir), strerror(&e));
             return;
         }
     };

@@ -79,10 +79,12 @@
 //! false would be a wrong answer rather than a refusal. `%Z` renders empty for
 //! the same reason. Tracked in `known-issues.md`.
 
+use coreutils::diag;
 use coreutils::errmsg::{self, strerror};
 #[cfg(unix)]
 use coreutils::quote::os_bytes;
 use coreutils::quote::{self, os_from_bytes, quote};
+use coreutils::stdfd;
 use coreutils::{cfmt, extfloat, fnmatch, pathname};
 #[cfg(unix)]
 use std::collections::HashMap;
@@ -206,7 +208,7 @@ trait Tree {
 
 #[cfg(not(unix))]
 fn main() -> ExitCode {
-    eprintln!("find: unix-only utility; not supported on this platform");
+    diag!("find: unix-only utility; not supported on this platform");
     ExitCode::from(1)
 }
 
@@ -814,7 +816,7 @@ fn process_debug_options(spec: &[u8]) -> Result<(), Leading> {
             // however late in the list the offender is. `-D exec,bogus`
             // really does say `Ignoring unrecognised debug flag 'exec'`.
             let head = strtok_first(spec);
-            eprintln!("find: Ignoring unrecognised debug flag {}", quote(head));
+            diag!("find: Ignoring unrecognised debug flag {}", quote(head));
         }
     }
     if empty {
@@ -3898,7 +3900,7 @@ impl Ctx<'_> {
     /// complaint belongs after the tree it managed to walk.
     fn warn(&mut self, msg: &str) {
         self.flush();
-        eprintln!("find: {msg}");
+        diag!("find: {msg}");
     }
 
     /// `following_links()`: whether the walk dereferenced this item's own name.
@@ -3928,7 +3930,12 @@ impl Ctx<'_> {
                 Some(Sink::Stdout) => io::stdout()
                     .write_all(buf)
                     .and_then(|()| io::stdout().flush()),
-                Some(Sink::Stderr) => io::stderr().write_all(buf),
+                // The raw `write(2)` and not `io::stderr()`, whose `EBADF` the
+                // runtime turns into success: `-fprint /dev/stderr` would then
+                // report nothing and exit 0. The error is returned rather than
+                // recorded because the arm below already turns it into the
+                // status 1 that `find … -fprint /dev/stderr 2>/dev/full` gives.
+                Some(Sink::Stderr) => stdfd::write_all(2, buf),
                 Some(Sink::File(f)) => f.write_all(buf).and_then(|()| f.flush()),
                 // Accumulates rather than drains: the point of it is that the
                 // bytes are still there when the walk has finished.
@@ -3940,7 +3947,7 @@ impl Ctx<'_> {
             if let Err(e) = res {
                 // Upstream dies here rather than carrying on: a `find` whose
                 // output is going nowhere has nothing useful left to do.
-                eprintln!("find: {}", errmsg::strerror(&e));
+                diag!("find: {}", errmsg::strerror(&e));
                 self.status = 1;
             }
         }
@@ -4101,17 +4108,26 @@ impl Ctx<'_> {
             // *different* path from the one about to be handed to the command
             // would be asking them to confirm the wrong thing.
             //
-            // `write_all` errors are dropped deliberately: the answer to a
-            // failed write on stderr is not a second write to stderr, and the
-            // read that follows is what actually decides whether to run.
-            let mut e = io::stderr().lock();
-            let _ = e.write_all(b"< ");
-            let _ = e.write_all(&prog);
-            let _ = e.write_all(b" ... ");
-            let _ = e.write_all(&it.path);
-            let _ = e.write_all(b" > ? ");
-            let _ = e.flush();
-            drop(e);
+            // Assembled and written once, as upstream's single `fprintf` is:
+            // five separate `write(2)` calls can have another process's output
+            // land in the middle of the question being asked.
+            //
+            // Nothing is done with the failure *here* — the answer to a failed
+            // write on stderr is not a second write to stderr, and the read
+            // that follows is what actually decides whether to run. It is not
+            // dropped either, though: `diag_bytes` records it, and a lost
+            // prompt does change the status upstream. Measured, `find f -ok
+            // true {} \; </dev/null 2>/dev/full` is 1 where the same run with a
+            // writable stderr is 0 — `close_stdout` runs from `atexit` and does
+            // not care that the unwritable bytes were a prompt rather than a
+            // complaint.
+            let mut prompt = Vec::new();
+            prompt.extend_from_slice(b"< ");
+            prompt.extend_from_slice(&prog);
+            prompt.extend_from_slice(b" ... ");
+            prompt.extend_from_slice(&it.path);
+            prompt.extend_from_slice(b" > ? ");
+            stdfd::diag_bytes(&prompt);
             if !self.tree.confirm() {
                 return false;
             }
@@ -4915,7 +4931,7 @@ fn help_text() -> String {
 /// supplies.
 fn report(f: &Fatal) {
     for line in &f.0 {
-        eprintln!("find: {line}");
+        diag!("find: {line}");
     }
 }
 
@@ -4968,12 +4984,12 @@ fn run_inner(argv: &[Vec<u8>], tree: &dyn Tree, capture: &mut Option<Vec<u8>>) -
     let leading = match process_leading_options(argv, &mut follow) {
         Ok(i) => i,
         Err(Leading::Usage(msg)) => {
-            eprintln!("find: {msg}");
-            eprintln!("Try 'find --help' for more information.");
+            diag!("find: {msg}");
+            diag!("Try 'find --help' for more information.");
             return 1;
         }
         Err(Leading::Die(msg)) => {
-            eprintln!("find: {msg}");
+            diag!("find: {msg}");
             return 1;
         }
         Err(Leading::DebugHelp) => {
@@ -5002,7 +5018,7 @@ fn run_inner(argv: &[Vec<u8>], tree: &dyn Tree, capture: &mut Option<Vec<u8>>) -
     // since it prints each one at the moment it decides on it and nothing else
     // has reached the output yet.
     for w in &parser.warnings {
-        eprintln!("find: {w}");
+        diag!("find: {w}");
     }
     match parsed {
         Ok(None) => {}
@@ -5113,23 +5129,25 @@ fn process_all_startpoints(
         // `-files0-from` and start points on the command line are mutually
         // exclusive, and the refusal is two lines: the operand, then the rule.
         if let Some(first) = start_points.first() {
-            eprintln!("find: extra operand {}", quote(first));
-            eprintln!("find: file operands cannot be combined with -files0-from");
+            diag!("find: extra operand {}", quote(first));
+            diag!("find: file operands cannot be combined with -files0-from");
             return 1;
         }
         if from == b"-" {
             if ok_prompt {
                 // The prompt and the name list would be reading the same
                 // stream, so one would eat the other's input.
-                eprintln!(
+                diag!(
                     "find: option -files0-from reading from standard input cannot be combined with -ok, -okdir"
                 );
-                eprintln!();
+                // Upstream's refusal ends with a blank line. It goes out the
+                // same way the line above it does, so that losing it counts.
+                diag!("");
                 return 1;
             }
             let mut buf = Vec::new();
             if let Err(e) = io::Read::read_to_end(&mut io::stdin(), &mut buf) {
-                eprintln!(
+                diag!(
                     "find: {}: read error: {}",
                     files0_name(from),
                     errmsg::strerror(&e)
@@ -5141,7 +5159,7 @@ fn process_all_startpoints(
             match std::fs::read(os_from_bytes(from)) {
                 Ok(buf) => split_nul(&buf),
                 Err(e) => {
-                    eprintln!(
+                    diag!(
                         "find: cannot open {} for reading: {}",
                         files0_name(from),
                         errmsg::strerror(&e)
@@ -5213,10 +5231,19 @@ fn split_nul(buf: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 #[cfg(unix)]
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+#[cfg(unix)]
+fn run_main() -> ExitCode {
     if std::env::var_os("FIND_BLOCK_SIZE").is_some() {
-        eprintln!(
+        diag!(
             "find: The environment variable FIND_BLOCK_SIZE is not supported, the only thing \
              that affects the block size is the POSIXLY_CORRECT environment variable"
         );

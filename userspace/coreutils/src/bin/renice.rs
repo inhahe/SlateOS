@@ -11,8 +11,10 @@
 //!   0  success
 //!   1  error
 
+use coreutils::diag;
+use coreutils::stdfd;
 use std::env;
-use std::process;
+use std::process::ExitCode;
 
 // POSIX priority target types.
 const PRIO_PROCESS: i32 = 0;
@@ -115,17 +117,25 @@ fn target_label(which: i32, who: u32) -> String {
     }
 }
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
 
     let parsed = match parse_args(&args) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("renice: {e}");
+            diag!("renice: {e}");
             if e == "missing operand" {
-                eprintln!("Usage: renice [-n INCREMENT] [-p PID...] [-u USER]");
+                diag!("Usage: renice [-n INCREMENT] [-p PID...] [-u USER]");
             }
-            process::exit(1);
+            return ExitCode::from(1);
         }
     };
 
@@ -134,7 +144,7 @@ fn main() {
     let pids = parsed.pids;
     let user = parsed.user;
 
-    let mut exit_code = 0;
+    let mut exit_code = 0u8;
 
     // Handle user-based renice.
     if let Some(ref _username) = user {
@@ -143,14 +153,14 @@ fn main() {
         let uid: u32 = match _username.parse() {
             Ok(u) => u,
             Err(_) => {
-                eprintln!("renice: unknown user: {_username}");
-                eprintln!("  (numeric UID required until /etc/passwd lookup is implemented)");
-                process::exit(1);
+                diag!("renice: unknown user: {_username}");
+                diag!("  (numeric UID required until /etc/passwd lookup is implemented)");
+                return ExitCode::from(1);
             }
         };
 
         if let Err(e) = renice_target(PRIO_USER, uid, increment, absolute) {
-            eprintln!("renice: user {_username}: {e}");
+            diag!("renice: user {_username}: {e}");
             exit_code = 1;
         }
     }
@@ -158,12 +168,12 @@ fn main() {
     // Handle PID-based renice.
     for pid in &pids {
         if let Err(e) = renice_target(PRIO_PROCESS, *pid, increment, absolute) {
-            eprintln!("renice: PID {pid}: {e}");
+            diag!("renice: PID {pid}: {e}");
             exit_code = 1;
         }
     }
 
-    process::exit(exit_code);
+    ExitCode::from(exit_code)
 }
 
 #[cfg(target_os = "linux")]

@@ -305,13 +305,13 @@ fn main() -> std::process::ExitCode {
 /// descriptor it never looked at. `id`, `whoami` and `logname` say the same
 /// thing for the same reason.
 #[cfg(not(unix))]
-fn main() {
+fn main() -> std::process::ExitCode {
     // `diag!` and not `eprintln!` even here, where the message is the whole of
     // what the program does: `eprintln!` panics when the write fails, and the
     // panic message then fails to print for the same reason, so `tty 2>&-`
     // would abort with 134 instead of refusing with 1.
     coreutils::diag!("tty: unix-only utility; not supported on this platform");
-    std::process::exit(1);
+    std::process::ExitCode::from(1)
 }
 
 #[cfg(test)]

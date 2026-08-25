@@ -67,9 +67,11 @@
 //! stay in [`LONG_OPTIONS`] because the table is what decides whether an
 //! abbreviation is ambiguous.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quoteaf_os};
+use coreutils::stdfd::{self, Stream};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -136,7 +138,15 @@ enum Request {
     Run(MkfifoFlags, Vec<OsString>),
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         Ok(Request::Help) => {
@@ -148,7 +158,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Request::Run(flags, names)) => {
-            let mut err = io::stderr().lock();
+            // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
+            // diagnostic that never arrived has to reach `close_stderr`'s flag.
+            let mut err = Stream::stderr();
             if make_all(&flags, &names, &mut err) {
                 ExitCode::SUCCESS
             } else {
@@ -156,7 +168,7 @@ fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("mkfifo: {e}");
+            diag!("mkfifo: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }

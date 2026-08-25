@@ -43,10 +43,12 @@
 //! polls, so `--max-unchanged-stats` is always in play and `--pid` is checked
 //! exactly once per iteration. The clauses are dropped rather than copied.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::filekind;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{os_bytes, quote, quoteaf, quotef};
+use coreutils::stdfd;
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs::{File, Metadata};
@@ -196,7 +198,15 @@ enum Request {
     Run(Options, Vec<OsString>),
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         Ok(Request::Help) => {
@@ -212,7 +222,7 @@ fn main() -> ExitCode {
             run(&options, &files)
         }
         Err(e) => {
-            eprintln!("tail: {e}");
+            diag!("tail: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }
@@ -890,13 +900,13 @@ fn parse_hex_float(text: &str) -> Option<f64> {
 fn warn_about_unused(options: &Options) {
     if options.retry {
         if !options.forever {
-            eprintln!("tail: warning: --retry ignored; --retry is useful only when following");
+            diag!("tail: warning: --retry ignored; --retry is useful only when following");
         } else if options.follow == Follow::Descriptor {
-            eprintln!("tail: warning: --retry only effective for the initial open");
+            diag!("tail: warning: --retry only effective for the initial open");
         }
     }
     if options.pid.is_some() && !options.forever {
-        eprintln!("tail: warning: PID ignored; --pid=PID is useful only when following");
+        diag!("tail: warning: PID ignored; --pid=PID is useful only when following");
     }
 }
 
@@ -992,7 +1002,7 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
 
     // A name is what `--follow=name` follows, and standard input has none.
     if has_stdin && options.follow == Follow::Name {
-        eprintln!("tail: cannot follow {} by name", quoteaf(b"-"));
+        diag!("tail: cannot follow {} by name", quoteaf(b"-"));
         return ExitCode::from(1);
     }
     if options.forever && has_stdin {
@@ -1006,7 +1016,7 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
             && operands.len() == 1
             && !stdin_is_regular();
         if !blocking && io::stdin().is_terminal() {
-            eprintln!("tail: warning: following standard input indefinitely is ineffective");
+            diag!("tail: warning: following standard input indefinitely is ineffective");
         }
     }
 
@@ -1078,7 +1088,7 @@ fn start_file(
                 w.trouble = Trouble::Io(e.kind());
                 w.ignore = !options.retry;
             }
-            eprintln!(
+            diag!(
                 "tail: cannot open {} for reading: {}",
                 quoteaf(&w.label),
                 strerror(&e)
@@ -1099,7 +1109,7 @@ fn start_file(
             return true;
         }
         Err(e) => {
-            eprintln!(
+            diag!(
                 "tail: error reading {}: {}",
                 quoteaf(&w.label),
                 strerror(&e)
@@ -1125,7 +1135,7 @@ fn start_file(
                 w.trouble = Trouble::NotAnErrno;
                 w.tailable = false;
                 w.ignore = !options.retry;
-                eprintln!(
+                diag!(
                     "tail: {}: cannot follow end of this type of file{}",
                     quotef(&w.label),
                     if w.ignore {
@@ -1138,7 +1148,7 @@ fn start_file(
             Err(e) => {
                 ok = false;
                 w.trouble = Trouble::Io(e.kind());
-                eprintln!(
+                diag!(
                     "tail: error reading {}: {}",
                     quoteaf(&w.label),
                     strerror(&e)
@@ -1465,7 +1475,7 @@ fn follow(
         }
 
         if !any_live(watched, options) {
-            eprintln!("tail: no files remaining");
+            diag!("tail: no files remaining");
             return;
         }
         if !any_input && out.flush().is_err() {
@@ -1500,7 +1510,7 @@ fn poll_one(
         Some(Ok(m)) => m,
         Some(Err(e)) => {
             w.trouble = Trouble::Io(e.kind());
-            eprintln!("tail: {}: {}", quotef(&w.label), strerror(&e));
+            diag!("tail: {}: {}", quotef(&w.label), strerror(&e));
             w.file = None;
             return false;
         }
@@ -1542,7 +1552,7 @@ fn poll_one(
     }
 
     if regular && stats.len() < w.size {
-        eprintln!("tail: {}: file truncated", quotef(&w.label));
+        diag!("tail: {}: file truncated", quotef(&w.label));
         if let Some(f) = w.file.as_mut() {
             let _ = f.seek(SeekFrom::Start(0));
         }
@@ -1569,7 +1579,7 @@ fn poll_one(
             read != 0
         }
         Err(e) => {
-            eprintln!(
+            diag!(
                 "tail: error reading {}: {}",
                 quoteaf(&w.label),
                 strerror(&e)
@@ -1606,10 +1616,10 @@ fn recheck(w: &mut Watched, options: &Options) {
                 // A different failure from last time is news; the same one
                 // again is not.
                 if previous != w.trouble {
-                    eprintln!("tail: {}: {}", quotef(&w.label), strerror(&e));
+                    diag!("tail: {}: {}", quotef(&w.label), strerror(&e));
                 }
             } else if was_tailable {
-                eprintln!(
+                diag!(
                     "tail: {} has become inaccessible: {}",
                     quoteaf(&w.label),
                     strerror(&e)
@@ -1625,7 +1635,7 @@ fn recheck(w: &mut Watched, options: &Options) {
         w.tailable = false;
         w.ignore = !(options.retry && options.follow == Follow::Name);
         if was_tailable || previous != Trouble::NotAnErrno {
-            eprintln!(
+            diag!(
                 "tail: {} has been replaced with an untailable file{}",
                 quoteaf(&w.label),
                 if w.ignore {
@@ -1641,18 +1651,18 @@ fn recheck(w: &mut Watched, options: &Options) {
 
     let id = file_id(&stats);
     let fresh = if previous != Trouble::None && previous != Trouble::Io(ErrorKind::NotFound) {
-        eprintln!("tail: {} has become accessible", quoteaf(&w.label));
+        diag!("tail: {} has become accessible", quoteaf(&w.label));
         true
     } else if w.file.is_none() {
         // A name that was missing and is here again is a new file even when the
         // identity matches, because identities get reused.
-        eprintln!(
+        diag!(
             "tail: {} has appeared;  following new file",
             quoteaf(&w.label)
         );
         true
     } else if w.id != id {
-        eprintln!(
+        diag!(
             "tail: {} has been replaced;  following new file",
             quoteaf(&w.label)
         );

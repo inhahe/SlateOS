@@ -57,6 +57,7 @@
 
 #![cfg_attr(not(unix), allow(dead_code))]
 
+use coreutils::diag;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{self, Style};
 use localtime::{Zone, strftime};
@@ -720,13 +721,13 @@ struct Diags {
 
 impl Diags {
     fn error(&mut self, message: &str) {
-        eprintln!("stat: {message}");
+        diag!("stat: {message}");
         self.fail = true;
     }
 
     #[allow(clippy::unused_self)]
     fn warn(&self, message: &str) {
-        eprintln!("stat: {message}");
+        diag!("stat: {message}");
     }
 }
 
@@ -1157,13 +1158,17 @@ Valid format sequences for file systems:
 
 #[cfg(not(unix))]
 fn main() -> std::process::ExitCode {
-    eprintln!("stat: unix-only utility; not supported on this platform");
+    diag!("stat: unix-only utility; not supported on this platform");
     std::process::ExitCode::from(1)
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
-    imp::main()
+    coreutils::stdfd::close_stderr(imp::main(), 1)
 }
 
 #[cfg(unix)]
@@ -1173,6 +1178,7 @@ mod imp {
         help_text, is_device, parse_args, print_it, quoting_style_from_env, scan, wants,
     };
     use coreutils::canon::{self, Mode, RealFs};
+    use coreutils::diag;
     use coreutils::errmsg::strerror;
     use coreutils::pathname::dir_name;
     use coreutils::quote::{self, Style, quote_os, quoteaf, quoteaf_os};
@@ -1443,7 +1449,7 @@ mod imp {
             }
             Ok(Request::Run(settings)) => settings,
             Err(e) => {
-                eprintln!("stat: {e}");
+                diag!("stat: {e}");
                 return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
             }
         };
@@ -1545,7 +1551,7 @@ mod imp {
                 if e.kind() == io::ErrorKind::BrokenPipe {
                     return ExitCode::from(u8::from(diags.fail));
                 }
-                eprintln!("stat: write error: {}", strerror(&e));
+                diag!("stat: write error: {}", strerror(&e));
                 return ExitCode::from(1);
             }
             if stop {
@@ -1556,12 +1562,12 @@ mod imp {
         if let Err(e) = out.flush()
             && e.kind() != io::ErrorKind::BrokenPipe
         {
-            eprintln!("stat: write error: {}", strerror(&e));
+            diag!("stat: write error: {}", strerror(&e));
             return ExitCode::from(1);
         }
 
         if let Some(text) = invalid {
-            eprintln!("stat: {}: invalid directive", quote::quote(&text));
+            diag!("stat: {}: invalid directive", quote::quote(&text));
             return ExitCode::from(1);
         }
         ExitCode::from(u8::from(diags.fail))

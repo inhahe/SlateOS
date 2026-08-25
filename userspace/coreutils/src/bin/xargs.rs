@@ -6,10 +6,13 @@
 //!   -I REPL   replace REPL in COMMAND with each input item (one per invocation)
 //!   Default: append all stdin items to COMMAND and run once.
 
+use coreutils::diag;
 use coreutils::quote::quotef_os;
+use coreutils::stdfd;
 use std::env;
 use std::io::{self, Read};
-use std::process::{self, Command};
+use std::process::Command;
+use std::process::ExitCode;
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct XargsOpts {
@@ -19,7 +22,15 @@ struct XargsOpts {
     cmd_args: Vec<String>,
 }
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut opts = parse_args(&args);
 
@@ -29,16 +40,16 @@ fn main() {
 
     let mut input = String::new();
     if io::stdin().read_to_string(&mut input).is_err() {
-        eprintln!("xargs: failed to read stdin");
-        process::exit(1);
+        diag!("xargs: failed to read stdin");
+        return ExitCode::from(1);
     }
 
     let items = split_items(&input, opts.null_delim);
     if items.is_empty() {
-        return;
+        return ExitCode::SUCCESS;
     }
 
-    let mut exit_code = 0;
+    let mut exit_code = 0u8;
 
     if let Some(ref repl) = opts.replace_str {
         for item in &items {
@@ -47,7 +58,7 @@ fn main() {
                 match Command::new(cmd).args(args).status() {
                     Ok(s) if !s.success() => exit_code = 1,
                     Err(e) => {
-                        eprintln!("xargs: {}: {e}", quotef_os(cmd));
+                        diag!("xargs: {}: {e}", quotef_os(cmd));
                         exit_code = 1;
                     }
                     _ => {}
@@ -65,7 +76,7 @@ fn main() {
             match Command::new(cmd).args(&full_args).status() {
                 Ok(s) if !s.success() => exit_code = 1,
                 Err(e) => {
-                    eprintln!("xargs: {}: {e}", quotef_os(cmd));
+                    diag!("xargs: {}: {e}", quotef_os(cmd));
                     exit_code = 1;
                 }
                 _ => {}
@@ -73,7 +84,7 @@ fn main() {
         }
     } else {
         let Some((cmd, initial_args)) = opts.cmd_args.split_first() else {
-            process::exit(exit_code);
+            return ExitCode::from(exit_code);
         };
         let mut full_args: Vec<&str> = initial_args.iter().map(String::as_str).collect();
         for item in &items {
@@ -83,14 +94,14 @@ fn main() {
         match Command::new(cmd).args(&full_args).status() {
             Ok(s) if !s.success() => exit_code = 1,
             Err(e) => {
-                eprintln!("xargs: {}: {e}", quotef_os(cmd));
+                diag!("xargs: {}: {e}", quotef_os(cmd));
                 exit_code = 1;
             }
             _ => {}
         }
     }
 
-    process::exit(exit_code);
+    ExitCode::from(exit_code)
 }
 
 /// Parse xargs's argv into options + the command tail.

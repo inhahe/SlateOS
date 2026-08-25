@@ -51,11 +51,14 @@
 
 #![cfg_attr(not(unix), allow(dead_code))]
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fnmatch::{Flags, fnmatch};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::human::{Opts, default_block_size, human_readable};
 use coreutils::quote::{os_bytes, quote, quoteaf, quotef};
+#[cfg(unix)]
+use coreutils::stdfd::{self, Stream};
 // Only [`RealTree`] turns a byte path back into an `OsString`, and it is the
 // half of this file that the Windows development host does not compile — so
 // importing this unconditionally is an unused import there and a needed one on
@@ -909,7 +912,7 @@ fn parse_args(
         // A warning, not a refusal: `du -s -d0` says its piece and then runs.
         // Threaded out through `Request` would need a third variant for one
         // string, so it is printed here by the only caller that can.
-        eprintln!("du: {text}");
+        diag!("du: {text}");
     }
     Ok(Request::Run(cfg, Source::Operands(operands)))
 }
@@ -1049,7 +1052,7 @@ Binary prefixes can be used, too: KiB=K, MiB=M, and so on.
 
 #[cfg(not(unix))]
 fn main() -> ExitCode {
-    eprintln!("du: unix-only utility; not supported on this platform");
+    diag!("du: unix-only utility; not supported on this platform");
     ExitCode::from(1)
 }
 
@@ -1106,8 +1109,17 @@ fn slurp(name: &[u8]) -> io::Result<Vec<u8>> {
     std::fs::read(os_from_bytes(name))
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 #[cfg(unix)]
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+#[cfg(unix)]
+fn run_main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     let env = Environment {
         du_block_size: std::env::var_os("DU_BLOCK_SIZE").map(|v| os_bytes(&v).into_owned()),
@@ -1119,7 +1131,9 @@ fn main() -> ExitCode {
     let request = match parse_args(&argv, &env, &slurp) {
         Ok(request) => request,
         Err(refusal) => {
-            refusal.print(&mut io::stderr());
+            // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
+            // diagnostic that never arrived has to reach `close_stderr`'s flag.
+            refusal.print(&mut Stream::stderr());
             return ExitCode::from(u8::try_from(refusal.status).unwrap_or(1));
         }
     };
@@ -1138,7 +1152,9 @@ fn main() -> ExitCode {
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    let mut err = io::stderr();
+    // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
+    // diagnostic that never arrived has to reach `close_stderr`'s flag.
+    let mut err = Stream::stderr();
 
     let (roots, list) = match source {
         Source::Operands(names) => (names, None),

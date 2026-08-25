@@ -249,27 +249,105 @@ fn bash_compat_enabled() -> bool {
     }
 }
 
+/// The kernel's own answer for one of `/proc/self/status`'s credential lines —
+/// `Uid:` or `Gid:`, each `real  effective  saved  fs` — as `(real, effective)`.
+///
+/// This is the same shape of source as [`system_hostname`]'s
+/// `/proc/sys/kernel/hostname`: a fact the kernel knows, read from the file it
+/// publishes it in, because `std` exposes no `getuid`/`getgid` and this crate
+/// deliberately has no `libc` dependency (see `Cargo.toml`). A kernel that does
+/// not mount procfs — which today includes SlateOS itself — returns `None` and
+/// the caller falls back, so this never lies and never panics.
+#[cfg(unix)]
+fn proc_self_credential(key: &str) -> Option<(u32, u32)> {
+    let text = std::fs::read("/proc/self/status").ok()?;
+    for line in text.split(|b| *b == b'\n') {
+        let Some(rest) = line.strip_prefix(key.as_bytes()) else {
+            continue;
+        };
+        let mut fields = rest
+            .split(|b: &u8| b.is_ascii_whitespace())
+            .filter(|f| !f.is_empty())
+            .filter_map(|f| core::str::from_utf8(f).ok()?.parse::<u32>().ok());
+        let real = fields.next()?;
+        // A `Uid:`/`Gid:` line always carries all four IDs, but treat a short
+        // one as "effective == real" rather than discarding the line: a
+        // truncated read is worth less than a partial truth, not more.
+        let effective = fields.next().unwrap_or(real);
+        return Some((real, effective));
+    }
+    None
+}
+
 /// The `(uid, euid)` identity `osh` reports via readonly `$UID`/`$EUID`
-/// (open-questions Q28). Defaults to `(0, 0)` — **root**, option A — for the
-/// current single-user, pre-privilege-model bring-up, so root-gated scripts
+/// (open-questions Q28), and the credential every ownership and permission
+/// primary (`-O`, `-r`/`-w`/`-x`) is judged against.
+///
+/// **The kernel wins when it has an answer.** On a host with procfs this is the
+/// process's real `getuid`/`geteuid`, which is what makes `[ -O file ]` agree
+/// with bash instead of inverting it. It is deliberately checked *before* the
+/// `OSH_UID` override, even though that override is the operator's Q28
+/// configurability: the override exists to stand in for a credential the kernel
+/// cannot yet supply, and honouring it over a kernel that *can* would let any
+/// parent process redefine `$UID` by exporting a variable — precisely the
+/// spoofing bash refuses when it ignores an inherited `UID=` from the
+/// environment.
+///
+/// Below the kernel: numeric `OSH_UID` (and optionally `OSH_EUID`, defaulting to
+/// `OSH_UID`) from the environment, so a SlateOS login/session layer can inject
+/// an identity. Below that, `(0, 0)` — **root**, option A — for the current
+/// single-user, pre-privilege-model bring-up, so root-gated scripts
 /// (`if [ "$EUID" -ne 0 ]; then echo "run as root"; fi`) correctly take their
 /// privileged path while the shell genuinely *is* the all-powerful system.
-///
-/// The operator asked for the reported identity to be per-user configurable: a
-/// session provides numeric `OSH_UID` (and optionally `OSH_EUID`, which defaults
-/// to `OSH_UID`) in the environment. Once SlateOS exposes a real
-/// `getuid`/`geteuid` credential, that should be preferred over this env
-/// override (tracked in known-issues TD-OILS-IDVARS).
 fn reported_identity() -> (u32, u32) {
-    let uid = std::env::var("OSH_UID")
-        .ok()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .unwrap_or(0);
-    let euid = std::env::var("OSH_EUID")
-        .ok()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .unwrap_or(uid);
-    (uid, euid)
+    #[cfg(unix)]
+    if let Some(ids) = proc_self_credential("Uid:") {
+        return ids;
+    }
+    configured_identity(
+        std::env::var("OSH_UID").ok().as_deref(),
+        std::env::var("OSH_EUID").ok().as_deref(),
+    )
+}
+
+/// The half of [`reported_identity`] that does not ask the kernel: the Q28
+/// default and the `OSH_UID`/`OSH_EUID` override that adjusts it.
+///
+/// Split out and taking its two inputs as arguments rather than reading the
+/// environment itself so that the operator's Q28 policy stays testable. Once
+/// the host has procfs, the policy is unreachable through `reported_identity`
+/// — every call is answered by the kernel before it gets here — and a rule
+/// that can only be exercised on the platform that does not implement it is a
+/// rule with no test. Arguments also keep those tests off the process-global
+/// environment, which no parallel test can safely write.
+///
+/// An unparseable value is *ignored*, not an error: this is read from an
+/// inherited environment, and a shell that refused to start because some
+/// ancestor exported `OSH_UID=root` would be worse than one that reports the
+/// default.
+fn configured_identity(uid: Option<&str>, euid: Option<&str>) -> (u32, u32) {
+    let parse = |v: Option<&str>| v.and_then(|v| v.trim().parse::<u32>().ok());
+    let uid = parse(uid).unwrap_or(0);
+    (uid, parse(euid).unwrap_or(uid))
+}
+
+/// The effective group ID `[ -G file ]` is judged against — bash's `current_user
+/// .egid`, not its group *list*. Measured against bash 5.2.21: a file whose
+/// group is a supplementary group we genuinely belong to (`chgrp 24 f` for a
+/// member of group 24) is `-G` **false**, so the list is the wrong thing to ask.
+///
+/// Same precedence as [`reported_identity`]: the kernel first, then whatever
+/// [`reported_groups`] derived from `OSH_GROUPS` or the passwd/group tables,
+/// whose first entry is the primary group.
+///
+/// `unix` only, because `-G` is: the Windows [`unary_owner`] has no GID to
+/// compare against and answers from the file's mere existence instead.
+#[cfg(unix)]
+fn reported_egid() -> u32 {
+    if let Some((_, egid)) = proc_self_credential("Gid:") {
+        return egid;
+    }
+    reported_groups().first().copied().unwrap_or(0)
 }
 
 /// The variables bash marks `att_noassign`: the shell maintains them, so a
@@ -68287,8 +68365,8 @@ fn unary_mode_bit(_path: &std::path::Path, _op: BStr<'_>) -> bool {
 }
 
 /// `-O`/`-G` — the file is owned by our effective UID / GID. bash compares
-/// against the effective credential only, not the supplementary group list, so
-/// `-G` uses the first entry of [`reported_groups`] (the primary group).
+/// against the effective credential only, never the supplementary group list;
+/// see [`reported_egid`] for the measurement that settles which.
 #[cfg(unix)]
 fn unary_owner(path: &std::path::Path, op: BStr<'_>) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -68298,7 +68376,7 @@ fn unary_owner(path: &std::path::Path, op: BStr<'_>) -> bool {
     if op == b"-O" {
         md.uid() == reported_identity().1
     } else {
-        reported_groups().first().is_some_and(|g| *g == md.gid())
+        md.gid() == reported_egid()
     }
 }
 
@@ -84369,26 +84447,58 @@ st=1
 
     #[test]
     fn special_var_identity_uid_euid() {
-        // Default reported identity is root (0/0) per the operator's Q28
-        // decision — SlateOS runs single-user-as-root until a login/session
-        // layer injects a per-user identity via OSH_UID/OSH_EUID.
-        assert_eq!(run("echo $UID").0, "0\n");
-        assert_eq!(run("echo $EUID").0, "0\n");
-        // The canonical root check scripts use works out to "root".
+        // The identity is the platform's, not a constant: on a host with procfs
+        // it is the process's real credential (which is what makes `[ -O f ]`
+        // agree with bash), and only below that the Q28 root default — see
+        // `configured_identity`, whose own tests pin that policy.
+        let (uid, euid) = reported_identity();
+        assert_eq!(run("echo $UID").0, format!("{uid}\n"));
+        assert_eq!(run("echo $EUID").0, format!("{euid}\n"));
+        // The canonical root check scripts use agrees with it — this is the
+        // arithmetic comparison, not the seeding, and it is the reason the
+        // value has to be an integer rather than a string that looks like one.
         assert_eq!(
             run("if [ \"$EUID\" -ne 0 ]; then echo notroot; else echo root; fi").0,
-            "root\n"
+            if euid == 0 { "root\n" } else { "notroot\n" }
         );
         // bash marks both readonly-integer (`declare -ir`); reassignment fails.
         assert!(run("declare -p UID").0.starts_with("declare -ir UID="));
         assert!(run("declare -p EUID").0.starts_with("declare -ir EUID="));
         // A bare reassignment of a readonly var reports status 1 and (as osh
         // does non-interactively) aborts the list, so the value is untouched.
-        assert_eq!(run("UID=1000").1, 1);
-        assert_eq!(run("EUID=1000").1, 1);
-        assert_eq!(run("echo $UID").0, "0\n");
-        // The `\\$` prompt escape resolves to `#` for the root EUID.
-        assert_eq!(run("PS1='\\$ '; echo \"${PS1@P}\"").0, "# \n");
+        assert_eq!(run("UID=99999").1, 1);
+        assert_eq!(run("EUID=99999").1, 1);
+        assert_eq!(run("echo $UID").0, format!("{uid}\n"));
+        // The `\\$` prompt escape resolves to `#` for the root EUID and `$` for
+        // any other.
+        assert_eq!(
+            run("PS1='\\$ '; echo \"${PS1@P}\"").0,
+            if euid == 0 { "# \n" } else { "$ \n" }
+        );
+    }
+
+    #[test]
+    fn configured_identity_defaults_to_root_and_honours_the_env() {
+        // Q28, option A: with nothing configured the shell reports root, so a
+        // `[ "$EUID" -ne 0 ]` gate takes its privileged path on a SlateOS that
+        // genuinely is single-user-as-root.
+        assert_eq!(configured_identity(None, None), (0, 0));
+        // `OSH_UID` alone sets both — a session that names one identity means
+        // one identity, not a setuid split.
+        assert_eq!(configured_identity(Some("1000"), None), (1000, 1000));
+        // `OSH_EUID` splits them when it is given.
+        assert_eq!(configured_identity(Some("1000"), Some("0")), (1000, 0));
+        // `OSH_EUID` on its own leaves the real uid at the default.
+        assert_eq!(configured_identity(None, Some("7")), (0, 7));
+        // Surrounding whitespace is trimmed, as for every other numeric env
+        // toggle the shell reads.
+        assert_eq!(configured_identity(Some(" 42 \n"), None), (42, 42));
+        // A value that is not a number is ignored rather than fatal: this comes
+        // from an inherited environment nobody here controls.
+        assert_eq!(configured_identity(Some("root"), None), (0, 0));
+        assert_eq!(configured_identity(Some(""), Some("-1")), (0, 0));
+        // Out of range for a uid_t, so not a uid — same treatment.
+        assert_eq!(configured_identity(Some("4294967296"), None), (0, 0));
     }
 
     #[test]
@@ -101232,18 +101342,22 @@ st=1
              declare -A m=([x]=\"1\" )\ndeclare -A n=([y]=\"2\" )\n"
         );
 
-        // `PPID` lists with the real parent pid, so it is normalised away before
-        // the listings below are compared literally.
-        let hide_ppid = |o: String| {
+        // Three of these carry a value the host decides rather than the shell:
+        // `PPID` is the real parent pid, and `EUID`/`UID` are the process's real
+        // credential wherever the kernel publishes one. The listings below are
+        // compared literally, so the *values* are masked away and only the
+        // names, attributes and sort position are asserted.
+        let hide_host_values = |o: String| {
             o.lines()
                 .map(|l| {
-                    if l.starts_with("declare -ir PPID=") {
-                        "declare -ir PPID"
-                    } else {
-                        l
+                    for name in ["PPID", "EUID", "UID"] {
+                        if l.starts_with(&format!("declare -ir {name}=")) {
+                            return format!("declare -ir {name}");
+                        }
                     }
+                    l.to_string()
                 })
-                .collect::<Vec<&str>>()
+                .collect::<Vec<String>>()
                 .join("\n")
         };
 
@@ -101255,10 +101369,10 @@ st=1
         // in sort order, exactly as bash lists them.
         let (o2, _) = run("declare -i k=5; s=hi; declare -i k2=9; declare -i");
         assert_eq!(
-            hide_ppid(o2),
-            "declare -i BASHPID\ndeclare -ir EUID=\"0\"\ndeclare -i HISTCMD\n\
+            hide_host_values(o2),
+            "declare -i BASHPID\ndeclare -ir EUID\ndeclare -i HISTCMD\n\
              declare -i OPTIND=\"1\"\ndeclare -ir PPID\ndeclare -i RANDOM\n\
-             declare -i SRANDOM\ndeclare -ir UID=\"0\"\n\
+             declare -i SRANDOM\ndeclare -ir UID\n\
              declare -i k=\"5\"\ndeclare -i k2=\"9\""
         );
 
@@ -101269,10 +101383,10 @@ st=1
         // readonly vars like BASH_VERSINFO.
         let (o3, _) = run("declare -i ii=1; declare -l low=HELLO; plain=3; declare -il");
         assert_eq!(
-            hide_ppid(o3),
-            "declare -i BASHPID\ndeclare -ir EUID=\"0\"\ndeclare -i HISTCMD\n\
+            hide_host_values(o3),
+            "declare -i BASHPID\ndeclare -ir EUID\ndeclare -i HISTCMD\n\
              declare -i OPTIND=\"1\"\ndeclare -ir PPID\ndeclare -i RANDOM\n\
-             declare -i SRANDOM\ndeclare -ir UID=\"0\"\n\
+             declare -i SRANDOM\ndeclare -ir UID\n\
              declare -i ii=\"1\"\ndeclare -l low=\"hello\""
         );
 

@@ -32793,6 +32793,51 @@ the part that turns `Layout::character` from a pure function into a machine with
 a memory). **(4) compose sequences remain untouched** and are the same shape of
 problem over longer sequences.
 
+**Update 2026-08-24, later still — step 2 is done, in both halves. Only the
+compositor's memory (step 3) is left.**
+
+*Step 2a — which faces are dead* (`38348bf9b`, `gui/keylayout`). `KeyDef` gained
+`dead: DeadFaces`, four flags, one per level. Four and not one because **deadness
+belongs to a key's face, not to a character**: French AZERTY carries `^` twice —
+plain on the key right of `P`, where it is dead and makes `ê`, and on AltGr+9,
+where it is the ordinary ASCII circumflex a programmer types into a shell. Any
+per-*character* "is this an accent" table is necessarily wrong about one of them.
+The three national layouts declare seven dead faces between them; the five
+English ones declare none, which a test asserts rather than assumes.
+
+The load-bearing part is not the flags but a refactor next to them.
+`KeyDef::face(level) -> Option<Face>` now decides *once* which of the four levels
+the modifiers select, and both `character()` and `is_dead()` read its answer, so
+they are structurally unable to disagree. The case that forces this: AltGr+Shift
+on a key with no fourth-level character falls back to the AltGr *character*, so
+its *deadness* has to fall back too — otherwise the key types a live `~` while
+the compositor sits waiting for a vowel, and the user's next letter vanishes.
+
+*Step 2b — what an accent and the next key make* (`30b0864a7`,
+`gui/font/src/deadkey.rs`). No accent table: composing `e` and an acute into `é`
+is exactly the question `norm.rs` already answers on every string it shapes, from
+generated UAX #15 tables covering ~1050 pairs. A hand-written
+`match ('e', '´') => 'é'` would be a second answer to that question — shorter,
+and therefore the one that eventually disagrees, most likely by omitting the
+letter nobody thought to list. So the module adds one thing: the map from the
+*spacing* accent a key cap carries (`´` U+00B4) to the *combining* mark the
+tables are indexed by (U+0301). Thirteen accents, through the eighteen
+characters keyboards print them as.
+
+U+00B0 DEGREE SIGN is deliberately **not** in that map, and a test pins its
+absence. It is indistinguishable from U+02DA RING ABOVE on screen, and German
+puts it on the shifted face of a key whose plain face is a dead circumflex —
+precisely the arrangement in which a mis-declared `°` would quietly compose `å`.
+
+**Still to do for (3):** the compositor must hold the pending accent between two
+key events, implement §550's failed-composition policy (type both characters),
+and decide the two conventions that are facts about keyboards rather than about
+Unicode — what a dead key pressed twice does, and what a dead key followed by a
+space does. It is also the only crate that links both `keylayout` and `osfont`,
+so it is where a test belongs asserting that every dead face in every builtin
+layout maps to a real `deadkey::combining` entry. Until that lands, the three
+national layouts still type a standalone accent where a real board would compose.
+
 ## A-JOB-CONTROL-SELF-STOP-LOST-A-RACING-SIGCONT (lane A, 2026-08-17) - **fixed**
 
 **In short:** when a program stopped itself for job control (what a shell does
@@ -75057,3 +75102,89 @@ follow whatever the `cmp`/`diff` entry above settled for multi-valued statuses,
 so the shell speaks one convention rather than two.
 
 **Severity.** Medium in scripts, invisible interactively.
+
+## TD-SHARED-PRE-PUSH-GATE-7-CHECKS-A-WHOLE-CRATE-WHEN-A-CRATE-ROOT-IS-TOUCHED (lane C, 2026-08-24) — **open; a documentation fault, not a behaviour one**
+
+**In short.** The push hook refuses a push containing a `.rs` file that
+`rustfmt` (the Rust code formatter) would reformat. Its own comment promises
+this is scoped to the files your commits touched — "this is never complaining
+about someone else's code." That promise is false for one shape of file:
+`rustfmt` follows `mod` declarations, so checking a crate's `lib.rs` checks
+*every* module the crate declares. Adding a single line to a crate root is
+therefore checked as the whole crate.
+
+Nothing here is unsafe and nothing is silently wrong; the surprise is the cost.
+An agent who adds `pub mod foo;` to a crate root expects to be told about
+`foo.rs` and is instead handed a diff over thirty files it never opened, which
+reads exactly like a broken gate — and the documented reaction to a gate that
+complains about someone else's code is to bypass it. That is the actual risk:
+a correct gate that looks broken gets `ALLOW_FMT_DRIFT=1` by habit, and then it
+protects nothing.
+
+### Where it lives
+
+`scripts/hooks/pre-push`, gate 7 — the loop that builds the path list from
+`git log --name-only … HEAD --not --remotes`, and the `fmt_check` that hands
+those paths to `rustfmt` directly. The scoping claim is in the comment block
+headed "Gate 7 — a source file rustfmt would reformat", in the paragraph
+beginning "Scope: exactly the .rs files the commits being pushed add or
+modify", and it is repeated in the refusal message printed to the pusher.
+
+The mechanism is `rustfmt`'s own, not the hook's: given a file, `rustfmt`
+parses it and recurses into every `mod name;` it finds, because that is how it
+formats a crate from its root. `cargo fmt` relies on exactly this. So the hook
+cannot get per-file scoping merely by naming one file — the file names a tree.
+
+### How it was hit
+
+2026-08-24, lane C, adding `pub mod deadkey;` (one line) to `gui/font/src/lib.rs`
+for the dead-key composer. The push was refused with a `rustfmt` diff over
+`gui/font/src/bidi.rs` and thirty-eight other files, none of them in the commit.
+`osfont` had never been through the formatter, and the gate — correctly, by its
+real behaviour — declined to let the crate root move until the crate was clean.
+
+### What the proper fix looks like
+
+Two candidates, and they are not exclusive:
+
+1. **Make the comment and the refusal message true.** Say that a crate root or
+   a `mod.rs` is checked as the subtree it declares, because `rustfmt` follows
+   `mod`, and that the fix in that case is `cargo fmt -p <crate>` rather than
+   `rustfmt <file>`. This is a few lines of prose and removes the whole
+   "the gate is broken" reading. It is the fix this entry recommends.
+
+2. **Pass `--skip-children`** so `rustfmt` checks only the named file. This
+   makes the scoping claim literally true, at the price of the gate no longer
+   noticing that a crate root's *siblings* drifted — which, on the evidence of
+   `osfont`, is drift worth noticing. Not recommended on its own; if taken, it
+   should be paired with something that does check whole crates on a slower
+   cadence, or the drift simply stops being visible anywhere.
+
+Note that `--skip-children` is also what would have let `osfont` stay
+unformatted indefinitely, so option 1 is the one that keeps the value the gate
+delivered here.
+
+### Lane
+
+`scripts/hooks/pre-push` is in no lane's `owns` list in
+`scripts/which-lane.py` and in no lane's `never writes` list — it is shared
+infrastructure, added by the lane that wrote gate 7 (`0c7d8bfa3`). Lane C is
+logging it rather than editing it. Whoever picks it up should also copy the
+result to `.git/hooks/pre-push` in each worktree, or re-run
+`scripts/install-hooks.sh`, since the tracked file is only the source.
+
+**Severity.** Low as a defect, medium as an invitation to bypass a working
+gate.
+
+### 2026-08-24 — what lane C did instead of bypassing it
+
+Made `osfont` genuinely formatted (`e0cb965d6`), which is what the gate was
+asking for. Eight of the crate's files are generated by
+`gui/font/tools/gen_*.py`, and formatting those would have fought the next
+regeneration forever — so the eleven table generators now run `rustfmt` over
+what they write, via `gui/font/tools/rustfmt_out.py`. Proven idempotent rather
+than assumed: after `cargo fmt -p osfont`, re-running `gen_norm_tables.py`
+leaves `norm_tables.rs` byte-identical (SHA-256 `434108c5…`), and
+`scripts/check-generated-tables.py` still reports all four of its tables
+matching. Any other crate that mixes generated and hand-written modules will
+hit the same wall the first time its root is touched; the same fix applies.

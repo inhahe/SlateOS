@@ -11507,6 +11507,53 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "and still reports success");
     }
 
+    serial_println!("  kshell::self_test 32: both spellings of `tee` agree about failure");
+    // `tee` is one command with two implementations -- `cmd_tee_input` for the
+    // piped form and `cmd_tee` for `tee FILE TEXT` -- and only the first set a
+    // status when the write failed. The messages were byte-identical, so the
+    // disagreement was invisible in the output and showed up only in `&&`.
+    //
+    // The sweep that fixed the rest of this class could not reach it: its rule
+    // required the message to be `progname: <complaint>`, and `tee: write
+    // error: {:?}` puts two words before the colon that carries the meaning.
+    // `known-issues.md` recorded three such sites as deliberately unswept; two
+    // have since been fixed by later waves, and this was the last one.
+    {
+        // Local rather than shared: the earlier rungs each define their own
+        // `piped` inside their own block, so there is nothing in scope here.
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // A directory that does not exist, so the write cannot succeed. Both
+        // forms are asked to write to the same bad path, which is what makes
+        // this a comparison rather than two independent assertions.
+        let bad = "/zzz_no_such_dir/tee_selftest.txt";
+
+        let out = capture_command(&alloc::format!("tee {} hello", bad));
+        assert_output_contains("the two-argument form reports the error", &out, b"tee: ");
+        assert_eq!(last_exit(), 1, "tee FILE TEXT: a failed write is a failure");
+
+        let out = piped(&alloc::format!("tee {}", bad), b"hello");
+        assert_output_contains("the piped form reports the error", &out, b"tee: ");
+        assert_eq!(
+            last_exit(),
+            1,
+            "tee < input: a failed write is a failure too"
+        );
+
+        // And a write that works still succeeds, in both forms -- otherwise a
+        // blanket `set_exit(1)` would satisfy the two assertions above while
+        // breaking every honest use of the command.
+        let good = "/tmp/kshell_tee_status.txt";
+        let _ = capture_command(&alloc::format!("tee {} hello", good));
+        assert_eq!(last_exit(), 0, "tee FILE TEXT: a good write is success");
+        let _ = piped(&alloc::format!("tee {}", good), b"hello");
+        assert_eq!(last_exit(), 0, "tee < input: a good write is success");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -108157,7 +108204,13 @@ fn cmd_tee(args: &str) {
 
     // Write to the file.
     if let Err(e) = crate::fs::Vfs::write_file(path, text.as_bytes()) {
+        // The pipe form of this same command, `cmd_tee_input`, already sets a
+        // status for the byte-identical error. Same command, same failure, same
+        // message, opposite status -- so `tee /ro/f x && deploy` ran `deploy`
+        // when the two-argument form was used and did not when the piped form
+        // was, which is the kind of difference nobody thinks to test for.
         shell_println!("tee: write error: {:?}", e);
+        set_exit(1);
     }
 }
 

@@ -13419,7 +13419,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // The metacharacters that make the substring reading wrong, from the
         // other direction: a bracket, an alternation, a group, a bound.
         for (prog, want) in [
-            ("awk '/^[an]/ {print}'", b"not err two\nabc\naxc\nadc\n" as &[u8]),
+            (
+                "awk '/^[an]/ {print}'",
+                b"not err two\nabc\naxc\nadc\n" as &[u8],
+            ),
             ("awk '/one|two/ {print}'", b"err one\nnot err two\n"),
             ("awk '/^(err|abc)$/ {print}'", b"abc\n"),
             ("awk '/^a.c$/ {print}'", b"abc\naxc\nadc\n"),
@@ -123298,7 +123301,9 @@ fn awk_feed(
                 Ok(true) => awk_exec_action(&rule.action, record, &fields, *nr, nf),
                 Ok(false) => {}
                 Err(_) => {
-                    return Err(AwkMatchAbort(alloc::string::String::from(rule.text.as_str())));
+                    return Err(AwkMatchAbort(alloc::string::String::from(
+                        rule.text.as_str(),
+                    )));
                 }
             }
         }

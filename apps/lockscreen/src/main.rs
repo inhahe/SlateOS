@@ -25,8 +25,8 @@ use guitk::event::{
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
-use pwkdf::{KdfError, KdfParams, PasswordVerifier};
 use guitk::text;
+use pwkdf::{KdfError, KdfParams, PasswordVerifier};
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -228,6 +228,128 @@ fn compute_initials(name: &str) -> String {
 }
 
 // ============================================================================
+// Who decides whether a password is right
+// ============================================================================
+
+/// The verdict on a password attempt.
+///
+/// # Why this is not a `bool`
+///
+/// It used to be, and the screen's two call sites both wrote
+/// `let _ = self.submit_password();` — the answer to the only question the
+/// screen asks was computed and thrown away. A richer type does not by itself
+/// stop that, but it does make the discard visible, and each variant here
+/// wants different handling that a `bool` cannot express.
+///
+/// The variants mirror `userspace/authlib`'s `Outcome` one for one, because
+/// this is the shape the real answer arrives in — see
+/// `requests/b-c-desktop-password-checks-go-through-a-privileged-verifier.md`
+/// and `design-decisions.md` §341. The lock screen will not compute a verdict
+/// itself for much longer: it will hand the typed bytes to `logind` over
+/// `libservicebus` and receive one of these back. Naming the six cases now,
+/// while the answer is still local, is the difference between growing toward
+/// that shape and away from it.
+///
+/// # `Locked` and `Unusable` are not `Rejected`
+///
+/// All three show the user the same thing, because telling an attacker *which*
+/// of the three they hit is free information. They are separate anyway because
+/// `Unusable` means the *system* is broken — a stored entry that nothing on
+/// this machine can recompute — and that has to reach an administrator rather
+/// than be tallied as a typo and eventually lock the account out for a fault
+/// it did not cause.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthOutcome {
+    /// The password is right.
+    Accepted,
+    /// The password is wrong, or there is no such user. Indistinguishable on
+    /// purpose: `authlib` runs the same key derivation against a dummy entry
+    /// for a missing account, so the call cannot be timed to enumerate users.
+    Rejected,
+    /// The account is disabled (`!`, `!!`, `*`, `!$6$…` in the store). No
+    /// password will ever open it.
+    Locked,
+    /// The stored entry is empty. Deliberately *not* a verdict: `authlib`
+    /// reports what it found and each caller states its own policy, because a
+    /// console login may reasonably let an empty entry through and a lock
+    /// screen may not. This screen's policy is [`LockScreen::unlocks_for`].
+    NoPassword,
+    /// The stored entry is in a format this system cannot recompute. A fault,
+    /// not a wrong guess.
+    Unusable,
+    /// Too many recent failures. The verifier, not the caller, counts them —
+    /// a password check is an oracle by construction, so the rate limit is
+    /// part of the interface rather than something each caller is trusted to
+    /// remember to add.
+    RateLimited {
+        /// Seconds until another attempt will be considered.
+        retry_after_secs: u64,
+    },
+}
+
+impl AuthOutcome {
+    /// Whether this verdict, on its own, means the password was right.
+    ///
+    /// Note what this deliberately does *not* decide: [`Self::NoPassword`] is
+    /// false here, and a caller that wants to accept an empty entry must say
+    /// so itself. See the variant's own note.
+    #[must_use]
+    pub const fn is_accepted(self) -> bool {
+        matches!(self, Self::Accepted)
+    }
+
+    /// Whether this verdict means the machine needs an administrator rather
+    /// than another guess.
+    #[must_use]
+    pub const fn needs_administrator(self) -> bool {
+        matches!(self, Self::Locked | Self::Unusable)
+    }
+
+    /// A message safe to show on a screen an attacker may be standing at.
+    ///
+    /// [`Self::Rejected`], [`Self::Locked`] and [`Self::Unusable`] share one
+    /// string on purpose — see the type's own note.
+    #[must_use]
+    pub const fn user_message(self) -> &'static str {
+        match self {
+            Self::Accepted => "",
+            Self::Rejected | Self::Locked | Self::Unusable => "Incorrect password",
+            Self::NoPassword => "This account has no password",
+            Self::RateLimited { .. } => "Too many attempts",
+        }
+    }
+}
+
+/// Something that can say whether a password is right.
+///
+/// The screen holds one of these rather than a hash, which is the whole point:
+/// `apps/lockscreen` runs as the logged-in user and is the process most likely
+/// to be attacked, so the thing worth stealing must not be in it. Today the
+/// only implementor is [`PasswordValidator`], which does hold a verifier and
+/// is interim scaffolding for exactly that reason. Tomorrow's implementor is a
+/// `libservicebus` connection to `system.logind`, and nothing above this trait
+/// changes when it arrives.
+///
+/// # Why `&mut self`
+///
+/// The failure tally lives on the verifier, not on the question — one
+/// authority per process, not one per attempt. A rate limit rebuilt for every
+/// guess is not a rate limit. [`PasswordValidator`] does not use the
+/// mutability, and the signature carries it anyway so that the implementor
+/// that needs it does not have to change the trait.
+///
+/// # Why `&[u8]` and not `&str`
+///
+/// A password is not text. `logind` takes `libservicebus` byte-string fields
+/// precisely so that a password which is not valid UTF-8 survives the trip,
+/// and a `&str` here would put a lossy conversion in front of the one call
+/// where losing a byte silently means a correct password is rejected forever.
+pub trait PasswordAuthority: core::fmt::Debug {
+    /// Judge `password` for `username`.
+    fn authenticate(&mut self, username: &str, password: &[u8]) -> AuthOutcome;
+}
+
+// ============================================================================
 // Password validator
 // ============================================================================
 
@@ -340,6 +462,36 @@ impl PasswordValidator {
         let params = KdfParams::new([0x5Au8; pwkdf::SALT_LEN], TEST_ROUNDS);
         Self {
             verifier: PasswordVerifier::create(password.as_bytes(), params, VERIFIER_DOMAIN),
+        }
+    }
+}
+
+/// The interim local path, until `logind` can tell who is calling it.
+///
+/// This is the implementation that ought not to exist: it means the process
+/// guarding the session is also the process holding the thing worth stealing.
+/// It stays because the replacement is blocked, not because it is right —
+/// `logind`'s `AuthenticateSession` is written and tested, and answers
+/// `system.logind.Error.UnknownCaller` to everyone, because the kernel gives a
+/// service no way to learn its caller's uid (`SYS_SERVICE_ACCEPT` returns a
+/// bare handle and records nothing about the peer). Lane B has asked lane A
+/// for that in `requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`.
+/// When it lands, this impl is deleted and a bus connection takes its place;
+/// nothing else in this file moves.
+///
+/// Only three of the six outcomes are reachable from here, which is itself the
+/// measure of how much this stands in for. It cannot distinguish a disabled
+/// account from a wrong password, because it never sees an account — it holds
+/// one verifier and knows nothing about `username`. The rate limit is the
+/// screen's own [`LockoutTimer`], which is the wrong place for it (see the
+/// trait's note) and is where it has to stay while the tally has nowhere else
+/// to live.
+impl PasswordAuthority for PasswordValidator {
+    fn authenticate(&mut self, _username: &str, password: &[u8]) -> AuthOutcome {
+        if self.verifier.check(password) {
+            AuthOutcome::Accepted
+        } else {
+            AuthOutcome::Rejected
         }
     }
 }
@@ -573,6 +725,11 @@ impl LockoutTimer {
         self.active
     }
 
+    /// Whole seconds left before another attempt will be considered.
+    const fn remaining_secs(&self) -> u64 {
+        self.remaining_secs
+    }
+
     /// Format remaining time for display (e.g. "0:30", "4:59").
     fn format_remaining(&self) -> String {
         let mins = self.remaining_secs / 60;
@@ -734,7 +891,11 @@ impl UserList {
 }
 
 /// The lock screen application state.
-#[derive(Clone, Debug)]
+///
+/// No longer `Clone`: it owns a [`PasswordAuthority`], which will shortly be a
+/// bus connection, and a second screen sharing one connection's failure tally
+/// is not a thing that should be constructible by accident. Nothing cloned it.
+#[derive(Debug)]
 pub struct LockScreen {
     /// Current UI state (clock view or password entry).
     pub state: LockScreenState,
@@ -761,9 +922,20 @@ pub struct LockScreen {
     shake: ShakeAnimation,
     /// Lockout timer state.
     lockout: LockoutTimer,
-    /// Password validator for the selected user (optional; users without
-    /// passwords don't need one).
-    validator: Option<PasswordValidator>,
+    /// Who judges a typed password. `None` means nothing can judge one, which
+    /// is [`AuthOutcome::Unusable`] and not "let them in".
+    authority: Option<Box<dyn PasswordAuthority>>,
+    /// Set when a password attempt succeeded and the session should be
+    /// unlocked; cleared by [`LockScreen::take_unlock_request`].
+    ///
+    /// [`LockScreen::handle_event`]'s doc comment promised this field for a
+    /// long time before it existed. Until it did, the two places that submit a
+    /// password both wrote `let _ = self.submit_password();`, so pressing
+    /// Enter with the right password consumed the event, cleared the buffer,
+    /// reset the failure count and unlocked nothing — the screen was
+    /// undismissable through its own event loop, and every test that appeared
+    /// to prove otherwise called `submit_password` directly.
+    unlock_requested: bool,
     /// Whether the submit button is hovered.
     submit_hovered: bool,
     /// Whether the password field is focused.
@@ -780,7 +952,7 @@ impl LockScreen {
     pub fn new(
         users: Vec<UserInfo>,
         config: LockScreenConfig,
-        validator: Option<PasswordValidator>,
+        authority: Option<Box<dyn PasswordAuthority>>,
     ) -> Self {
         let users = UserList::new(users);
         Self {
@@ -801,7 +973,8 @@ impl LockScreen {
             show_error: false,
             shake: ShakeAnimation::new(),
             lockout: LockoutTimer::new(),
-            validator,
+            authority,
+            unlock_requested: false,
             submit_hovered: false,
             password_focused: false,
         }
@@ -823,7 +996,11 @@ impl LockScreen {
         let user = UserInfo::new("admin", "Administrator", true)
             .with_hint("It's the name of your first pet");
         let validator = PasswordValidator::for_test("password123");
-        Self::new(vec![user], LockScreenConfig::default(), Some(validator))
+        Self::new(
+            vec![user],
+            LockScreenConfig::default(),
+            Some(Box::new(validator)),
+        )
     }
 
     /// Get the currently active/selected user.
@@ -875,6 +1052,10 @@ impl LockScreen {
             self.password_buffer.clear();
             self.failed_attempts = 0;
             self.show_error = false;
+            // An authorisation is for the account that earned it. Carrying one
+            // across a switch would let a correct password for a guest account
+            // unlock the administrator's session.
+            self.unlock_requested = false;
         }
     }
 
@@ -909,47 +1090,104 @@ impl LockScreen {
         self.password_buffer.len()
     }
 
-    /// Attempt to submit the current password.
+    /// This screen's policy on an outcome that is not, by itself, a verdict.
     ///
-    /// Returns `true` if the password is correct (screen should unlock),
-    /// `false` if incorrect.
-    pub fn submit_password(&mut self) -> bool {
+    /// Only [`AuthOutcome::NoPassword`] is in question: `authlib` reports an
+    /// empty stored entry without judging it, because a console login may
+    /// reasonably let one through and a lock screen may not. Everything else
+    /// is already decided by [`AuthOutcome::is_accepted`].
+    ///
+    /// **This currently accepts it, which is the behaviour this screen has
+    /// always had, and it is an open question rather than a settled one** —
+    /// see `open-questions.md`. Refusing is the secure answer and is what lane
+    /// B recommends; it also means a user whose account has no password can
+    /// reach a screen that will never let them back in. Both are bad and the
+    /// choice is the operator's. It is one function so that changing it is one
+    /// line, and it is *not* changed as part of the refactor that introduced
+    /// it: a rework that quietly alters who can unlock a machine is two
+    /// changes wearing one commit message.
+    #[must_use]
+    pub const fn unlocks_for(outcome: AuthOutcome) -> bool {
+        matches!(outcome, AuthOutcome::Accepted | AuthOutcome::NoPassword)
+    }
+
+    /// Whether an unlock has been requested since this was last called, and
+    /// clear it.
+    ///
+    /// Taking rather than reading: an unlock authorises exactly *one* unlock,
+    /// not a mode. That mirrors the one-shot ticket `logind` leaves on a
+    /// session — a caller that authenticated, was interrupted and walked away
+    /// must not leave a screen the next person clears for free.
+    pub fn take_unlock_request(&mut self) -> bool {
+        core::mem::take(&mut self.unlock_requested)
+    }
+
+    /// Attempt to submit the current password, and report what came back.
+    ///
+    /// On a verdict this screen unlocks for ([`Self::unlocks_for`]) the unlock
+    /// flag is raised, to be collected by [`Self::take_unlock_request`]. The
+    /// return value is for the caller that wants to *say* something about the
+    /// outcome; the flag is what actually dismisses the screen, so a caller
+    /// that ignores the return value no longer silently ignores the unlock.
+    pub fn submit_password(&mut self) -> AuthOutcome {
         if self.lockout.is_active() {
-            return false;
+            return AuthOutcome::RateLimited {
+                retry_after_secs: self.lockout.remaining_secs(),
+            };
         }
 
-        let user = self.active_user();
-        if !user.has_password {
-            // No password required — unlock immediately.
-            return true;
+        if !self.active_user().has_password {
+            return self.settle(AuthOutcome::NoPassword);
         }
 
+        // An empty box is not a guess, and it does not cost the user an
+        // attempt. Reported as a rejection because that is what it is; the
+        // difference from a wrong password is that nothing is asked and
+        // nothing is tallied.
         if self.password_buffer.is_empty() {
-            return false;
+            return AuthOutcome::Rejected;
         }
 
-        let is_valid = self
-            .validator
-            .as_ref()
-            .is_some_and(|v| v.validate(&self.password_buffer));
+        // The username goes with the password because the authority that will
+        // shortly answer this is per-machine, not per-user, and needs to know
+        // whose entry to check and whose failures to count.
+        let username = self.active_user().username.clone();
+        let outcome = self.authority.as_mut().map_or(
+            // No authority at all is a broken system, not an open door. The
+            // shape this replaces asked `is_some_and(...)`, which reads as
+            // "reject" and is right by accident: it collapses "wrong password"
+            // and "nothing here can check a password" into one answer, and the
+            // second needs an administrator rather than another guess.
+            AuthOutcome::Unusable,
+            |authority| authority.authenticate(&username, self.password_buffer.as_bytes()),
+        );
+        self.settle(outcome)
+    }
 
-        if is_valid {
+    /// Apply `outcome` to the screen: raise the unlock flag or count the
+    /// failure, and return it unchanged for the caller to inspect.
+    fn settle(&mut self, outcome: AuthOutcome) -> AuthOutcome {
+        self.password_buffer.clear();
+        if Self::unlocks_for(outcome) {
             self.failed_attempts = 0;
-            self.password_buffer.clear();
-            true
-        } else {
-            self.failed_attempts = self.failed_attempts.saturating_add(1);
-            self.show_error = true;
-            self.shake.trigger();
-            self.password_buffer.clear();
-
-            // Check if we should start a lockout.
-            if let Some(duration) = lockout_duration_for_attempts(self.failed_attempts) {
-                self.lockout.start(duration);
-            }
-
-            false
+            self.unlock_requested = true;
+            return outcome;
         }
+
+        // A failed guess revokes an authorisation already earned, so that
+        // someone who walks up to a screen the real user authenticated and
+        // abandoned cannot spend it. In practice the caller collects the flag
+        // after every event and it never lives this long -- which is exactly
+        // why it is worth writing down: the rule must hold for the caller that
+        // does not, not only for the one that does.
+        self.unlock_requested = false;
+        self.failed_attempts = self.failed_attempts.saturating_add(1);
+        self.show_error = true;
+        self.shake.trigger();
+        if let Some(duration) = lockout_duration_for_attempts(self.failed_attempts) {
+            self.lockout.start(duration);
+        }
+        outcome
     }
 
     /// Get the current accessibility description of the screen.
@@ -964,8 +1202,9 @@ impl LockScreen {
     /// Handle an input event. Returns `EventResult::Consumed` if the event
     /// was handled, or `EventResult::Ignored` if it should propagate.
     ///
-    /// Special return: if the screen should unlock, this is signaled by
-    /// the `unlock_requested` flag on the struct (checked separately).
+    /// An event may authorise an unlock, which is *not* in the return value —
+    /// collect it with [`Self::take_unlock_request`] after each call. This
+    /// doc has said so since before the flag existed; it does now.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
             Event::Key(key_event) => self.handle_key(key_event),
@@ -1022,7 +1261,12 @@ impl LockScreen {
                     EventResult::Consumed
                 }
                 Key::Enter => {
-                    let _ = self.submit_password();
+                    // The verdict is deliberately not inspected here: acting
+                    // on it is `submit_password`'s own job, so that pressing
+                    // Enter and clicking Submit cannot drift apart. What used
+                    // to be wrong was that `submit_password` had no way to
+                    // act, and this discard was the whole of the handling.
+                    self.submit_password();
                     EventResult::Consumed
                 }
                 Key::Backspace => {
@@ -1061,7 +1305,7 @@ impl LockScreen {
                         // Check if click is on submit button.
                         let submit_rect = self.submit_button_rect();
                         if hit_test(mouse.x, mouse.y, &submit_rect) {
-                            let _ = self.submit_password();
+                            self.submit_password();
                             return EventResult::Consumed;
                         }
                         // Check if click is on a user in the user list.
@@ -1659,13 +1903,19 @@ mod tests {
     )]
 
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     // -- Helper factories --
 
     fn single_user_lockscreen() -> LockScreen {
         let user = UserInfo::new("alice", "Alice Johnson", true).with_hint("Name of your cat");
         let validator = PasswordValidator::for_test("correcthorse");
-        LockScreen::new(vec![user], LockScreenConfig::default(), Some(validator))
+        LockScreen::new(
+            vec![user],
+            LockScreenConfig::default(),
+            Some(Box::new(validator)),
+        )
     }
 
     fn multi_user_lockscreen() -> LockScreen {
@@ -1675,12 +1925,62 @@ mod tests {
             UserInfo::new("charlie", "Charlie Brown", false),
         ];
         let validator = PasswordValidator::for_test("correcthorse");
-        LockScreen::new(users, LockScreenConfig::default(), Some(validator))
+        LockScreen::new(
+            users,
+            LockScreenConfig::default(),
+            Some(Box::new(validator)),
+        )
     }
 
     fn no_password_lockscreen() -> LockScreen {
         let user = UserInfo::new("guest", "Guest User", false);
         LockScreen::new(vec![user], LockScreenConfig::default(), None)
+    }
+
+    /// An authority that answers with whatever it was told to, and remembers
+    /// what it was asked.
+    ///
+    /// [`PasswordValidator`] can only ever say `Accepted` or `Rejected` — it
+    /// holds one verifier and has never heard of an account — so three of the
+    /// six outcomes have no way to reach the screen through it. Those three
+    /// are the ones whose handling differs, which is precisely why the screen
+    /// needs to be driven by something that can produce them.
+    /// What a [`FakeAuthority`] was asked: the username and the raw password
+    /// bytes, in order. `Vec<u8>` and not `String` on purpose — the point of
+    /// the byte-string signature is that a password which is not valid UTF-8
+    /// survives, and a spy that stringified it could not show that.
+    type AskLog = Rc<RefCell<Vec<(String, Vec<u8>)>>>;
+
+    #[derive(Debug)]
+    struct FakeAuthority {
+        answer: AuthOutcome,
+        asked: Option<AskLog>,
+    }
+
+    impl FakeAuthority {
+        const fn always(answer: AuthOutcome) -> Self {
+            Self {
+                answer,
+                asked: None,
+            }
+        }
+
+        const fn recording(answer: AuthOutcome, asked: AskLog) -> Self {
+            Self {
+                answer,
+                asked: Some(asked),
+            }
+        }
+    }
+
+    impl PasswordAuthority for FakeAuthority {
+        fn authenticate(&mut self, username: &str, password: &[u8]) -> AuthOutcome {
+            if let Some(log) = self.asked.as_ref() {
+                log.borrow_mut()
+                    .push((username.to_string(), password.to_vec()));
+            }
+            self.answer
+        }
     }
 
     // -- LockScreenState --
@@ -1884,8 +2184,9 @@ mod tests {
         for ch in "correcthorse".chars() {
             ls.type_char(ch);
         }
-        assert!(ls.submit_password());
+        assert_eq!(ls.submit_password(), AuthOutcome::Accepted);
         assert_eq!(ls.failed_attempts, 0);
+        assert!(ls.take_unlock_request());
     }
 
     #[test]
@@ -1895,24 +2196,30 @@ mod tests {
         for ch in "wrongpassword".chars() {
             ls.type_char(ch);
         }
-        assert!(!ls.submit_password());
+        assert_eq!(ls.submit_password(), AuthOutcome::Rejected);
         assert_eq!(ls.failed_attempts, 1);
         assert!(ls.show_error);
+        assert!(!ls.take_unlock_request());
     }
 
     #[test]
     fn test_submit_empty_password() {
         let mut ls = single_user_lockscreen();
         ls.enter_password_mode();
-        assert!(!ls.submit_password());
+        assert_eq!(ls.submit_password(), AuthOutcome::Rejected);
         assert_eq!(ls.failed_attempts, 0); // Empty submit doesn't count as failure.
+        assert!(!ls.take_unlock_request());
     }
 
     #[test]
     fn test_no_password_user_unlocks_immediately() {
         let mut ls = no_password_lockscreen();
         ls.enter_password_mode();
-        assert!(ls.submit_password());
+        // Reported as `NoPassword`, not `Accepted`: nothing was checked. The
+        // screen unlocks for it only because `unlocks_for` says so, which is
+        // the open question that function documents.
+        assert_eq!(ls.submit_password(), AuthOutcome::NoPassword);
+        assert!(ls.take_unlock_request());
     }
 
     // -- Failed attempts and lockout --
@@ -1961,7 +2268,14 @@ mod tests {
             ls.type_char('x');
             ls.submit_password();
         }
-        assert!(!ls.submit_password()); // Submit blocked during lockout.
+        assert_eq!(
+            ls.submit_password(),
+            AuthOutcome::RateLimited {
+                retry_after_secs: LOCKOUT_TIER_1_SECS
+            },
+            "a submit during lockout must say why it was refused"
+        );
+        assert!(!ls.take_unlock_request());
     }
 
     #[test]
@@ -2195,6 +2509,275 @@ mod tests {
         });
         let result = ls.handle_event(&event);
         assert_eq!(result, EventResult::Consumed);
+        // Consuming the event is the weaker half. This test used to stop at
+        // the line above, which `handle_key` would have satisfied by doing
+        // nothing at all -- and for a while that is close to what it did.
+        assert!(
+            ls.take_unlock_request(),
+            "pressing Enter with the right password must authorise an unlock"
+        );
+    }
+
+    #[test]
+    fn pressing_enter_with_the_wrong_password_authorises_nothing() {
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        for ch in "wronghorse".chars() {
+            ls.type_char(ch);
+        }
+        ls.handle_event(&Event::Key(KeyEvent {
+            key: Key::Enter,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        }));
+
+        assert!(!ls.take_unlock_request());
+        assert_eq!(ls.failed_attempts, 1);
+    }
+
+    #[test]
+    fn clicking_submit_with_the_right_password_authorises_an_unlock() {
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        for ch in "correcthorse".chars() {
+            ls.type_char(ch);
+        }
+        // Through the same door a mouse uses, because the two submit paths
+        // were separately written and could separately stop working.
+        let button = ls.submit_button_rect();
+        ls.handle_event(&Event::Mouse(MouseEvent {
+            x: button.x + button.width / 2.0,
+            y: button.y + button.height / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+
+        assert!(ls.take_unlock_request());
+    }
+
+    #[test]
+    fn an_unlock_is_authorised_once_and_not_left_standing() {
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        for ch in "correcthorse".chars() {
+            ls.type_char(ch);
+        }
+        ls.submit_password();
+
+        assert!(ls.take_unlock_request());
+        assert!(
+            !ls.take_unlock_request(),
+            "one accepted password authorises one unlock, not a mode"
+        );
+    }
+
+    #[test]
+    fn a_failed_guess_revokes_an_authorisation_nobody_collected() {
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        for ch in "correcthorse".chars() {
+            ls.type_char(ch);
+        }
+        ls.submit_password();
+
+        // The real user authenticated, was interrupted, and walked away
+        // without the screen being dismissed. Someone else guesses.
+        ls.type_char('x');
+        ls.submit_password();
+
+        assert!(
+            !ls.take_unlock_request(),
+            "a wrong guess must spend the authorisation it did not earn"
+        );
+    }
+
+    #[test]
+    fn switching_user_revokes_an_authorisation_earned_by_the_other_account() {
+        let mut ls = multi_user_lockscreen();
+        ls.enter_password_mode();
+        for ch in "correcthorse".chars() {
+            ls.type_char(ch);
+        }
+        ls.submit_password();
+
+        ls.select_user(1);
+
+        assert!(
+            !ls.take_unlock_request(),
+            "an authorisation belongs to the account that earned it"
+        );
+    }
+
+    #[test]
+    fn a_screen_with_nothing_to_check_a_password_against_reports_a_fault() {
+        // Not "rejected": a user whose account has a password, on a screen
+        // holding no authority, is a broken machine rather than a bad typist,
+        // and the difference decides whether an administrator is called.
+        let user = UserInfo::new("alice", "Alice Johnson", true);
+        let mut ls = LockScreen::new(vec![user], LockScreenConfig::default(), None);
+        ls.enter_password_mode();
+        ls.type_char('x');
+
+        let outcome = ls.submit_password();
+        assert_eq!(outcome, AuthOutcome::Unusable);
+        assert!(outcome.needs_administrator());
+        assert!(!ls.take_unlock_request());
+    }
+
+    #[test]
+    fn a_locked_account_is_told_apart_from_a_typo_without_being_shown_apart() {
+        for outcome in [
+            AuthOutcome::Rejected,
+            AuthOutcome::Locked,
+            AuthOutcome::Unusable,
+        ] {
+            let mut ls = LockScreen::new(
+                vec![UserInfo::new("alice", "Alice Johnson", true)],
+                LockScreenConfig::default(),
+                Some(Box::new(FakeAuthority::always(outcome))),
+            );
+            ls.enter_password_mode();
+            ls.type_char('x');
+
+            assert_eq!(ls.submit_password(), outcome);
+            assert!(!ls.take_unlock_request());
+            // Same words for all three: which one an attacker hit is free
+            // information. The screen still knows the difference.
+            assert_eq!(outcome.user_message(), "Incorrect password");
+        }
+        assert!(!AuthOutcome::Rejected.needs_administrator());
+        assert!(AuthOutcome::Locked.needs_administrator());
+        assert!(AuthOutcome::Unusable.needs_administrator());
+    }
+
+    #[test]
+    fn an_empty_stored_entry_is_not_by_itself_an_acceptance() {
+        // The distinction the whole `NoPassword` variant exists to carry: the
+        // verdict is "there was nothing to check", and only this screen's own
+        // policy turns that into an unlock. Collapsing it into `is_accepted`
+        // would decide the question in `open-questions.md` by accident, in a
+        // library function, for every caller at once.
+        assert!(!AuthOutcome::NoPassword.is_accepted());
+        assert!(AuthOutcome::Accepted.is_accepted());
+        assert!(
+            LockScreen::unlocks_for(AuthOutcome::NoPassword),
+            "the screen's policy, which is the thing that is allowed to say yes"
+        );
+    }
+
+    #[test]
+    fn a_submitted_password_does_not_stay_in_the_buffer() {
+        // Right or wrong, the typed bytes are gone afterwards. Wrong matters
+        // because the next guess would otherwise be appended to this one and
+        // every later attempt would fail for a reason the user cannot see;
+        // right matters because a plaintext password should not outlive the
+        // moment it was needed.
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        for ch in "wronghorse".chars() {
+            ls.type_char(ch);
+        }
+        ls.submit_password();
+        assert_eq!(ls.password_len(), 0);
+
+        for ch in "correcthorse".chars() {
+            ls.type_char(ch);
+        }
+        ls.submit_password();
+        assert_eq!(ls.password_len(), 0);
+    }
+
+    #[test]
+    fn a_correct_password_clears_the_failures_that_came_before_it() {
+        // `test_submit_correct_password` asserts this too, but from a screen
+        // that never failed -- so the count it checks is zero either way and
+        // deleting the reset leaves it green. Here the count is genuinely
+        // non-zero first, which is the only arrangement that can see it.
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        for _ in 0..2 {
+            ls.type_char('x');
+            ls.submit_password();
+        }
+        assert_eq!(ls.failed_attempts, 2);
+
+        for ch in "correcthorse".chars() {
+            ls.type_char(ch);
+        }
+        assert_eq!(ls.submit_password(), AuthOutcome::Accepted);
+        assert_eq!(
+            ls.failed_attempts, 0,
+            "a right password must not leave the user two guesses from a lockout"
+        );
+    }
+
+    #[test]
+    fn the_username_reaches_the_authority_that_has_to_look_it_up() {
+        // The old signature had nowhere to put it, because the screen held the
+        // one verifier it would ever consult. A verifier that serves the whole
+        // machine cannot work that way, and a screen that never sends the name
+        // would ask it about the wrong account.
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut ls = LockScreen::new(
+            vec![UserInfo::new("alice", "Alice Johnson", true)],
+            LockScreenConfig::default(),
+            Some(Box::new(FakeAuthority::recording(
+                AuthOutcome::Rejected,
+                Rc::clone(&seen),
+            ))),
+        );
+        ls.enter_password_mode();
+        for ch in "hunter2".chars() {
+            ls.type_char(ch);
+        }
+        ls.submit_password();
+
+        assert_eq!(
+            *seen.borrow(),
+            vec![("alice".to_string(), b"hunter2".to_vec())]
+        );
+    }
+
+    #[test]
+    fn the_password_reaches_the_authority_exactly_as_it_was_typed() {
+        // Every other password in this file is lowercase ASCII -- "hunter2",
+        // "correcthorse", a run of 'x' -- so a screen that folded the case or
+        // re-encoded the text on its way out would pass all of them, while
+        // locking every user with a capital letter out of their own machine.
+        // The reintroduction sweep found exactly that: substituting
+        // `password_buffer.to_lowercase().as_bytes()` for
+        // `password_buffer.as_bytes()` failed no test.
+        //
+        // So this one types something no accident survives: two capitals, a
+        // multi-byte character and a symbol. The expected value is spelled as
+        // an explicit byte string rather than `"...".as_bytes()`, so that a
+        // mangling cannot be made to pass by editing the source literal to
+        // match it.
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut ls = LockScreen::new(
+            vec![UserInfo::new("alice", "Alice Johnson", true)],
+            LockScreenConfig::default(),
+            Some(Box::new(FakeAuthority::recording(
+                AuthOutcome::Rejected,
+                Rc::clone(&seen),
+            ))),
+        );
+        ls.enter_password_mode();
+        for ch in "PaSSwörd!".chars() {
+            ls.type_char(ch);
+        }
+        ls.submit_password();
+
+        assert_eq!(
+            seen.borrow().len(),
+            1,
+            "one submission must ask exactly once"
+        );
+        assert_eq!(
+            seen.borrow()[0].1,
+            b"PaSSw\xc3\xb6rd!".to_vec(),
+            "the password must arrive as it was typed, case and encoding included"
+        );
     }
 
     #[test]

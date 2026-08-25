@@ -254,8 +254,16 @@ pub struct ModalOverlay {
     pub dismiss_on_click_outside: bool,
     /// Whether pressing Escape dismisses the overlay.
     pub dismiss_on_escape: bool,
-    /// The area occupied by the dialog content (clicks inside are forwarded).
-    content_rect: (f32, f32, f32, f32),
+    /// The area occupied by the dialog content (clicks inside are forwarded),
+    /// or `None` until the dialog has drawn itself once and said where it
+    /// landed.
+    ///
+    /// `None` is not the same as an empty rectangle, and the difference is a
+    /// bug this used to have: with a zero rect every click counts as "outside",
+    /// so the first click after `show()` and before the first frame dismissed a
+    /// dialog the user had not seen yet. Not knowing where the dialog is means
+    /// no click can be classified, so none of them dismiss it.
+    content_rect: Option<(f32, f32, f32, f32)>,
 }
 
 impl ModalOverlay {
@@ -268,7 +276,7 @@ impl ModalOverlay {
             fade_speed: 0.004, // Full fade in ~250ms
             dismiss_on_click_outside: true,
             dismiss_on_escape: true,
-            content_rect: (0.0, 0.0, 0.0, 0.0),
+            content_rect: None,
         }
     }
 
@@ -294,8 +302,14 @@ impl ModalOverlay {
     }
 
     /// Set the content rectangle (the area that the dialog occupies).
+    ///
+    /// Every dialog calls this from its own `render`, with the rectangle it has
+    /// just drawn itself into. That is deliberately the only place it is called
+    /// from: the overlay's idea of where the dialog is has to be the dialog's
+    /// idea of where it is, and the only moment both are known to agree is the
+    /// moment the box was drawn.
     pub fn set_content_rect(&mut self, x: f32, y: f32, width: f32, height: f32) {
-        self.content_rect = (x, y, width, height);
+        self.content_rect = Some((x, y, width, height));
     }
 
     /// Update animation state. Call each frame with elapsed milliseconds.
@@ -321,7 +335,8 @@ impl ModalOverlay {
 
         if let MouseEventKind::Press(MouseButton::Left) = event.kind
             && self.dismiss_on_click_outside
-            && !self.point_in_content(event.x, event.y)
+            && let Some((cx, cy, cw, ch)) = self.content_rect
+            && !point_in_rect(event.x, event.y, cx, cy, cw, ch)
         {
             return Some(DialogResult::Dismissed);
         }
@@ -355,12 +370,6 @@ impl ModalOverlay {
             corner_radii: CornerRadii::ZERO,
         });
     }
-
-    /// Check if a point is inside the content rectangle.
-    fn point_in_content(&self, x: f32, y: f32) -> bool {
-        let (cx, cy, cw, ch) = self.content_rect;
-        x >= cx && x <= cx + cw && y >= cy && y <= cy + ch
-    }
 }
 
 impl Default for ModalOverlay {
@@ -391,6 +400,9 @@ pub struct AlertDialog {
     overlay: ModalOverlay,
     /// Custom width (if set, overrides auto-sizing).
     width: Option<f32>,
+    /// Where the dialog last drew itself, or `None` before the first frame.
+    /// This is what a click is tested against; see [`DialogLayout`].
+    placement: Option<DialogLayout>,
 }
 
 impl AlertDialog {
@@ -555,18 +567,23 @@ impl AlertDialog {
             return EventResult::Consumed;
         }
 
-        // Check button clicks.
+        // Check button clicks, against the rectangles the buttons were last
+        // drawn at. Nothing is clickable before the first frame, which is
+        // correct: a dialog that has not been drawn has no buttons on screen to
+        // have been aimed at.
         if let MouseEventKind::Press(MouseButton::Left) = event.kind {
-            let layout = self.compute_layout(800.0, 600.0);
-            for (i, btn_rect) in layout.button_rects.iter().enumerate() {
-                if point_in_rect(
-                    event.x, event.y, btn_rect.0, btn_rect.1, btn_rect.2, btn_rect.3,
-                ) && let Some(btn) = self.buttons.buttons.get(i)
-                {
-                    self.result = Some(btn.to_result());
-                    self.overlay.hide();
-                    return EventResult::Consumed;
-                }
+            let hit = self.placement.as_ref().and_then(|layout| {
+                layout
+                    .button_rects
+                    .iter()
+                    .position(|r| point_in_rect(event.x, event.y, r.0, r.1, r.2, r.3))
+            });
+            if let Some(i) = hit
+                && let Some(btn) = self.buttons.buttons.get(i)
+            {
+                self.result = Some(btn.to_result());
+                self.overlay.hide();
+                return EventResult::Consumed;
             }
         }
 
@@ -574,7 +591,15 @@ impl AlertDialog {
     }
 
     /// Render the dialog within the given parent area.
-    pub fn render(&self, parent_width: f32, parent_height: f32, tree: &mut RenderTree) {
+    ///
+    /// Takes `&mut self` because drawing is what teaches the dialog where it
+    /// is: the box it lands in depends on the parent size, which only the
+    /// caller knows and only passes in here. Storing that as a side effect of
+    /// rendering — rather than offering a separate "tell me your size" call —
+    /// is what makes "you can only click what was drawn" true by construction.
+    /// The separate call existed once (`ModalOverlay::set_content_rect`) and
+    /// nothing outside the tests ever made it.
+    pub fn render(&mut self, parent_width: f32, parent_height: f32, tree: &mut RenderTree) {
         if !self.overlay.active && self.overlay.opacity <= 0.0 {
             return;
         }
@@ -583,6 +608,8 @@ impl AlertDialog {
         self.overlay.render(parent_width, parent_height, tree);
 
         let layout = self.compute_layout(parent_width, parent_height);
+        self.overlay
+            .set_content_rect(layout.x, layout.y, layout.width, layout.height);
 
         // Box shadow.
         tree.push(RenderCommand::BoxShadow {
@@ -669,7 +696,7 @@ impl AlertDialog {
             text_x = icon_x + ICON_SIZE + ICON_PADDING;
         }
 
-        let buttons_y = layout.y + layout.height - BUTTON_HEIGHT - CONTENT_PADDING;
+        let buttons_y = layout.buttons_y;
 
         // Message text, one command per wrapped line.
         let text_max_width = self.message_max_width();
@@ -701,22 +728,22 @@ impl AlertDialog {
         }
 
         // Buttons (bottom-right aligned).
-        self.render_buttons(tree, &layout, buttons_y);
+        self.render_buttons(tree, &layout);
+
+        self.placement = Some(layout);
     }
 
     /// Render the button row.
-    fn render_buttons(&self, tree: &mut RenderTree, layout: &DialogLayout, y: f32) {
-        let total_width: f32 = self
-            .buttons
-            .buttons
-            .iter()
-            .map(|_| BUTTON_MIN_WIDTH)
-            .sum::<f32>()
-            + (self.buttons.len().saturating_sub(1) as f32) * BUTTON_SPACING;
-        let start_x = layout.x + layout.width - CONTENT_PADDING - total_width;
-
+    ///
+    /// Draws each button at the rectangle `compute_layout` put it at, rather
+    /// than repeating the arithmetic. The two used to be separate copies of the
+    /// same sum, which is a hit area that can drift away from the button under
+    /// it with no test able to see it happen.
+    fn render_buttons(&self, tree: &mut RenderTree, layout: &DialogLayout) {
         for (i, btn) in self.buttons.buttons.iter().enumerate() {
-            let btn_x = start_x + (i as f32) * (BUTTON_MIN_WIDTH + BUTTON_SPACING);
+            let Some(&(btn_x, y, _, _)) = layout.button_rects.get(i) else {
+                continue;
+            };
             let is_focused = i == self.focused_button;
 
             // Button background.
@@ -835,6 +862,7 @@ impl AlertDialog {
             y,
             width,
             height,
+            buttons_y,
             button_rects,
         }
     }
@@ -871,6 +899,7 @@ impl AlertDialog {
             result: None,
             overlay,
             width: None,
+            placement: None,
         }
     }
 }
@@ -896,6 +925,13 @@ pub struct InputDialog {
     /// screen, and a caret rebuilt from the offset alone steps over a
     /// right-to-left word rather than through it.
     cursor: TextCursor,
+    /// Where a selection started, as a byte offset into `input_text`, or `None`
+    /// if nothing is selected. The other end of the selection is the caret —
+    /// deliberately, rather than a stored `(start, end)` pair, which is a third
+    /// number that can disagree with the other two. A plain offset and not a
+    /// `TextCursor`: a selection is a range of *text*, so it has no side of a
+    /// direction boundary to be on. See `design-decisions.md` §546.
+    selection_anchor: Option<usize>,
     password_mode: bool,
     validation_error: Option<String>,
     /// Validation function stored as a flag; actual validation is done via `validate()`.
@@ -904,6 +940,9 @@ pub struct InputDialog {
     focused_element: InputFocus,
     result: Option<DialogResult>,
     overlay: ModalOverlay,
+    /// Where the dialog last drew its field and its buttons, or `None` before
+    /// the first frame. See [`InputPlacement`].
+    placement: Option<InputPlacement>,
 }
 
 /// Which element has focus in the input dialog.
@@ -927,6 +966,7 @@ impl InputDialog {
             placeholder: placeholder.to_string(),
             input_text: String::new(),
             cursor: TextCursor::default(),
+            selection_anchor: None,
             password_mode: false,
             validation_error: None,
             has_validator: false,
@@ -934,6 +974,7 @@ impl InputDialog {
             focused_element: InputFocus::TextField,
             result: None,
             overlay,
+            placement: None,
         }
     }
 
@@ -957,6 +998,7 @@ impl InputDialog {
     pub fn with_initial_text(mut self, text: &str) -> Self {
         self.input_text = text.to_string();
         self.cursor = TextCursor::from(text.len());
+        self.selection_anchor = None;
         self
     }
 
@@ -965,6 +1007,7 @@ impl InputDialog {
         self.result = None;
         self.validation_error = None;
         self.focused_element = InputFocus::TextField;
+        self.selection_anchor = None;
         self.overlay.show();
     }
 
@@ -987,6 +1030,9 @@ impl InputDialog {
     pub fn set_input_text(&mut self, text: &str) {
         self.input_text = text.to_string();
         self.cursor = TextCursor::from(text.len());
+        // The anchor names offsets in the string that has just been replaced,
+        // so it can be past the end of the new one.
+        self.selection_anchor = None;
     }
 
     /// Set a validation error message (shown below the input field).
@@ -1083,15 +1129,34 @@ impl InputDialog {
             // reader of that script means, even where that character is drawn
             // on the right. The arrows below are the opposite — they are about
             // the screen — and that asymmetry is deliberate.
+            //
+            // Every deleting arm below asks the selection first. A key that
+            // would remove one character removes the whole selection instead
+            // when there is one, which is what "selected" means everywhere
+            // else; a field that deleted one character out of a highlighted run
+            // would leave the user staring at a highlight that no longer
+            // matches the text under it.
             Key::Backspace => {
-                if let Some(prev) = self.cursor.prev_in(&self.input_text) {
+                if crate::textedit::delete_selection(
+                    &mut self.input_text,
+                    &mut self.cursor,
+                    &mut self.selection_anchor,
+                ) {
+                    self.validation_error = None;
+                } else if let Some(prev) = self.cursor.prev_in(&self.input_text) {
                     self.input_text.remove(prev.byte());
                     self.cursor = prev;
                     self.validation_error = None;
                 }
             }
             Key::Delete => {
-                if self.cursor.byte() < self.input_text.len() {
+                if crate::textedit::delete_selection(
+                    &mut self.input_text,
+                    &mut self.cursor,
+                    &mut self.selection_anchor,
+                ) {
+                    self.validation_error = None;
+                } else if self.cursor.byte() < self.input_text.len() {
                     // `remove` takes the whole character at the offset, so no
                     // width arithmetic is needed here — only the guard that the
                     // offset is inside the string.
@@ -1099,18 +1164,36 @@ impl InputDialog {
                     self.validation_error = None;
                 }
             }
-            Key::Left => self.move_caret(false),
-            Key::Right => self.move_caret(true),
+            // Each arrow plants the anchor before it moves, if Shift is down,
+            // and drops it if not: a bare arrow on a selection means "put the
+            // caret here and forget the selection", not "extend it silently".
+            Key::Left => {
+                self.begin_or_end_selection(event.modifiers.shift);
+                self.move_caret(false);
+            }
+            Key::Right => {
+                self.begin_or_end_selection(event.modifiers.shift);
+                self.move_caret(true);
+            }
             Key::Home => {
+                self.begin_or_end_selection(event.modifiers.shift);
                 self.cursor = TextCursor::default();
             }
             Key::End => {
+                self.begin_or_end_selection(event.modifiers.shift);
                 self.cursor = TextCursor::from(self.input_text.len());
             }
             _ => {
                 if let Some(ch) = event.text
                     && !ch.is_control()
                 {
+                    // Typing over a selection replaces it, so the character
+                    // lands where the selection was rather than beside it.
+                    crate::textedit::delete_selection(
+                        &mut self.input_text,
+                        &mut self.cursor,
+                        &mut self.selection_anchor,
+                    );
                     self.input_text.insert(self.cursor.byte(), ch);
                     // The boundary after the caret, once the text has the new
                     // character in it, is where the typing left the caret.
@@ -1126,13 +1209,96 @@ impl InputDialog {
     }
 
     /// Handle mouse event.
+    ///
+    /// Everything is hit-tested against what the last frame drew. Before that
+    /// frame the dialog has no placement and nothing inside it can be clicked —
+    /// which is the honest answer, since nothing inside it is on screen.
     fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
         if let Some(result) = self.overlay.handle_mouse(event) {
             self.result = Some(result);
             self.overlay.hide();
             return EventResult::Consumed;
         }
+
+        let MouseEventKind::Press(MouseButton::Left) = event.kind else {
+            return EventResult::Consumed;
+        };
+        let Some(p) = self.placement.clone() else {
+            return EventResult::Consumed;
+        };
+
+        if point_in_rect(event.x, event.y, p.ok.0, p.ok.1, p.ok.2, p.ok.3) {
+            // The focus follows the click, so that a rejected input leaves the
+            // ring on the button the user pressed rather than back in the field
+            // — `try_accept` may do nothing, and the dialog has to still look
+            // like the place the press landed.
+            self.focused_element = InputFocus::OkButton;
+            self.try_accept();
+            return EventResult::Consumed;
+        }
+
+        if point_in_rect(
+            event.x, event.y, p.cancel.0, p.cancel.1, p.cancel.2, p.cancel.3,
+        ) {
+            self.focused_element = InputFocus::CancelButton;
+            self.result = Some(DialogResult::Cancel);
+            self.overlay.hide();
+            return EventResult::Consumed;
+        }
+
+        if point_in_rect(event.x, event.y, p.field.0, p.field.1, p.field.2, p.field.3) {
+            self.focused_element = InputFocus::TextField;
+            self.place_caret_at(event.x - p.text_x, p.text_width);
+        }
+
         EventResult::Consumed
+    }
+
+    /// Put the caret where a click `dx` pixels into the drawn text landed.
+    ///
+    /// The click is resolved against the string that is *on screen*, which for
+    /// a password field is the row of marks and not the secret, and the answer
+    /// is then mapped back to a byte offset in the secret. Resolving against the
+    /// secret directly would place the caret by the widths of characters nobody
+    /// can see: a click aimed at the third mark would land wherever the third
+    /// character of the real text happens to end, which for a proportional font
+    /// is somewhere else entirely.
+    fn place_caret_at(&mut self, dx: f32, width: f32) {
+        // A click starts a new selection wherever it lands, so whatever was
+        // selected stops being selected. Dragging is not wired up, so the
+        // anchor is dropped rather than planted: an anchor with no drag to move
+        // it is an empty selection that only looks like state.
+        self.selection_anchor = None;
+
+        if self.input_text.is_empty() {
+            // What is drawn is the placeholder, which is not editable text. It
+            // has no caret positions in it, so a click anywhere in the field
+            // means the one place typing can go.
+            self.cursor = TextCursor::default();
+            return;
+        }
+
+        let display = self.display_text();
+        let drawn_cursor = TextCursor::from(self.drawn_offset(self.cursor.byte()));
+        let hit = crate::textedit::cursor_at_click(
+            &display,
+            drawn_cursor,
+            width,
+            FONT_SIZE,
+            FontWeightHint::Regular,
+            dx,
+        );
+        self.cursor = if self.password_mode {
+            // The marks are all one byte and all the same width, so the hit
+            // carries no direction to preserve — and a masked field is the
+            // documented exception that stays logical anyway. See `move_caret`.
+            TextCursor::from(self.byte_at_drawn(hit.byte()))
+        } else {
+            // Whole, not just the byte: where two directions meet, one offset
+            // names two places on screen and the affinity is what tells them
+            // apart.
+            hit
+        };
     }
 
     /// Step the caret one position left or right **on the screen**.
@@ -1185,6 +1351,74 @@ impl InputDialog {
         }
     }
 
+    /// Plant or drop the selection anchor for an arrow key that is about to
+    /// move the caret.
+    fn begin_or_end_selection(&mut self, shift: bool) {
+        crate::textedit::begin_or_end_selection(shift, self.cursor, &mut self.selection_anchor);
+    }
+
+    /// The selected range as offsets into the *drawn* string.
+    ///
+    /// For an ordinary field that is the range as stored. For a password field
+    /// the drawn string is a row of one-byte marks, one per character, so both
+    /// ends have to be converted from byte offsets in the secret to mark counts
+    /// — otherwise a selection over an accented letter would highlight two
+    /// marks for one character, and a selection over an emoji four, which is
+    /// exactly the byte-count leak the masking exists to prevent.
+    fn drawn_offset(&self, byte: usize) -> usize {
+        if !self.password_mode {
+            return byte;
+        }
+        self.input_text.get(..byte).map_or_else(
+            || self.input_text.chars().count(),
+            |head| head.chars().count(),
+        )
+    }
+
+    /// The inverse of [`Self::drawn_offset`]: a position in the drawn string
+    /// back to a byte offset in the stored one.
+    ///
+    /// A click gives an offset into what is on screen; the caret is stored as
+    /// an offset into what was typed. For an ordinary field those are the same
+    /// number. For a password field the drawn string has one mark per
+    /// character, so the mark count has to be walked back through the secret's
+    /// characters — which is also why this cannot be a multiplication.
+    fn byte_at_drawn(&self, drawn: usize) -> usize {
+        if !self.password_mode {
+            return drawn;
+        }
+        self.input_text
+            .char_indices()
+            .nth(drawn)
+            .map_or(self.input_text.len(), |(byte, _)| byte)
+    }
+
+    /// The string the field puts on screen: the placeholder when there is
+    /// nothing typed, a row of marks in password mode, otherwise the text
+    /// itself.
+    ///
+    /// Shared by `render` and the click path so that the two cannot disagree
+    /// about what the user is looking at — a click resolved against a different
+    /// string from the one drawn is a caret that lands somewhere the user did
+    /// not aim.
+    fn display_text(&self) -> String {
+        if self.input_text.is_empty() {
+            self.placeholder.clone()
+        } else if self.password_mode {
+            // One mark per *caret stop*, not per byte. `len()` is the UTF-8
+            // byte count, so a password with any non-ASCII character in it drew
+            // more asterisks than it has characters — two for an accented
+            // letter, four for an emoji. That is wrong twice over: the row of
+            // marks no longer lines up with the positions the caret can occupy
+            // (`caret_offsets` walks characters), and the width of the row
+            // leaks how many bytes the secret encodes to, which for a password
+            // typed in a non-Latin script is most of what an observer wants.
+            "*".repeat(self.input_text.chars().count())
+        } else {
+            self.input_text.clone()
+        }
+    }
+
     /// Cycle focus between text field, OK, and Cancel.
     fn cycle_focus(&mut self, reverse: bool) {
         self.focused_element = if reverse {
@@ -1226,7 +1460,10 @@ impl InputDialog {
     }
 
     /// Render the input dialog.
-    pub fn render(&self, parent_width: f32, parent_height: f32, tree: &mut RenderTree) {
+    ///
+    /// Takes `&mut self` so that the rectangles it draws become the rectangles
+    /// a click is tested against; see [`AlertDialog::render`].
+    pub fn render(&mut self, parent_width: f32, parent_height: f32, tree: &mut RenderTree) {
         if !self.overlay.active && self.overlay.opacity <= 0.0 {
             return;
         }
@@ -1255,6 +1492,7 @@ impl InputDialog {
             + CONTENT_PADDING;
         let x = (parent_width - width) / 2.0;
         let y = (parent_height - height) / 2.0;
+        self.overlay.set_content_rect(x, y, width, height);
 
         // Shadow.
         tree.push(RenderCommand::BoxShadow {
@@ -1325,6 +1563,7 @@ impl InputDialog {
 
         // Input field.
         let input_width = width - CONTENT_PADDING * 2.0;
+        let field_rect = (x + CONTENT_PADDING, content_y, input_width, INPUT_HEIGHT);
         let input_border_color = if self.focused_element == InputFocus::TextField {
             COLOR_BLUE
         } else if self.validation_error.is_some() {
@@ -1353,36 +1592,56 @@ impl InputDialog {
         });
 
         // Input text or placeholder.
-        let display_text = if self.input_text.is_empty() {
-            self.placeholder.clone()
-        } else if self.password_mode {
-            // One mark per *caret stop*, not per byte. `len()` is the UTF-8
-            // byte count, so a password with any non-ASCII character in it drew
-            // more asterisks than it has characters — two for an accented
-            // letter, four for an emoji. That is wrong twice over: the row of
-            // marks no longer lines up with the positions the caret can occupy
-            // (`caret_offsets` walks characters), and the width of the row
-            // leaks how many bytes the secret encodes to, which for a password
-            // typed in a non-Latin script is most of what an observer wants.
-            "*".repeat(self.input_text.chars().count())
+        //
+        // Geometry shared by both paths, so the caret in an empty field sits
+        // exactly where the first character will be drawn.
+        let text_x = x + CONTENT_PADDING + 10.0;
+        let text_y = content_y + (INPUT_HEIGHT - FONT_SIZE) / 2.0;
+        let text_avail = input_width - 20.0;
+        let field_focused = self.focused_element == InputFocus::TextField;
+
+        let display_text = self.display_text();
+        if self.input_text.is_empty() {
+            // The placeholder is not editable text: it has no caret positions
+            // in it and nothing can be selected in it, so it is drawn plainly
+            // and the caret — if the field has the focus — goes at the left,
+            // where the first character the user types will appear. A focused
+            // empty field with no caret is one the user cannot tell is ready.
+            tree.push(RenderCommand::Text {
+                x: text_x,
+                y: text_y,
+                text: display_text,
+                color: COLOR_OVERLAY0,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(text_avail),
+                overflow: TextOverflow::Ellipsis,
+            });
+            if field_focused {
+                crate::textedit::push_caret(tree, text_x, text_y, FONT_SIZE, COLOR_TEXT);
+            }
         } else {
-            self.input_text.clone()
-        };
-        let text_color = if self.input_text.is_empty() {
-            COLOR_OVERLAY0
-        } else {
-            COLOR_TEXT
-        };
-        tree.push(RenderCommand::Text {
-            x: x + CONTENT_PADDING + 10.0,
-            y: content_y + (INPUT_HEIGHT - FONT_SIZE) / 2.0,
-            text: display_text,
-            color: text_color,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(input_width - 20.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+            // Offsets into the *drawn* string: for a password field that is the
+            // row of marks, not the secret. See `drawn_offset`.
+            let drawn_cursor = TextCursor::from(self.drawn_offset(self.cursor.byte()));
+            let drawn_anchor = self.selection_anchor.map(|a| self.drawn_offset(a));
+            crate::textedit::draw(
+                tree,
+                &crate::textedit::SingleLine {
+                    text: &display_text,
+                    cursor: drawn_cursor,
+                    selection_anchor: drawn_anchor,
+                    focused: field_focused,
+                    x: text_x,
+                    y: text_y,
+                    width: text_avail,
+                    line_height: FONT_SIZE,
+                    font_size: FONT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: COLOR_TEXT,
+                },
+            );
+        }
 
         content_y += INPUT_HEIGHT;
 
@@ -1469,6 +1728,17 @@ impl InputDialog {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+
+        // Assembled from the same locals the drawing above used, so the hit
+        // areas are the drawn areas by construction rather than by a second
+        // copy of the arithmetic agreeing with the first.
+        self.placement = Some(InputPlacement {
+            field: field_rect,
+            text_x,
+            text_width: text_avail,
+            ok: (btn_start_x, buttons_y, BUTTON_MIN_WIDTH, BUTTON_HEIGHT),
+            cancel: (cancel_x, buttons_y, BUTTON_MIN_WIDTH, BUTTON_HEIGHT),
+        });
     }
 }
 
@@ -1493,6 +1763,14 @@ pub struct ProgressDialog {
     /// Animation tick counter for indeterminate mode.
     anim_tick: u64,
     overlay: ModalOverlay,
+    /// Where the Cancel button was last drawn, or `None` if there is no Cancel
+    /// button or the dialog has not been drawn yet.
+    ///
+    /// The two `None` cases are deliberately the same value, because they mean
+    /// the same thing to the only reader: there is nowhere on screen a click
+    /// could have been aimed at. A dialog that has not been drawn has no button
+    /// to press for the same reason a non-cancelable one does not.
+    cancel_rect: Option<(f32, f32, f32, f32)>,
 }
 
 /// Progress mode.
@@ -1521,6 +1799,7 @@ impl ProgressDialog {
             cancelled: false,
             anim_tick: 0,
             overlay,
+            cancel_rect: None,
         }
     }
 
@@ -1540,6 +1819,7 @@ impl ProgressDialog {
             cancelled: false,
             anim_tick: 0,
             overlay,
+            cancel_rect: None,
         }
     }
 
@@ -1625,6 +1905,7 @@ impl ProgressDialog {
                 }
                 EventResult::Consumed
             }
+            Event::Mouse(mouse_event) => self.handle_mouse(mouse_event),
             Event::Tick { elapsed_ms } => {
                 self.tick(*elapsed_ms);
                 EventResult::Consumed
@@ -1633,8 +1914,39 @@ impl ProgressDialog {
         }
     }
 
+    /// Handle a mouse event.
+    ///
+    /// A cancelable progress dialog draws a Cancel button. Until this existed
+    /// there was no `Event::Mouse` arm at all, so that button did nothing:
+    /// cancelling was Escape or nothing, on a dialog whose whole visible offer
+    /// is a button.
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        // A progress dialog is not click-outside-dismissable by default — it is
+        // reporting work that is still running — but ask the overlay anyway so
+        // that a caller who turns it on gets it, and treat that dismissal as
+        // the cancel it is.
+        if self.overlay.handle_mouse(event).is_some() {
+            self.cancelled = self.cancelable;
+            self.overlay.hide();
+            return EventResult::Consumed;
+        }
+
+        if let MouseEventKind::Press(MouseButton::Left) = event.kind
+            && let Some((bx, by, bw, bh)) = self.cancel_rect
+            && point_in_rect(event.x, event.y, bx, by, bw, bh)
+        {
+            self.cancelled = true;
+            self.overlay.hide();
+        }
+
+        EventResult::Consumed
+    }
+
     /// Render the progress dialog.
-    pub fn render(&self, parent_width: f32, parent_height: f32, tree: &mut RenderTree) {
+    ///
+    /// Takes `&mut self` so that the Cancel button it draws is the Cancel
+    /// button a click is tested against; see [`AlertDialog::render`].
+    pub fn render(&mut self, parent_width: f32, parent_height: f32, tree: &mut RenderTree) {
         if !self.overlay.active && self.overlay.opacity <= 0.0 {
             return;
         }
@@ -1660,6 +1972,7 @@ impl ProgressDialog {
             + CONTENT_PADDING;
         let x = (parent_width - width) / 2.0;
         let y = (parent_height - height) / 2.0;
+        self.overlay.set_content_rect(x, y, width, height);
 
         // Shadow.
         tree.push(RenderCommand::BoxShadow {
@@ -1804,10 +2117,19 @@ impl ProgressDialog {
             });
         }
 
-        // Cancel button.
+        // Cancel button. Cleared first, unconditionally, so that what is left in
+        // `cancel_rect` after a frame is exactly what that frame drew. Today
+        // nothing can reach here with `cancelable` false after a frame drew the
+        // button — it is only ever turned on, by the builder — so the clear
+        // never actually fires. It stays anyway: the invariant this whole type
+        // rests on is that the hit area *is* the drawn area by construction, and
+        // dropping the line would leave that resting instead on an argument
+        // about which setters exist, which the next setter would silently break.
+        self.cancel_rect = None;
         if self.cancelable {
             let btn_y = y + height - BUTTON_HEIGHT - CONTENT_PADDING;
             let btn_x = x + width - CONTENT_PADDING - BUTTON_MIN_WIDTH;
+            self.cancel_rect = Some((btn_x, btn_y, BUTTON_MIN_WIDTH, BUTTON_HEIGHT));
             tree.push(RenderCommand::FillRect {
                 x: btn_x,
                 y: btn_y,
@@ -2227,13 +2549,54 @@ impl NonModalDialog {
 
 // --- Internal helpers ---
 
-/// Layout information for a dialog (computed position/size + button hit areas).
+/// Where a dialog is: its box, and the areas inside it that can be clicked.
+///
+/// Held by the dialog after it renders, so that a click can be tested against
+/// the rectangles that were actually drawn rather than against a fresh guess at
+/// the parent's size. `AlertDialog::handle_mouse` used to make that guess —
+/// `compute_layout(800.0, 600.0)` — which put its hit areas 560 px left and
+/// 240 px above its own buttons on a 1920×1080 desktop.
+#[derive(Clone, Debug)]
 struct DialogLayout {
     x: f32,
     y: f32,
     width: f32,
     height: f32,
+    /// Top edge of the button row. Kept here rather than recomputed at each
+    /// use, because the message-clipping test in `render` and the button rects
+    /// below have to agree about where the row starts or a long message is
+    /// drawn over the controls that dismiss the dialog.
+    buttons_y: f32,
     button_rects: Vec<(f32, f32, f32, f32)>,
+}
+
+/// Where an [`InputDialog`] last drew the parts of itself that can be clicked.
+///
+/// The text field is recorded twice on purpose. `field` is the bordered box —
+/// what the user aims at, including the padding inside it — and is what decides
+/// whether a click focuses the field at all. `text_x`/`text_width` describe the
+/// narrower strip the glyphs occupy, and are what a click is measured against
+/// once it is known to be in the field, because they are exactly the `x` and
+/// `width` handed to [`crate::textedit::draw`]. A click in the padding is
+/// therefore still a click in the field, and resolves to the nearest end of the
+/// text rather than being ignored.
+///
+/// The dialog's own box is deliberately not here. The overlay already holds it,
+/// told by the same `render` call, and it is the overlay — not this — that
+/// decides whether a click counts as "outside". Two records of one rectangle is
+/// one rectangle that can go stale.
+#[derive(Clone, Debug)]
+struct InputPlacement {
+    /// The bordered input box.
+    field: (f32, f32, f32, f32),
+    /// Left edge of the drawn glyphs.
+    text_x: f32,
+    /// Width of the strip the glyphs occupy.
+    text_width: f32,
+    /// The OK button.
+    ok: (f32, f32, f32, f32),
+    /// The Cancel button.
+    cancel: (f32, f32, f32, f32),
 }
 
 /// Point-in-rectangle hit test.
@@ -2618,7 +2981,7 @@ mod tests {
     }
 
     /// Every message line an alert drew, as (y, text), in draw order.
-    fn alert_message_lines(dialog: &AlertDialog) -> Vec<(f32, String)> {
+    fn alert_message_lines(dialog: &mut AlertDialog) -> Vec<(f32, String)> {
         let mut tree = RenderTree::new();
         dialog.render(800.0, 600.0, &mut tree);
         tree.commands
@@ -2649,7 +3012,7 @@ mod tests {
         dialog.show();
         dialog.overlay.opacity = 1.0;
 
-        let lines = alert_message_lines(&dialog);
+        let lines = alert_message_lines(&mut dialog);
         assert!(
             lines.len() > 1,
             "a {} character message was drawn as {} line(s)",
@@ -2678,7 +3041,7 @@ mod tests {
         dialog.overlay.opacity = 1.0;
         let layout = dialog.compute_layout(800.0, 600.0);
 
-        let lines = alert_message_lines(&dialog);
+        let lines = alert_message_lines(&mut dialog);
         for (_, line) in &lines {
             if line.split_whitespace().count() < 2 {
                 continue;
@@ -2756,7 +3119,7 @@ mod tests {
         let layout = dialog.compute_layout(800.0, 600.0);
         let buttons_y = layout.y + layout.height - BUTTON_HEIGHT - CONTENT_PADDING;
 
-        let lines = alert_message_lines(&dialog);
+        let lines = alert_message_lines(&mut dialog);
         assert!(!lines.is_empty(), "the message vanished entirely");
         for (y, line) in &lines {
             assert!(
@@ -3244,11 +3607,13 @@ mod tests {
 
         let mut tree = RenderTree::new();
         dialog.render(800.0, 600.0, &mut tree);
+        // `RichText`, not `Text`: the field's contents are drawn by
+        // `textedit::draw`, which colours the selection per glyph.
         let masks: Vec<&String> = tree
             .commands
             .iter()
             .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } if text.starts_with('*') => Some(text),
+                RenderCommand::RichText { text, .. } if text.starts_with('*') => Some(text),
                 _ => None,
             })
             .collect();
@@ -3257,6 +3622,250 @@ mod tests {
         assert!(
             !masks[0].contains(|c| c != '*'),
             "nothing of the secret itself is drawn"
+        );
+    }
+
+    // --- InputDialog caret, selection and scrolling ---
+    //
+    // The dialog tracked a caret from the day it was written and never drew
+    // one, so every test above could assert where the caret *went* and none
+    // could assert where it is *shown* -- see `known-issues.md`,
+    // TD-C-TWO-TOOLKIT-TEXT-FIELDS-DRAW-NO-CARET-AT-ALL. These are the tests
+    // that can.
+
+    /// Every vertical `Line` in a rendered dialog, by x. The caret is the only
+    /// thing in this dialog drawn as a zero-width line.
+    fn caret_xs(dialog: &mut InputDialog) -> Vec<f32> {
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, .. } if (x1 - x2).abs() < f32::EPSILON => Some(*x1),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The dialog, shown and fully faded in, ready to render.
+    fn opened(mut dialog: InputDialog) -> InputDialog {
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+        dialog
+    }
+
+    fn shifted(k: Key, shift: bool) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers {
+                shift,
+                ..Modifiers::NONE
+            },
+            text: None,
+        })
+    }
+
+    #[test]
+    fn the_field_draws_a_caret_when_it_has_the_focus_and_not_when_it_does_not() {
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abc"));
+        assert_eq!(
+            caret_xs(&mut dialog).len(),
+            1,
+            "the focused field must show where the next character will go"
+        );
+
+        // Tab to the OK button. A caret still drawn here would say the typing
+        // goes to the text field when Space would in fact press the button.
+        let mut moved = dialog;
+        moved.handle_event(&shifted(Key::Tab, false));
+        assert_eq!(moved.focused_element, InputFocus::OkButton);
+        assert!(
+            caret_xs(&mut moved).is_empty(),
+            "an unfocused field must not draw a caret"
+        );
+    }
+
+    #[test]
+    fn an_empty_input_dialog_still_shows_where_typing_will_land() {
+        // The empty field draws its placeholder, which is not editable text --
+        // but the caret still belongs at the left, or a user cannot tell a
+        // ready field from a dead one.
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "type here"));
+        assert_eq!(caret_xs(&mut dialog).len(), 1);
+    }
+
+    #[test]
+    fn the_input_dialogs_drawn_caret_follows_the_arrow_keys() {
+        // The point of the whole exercise: the caret the dialog tracks and the
+        // caret it draws have to be the same caret.
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abcdef"));
+        let at_end = caret_xs(&mut dialog)[0];
+
+        dialog.handle_event(&shifted(Key::Home, false));
+        let at_start = caret_xs(&mut dialog)[0];
+        assert!(
+            at_start < at_end,
+            "Home must move the drawn caret left of where End leaves it, got {at_start} then {at_end}"
+        );
+
+        dialog.handle_event(&shifted(Key::Right, false));
+        let after_one = caret_xs(&mut dialog)[0];
+        assert!(
+            after_one > at_start,
+            "one Right must move the drawn caret rightwards in left-to-right text"
+        );
+    }
+
+    #[test]
+    fn shift_and_an_arrow_select_in_the_input_dialog_and_a_bare_arrow_gives_it_up() {
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abcdef"));
+        assert_eq!(dialog.selection_anchor, None);
+
+        dialog.handle_event(&shifted(Key::Left, true));
+        dialog.handle_event(&shifted(Key::Left, true));
+        assert_eq!(
+            dialog.selection_anchor,
+            Some(6),
+            "the anchor stays where the selection began, not where the caret is now"
+        );
+        assert_eq!(dialog.cursor.byte(), 4);
+
+        dialog.handle_event(&shifted(Key::Left, false));
+        assert_eq!(
+            dialog.selection_anchor, None,
+            "a bare arrow means 'put the caret here and forget the selection'"
+        );
+    }
+
+    #[test]
+    fn an_input_dialogs_selection_is_painted_behind_the_text() {
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abcdef"));
+        dialog.handle_event(&shifted(Key::Home, false));
+        dialog.handle_event(&shifted(Key::Right, true));
+        dialog.handle_event(&shifted(Key::Right, true));
+
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+        let painted = tree.commands.iter().any(|c| {
+            matches!(c, RenderCommand::FillRect { color, .. }
+                if *color == crate::textedit::SELECTION_BACKGROUND)
+        });
+        assert!(painted, "a selection nobody can see is not a selection");
+    }
+
+    #[test]
+    fn typing_over_an_input_dialogs_selection_replaces_it() {
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abcdef"));
+        dialog.handle_event(&shifted(Key::Home, false));
+        for _ in 0..3 {
+            dialog.handle_event(&shifted(Key::Right, true));
+        }
+        dialog.handle_event(&Event::Key(KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: Some('Z'),
+        }));
+        assert_eq!(dialog.input_text, "Zdef");
+        assert_eq!(dialog.cursor.byte(), 1);
+        assert_eq!(dialog.selection_anchor, None);
+    }
+
+    #[test]
+    fn backspace_over_an_input_dialogs_selection_takes_it_and_nothing_more() {
+        // The bug this guards is an off-by-one that is easy to write and hard
+        // to see: deleting the selection *and then* the character before it.
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abcdef"));
+        for _ in 0..2 {
+            dialog.handle_event(&shifted(Key::Left, true));
+        }
+        dialog.handle_event(&shifted(Key::Backspace, false));
+        assert_eq!(dialog.input_text, "abcd");
+        assert_eq!(dialog.cursor.byte(), 4);
+
+        // And with no selection it still deletes exactly one character.
+        dialog.handle_event(&shifted(Key::Backspace, false));
+        assert_eq!(dialog.input_text, "abc");
+    }
+
+    #[test]
+    fn delete_over_a_selection_takes_the_selection_rather_than_the_next_character() {
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abcdef"));
+        dialog.handle_event(&shifted(Key::Home, false));
+        for _ in 0..2 {
+            dialog.handle_event(&shifted(Key::Right, true));
+        }
+        dialog.handle_event(&shifted(Key::Delete, false));
+        assert_eq!(dialog.input_text, "cdef");
+        assert_eq!(dialog.cursor.byte(), 0);
+    }
+
+    #[test]
+    fn an_input_dialog_selection_spanning_a_multi_byte_character_is_cut_on_a_boundary() {
+        // `String::drain` panics on an offset inside a character, and a panic
+        // in a dialog takes the application down over a keystroke.
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("aébc"));
+        dialog.handle_event(&shifted(Key::Home, false));
+        for _ in 0..2 {
+            dialog.handle_event(&shifted(Key::Right, true));
+        }
+        dialog.handle_event(&shifted(Key::Backspace, false));
+        assert_eq!(dialog.input_text, "bc");
+    }
+
+    #[test]
+    fn replacing_the_text_from_code_drops_a_selection_that_named_the_old_text() {
+        // The anchor is an offset into a string that no longer exists; left
+        // behind it can point past the end of the new one, and the next
+        // backspace would try to cut a range that is not there.
+        let mut dialog =
+            opened(InputDialog::prompt("T", "P:", "").with_initial_text("a long value"));
+        for _ in 0..4 {
+            dialog.handle_event(&shifted(Key::Left, true));
+        }
+        assert!(dialog.selection_anchor.is_some());
+        dialog.set_input_text("hi");
+        assert_eq!(dialog.selection_anchor, None);
+        assert_eq!(dialog.cursor.byte(), 2);
+    }
+
+    #[test]
+    fn a_password_selection_is_measured_in_marks_and_not_in_bytes() {
+        // The mask is one byte per character, the secret is not, so a selection
+        // carried over unconverted would highlight two marks for an accented
+        // letter -- redrawing exactly the byte-length leak the masking exists
+        // to prevent, this time in the shape of the highlight.
+        let secret = "aébc"; // 4 characters, 5 bytes
+        let dialog = InputDialog::prompt("T", "P:", "")
+            .with_password_mode(true)
+            .with_initial_text(secret);
+        assert_eq!(dialog.drawn_offset(secret.len()), 4);
+        assert_eq!(dialog.drawn_offset(3), 2, "'a' and 'é' are two marks");
+        assert_eq!(dialog.drawn_offset(0), 0);
+    }
+
+    #[test]
+    fn an_input_dialog_longer_than_its_box_scrolls_to_keep_the_caret_in_view() {
+        // Without a scroll offset the caret is painted past the right edge of
+        // the field, over whatever is beside it.
+        let long = "x".repeat(400);
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text(&long));
+        let caret = caret_xs(&mut dialog)[0];
+
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+        let clip = tree.commands.iter().find_map(|c| match c {
+            RenderCommand::PushClip {
+                x, width, height, ..
+            } if *height <= FONT_SIZE => Some((*x, *width)),
+            _ => None,
+        });
+        let (clip_x, clip_w) = clip.expect("the field's text must be clipped to the field");
+        assert!(
+            caret >= clip_x && caret <= clip_x + clip_w,
+            "the caret at {caret} must be inside the field's box {clip_x}..{}",
+            clip_x + clip_w
         );
     }
 
@@ -3600,5 +4209,421 @@ mod tests {
     fn test_dialog_icon_colors_distinct() {
         assert_ne!(DialogIcon::Info.color(), DialogIcon::Warning.color());
         assert_ne!(DialogIcon::Warning.color(), DialogIcon::Error.color());
+    }
+
+    // --- Where a dialog is when it is clicked ---
+    //
+    // Every dialog in this file drew controls it could not be clicked on. The
+    // alert hit-tested against `compute_layout(800.0, 600.0)` — a parent size
+    // it guessed, because `handle_mouse` was never told the real one — so on a
+    // 1920x1080 desktop its hit areas sat 560 px left and 240 px above the
+    // buttons on screen. The input dialog hit-tested nothing at all: its OK and
+    // Cancel could only be reached with Tab and Enter, and its text field could
+    // not be clicked into. The progress dialog had no `Event::Mouse` arm, so a
+    // `.cancelable()` one drew a Cancel button that did nothing.
+    //
+    // The fix is that rendering is what teaches a dialog where it is. These
+    // tests measure the controls out of the render tree — the pixels the
+    // compositor would draw — and click *those*, so a hit area that drifts away
+    // from the thing it belongs to fails here even if both are internally
+    // consistent. See `known-issues.md`,
+    // TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED.
+
+    /// Every button-sized rectangle a dialog drew, top-left first, in draw
+    /// order. Buttons are the only fills of exactly this size, and the focus
+    /// ring is a `StrokeRect`, so this finds the buttons and nothing else.
+    fn drawn_buttons(tree: &RenderTree) -> Vec<(f32, f32)> {
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if (width - BUTTON_MIN_WIDTH).abs() < 0.01
+                    && (height - BUTTON_HEIGHT).abs() < 0.01 =>
+                {
+                    Some((*x, *y))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where the drawn glyphs of an input dialog's field begin.
+    ///
+    /// Taken from the text command itself rather than recomputed from the
+    /// dialog's own numbers, so that this is an independent measurement of
+    /// where the user sees the text.
+    fn drawn_text_x(tree: &RenderTree) -> f32 {
+        tree.commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::RichText { x, .. } => Some(*x),
+                _ => None,
+            })
+            .expect("a field with text in it draws it")
+    }
+
+    fn press_at(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// The middle of a button whose top-left corner is `(x, y)`.
+    fn button_centre((x, y): (f32, f32)) -> (f32, f32) {
+        (x + BUTTON_MIN_WIDTH / 2.0, y + BUTTON_HEIGHT / 2.0)
+    }
+
+    #[test]
+    fn an_alerts_buttons_are_clickable_where_they_were_drawn_on_any_size_of_parent() {
+        // 800x600 is the size the old hit test assumed, and is included so that
+        // the test says plainly that it was not wrong *there* — it was wrong
+        // everywhere else, which is every real desktop.
+        for (parent_w, parent_h) in [(800.0, 600.0), (1920.0, 1080.0), (1280.0, 1024.0)] {
+            let mut dialog = AlertDialog::confirm("Quit", "Discard the unsaved file?");
+            dialog.show();
+            dialog.overlay.opacity = 1.0;
+
+            let mut tree = RenderTree::new();
+            dialog.render(parent_w, parent_h, &mut tree);
+            let buttons = drawn_buttons(&tree);
+            assert_eq!(buttons.len(), 2, "confirm draws OK and Cancel");
+
+            let (cx, cy) = button_centre(buttons[1]);
+            dialog.handle_event(&press_at(cx, cy));
+            assert_eq!(
+                dialog.result(),
+                Some(&DialogResult::Cancel),
+                "a click in the middle of the drawn Cancel button must press it \
+                 on a {parent_w}x{parent_h} parent"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dialog_that_has_not_been_drawn_yet_is_not_dismissed_by_a_click() {
+        // The overlay used to start with a zero content rect, which made every
+        // click "outside" — so a click landing between `show()` and the first
+        // frame dismissed a dialog the user had not been shown.
+        let mut dialog = AlertDialog::info("Heads up", "The file was moved.");
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+
+        dialog.handle_event(&press_at(4.0, 4.0));
+        assert_eq!(
+            dialog.result(),
+            None,
+            "a dialog with nothing on screen yet has no outside to have been \
+             clicked in"
+        );
+    }
+
+    #[test]
+    fn a_click_outside_a_drawn_alert_still_dismisses_it() {
+        // The guard above must not have turned click-outside off altogether.
+        let mut dialog = AlertDialog::info("Heads up", "The file was moved.");
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+
+        let mut tree = RenderTree::new();
+        dialog.render(1920.0, 1080.0, &mut tree);
+
+        dialog.handle_event(&press_at(4.0, 4.0));
+        assert_eq!(dialog.result(), Some(&DialogResult::Dismissed));
+    }
+
+    #[test]
+    fn an_input_dialogs_ok_button_can_be_clicked() {
+        let mut dialog =
+            opened(InputDialog::prompt("Rename", "New name:", "").with_initial_text("notes.txt"));
+
+        let mut tree = RenderTree::new();
+        dialog.render(1920.0, 1080.0, &mut tree);
+        let buttons = drawn_buttons(&tree);
+        assert_eq!(buttons.len(), 2, "the input dialog draws OK and Cancel");
+
+        let (cx, cy) = button_centre(buttons[0]);
+        dialog.handle_event(&press_at(cx, cy));
+        assert_eq!(
+            dialog.result(),
+            Some(&DialogResult::Text(String::from("notes.txt"))),
+            "clicking OK must accept, exactly as Enter does"
+        );
+    }
+
+    /// Clicking OK on an input the caller has rejected does nothing, and doing
+    /// nothing is the case where the focus ring matters: the dialog stays open,
+    /// so it stays on screen showing the user where their press went. A ring
+    /// left back in the text field says the press missed — on a dialog that is
+    /// refusing to close for a reason printed underneath, that reads as the
+    /// button being broken rather than the input being wrong.
+    #[test]
+    fn clicking_ok_on_a_rejected_input_moves_the_focus_ring_to_it_and_stays_open() {
+        let mut dialog =
+            opened(InputDialog::prompt("Rename", "New name:", "").with_initial_text("no/slashes"));
+        dialog.set_validation_error(Some("A name cannot contain '/'"));
+        assert_eq!(
+            dialog.focused_element,
+            InputFocus::TextField,
+            "the dialog opens with the focus in the field, which is what moves"
+        );
+
+        let mut tree = RenderTree::new();
+        dialog.render(1920.0, 1080.0, &mut tree);
+        let buttons = drawn_buttons(&tree);
+
+        let (cx, cy) = button_centre(buttons[0]);
+        dialog.handle_event(&press_at(cx, cy));
+        assert_eq!(
+            dialog.result(),
+            None,
+            "a rejected input must not accept — that is what makes this the \
+             interesting case"
+        );
+        assert_eq!(
+            dialog.focused_element,
+            InputFocus::OkButton,
+            "the focus follows the click even when the click achieved nothing"
+        );
+    }
+
+    #[test]
+    fn an_input_dialogs_cancel_button_can_be_clicked() {
+        let mut dialog =
+            opened(InputDialog::prompt("Rename", "New name:", "").with_initial_text("notes.txt"));
+
+        let mut tree = RenderTree::new();
+        dialog.render(1920.0, 1080.0, &mut tree);
+        let buttons = drawn_buttons(&tree);
+
+        let (cx, cy) = button_centre(buttons[1]);
+        dialog.handle_event(&press_at(cx, cy));
+        assert_eq!(dialog.result(), Some(&DialogResult::Cancel));
+    }
+
+    #[test]
+    fn clicking_the_input_dialogs_field_focuses_it_and_puts_the_caret_where_it_landed() {
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("WWWiii"));
+        // Tab away first, so the click has a focus to move as well as a caret
+        // to place.
+        dialog.handle_event(&shifted(Key::Tab, false));
+        assert_eq!(dialog.focused_element, InputFocus::OkButton);
+
+        let mut tree = RenderTree::new();
+        dialog.render(1920.0, 1080.0, &mut tree);
+        let text_x = drawn_text_x(&tree);
+        let field = dialog.placement.as_ref().expect("just drawn").field;
+        let mid_y = field.1 + field.3 / 2.0;
+
+        dialog.handle_event(&press_at(text_x + 0.5, mid_y));
+        assert_eq!(
+            dialog.focused_element,
+            InputFocus::TextField,
+            "a click in the field is how a user says they want to type in it"
+        );
+        assert_eq!(
+            dialog.cursor.byte(),
+            0,
+            "a click at the left edge lands before the text"
+        );
+
+        let full = crate::text::measure("WWWiii", FONT_SIZE, FontWeightHint::Regular);
+        dialog.handle_event(&press_at(text_x + full, mid_y));
+        assert_eq!(
+            dialog.cursor.byte(),
+            6,
+            "and one past the last glyph lands after all of it"
+        );
+    }
+
+    #[test]
+    fn clicking_in_a_scrolled_input_dialog_field_accounts_for_what_scrolled_off() {
+        // A field opens with its caret at the end, so a value longer than the
+        // box opens scrolled to its tail: the glyph under the left edge is in
+        // the middle of the string. A click that forgot the scroll offset would
+        // answer 0 here.
+        let long = "the quick brown fox jumps over the lazy dog, ".repeat(4);
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text(&long));
+
+        let mut tree = RenderTree::new();
+        dialog.render(1920.0, 1080.0, &mut tree);
+        let p = dialog.placement.clone().expect("just drawn");
+        let (field, text_x) = (p.field, p.text_x);
+        let mid_y = field.1 + field.3 / 2.0;
+        assert!(
+            crate::text::measure(&long, FONT_SIZE, FontWeightHint::Regular) > p.text_width,
+            "the value has to be too long for the box or there is no scroll to \
+             have been forgotten"
+        );
+
+        dialog.handle_event(&press_at(text_x + 0.5, mid_y));
+        assert!(
+            dialog.cursor.byte() > long.len() / 2,
+            "the left edge of a field scrolled to its tail shows the far end of \
+             the string, got byte {}",
+            dialog.cursor.byte()
+        );
+    }
+
+    /// A click is how a user says "put the caret here", and a caret placed
+    /// somewhere is a caret that is not selecting anything. Leaving the anchor
+    /// behind would mean the next typed character replaced a run of text the
+    /// user had just clicked away from — the selection is invisible once the
+    /// caret has left it, so the deletion would come with no warning at all.
+    #[test]
+    fn clicking_in_the_input_dialogs_field_gives_up_the_selection_it_landed_on() {
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abcdef"));
+        dialog.handle_event(&shifted(Key::Home, true));
+        assert_eq!(
+            dialog.selection_anchor,
+            Some(6),
+            "Shift+Home selects the whole value, which is what the click undoes"
+        );
+
+        let mut tree = RenderTree::new();
+        dialog.render(1920.0, 1080.0, &mut tree);
+        let p = dialog.placement.clone().expect("just drawn");
+        let mid_y = p.field.1 + p.field.3 / 2.0;
+        let three_in = crate::text::measure("abc", FONT_SIZE, FontWeightHint::Regular);
+
+        dialog.handle_event(&press_at(p.text_x + three_in, mid_y));
+        assert_eq!(dialog.cursor.byte(), 3, "the click placed the caret");
+        assert_eq!(
+            dialog.selection_anchor, None,
+            "and placing it is what gives the selection up"
+        );
+    }
+
+    /// An empty field draws its placeholder, and the placeholder is not the
+    /// value: it is longer than the empty string it stands in for, so resolving
+    /// a click against it yields an offset past the end of the text the caret
+    /// actually lives in. That offset then reaches `String::insert`, which
+    /// panics on an out-of-bounds index — a click in the greyed-out prompt of an
+    /// empty box followed by a keystroke would take the whole dialog down.
+    #[test]
+    fn clicking_in_an_empty_input_field_leaves_the_caret_at_the_start() {
+        let mut dialog = opened(InputDialog::prompt("T", "P:", "type something here"));
+        assert!(dialog.input_text.is_empty());
+
+        let mut tree = RenderTree::new();
+        dialog.render(1920.0, 1080.0, &mut tree);
+        let p = dialog.placement.clone().expect("just drawn");
+        let mid_y = p.field.1 + p.field.3 / 2.0;
+        let far_in = crate::text::measure("type something", FONT_SIZE, FontWeightHint::Regular);
+        assert!(
+            far_in > 0.0,
+            "the placeholder has to actually be drawn for this click to be a trap"
+        );
+
+        dialog.handle_event(&press_at(p.text_x + far_in, mid_y));
+        assert_eq!(
+            dialog.cursor.byte(),
+            0,
+            "there is nowhere else in an empty string for the caret to be"
+        );
+
+        // And the caret it left behind is one that can be typed at — which is
+        // the half of this that a caret parked past the end would fail on, with
+        // a panic rather than a wrong answer.
+        dialog.handle_event(&Event::Key(KeyEvent {
+            key: Key::X,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: Some('x'),
+        }));
+        assert_eq!(dialog.input_text, "x");
+    }
+
+    #[test]
+    fn a_click_in_a_password_field_lands_on_a_character_of_the_secret() {
+        // The marks are one byte each and the secret is not, so the offset a
+        // click resolves to in the drawn row has to be walked back through the
+        // secret's characters. Reading it as a byte offset directly would put
+        // the caret inside a character — and `String::insert` panics on that.
+        let secret = "aéb😀c";
+        let mut dialog = opened(
+            InputDialog::prompt("Login", "Password:", "")
+                .with_password_mode(true)
+                .with_initial_text(secret),
+        );
+
+        let mut tree = RenderTree::new();
+        dialog.render(1920.0, 1080.0, &mut tree);
+        let text_x = drawn_text_x(&tree);
+        let field = dialog.placement.as_ref().expect("just drawn").field;
+        let mid_y = field.1 + field.3 / 2.0;
+
+        // Just past the second mark: the caret belongs before the third
+        // character, which is `b` at byte 3 — not at byte 2, which is inside
+        // the `é`.
+        let mark = crate::text::measure("*", FONT_SIZE, FontWeightHint::Regular);
+        dialog.handle_event(&press_at(text_x + mark * 2.1, mid_y));
+        assert_eq!(
+            dialog.cursor.byte(),
+            3,
+            "two marks in is three bytes in, because the second character is \
+             two bytes long"
+        );
+
+        // Every mark, including one past the last, must land on a boundary.
+        for n in 0..=secret.chars().count() {
+            dialog.handle_event(&press_at(text_x + mark * n as f32, mid_y));
+            let at = dialog.cursor.byte();
+            assert!(
+                secret.is_char_boundary(at),
+                "a click at mark {n} put the caret at byte {at}, which is \
+                 inside a character"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cancelable_progress_dialogs_cancel_button_can_be_clicked() {
+        let mut dialog = ProgressDialog::determinate("Copying", "12 of 340 files").with_cancel();
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+
+        let mut tree = RenderTree::new();
+        dialog.render(1920.0, 1080.0, &mut tree);
+        let buttons = drawn_buttons(&tree);
+        assert_eq!(
+            buttons.len(),
+            1,
+            "a cancelable progress dialog draws Cancel"
+        );
+
+        let (cx, cy) = button_centre(buttons[0]);
+        dialog.handle_event(&press_at(cx, cy));
+        assert!(
+            dialog.is_cancelled(),
+            "the only control the dialog offers has to work when it is clicked"
+        );
+    }
+
+    #[test]
+    fn a_progress_dialog_without_a_cancel_button_cannot_be_cancelled_by_a_click() {
+        // There is no button, so there must be no hit area either — a stale
+        // rectangle left over from a dialog that used to have one would cancel
+        // a job on a click into blank space.
+        let mut dialog = ProgressDialog::determinate("Copying", "12 of 340 files");
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+
+        let mut tree = RenderTree::new();
+        dialog.render(1920.0, 1080.0, &mut tree);
+        assert!(drawn_buttons(&tree).is_empty());
+
+        for x in [900.0_f32, 960.0, 1020.0] {
+            for y in [520.0_f32, 560.0, 600.0] {
+                dialog.handle_event(&press_at(x, y));
+            }
+        }
+        assert!(!dialog.is_cancelled());
     }
 }

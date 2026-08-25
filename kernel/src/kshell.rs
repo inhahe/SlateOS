@@ -322,6 +322,46 @@ fn assert_output_starts_with(what: &str, out: &[u8], expected: &[u8]) {
     panic!("`{}` output did not start with the expected prefix", what);
 }
 
+/// Whether `out` contains `needle` anywhere.
+///
+/// Shared by [`assert_output_contains`] and [`assert_output_lacks`] so the two
+/// can never disagree about what "contains" means — a positive and a negative
+/// assertion that answer the same question differently would let a single
+/// output satisfy both.
+fn output_contains(out: &[u8], needle: &[u8]) -> bool {
+    needle.len() <= out.len() && out.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Assert a captured command's output contains `expected` somewhere.
+///
+/// [`assert_output_starts_with`] cannot express this, and the gap is not
+/// cosmetic: a diagnostic about *part* of a walk — `find` reporting the one
+/// subtree it could not descend into — is emitted in the middle of the matches
+/// it did find, so it is never at the start and the prefix form would have to be
+/// weakened to `find: ` and thereby stop distinguishing the message at all.
+///
+/// Panics on a miss, after printing both sides, so the failing boot carries its
+/// own explanation.
+fn assert_output_contains(what: &str, out: &[u8], expected: &[u8]) {
+    use crate::serial_println;
+
+    assert!(
+        !expected.is_empty(),
+        "`{}`: assert_output_contains needs a non-empty needle",
+        what
+    );
+
+    if output_contains(out, expected) {
+        return;
+    }
+    serial_println!("  !! `{}`: output lacked text it must contain", what);
+    serial_println!("     expected somewhere in the output:");
+    dump_lines(expected);
+    serial_println!("     actual output ({} bytes):", out.len());
+    dump_lines(out);
+    panic!("`{}` output lacked text it must contain", what);
+}
+
 /// Assert a captured command's output does **not** contain `forbidden`.
 ///
 /// The negative counterpart to [`assert_output_starts_with`], and it exists for
@@ -346,9 +386,7 @@ fn assert_output_lacks(what: &str, out: &[u8], forbidden: &[u8]) {
         what
     );
 
-    let present =
-        forbidden.len() <= out.len() && out.windows(forbidden.len()).any(|w| w == forbidden);
-    if !present {
+    if !output_contains(out, forbidden) {
         return;
     }
     serial_println!("  !! `{}`: output contained text it must not", what);
@@ -2221,6 +2259,7 @@ fn handle_control_flow(line: &str) -> bool {
 
             if condition.is_empty() {
                 shell_println!("Syntax error: {} requires a condition", first_word);
+                set_exit(1);
                 return true;
             }
 
@@ -2259,6 +2298,7 @@ fn handle_control_flow(line: &str) -> bool {
                         shell_println!(
                             "Syntax error: for ((...)) requires 3 semicolon-separated expressions"
                         );
+                        set_exit(1);
                         return true;
                     }
                     let init_expr = parts[0].trim();
@@ -2290,6 +2330,7 @@ fn handle_control_flow(line: &str) -> bool {
                     return true;
                 }
                 shell_println!("Syntax error: unterminated for ((...))");
+                set_exit(1);
                 return true;
             }
 
@@ -2304,6 +2345,7 @@ fn handle_control_flow(line: &str) -> bool {
 
             if variable.is_empty() {
                 shell_println!("Syntax error: for requires a variable name");
+                set_exit(1);
                 return true;
             }
 
@@ -2312,6 +2354,7 @@ fn handle_control_flow(line: &str) -> bool {
                 stripped.trim_start()
             } else {
                 shell_println!("Syntax error: for requires 'in' keyword");
+                set_exit(1);
                 return true;
             };
 
@@ -2325,6 +2368,7 @@ fn handle_control_flow(line: &str) -> bool {
 
             if words_raw.is_empty() {
                 shell_println!("Syntax error: for requires a word list after 'in'");
+                set_exit(1);
                 return true;
             }
 
@@ -2349,6 +2393,7 @@ fn handle_control_flow(line: &str) -> bool {
 
             if variable.is_empty() {
                 shell_println!("Syntax error: select requires a variable name");
+                set_exit(1);
                 return true;
             }
 
@@ -2356,6 +2401,7 @@ fn handle_control_flow(line: &str) -> bool {
                 stripped.trim_start()
             } else {
                 shell_println!("Syntax error: select requires 'in' keyword");
+                set_exit(1);
                 return true;
             };
 
@@ -2368,6 +2414,7 @@ fn handle_control_flow(line: &str) -> bool {
 
             if words_raw.is_empty() {
                 shell_println!("Syntax error: select requires a word list after 'in'");
+                set_exit(1);
                 return true;
             }
 
@@ -2387,6 +2434,7 @@ fn handle_control_flow(line: &str) -> bool {
         }
         "done" => {
             shell_println!("Syntax error: done without while/for/select");
+            set_exit(1);
             return true;
         }
         "case" => {
@@ -2403,11 +2451,13 @@ fn handle_control_flow(line: &str) -> bool {
                 ""
             } else {
                 shell_println!("Syntax error: case requires 'in' keyword");
+                set_exit(1);
                 return true;
             };
 
             if word_part.is_empty() {
                 shell_println!("Syntax error: case requires a word before 'in'");
+                set_exit(1);
                 return true;
             }
 
@@ -2423,6 +2473,7 @@ fn handle_control_flow(line: &str) -> bool {
         }
         "esac" => {
             shell_println!("Syntax error: esac without case");
+            set_exit(1);
             return true;
         }
         _ => {}
@@ -2450,6 +2501,7 @@ fn handle_control_flow(line: &str) -> bool {
             if condition.is_empty() {
                 shell_println!("Syntax error: if requires a condition");
                 CONTROL_STACK.lock().push(ControlState::ThenSkip);
+                set_exit(1);
                 return true;
             }
 
@@ -2481,6 +2533,7 @@ fn handle_control_flow(line: &str) -> bool {
             let mut stack = CONTROL_STACK.lock();
             if stack.is_empty() {
                 shell_println!("Syntax error: elif without if");
+                set_exit(1);
                 return true;
             }
 
@@ -2510,6 +2563,7 @@ fn handle_control_flow(line: &str) -> bool {
 
                     if condition.is_empty() {
                         shell_println!("Syntax error: elif requires a condition");
+                        set_exit(1);
                         return true;
                     }
 
@@ -2538,6 +2592,7 @@ fn handle_control_flow(line: &str) -> bool {
             let mut stack = CONTROL_STACK.lock();
             if stack.is_empty() {
                 shell_println!("Syntax error: else without if");
+                set_exit(1);
                 return true;
             }
 
@@ -2556,6 +2611,7 @@ fn handle_control_flow(line: &str) -> bool {
             let mut stack = CONTROL_STACK.lock();
             if stack.is_empty() {
                 shell_println!("Syntax error: fi without if");
+                set_exit(1);
             } else {
                 stack.pop();
             }
@@ -3211,6 +3267,9 @@ fn start_func_collection(name: &str, after_name: &str) -> bool {
             after_name
         );
     }
+    // Both branches above are errors and the two success paths returned
+    // earlier, so one insertion here covers them.
+    set_exit(1);
     true
 }
 
@@ -7464,7 +7523,11 @@ fn dispatch(line: &str) {
         "base64" => cmd_base64(args),
         "wipe" => cmd_wipe(args),
         "checksum" | "cksum" => cmd_checksum(args),
-        "gunzip" | "gzip" => cmd_gunzip(args),
+        // Two arms, not one: the name is the whole difference between these
+        // commands, and folding them into one arm threw it away before
+        // `cmd_gunzip` could read it. See `GzipMode`.
+        "gzip" => cmd_gunzip(args, GzipMode::Compress),
+        "gunzip" => cmd_gunzip(args, GzipMode::Decompress),
         "bunzip2" | "bzcat" => cmd_bunzip2(args),
         "bzip2" => cmd_bzip2(args),
         "unxz" | "xzcat" => cmd_unxz(args),
@@ -11014,6 +11077,407 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = Vfs::remove(same);
     }
 
+    serial_println!(
+        "  kshell::self_test 27: a subtree not walked is not a subtree without matches"
+    );
+    // `find` set no exit status on any path at all, so every one of its failures
+    // arrived as success -- and it has the worst possible trailer for that,
+    // because it signs off with "N matches found" whatever happened. A search
+    // that could not open its root printed `0 matches found` and exited 0: the
+    // exact output, and the exact status, of a search that read the directory
+    // and found it held nothing.
+    //
+    // This rung also pins the distinction the fix turns on, which no output can
+    // show: the built-in depth cap and the user's `-maxdepth` are the same
+    // number in the same field and opposite in meaning, so one must report and
+    // the other must stay silent.
+    {
+        use crate::fs::vfs::Vfs;
+
+        // Two trees, because a predicate filters the *output* and not the walk:
+        // `-name needle.txt` still descends every directory it is given, so a
+        // deep tree would trip the depth cap during the plain match tests and
+        // they would be asserting the cap rather than the match.
+        let shallow = Path::new("/tmp/kshell_find_shallow");
+        Vfs::mkdir_all(shallow)?;
+        Vfs::write_file(Path::new("/tmp/kshell_find_shallow/needle.txt"), b"x")?;
+
+        // 18 levels: two past FIND_DEPTH_CAP, so the walk is certain to hit the
+        // cap rather than merely reach it.
+        Vfs::mkdir_all(Path::new(
+            "/tmp/kshell_find_deep/d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/d11/d12/d13/d14/d15/d16/d17/d18",
+        ))?;
+
+        // 0: matched. The ordinary path, asserted so the rungs below cannot pass
+        // by breaking the search itself.
+        let out = capture_command("find /tmp/kshell_find_shallow -name needle.txt");
+        assert_output_contains("the match is printed", &out, b"needle.txt");
+        assert_eq!(last_exit(), 0, "find: a match is success");
+
+        // 0 as well: *finding nothing is a complete answer*, and this is the one
+        // place `find` differs from `grep`. `grep`'s empty result is ambiguous
+        // ("absent" or "unreadable?"), so it earns a third status; `find`'s is
+        // not, so a nonzero status here would invent a failure GNU `find` does
+        // not report either.
+        let out = capture_command("find /tmp/kshell_find_shallow -name zzz_no_such_name");
+        assert_output_contains("the empty result is stated", &out, b"0 matches found");
+        assert_eq!(last_exit(), 0, "find: finding nothing is not an error");
+
+        // 1: could not walk. Byte-for-byte the same trailer as the line above --
+        // `0 matches found` -- which is precisely why the status has to carry
+        // the difference.
+        let out = capture_command("find /zzz_no_such_dir -name anything");
+        assert_output_starts_with(
+            "find names the directory it could not read",
+            &out,
+            b"find: ",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "find: an unreadable root is not an empty one"
+        );
+
+        // A depth that is not a number used to become a silent `-maxdepth 16`,
+        // so a typo returned a truncated search wearing the look of a whole one.
+        let out = capture_command("find /tmp/kshell_find_shallow -maxdepth abc");
+        assert_output_starts_with("find rejects a non-numeric depth", &out, b"find: -maxdepth");
+        assert_eq!(last_exit(), 1, "find: a bad depth is a usage error");
+
+        // The built-in cap: nobody asked for it, the directories below it exist,
+        // and stopping there without a word is `find` reporting that they do not.
+        let out = capture_command("find /tmp/kshell_find_deep -type d");
+        assert_output_contains("the cap is named when it bites", &out, b"recursion limit");
+        assert_eq!(last_exit(), 1, "find: a truncated walk is incomplete");
+
+        // The user's own limit, on the same tree, cutting off far more of it --
+        // and silent, because this is the command doing what it was told. The
+        // pair is the whole point: identical mechanism, opposite meaning.
+        let out = capture_command("find /tmp/kshell_find_deep -maxdepth 2 -type d");
+        assert_output_lacks(
+            "a requested limit is not a complaint",
+            &out,
+            b"recursion limit",
+        );
+        assert_eq!(last_exit(), 0, "find: -maxdepth is not a failure");
+
+        // A depth past the cap is clamped and said out loud -- but the clamp is
+        // only a *warning*, and the status turns on whether the answer came back
+        // whole, not on whether the request was honoured verbatim. Here the cap
+        // goes on to bite this deep tree, so 1; asked of the shallow tree below,
+        // the same clamp costs nothing and the status stays 0.
+        let out = capture_command("find /tmp/kshell_find_deep -maxdepth 99 -type d");
+        assert_output_contains(
+            "the clamp is announced",
+            &out,
+            b"exceeds the built-in limit",
+        );
+        assert_eq!(last_exit(), 1, "find: the clamp truncated this walk");
+
+        let out = capture_command("find /tmp/kshell_find_shallow -maxdepth 99 -name needle.txt");
+        assert_output_contains(
+            "the clamp is still announced",
+            &out,
+            b"exceeds the built-in limit",
+        );
+        assert_eq!(
+            last_exit(),
+            0,
+            "find: a clamp that changed nothing is not a failure"
+        );
+
+        // The trees are left in place: removing an 18-deep one needs a recursive
+        // delete the VFS does not offer, and /tmp does not survive the boot. The
+        // names are unique enough that no other rung can trip over them.
+    }
+
+    serial_println!("  kshell::self_test 28: `ls -R` says which subtree it stopped at");
+    // The same silence as `find`'s, in the command most likely to meet it: a
+    // symlink loop is exactly what `ls`'s depth guard is for, and it answered by
+    // printing "ls: recursion limit reached" -- no path, no status -- in the
+    // middle of a long `-R` listing, where there is no way to tell which of the
+    // scrolled-past directories it belonged to.
+    //
+    // Unlike `find`, `ls` has no user-supplied depth, so there is no silent case
+    // to keep apart here: every hit on this limit is a refusal.
+    {
+        use crate::fs::vfs::Vfs;
+
+        // 34 levels: two past LS_DEPTH_CAP.
+        Vfs::mkdir_all(Path::new(
+            "/tmp/kshell_ls_deep/d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/d11/d12/d13/d14/d15/d16/d17\
+             /d18/d19/d20/d21/d22/d23/d24/d25/d26/d27/d28/d29/d30/d31/d32/d33/d34",
+        ))?;
+
+        let out = capture_command("ls -R /tmp/kshell_ls_deep");
+        assert_output_contains("the cap is named when it bites", &out, b"recursion limit");
+        // The path is the point: without it the line is unattributable, which is
+        // what it was before.
+        assert_output_contains("ls names the subtree it stopped at", &out, b"/d33");
+        assert_eq!(last_exit(), 1, "ls: a truncated listing is incomplete");
+
+        // A listing that fits under the cap is untouched by any of this. Its own
+        // fixture rather than the one rung 27 built: a rung that silently needs
+        // an earlier rung's leftovers fails for a reason that points at the
+        // wrong command the day someone reorders them.
+        Vfs::mkdir_all(Path::new("/tmp/kshell_ls_shallow/sub"))?;
+        let out = capture_command("ls -R /tmp/kshell_ls_shallow");
+        assert_output_lacks(
+            "an ordinary listing is not a complaint",
+            &out,
+            b"recursion limit",
+        );
+        assert_eq!(last_exit(), 0, "ls: a complete listing is success");
+    }
+
+    serial_println!("  kshell::self_test 29: a diagnostic followed by a bare return still owes 1");
+    // A sample of the 111 sites swept mechanically: a command printed
+    // `progname: something went wrong` and then `return;`, leaving the 0 that
+    // `dispatch` sets before every command. So `unzip missing.zip && rm -rf src`
+    // ran the `rm`.
+    //
+    // The sweep was gated on the Unix convention that a message prefixed with
+    // the command's own name is a diagnostic -- `cp`, `grep` and `ld` prefix
+    // their name to errors and never to results -- because the vocabulary gates
+    // do not work here: three of `zip`'s four early exits contain no form of the
+    // words "error", "failed" or "cannot", and an argument-count gate cannot
+    // separate a usage error from `alias`, `declare` and `trap`, all of which
+    // use "no arguments" to mean *show me the current value*.
+    //
+    // A gate is not a proof, so this rung spot-checks the three shapes the sweep
+    // covers, one command from each family, rather than trusting the convention
+    // on its own.
+    {
+        // A missing required argument.
+        let out = capture_command("unzip -d");
+        assert_output_starts_with("unzip explains the missing directory", &out, b"unzip: ");
+        assert_eq!(last_exit(), 1, "a usage error is a failed command");
+
+        // A file that cannot be read at all.
+        let out = capture_command("tar -tf /zzz_no_such_dir/zzz.tar");
+        assert_output_starts_with("tar names the archive it could not read", &out, b"tar: ");
+        assert_eq!(last_exit(), 1, "an unreadable archive is a failed command");
+
+        // A file that reads fine and is not what it claims to be -- the shape
+        // most likely to be mistaken for a result, since nothing failed at the
+        // I/O layer and the command has something true to say.
+        //
+        // `-t` was load-bearing when this rung was written, and is now merely
+        // one of two ways to reach the diagnostic. Plain `gunzip <not-gzip>`
+        // used not to reach it at all: `cmd_gunzip` serves both `gzip` and
+        // `gunzip`, `dispatch` discarded which name was typed, so the function
+        // guessed the direction from the file's magic bytes and a file that is
+        // *not* gzip was taken as a request to compress it. `-t` suppressed that
+        // guess. The guess was a bug in its own right and rung 30 now covers it;
+        // `-t` is kept here so this rung keeps testing the sweep rather than the
+        // fix.
+        crate::fs::vfs::Vfs::write_file(
+            Path::new("/tmp/kshell_sweep_selftest.gz"),
+            b"this is not gzip",
+        )?;
+        let out = capture_command("gunzip -t /tmp/kshell_sweep_selftest.gz");
+        assert_output_starts_with("gunzip rejects the magic", &out, b"gunzip: ");
+        assert_eq!(last_exit(), 1, "a malformed archive is a failed command");
+
+        // The five `-t` successes the sweep deliberately left alone are asserted
+        // in rung 30 rather than here, because guarding them needs a *valid*
+        // archive and making one needs the direction fix that rung 30 is about.
+        // They matter to the sweep: `gunzip -t good.gz` prints
+        // `gunzip: '<file>': OK (...)` on success, because real `gzip -t` does --
+        // so the convention the sweep runs on is not "the prefix means an
+        // error", it is "the prefix means the command is speaking about itself".
+
+        let _ = crate::fs::vfs::Vfs::remove(Path::new("/tmp/kshell_sweep_selftest.gz"));
+    }
+
+    serial_println!("  kshell::self_test 30: gunzip decompresses, whichever way the file looks");
+    // `gzip` compresses and `gunzip` decompresses, whichever way the file
+    // happens to look.
+    //
+    // `gzip` and `gunzip` share one function, and until now they shared one
+    // *dispatch arm* as well -- so the name the user typed was discarded before
+    // the function could read it, and the direction was inferred from the file's
+    // magic bytes instead: gzip header, decompress; anything else, compress.
+    //
+    // That guess is right for `gzip` and exactly backwards for `gunzip`, which
+    // is the worst shape a default can have, because the wrong half is the half
+    // that looks like it worked. `gunzip notes.txt` -- a plain mistake, the kind
+    // a tab-completion makes -- did not say "not in gzip format"; it compressed
+    // the file, wrote `notes.txt.gz`, printed a success line and exited 0. The
+    // mirror case was as bad and quieter: `gzip archive.gz` decompressed it.
+    //
+    // `-d` made it worse rather than better. It was `"-d" => {}`, commented
+    // "no-op, default for gunzip" -- but it was only a no-op if the guess was
+    // already going the right way, so `gzip -d notes.txt`, a user saying
+    // "decompress" as plainly as the interface allows, compressed it.
+    //
+    // The direction now comes from the name, overridden only by an explicit
+    // flag. These assertions are about *which way it went*, so each one uses a
+    // file whose contents point the other way -- a test that passed a gzip file
+    // to `gunzip` would be satisfied by the old guess too.
+    {
+        let plain = Path::new("/tmp/kshell_gzip_selftest.txt");
+        let archive = Path::new("/tmp/kshell_gzip_selftest.txt.gz");
+        // Compressible rather than random: a body that shrinks makes the
+        // round-trip assertion below prove the codec ran, not merely that a
+        // container was wrapped around the bytes and unwrapped again.
+        let body: &[u8] =
+            b"slateos gzip round trip slateos gzip round trip slateos gzip round trip";
+        let _ = crate::fs::vfs::Vfs::remove(archive);
+        crate::fs::vfs::Vfs::write_file(plain, body)?;
+
+        // `gzip` on a plain file compresses it. This is the direction the old
+        // guess got right, and it is here as the baseline the rest are read
+        // against.
+        let out = capture_command("gzip /tmp/kshell_gzip_selftest.txt");
+        assert_output_starts_with("gzip reports what it wrote", &out, b"gzip: ");
+        assert_eq!(last_exit(), 0, "compressing a plain file succeeds");
+        let compressed = crate::fs::vfs::Vfs::read_file(archive)?;
+        assert!(
+            compressed.len() >= 2 && compressed[0] == 0x1F && compressed[1] == 0x8B,
+            "gzip wrote a gzip header"
+        );
+
+        // `-t` on a good archive: the one case in this shell where a message
+        // prefixed with the command's own name reports a *success*. The bail
+        // sweep exempted five of these by name; this is what the exemption
+        // protects, and rung 29 could not assert it because nothing could
+        // produce a valid archive to test with.
+        let out = capture_command("gunzip -t /tmp/kshell_gzip_selftest.txt.gz");
+        assert_output_contains("a good archive tests OK", &out, b": OK (");
+        assert_eq!(last_exit(), 0, "a valid archive is not a failure");
+
+        // `gzip` on something already gzip refuses instead of producing
+        // `.gz.gz`. Without this the direction fix would trade one silent wrong
+        // answer for another: the old code decompressed here, and the naive fix
+        // compresses a second time, which is just as much not what was asked and
+        // is harder to notice.
+        let out = capture_command("gzip /tmp/kshell_gzip_selftest.txt.gz");
+        assert_output_starts_with("gzip refuses to re-compress", &out, b"gzip: ");
+        assert_eq!(
+            last_exit(),
+            1,
+            "re-compressing an archive is a failed command"
+        );
+        assert!(
+            crate::fs::vfs::Vfs::read_file(Path::new("/tmp/kshell_gzip_selftest.txt.gz.gz"))
+                .is_err(),
+            "and wrote no .gz.gz"
+        );
+
+        // `gzip -d` decompresses -- the flag that used to be a no-op. The
+        // round-trip is asserted on the bytes, since a decompress that produced
+        // the wrong content would still print a success line.
+        let _ = crate::fs::vfs::Vfs::remove(plain);
+        let out = capture_command("gzip -d /tmp/kshell_gzip_selftest.txt.gz");
+        // `gunzip: `, not `gzip: `, even though `gzip` is what was typed: the
+        // decompress half of the function names itself after the operation
+        // rather than after the invocation. GNU would say `gzip: ` here. Left
+        // as-is and asserted as-is -- the prefix is what the message means, not
+        // which name reached it, and the sweep's convention holds either way.
+        assert_output_starts_with("gzip -d reports what it wrote", &out, b"gunzip: ");
+        assert_eq!(last_exit(), 0, "gzip -d succeeds");
+        assert_eq!(
+            crate::fs::vfs::Vfs::read_file(plain)?.as_slice(),
+            body,
+            "the round trip returned the original bytes"
+        );
+
+        // The headline bug: `gunzip` on a file that is not gzip refuses, rather
+        // than reading the name as a request to compress. `plain` is the file
+        // just recovered above, so its contents are as un-gzip as they get.
+        //
+        // The archive has to go first, and the reason is worth stating because
+        // it cost a boot: this shell's `gzip` does *not* remove its input the
+        // way GNU's does, so `archive` is still sitting there from the compress
+        // step above. Asserting `archive` is absent without deleting it first
+        // asserted nothing about `gunzip` at all -- it read a leftover, and
+        // failed while the code under test was behaving correctly. Deleting it
+        // is what turns the check into a real one: if `gunzip` still guessed
+        // "not gzip, so compress it", it would put the file straight back.
+        let _ = crate::fs::vfs::Vfs::remove(archive);
+        let out = capture_command("gunzip /tmp/kshell_gzip_selftest.txt");
+        assert_output_contains("gunzip says what is wrong", &out, b"not in gzip format");
+        assert_eq!(
+            last_exit(),
+            1,
+            "decompressing a non-archive is a failed command"
+        );
+        assert!(
+            crate::fs::vfs::Vfs::read_file(archive).is_err(),
+            "and compressed nothing behind the user's back"
+        );
+
+        let _ = crate::fs::vfs::Vfs::remove(plain);
+        let _ = crate::fs::vfs::Vfs::remove(archive);
+    }
+
+    serial_println!("  kshell::self_test 31: a line the shell could not parse is not a success");
+    // The last family of statusless failures: `handle_control_flow` returns
+    // `true` to mean "this was control flow, I consumed it", `execute` returns
+    // the moment it does, and nothing on that path ever set a status. So the 0
+    // that `dispatch` writes before every command was what survived, and
+    //
+    //     fi ; echo $?
+    //
+    // printed a syntax error and then `0`. Under `&&` that is worse than
+    // cosmetic: `for in ; do ... && rm -rf build` ran the `rm` off the back of
+    // a line the shell had just refused to parse.
+    //
+    // Flat 1, not bash's 2. Bash does reserve 2 for syntax errors, but as one
+    // row of a whole table -- 126 not-executable, 127 not-found, 128+N signals
+    // -- and taking a single row without the rest leaves a caller unable to
+    // tell which convention it is reading. `empty pipe operand` already used
+    // flat 1 and is the precedent the rest now match.
+    {
+        // One per shape, not one per site: the sites are near-identical and the
+        // interesting question is whether the *arm* returns without a status,
+        // which differs by how the arm ends rather than by which keyword it is.
+        for (cmd, needle) in [
+            // Ends in a plain `return true`.
+            ("done", &b"done without"[..]),
+            ("esac", &b"esac without"[..]),
+            ("else", &b"else without"[..]),
+            ("elif", &b"elif without"[..]),
+            // Ends by falling out of an `if` whose `else` does the real work --
+            // the one arm with no `return` at all, so the insertion had to go
+            // inside the branch rather than before a return.
+            ("fi", &b"fi without"[..]),
+            // Reached through a different route: the keyword parses but its
+            // operands do not.
+            ("while", &b"requires a condition"[..]),
+            ("for", &b"for requires a variable name"[..]),
+            // A different function entirely (`start_func_collection`), whose two
+            // error branches share one `true` -- so one insertion covers both,
+            // and this checks that the shared one is on the reachable path.
+            ("zzz_nosuch() oops", &b"in function definition"[..]),
+        ] {
+            let out = capture_command(cmd);
+            assert_output_contains("the shell says what it could not parse", &out, needle);
+            assert_eq!(last_exit(), 1, "an unparseable line is a failed command");
+        }
+
+        // `if` with no condition is held back from the loop above because it is
+        // the one site that mutates parser state before returning: it pushes
+        // `ControlState::ThenSkip` so the body it expects gets skipped. Left
+        // there, every later command in this self-test would be silently
+        // discarded by `control_should_execute` and every later rung would
+        // "pass" without running. So it is asserted on its own and closed
+        // immediately.
+        let out = capture_command("if");
+        assert_output_contains("if wants a condition", &out, b"if requires a condition");
+        assert_eq!(last_exit(), 1, "an unparseable `if` is a failed command");
+        let _ = capture_command("fi");
+
+        // And the shell is still usable afterwards -- the assertion that the
+        // cleanup above actually worked. Without it a corrupted control stack
+        // would leave this rung green and take the rest of the suite with it,
+        // silently, which is the exact failure the `if` case risks.
+        let out = capture_command("echo parser_ok");
+        assert_output_starts_with("a plain command still runs", &out, b"parser_ok");
+        assert_eq!(last_exit(), 0, "and still reports success");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -11977,10 +12441,24 @@ fn cmd_ls(args: &str) {
     );
 }
 
+/// How deep `ls -R` will descend before giving up on a subtree.
+///
+/// A stack-safety limit against infinite recursion — a symlink loop, most
+/// obviously. Named rather than inlined because the limit is now *reported*
+/// when it bites, and the diagnostic and the check must not be able to drift
+/// apart.
+const LS_DEPTH_CAP: u32 = 32;
+
 /// Internal helper for ls: list one directory and optionally recurse.
 ///
-/// `depth` guards against infinite recursion (e.g., symlink loops);
-/// maximum depth is 32.
+/// `depth` guards against infinite recursion (e.g., symlink loops); the bound is
+/// [`LS_DEPTH_CAP`].
+///
+/// Sets a failing status itself rather than leaving it to `cmd_ls`, which is
+/// what it already does for an unreadable directory below. The usual reason a
+/// helper should stay silent — that only the caller knows whether one failure
+/// among several means the *command* failed — does not apply when the caller
+/// keeps no tally to decide with.
 #[allow(clippy::too_many_arguments)]
 fn ls_list_dir(
     path: &Path,
@@ -11993,8 +12471,19 @@ fn ls_list_dir(
     recursive: bool,
     depth: u32,
 ) {
-    if depth > 32 {
-        shell_println!("ls: recursion limit reached");
+    if depth > LS_DEPTH_CAP {
+        // Named the path and set a status, neither of which it used to do. `ls`
+        // has no equivalent of `find`'s user-supplied depth, so unlike there,
+        // every hit on this limit is a refusal: the directories below it exist
+        // and were not listed. Saying "recursion limit reached" without saying
+        // *where* also left the one useful fact out — in a `-R` walk the line
+        // arrives amid the listing of some unnamed directory.
+        shell_println!(
+            "ls: {}: recursion limit ({}) reached, not listed",
+            path.display(),
+            LS_DEPTH_CAP
+        );
+        set_exit(1);
         return;
     }
 
@@ -13330,6 +13819,13 @@ fn du_recurse(path: &Path, depth: usize, max_depth: usize, summary_only: bool) -
 ///   `find / -type d -name src`
 ///   `find . -size +1M`
 ///   `find /tmp -empty`
+///
+/// Exits **0** when the walk completed — *including* when it matched nothing,
+/// which is a complete answer and not an error — and **1** when it could not
+/// walk something: an unreadable directory, a subtree cut off by
+/// [`FIND_DEPTH_CAP`], or a usage error. Two values, not the three
+/// `grep`/`cmp`/`diff` use; see [`FindTally`] for why the third would be
+/// meaningless here.
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_find(args: &str) {
     if args.is_empty() {
@@ -13350,7 +13846,9 @@ fn cmd_find(args: &str) {
     let mut name_pattern: Option<&str> = None;
     let mut type_filter: Option<char> = None; // 'f', 'd', or 'l'
     let mut size_filter: Option<(i64, char)> = None; // (threshold, '+'/'-'/'=')
-    let mut max_depth: u32 = 16;
+    // `None` until the user asks: the default is not a request, and only a
+    // request may cut the walk off silently.
+    let mut user_max_depth: Option<u32> = None;
     let mut empty_filter = false;
 
     let mut words = args.split_whitespace().peekable();
@@ -13366,8 +13864,23 @@ fn cmd_find(args: &str) {
                 size_filter = Some(parse_size_predicate(s));
             }
         } else if w == "-maxdepth" {
-            if let Some(d) = words.next() {
-                max_depth = d.parse::<u32>().unwrap_or(16);
+            // `.unwrap_or(16)` used to turn `-maxdepth abc` into a silent
+            // `-maxdepth 16`, so a typo produced a *truncated* search wearing
+            // the appearance of a complete one. A depth argument that is not a
+            // number is a mistake, and the only safe answer to a mistake in a
+            // search's bounds is to refuse rather than to guess at them.
+            let Some(d) = words.next() else {
+                shell_println!("find: -maxdepth: expected a number");
+                set_exit(1);
+                return;
+            };
+            match d.parse::<u32>() {
+                Ok(n) => user_max_depth = Some(n),
+                Err(_) => {
+                    shell_println!("find: -maxdepth: '{}' is not a number", d);
+                    set_exit(1);
+                    return;
+                }
             }
         } else if w == "-empty" {
             empty_filter = true;
@@ -13385,6 +13898,25 @@ fn cmd_find(args: &str) {
 
     let root = resolve_path(search_path);
 
+    // A `-maxdepth` deeper than the cap cannot be honoured, and pretending
+    // otherwise is the same silence in a different place: the old code let the
+    // user's number straight through, so `-maxdepth 200` would have recursed 200
+    // levels into the shell's 64 KiB stack if a tree that deep existed. Clamp,
+    // and say so once here rather than once per subtree below.
+    let (max_depth, depth_limit_is_builtin) = match user_max_depth {
+        Some(n) if n <= FIND_DEPTH_CAP => (n, false),
+        Some(n) => {
+            shell_println!(
+                "find: -maxdepth {}: exceeds the built-in limit of {}, using {}",
+                n,
+                FIND_DEPTH_CAP,
+                FIND_DEPTH_CAP
+            );
+            (FIND_DEPTH_CAP, true)
+        }
+        None => (FIND_DEPTH_CAP, true),
+    };
+
     let filter = FindFilter {
         name_pattern,
         is_glob: name_pattern
@@ -13393,12 +13925,33 @@ fn cmd_find(args: &str) {
         size_filter,
         empty_filter,
         max_depth,
+        depth_limit_is_builtin,
     };
 
-    let mut count: u64 = 0;
-    find_recurse_filtered(Path::new(&root), &filter, &mut count, 0);
-    shell_println!("\n{} matches found", count);
+    let mut tally = FindTally::default();
+    find_recurse_filtered(Path::new(&root), &filter, &mut tally, 0);
+    shell_println!("\n{} matches found", tally.matches);
+
+    // Two values, not three (see `FindTally`): finding nothing is a complete
+    // answer and stays 0, exactly as GNU `find` does. What must not stay 0 is a
+    // walk that could not read something -- the count printed above is then a
+    // floor rather than a total, and the caller has no other way to learn that.
+    if tally.unreadable > 0 {
+        set_exit(1);
+    }
 }
+
+/// How deep `find` will descend before giving up on a subtree.
+///
+/// This is a stack-safety limit, not a feature: `find_recurse_filtered` recurses
+/// once per directory level, and the shell's task stack is 64 KiB
+/// ([`crate::sched::task::TASK_STACK_SIZE`]). It is emphatically *not* the same
+/// thing as the user's `-maxdepth`, even though one field used to carry both --
+/// see [`FindFilter::depth_limit_is_builtin`].
+///
+/// Named rather than inlined because the limit is now *reported* when it bites,
+/// and the diagnostic and the check must not be able to drift apart.
+const FIND_DEPTH_CAP: u32 = 16;
 
 /// Parsed find predicates.
 struct FindFilter<'a> {
@@ -13407,7 +13960,42 @@ struct FindFilter<'a> {
     type_filter: Option<char>,
     size_filter: Option<(i64, char)>,
     empty_filter: bool,
+    /// The depth actually enforced: the user's `-maxdepth` if they gave one and
+    /// it fits, otherwise [`FIND_DEPTH_CAP`].
     max_depth: u32,
+    /// Whether `max_depth` is ours or theirs.
+    ///
+    /// The two are indistinguishable as numbers and opposite in meaning. A user
+    /// who writes `-maxdepth 2` *asked* not to see anything deeper, so cutting
+    /// the walk off there is the command working, and saying so would be noise
+    /// on every run. Our own cap is the reverse: nobody asked for it, the files
+    /// below it exist, and stopping silently is `find` reporting that they do
+    /// not. Only the second gets a diagnostic.
+    depth_limit_is_builtin: bool,
+}
+
+/// What a `find` run produced: what it matched, and what it could not walk.
+///
+/// Unlike `grep`, `find` needs only **two** exit statuses, not three. The test
+/// is whether the command's "no" is ambiguous: `grep`'s empty result might mean
+/// *I searched and the text is absent* or *I could not read the file*, so it
+/// needs a third value to keep those apart. `find`'s empty result carries no
+/// such ambiguity -- "no path matched" is a perfectly good, complete answer, and
+/// GNU `find` accordingly exits 0 for it and reserves 1 for errors. Inventing a
+/// 2 here would be manufacturing a distinction the command does not have.
+///
+/// What `find` *did* lack was any status at all: `cmd_find` set none on any
+/// path, so `find /no/such/dir -name x` printed `0 matches found` and exited 0 --
+/// a directory that could not be opened reported as a directory containing
+/// nothing.
+#[derive(Default)]
+struct FindTally {
+    /// Paths that satisfied every predicate.
+    matches: u64,
+    /// Directories the walk could not read, or subtrees it was cut off from by
+    /// [`FIND_DEPTH_CAP`]. Any of these means the search was incomplete, so the
+    /// zero-match answer is not an answer.
+    unreadable: usize,
 }
 
 /// Parse a `-size` argument like `+1M`, `-512k`, `100c`.
@@ -94570,21 +95158,44 @@ fn extension_hint(path: &Path) -> &'static str {
     }
 }
 
-/// Recursive helper for find — search directory tree for name matches.
+/// Recursive helper for `find` — walk a directory tree applying the predicates.
 ///
-/// Uses glob matching if the pattern contains metacharacters (`*`, `?`,
-/// `[`), otherwise falls back to case-insensitive substring matching.
-/// Limits depth to 16.
-/// Recursive find with predicate filtering.
+/// Uses glob matching if the pattern contains metacharacters (`*`, `?`, `[`),
+/// otherwise falls back to case-insensitive substring matching. Depth is bounded
+/// by [`FindFilter::max_depth`].
+///
+/// Records anything it could not look at in `tally.unreadable` rather than
+/// returning quietly, because a walk that skipped a subtree has not established
+/// that the subtree holds no match — and printing `0 matches found` afterwards
+/// asserts exactly that. See [`FindTally`].
 #[allow(clippy::arithmetic_side_effects)]
-fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, count: &mut u64, depth: u32) {
+fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, tally: &mut FindTally, depth: u32) {
     if depth > filter.max_depth {
+        // Only our own cap is a refusal. The user's `-maxdepth` is the command
+        // doing what it was told, and announcing it would fire on every level of
+        // every bounded search.
+        if filter.depth_limit_is_builtin {
+            shell_println!(
+                "find: {}: recursion limit ({}) reached, not searched",
+                path.display(),
+                FIND_DEPTH_CAP
+            );
+            tally.unreadable = tally.unreadable.saturating_add(1);
+        }
         return;
     }
 
     let entries = match crate::fs::Vfs::readdir(path) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(e) => {
+            // This fires for the root as well as for subdirectories, which is
+            // the case that mattered most: `find /no/such/dir -name x` used to
+            // fail to open its one and only directory and then report the
+            // result as `0 matches found`, exit 0.
+            shell_println!("find: {}: {:?}", path.display(), e);
+            tally.unreadable = tally.unreadable.saturating_add(1);
+            return;
+        }
     };
 
     for entry in &entries {
@@ -94643,9 +95254,19 @@ fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, count: &mut u64, 
                 crate::fs::EntryType::File => entry.size == 0,
                 crate::fs::EntryType::Directory => {
                     // Check if directory is empty (no entries besides . and ..).
-                    crate::fs::Vfs::readdir(&child_path)
-                        .map(|e| e.is_empty())
-                        .unwrap_or(false)
+                    match crate::fs::Vfs::readdir(&child_path) {
+                        Ok(e) => e.is_empty(),
+                        Err(e) => {
+                            // `.unwrap_or(false)` here answered "not empty" for
+                            // a directory nobody managed to open -- a claim
+                            // about its contents, made without reading them, and
+                            // indistinguishable in the output from a directory
+                            // genuinely holding files.
+                            shell_println!("find: {}: {:?}", child_path.display(), e);
+                            tally.unreadable = tally.unreadable.saturating_add(1);
+                            false
+                        }
+                    }
                 }
                 _ => false,
             };
@@ -94663,11 +95284,11 @@ fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, count: &mut u64, 
                 crate::fs::EntryType::CharDevice => "",
             };
             shell_println!("{}{}", child_path.display(), type_str);
-            *count = count.saturating_add(1);
+            tally.matches = tally.matches.saturating_add(1);
         }
 
         if entry.entry_type == crate::fs::EntryType::Directory {
-            find_recurse_filtered(&child_path, filter, count, depth + 1);
+            find_recurse_filtered(&child_path, filter, tally, depth + 1);
         }
     }
 }
@@ -94687,6 +95308,7 @@ fn cmd_wc(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("wc: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -94738,6 +95360,7 @@ fn cmd_head(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("head: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -94773,6 +95396,7 @@ fn cmd_tail(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("tail: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -94834,6 +95458,7 @@ fn cmd_hexdump(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("hexdump: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -96060,6 +96685,7 @@ fn cmd_run(args: &str) {
         Ok(data) => data,
         Err(e) => {
             shell_println!("run: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -101349,6 +101975,7 @@ fn cmd_container(args: &str) {
                             },
                             None => {
                                 shell_println!("container logs: --tail needs a value");
+                                set_exit(1);
                                 return;
                             }
                         },
@@ -101442,6 +102069,7 @@ fn cmd_container(args: &str) {
                                 }
                                 None => {
                                     shell_println!("container events: -n needs a numeric value");
+                                    set_exit(1);
                                     return;
                                 }
                             }
@@ -101457,6 +102085,7 @@ fn cmd_container(args: &str) {
                                 }
                                 None => {
                                     shell_println!("container events: --id needs a container ID");
+                                    set_exit(1);
                                     return;
                                 }
                             }
@@ -105248,6 +105877,7 @@ fn cmd_source(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("source: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -105256,6 +105886,7 @@ fn cmd_source(args: &str) {
         Ok(s) => s,
         Err(_) => {
             shell_println!("source: {}: not a text file", path.display());
+            set_exit(1);
             return;
         }
     };
@@ -105265,6 +105896,7 @@ fn cmd_source(args: &str) {
         let mut depth = SOURCE_DEPTH.lock();
         if *depth >= MAX_DEPTH {
             shell_println!("source: maximum nesting depth ({}) exceeded", MAX_DEPTH);
+            set_exit(1);
             return;
         }
         *depth = depth.saturating_add(1);
@@ -105365,6 +105997,7 @@ fn cmd_nl(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("nl: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -105408,6 +106041,7 @@ fn cmd_rev(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("rev: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -107765,6 +108399,7 @@ fn cmd_journal(args: &str) {
                     i = i.wrapping_add(1);
                 } else {
                     shell_println!("journal: -n requires a number");
+                    set_exit(1);
                     return;
                 }
             }
@@ -107783,6 +108418,7 @@ fn cmd_journal(args: &str) {
                     i = i.wrapping_add(1);
                 } else {
                     shell_println!("journal: --since requires a number");
+                    set_exit(1);
                     return;
                 }
             }
@@ -114540,11 +115176,13 @@ fn cmd_tar(args: &str) {
     let mode_count = u8::from(create) + u8::from(extract) + u8::from(list);
     if mode_count != 1 {
         shell_println!("tar: specify exactly one of -c, -x, -t");
+        set_exit(1);
         return;
     }
 
     if !flags.contains('f') {
         shell_println!("tar: -f flag required (no stdin/stdout tar)");
+        set_exit(1);
         return;
     }
 
@@ -114560,6 +115198,7 @@ fn cmd_tar(args: &str) {
         // tar -cf archive.tar file1 dir1 ...
         if parts.len() < 3 {
             shell_println!("tar: no files specified for archiving");
+            set_exit(1);
             return;
         }
 
@@ -114581,6 +115220,7 @@ fn cmd_tar(args: &str) {
                 verbose,
             ) {
                 shell_println!("tar: {}: {:?}", source, e);
+                set_exit(1);
                 return;
             }
         }
@@ -114633,6 +115273,7 @@ fn cmd_tar(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("tar: xz compression failed: {:?}", e);
+                    set_exit(1);
                     return;
                 }
             }
@@ -114681,6 +115322,7 @@ fn cmd_tar(args: &str) {
             Ok(d) => d,
             Err(e) => {
                 shell_println!("tar: read '{}': {:?}", archive_path.display(), e);
+                set_exit(1);
                 return;
             }
         };
@@ -114703,6 +115345,7 @@ fn cmd_tar(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("tar: gzip decompress failed: {:?}", e);
+                    set_exit(1);
                     return;
                 }
             }
@@ -114724,6 +115367,7 @@ fn cmd_tar(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("tar: bzip2 decompress failed: {:?}", e);
+                    set_exit(1);
                     return;
                 }
             }
@@ -114743,6 +115387,7 @@ fn cmd_tar(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("tar: xz decompress failed: {:?}", e);
+                    set_exit(1);
                     return;
                 }
             }
@@ -114766,6 +115411,7 @@ fn cmd_tar(args: &str) {
                     }
                     Err(e) => {
                         shell_println!("tar: zstd decompress failed: {:?}", e);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -114784,6 +115430,7 @@ fn cmd_tar(args: &str) {
                     }
                     Err(e) => {
                         shell_println!("tar: lz4 decompress failed: {:?}", e);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -114799,6 +115446,7 @@ fn cmd_tar(args: &str) {
             Ok(e) => e,
             Err(e) => {
                 shell_println!("tar: parse '{}': {:?}", archive_path.display(), e);
+                set_exit(1);
                 return;
             }
         };
@@ -115086,6 +115734,7 @@ fn cmd_unzip(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("unzip: -d requires a directory argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -115101,6 +115750,7 @@ fn cmd_unzip(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("unzip: no archive file specified");
+            set_exit(1);
             return;
         }
     };
@@ -115109,6 +115759,7 @@ fn cmd_unzip(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("unzip: '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -115305,6 +115956,7 @@ fn cmd_cpio_list(args: &[&str]) {
         Some(&p) => resolve_path(p),
         None => {
             shell_println!("cpio -t: no archive file specified");
+            set_exit(1);
             return;
         }
     };
@@ -115313,6 +115965,7 @@ fn cmd_cpio_list(args: &[&str]) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("cpio: '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -115321,6 +115974,7 @@ fn cmd_cpio_list(args: &[&str]) {
         Ok(e) => e,
         Err(e) => {
             shell_println!("cpio: '{}': parse failed: {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -115417,6 +116071,7 @@ fn cmd_cpio_extract(args: &[&str]) {
                     skip_next = true;
                 } else {
                     shell_println!("cpio -i: -d requires a directory argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -115432,6 +116087,7 @@ fn cmd_cpio_extract(args: &[&str]) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("cpio -i: no archive file specified");
+            set_exit(1);
             return;
         }
     };
@@ -115440,6 +116096,7 @@ fn cmd_cpio_extract(args: &[&str]) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("cpio: '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -115452,6 +116109,7 @@ fn cmd_cpio_extract(args: &[&str]) {
                 archive_path.display(),
                 e
             );
+            set_exit(1);
             return;
         }
     };
@@ -115533,6 +116191,7 @@ fn cmd_cpio_create(args: &[&str]) {
 
     if args.len() < 2 {
         shell_println!("cpio -o: need archive name and at least one file");
+        set_exit(1);
         return;
     }
 
@@ -115596,6 +116255,7 @@ fn cmd_cpio_create(args: &[&str]) {
 
     if entries.is_empty() {
         shell_println!("cpio -o: no valid files to archive");
+        set_exit(1);
         return;
     }
 
@@ -115603,6 +116263,7 @@ fn cmd_cpio_create(args: &[&str]) {
         Ok(a) => a,
         Err(e) => {
             shell_println!("cpio: create failed: {:?}", e);
+            set_exit(1);
             return;
         }
     };
@@ -115666,6 +116327,7 @@ fn cmd_ar_list(args: &[&str]) {
         Some(&p) => resolve_path(p),
         None => {
             shell_println!("ar t: no archive file specified");
+            set_exit(1);
             return;
         }
     };
@@ -115674,6 +116336,7 @@ fn cmd_ar_list(args: &[&str]) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("ar: '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -115682,6 +116345,7 @@ fn cmd_ar_list(args: &[&str]) {
         Ok(e) => e,
         Err(e) => {
             shell_println!("ar: '{}': parse failed: {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -115737,6 +116401,7 @@ fn cmd_ar_extract(args: &[&str]) {
                     skip_next = true;
                 } else {
                     shell_println!("ar x: -d requires a directory argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -115752,6 +116417,7 @@ fn cmd_ar_extract(args: &[&str]) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("ar x: no archive file specified");
+            set_exit(1);
             return;
         }
     };
@@ -115760,6 +116426,7 @@ fn cmd_ar_extract(args: &[&str]) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("ar: '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -115772,6 +116439,7 @@ fn cmd_ar_extract(args: &[&str]) {
                 archive_path.display(),
                 e
             );
+            set_exit(1);
             return;
         }
     };
@@ -115818,6 +116486,7 @@ fn cmd_ar_create(args: &[&str]) {
 
     if args.len() < 2 {
         shell_println!("ar r: need archive name and at least one file");
+        set_exit(1);
         return;
     }
 
@@ -115848,6 +116517,7 @@ fn cmd_ar_create(args: &[&str]) {
 
     if entries.is_empty() {
         shell_println!("ar r: no valid files to archive");
+        set_exit(1);
         return;
     }
 
@@ -115855,6 +116525,7 @@ fn cmd_ar_create(args: &[&str]) {
         Ok(a) => a,
         Err(e) => {
             shell_println!("ar: create failed: {:?}", e);
+            set_exit(1);
             return;
         }
     };
@@ -116120,6 +116791,7 @@ fn cmd_dpkg_contents(args: &[&str]) {
         Some(&p) => resolve_path(p),
         None => {
             shell_println!("dpkg -c: no .deb file specified");
+            set_exit(1);
             return;
         }
     };
@@ -116181,6 +116853,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
                     skip_next = true;
                 } else {
                     shell_println!("dpkg -x: -d requires a directory argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -116196,6 +116869,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("dpkg -x: no .deb file specified");
+            set_exit(1);
             return;
         }
     };
@@ -116209,6 +116883,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
         Some(m) => m,
         None => {
             shell_println!("dpkg: no data.tar found in '{}'", deb_path.display());
+            set_exit(1);
             return;
         }
     };
@@ -116332,6 +117007,7 @@ fn cmd_un7z(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("un7z: -d requires a directory argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -116347,6 +117023,7 @@ fn cmd_un7z(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("un7z: no archive file specified");
+            set_exit(1);
             return;
         }
     };
@@ -116355,6 +117032,7 @@ fn cmd_un7z(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("un7z: '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -116367,6 +117045,7 @@ fn cmd_un7z(args: &str) {
                 archive_path.display(),
                 e
             );
+            set_exit(1);
             return;
         }
     };
@@ -116500,6 +117179,7 @@ fn cmd_unrar(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("unrar: -d requires a directory argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -116515,6 +117195,7 @@ fn cmd_unrar(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("unrar: no archive file specified");
+            set_exit(1);
             return;
         }
     };
@@ -116523,6 +117204,7 @@ fn cmd_unrar(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("unrar: '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -116534,10 +117216,12 @@ fn cmd_unrar(args: &str) {
                 "unrar: '{}': RAR4 format not supported (only RAR5)",
                 archive_path.display()
             );
+            set_exit(1);
             return;
         }
         Err(e) => {
             shell_println!("unrar: '{}': parse failed: {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -116767,6 +117451,7 @@ fn cmd_zip(args: &str) {
 
     if positional.len() < 2 {
         shell_println!("zip: need at least an archive name and one file");
+        set_exit(1);
         return;
     }
 
@@ -116809,6 +117494,7 @@ fn cmd_zip(args: &str) {
 
     if input_files.is_empty() {
         shell_println!("zip: no input files");
+        set_exit(1);
         return;
     }
 
@@ -116851,6 +117537,7 @@ fn cmd_zip(args: &str) {
 
     if entries.is_empty() {
         shell_println!("zip: nothing to add");
+        set_exit(1);
         return;
     }
 
@@ -117033,6 +117720,7 @@ fn cmd_base64(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("base64: '{}': {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -117181,17 +117869,39 @@ fn cmd_checksum(args: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// gunzip — gzip decompression
+// gzip / gunzip — gzip compression and decompression
 // ---------------------------------------------------------------------------
 
-/// `gunzip` / `gzip -d` command — decompress gzip files.
+/// Which of the two commands sharing [`cmd_gunzip`] the user actually typed.
+///
+/// `gzip` and `gunzip` are one function because they share almost all of their
+/// machinery, and every other compressor family in this shell splits them
+/// (`bzip2`/`bunzip2`, `xz`/`unxz`, `zstd`/`unzstd`, `lz4`/`unlz4`). Sharing the
+/// body is fine; what was not fine was sharing the *dispatch arm*, which
+/// discarded the name and left the function to guess the direction from the
+/// file's contents.
+#[derive(Clone, Copy)]
+enum GzipMode {
+    Compress,
+    Decompress,
+}
+
+/// `gzip` / `gunzip` command — gzip compression and decompression.
+///
+/// The direction comes from `invoked_as`, i.e. from which of the two names the
+/// user typed, and is overridden only by an explicit flag. It is emphatically
+/// *not* guessed from the file's contents; see the comment on `decompress`
+/// below for what that guess used to do.
 ///
 /// Usage:
+/// - `gzip file`                — compress to `file.gz`
 /// - `gunzip file.gz`           — decompress to file (strips .gz)
+/// - `gzip -d file.gz`          — decompress whichever name was typed
+/// - `gunzip -c file`           — compress whichever name was typed
 /// - `gunzip file.gz -o out`    — decompress to explicit output path
 /// - `gunzip -t file.gz`        — test integrity only (no output)
 /// - `gunzip -l file.gz`        — show compressed/uncompressed sizes
-fn cmd_gunzip(args: &str) {
+fn cmd_gunzip(args: &str, invoked_as: GzipMode) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
         shell_println!(
@@ -117209,6 +117919,7 @@ fn cmd_gunzip(args: &str) {
     let mut test_only = false;
     let mut list_mode = false;
     let mut compress_mode = false;
+    let mut explicit_decompress = false;
     let mut input_path: Option<&str> = None;
     let mut output_path: Option<&str> = None;
     let mut skip_next = false;
@@ -117221,7 +117932,12 @@ fn cmd_gunzip(args: &str) {
         match p {
             "-t" | "--test" => test_only = true,
             "-l" | "--list" => list_mode = true,
-            "-d" => {} // gzip -d: explicit decompress mode (no-op, default for gunzip)
+            // Was `"-d" => {}`, commented "no-op, default for gunzip". It was
+            // not a no-op that happened to be harmless: with the direction
+            // inferred from magic bytes, `gzip -d notes.txt` -- a user saying
+            // "decompress this" as plainly as the interface allows -- compressed
+            // it anyway.
+            "-d" | "--decompress" => explicit_decompress = true,
             "-c" => compress_mode = true, // explicit compress mode
             "-o" => {
                 if let Some(&out) = parts.get(i.wrapping_add(1)) {
@@ -117229,6 +117945,7 @@ fn cmd_gunzip(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("gunzip: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -117244,6 +117961,7 @@ fn cmd_gunzip(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("gunzip: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -117253,18 +117971,62 @@ fn cmd_gunzip(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("gzip: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
 
-    // Auto-detect: if the file starts with gzip magic and we're not
-    // explicitly compressing, decompress.  If -c is given or the file
-    // is not gzip, compress.
     let is_gzip =
         file_data.len() >= 2 && file_data.first() == Some(&0x1F) && file_data.get(1) == Some(&0x8B);
 
-    if compress_mode || (!is_gzip && !test_only && !list_mode) {
+    // Which direction to go. This used to be inferred from the file's magic
+    // bytes -- "not gzip, so the user must want it compressed" -- which is a
+    // reasonable guess for `gzip` and precisely backwards for `gunzip`, and it
+    // ran because `dispatch` sent both names to one arm and the function had no
+    // other way to tell them apart. `gunzip notes.txt` therefore wrote
+    // `notes.txt.gz`: the opposite of what was asked, reported as success. The
+    // mirror case was just as wrong -- `gzip archive.gz` *decompressed* it.
+    //
+    // Now the name decides, and only an explicit flag overrides it:
+    //   * `-d` / `-c` say the direction outright;
+    //   * `-t` and `-l` test and describe an existing archive, so they are
+    //     decompress-side whichever name invoked them.
+    // The magic bytes no longer choose anything; they are only checked below,
+    // where the answer is already known and the question is whether the file
+    // matches it.
+    let decompress = if test_only || list_mode {
+        true
+    } else if compress_mode {
+        false
+    } else if explicit_decompress {
+        true
+    } else {
+        matches!(invoked_as, GzipMode::Decompress)
+    };
+
+    if !decompress {
         // COMPRESS mode.
+
+        // Refuse to compress something that is already gzip, as GNU gzip does
+        // ("already has .gz suffix -- unchanged"). Without this the direction
+        // fix would trade one silent wrong answer for another: the old code
+        // *decompressed* `gzip archive.gz`, and the naive fix compresses it into
+        // `archive.gz.gz`, which is just as much not what was asked and is
+        // harder to notice. `-o` names the output explicitly, so it reads as
+        // deliberate and is allowed through.
+        //
+        // The test is the magic bytes rather than the file name: a `.gz` suffix
+        // is a claim and the header is the fact, and it is the fact that decides
+        // whether a second round of compression is redundant.
+        if is_gzip && output_path.is_none() {
+            shell_println!(
+                "gzip: '{}': already gzip-compressed, not compressing again (use -o to override)",
+                input.display()
+            );
+            set_exit(1);
+            return;
+        }
+
         let compressed = crate::fs::compress::gzip(&file_data);
 
         let out = if let Some(explicit) = output_path {
@@ -117300,6 +118062,7 @@ fn cmd_gunzip(args: &str) {
     let compressed = file_data;
     if !is_gzip {
         shell_println!("gunzip: '{}': not in gzip format", input.display());
+        set_exit(1);
         return;
     }
 
@@ -117340,6 +118103,7 @@ fn cmd_gunzip(args: &str) {
                 input.display(),
                 e
             );
+            set_exit(1);
             return;
         }
     };
@@ -117413,6 +118177,7 @@ fn cmd_bunzip2(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("bunzip2: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -117428,6 +118193,7 @@ fn cmd_bunzip2(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("bunzip2: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -117437,6 +118203,7 @@ fn cmd_bunzip2(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("bunzip2: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -117448,6 +118215,7 @@ fn cmd_bunzip2(args: &str) {
         || file_data.get(2) != Some(&b'h')
     {
         shell_println!("bunzip2: '{}': not a bzip2 file", input.display());
+        set_exit(1);
         return;
     }
 
@@ -117460,6 +118228,7 @@ fn cmd_bunzip2(args: &str) {
                 input.display(),
                 e
             );
+            set_exit(1);
             return;
         }
     };
@@ -117543,6 +118312,7 @@ fn cmd_bzip2(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("bzip2: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -117558,6 +118328,7 @@ fn cmd_bzip2(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("bzip2: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -117567,6 +118338,7 @@ fn cmd_bzip2(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("bzip2: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -117635,6 +118407,7 @@ fn cmd_xz(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("xz: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -117650,6 +118423,7 @@ fn cmd_xz(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("xz: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -117658,6 +118432,7 @@ fn cmd_xz(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("xz: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -117666,6 +118441,7 @@ fn cmd_xz(args: &str) {
         Ok(c) => c,
         Err(e) => {
             shell_println!("xz: compression failed: {:?}", e);
+            set_exit(1);
             return;
         }
     };
@@ -117734,6 +118510,7 @@ fn cmd_unxz(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("unxz: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -117749,6 +118526,7 @@ fn cmd_unxz(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("unxz: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -117758,6 +118536,7 @@ fn cmd_unxz(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("unxz: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -117765,6 +118544,7 @@ fn cmd_unxz(args: &str) {
     // Verify XZ magic (FD 37 7A 58 5A 00).
     if file_data.len() < 12 || file_data.get(..6) != Some(&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]) {
         shell_println!("unxz: '{}': not an XZ file", input.display());
+        set_exit(1);
         return;
     }
 
@@ -117773,6 +118553,7 @@ fn cmd_unxz(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("unxz: '{}': decompression failed: {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -117850,6 +118631,7 @@ fn cmd_unzstd(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("unzstd: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -117865,6 +118647,7 @@ fn cmd_unzstd(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("unzstd: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -117874,6 +118657,7 @@ fn cmd_unzstd(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("unzstd: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -117881,6 +118665,7 @@ fn cmd_unzstd(args: &str) {
     // Verify Zstandard magic (FD 2F B5 28).
     if file_data.len() < 8 {
         shell_println!("unzstd: '{}': file too small", input.display());
+        set_exit(1);
         return;
     }
     let magic = u32::from(file_data[0])
@@ -117889,6 +118674,7 @@ fn cmd_unzstd(args: &str) {
         | (u32::from(file_data[3]) << 24);
     if magic != 0xFD2F_B528 {
         shell_println!("unzstd: '{}': not a Zstandard file", input.display());
+        set_exit(1);
         return;
     }
 
@@ -117901,6 +118687,7 @@ fn cmd_unzstd(args: &str) {
                 input.display(),
                 e
             );
+            set_exit(1);
             return;
         }
     };
@@ -117981,6 +118768,7 @@ fn cmd_zstd(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("zstd: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -117996,6 +118784,7 @@ fn cmd_zstd(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("zstd: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -118005,6 +118794,7 @@ fn cmd_zstd(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("zstd: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -118086,6 +118876,7 @@ fn cmd_unlz4(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("unlz4: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -118101,6 +118892,7 @@ fn cmd_unlz4(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("unlz4: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -118110,6 +118902,7 @@ fn cmd_unlz4(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("unlz4: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -118117,6 +118910,7 @@ fn cmd_unlz4(args: &str) {
     // Verify LZ4 frame magic (04 22 4D 18).
     if file_data.len() < 7 {
         shell_println!("unlz4: '{}': file too small", input.display());
+        set_exit(1);
         return;
     }
     let magic = u32::from(file_data[0])
@@ -118129,6 +118923,7 @@ fn cmd_unlz4(args: &str) {
             input.display(),
             magic
         );
+        set_exit(1);
         return;
     }
 
@@ -118141,6 +118936,7 @@ fn cmd_unlz4(args: &str) {
                 input.display(),
                 e
             );
+            set_exit(1);
             return;
         }
     };
@@ -118214,6 +119010,7 @@ fn cmd_lz4(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("lz4: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -118229,6 +119026,7 @@ fn cmd_lz4(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("lz4: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -118238,6 +119036,7 @@ fn cmd_lz4(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("lz4: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -118339,6 +119138,7 @@ fn cmd_sed(args: &str) {
 
     if commands.is_empty() {
         shell_println!("sed: no command specified");
+        set_exit(1);
         return;
     }
 
@@ -118357,6 +119157,7 @@ fn cmd_sed(args: &str) {
     // Process each file (or use empty content if no file given).
     if file_args.is_empty() {
         shell_println!("sed: no input file specified");
+        set_exit(1);
         return;
     }
 
@@ -118704,6 +119505,7 @@ fn cmd_awk(args: &str) {
 
     if program.is_empty() {
         shell_println!("awk: no program specified");
+        set_exit(1);
         return;
     }
 
@@ -118712,6 +119514,7 @@ fn cmd_awk(args: &str) {
     // Process files.
     if files.is_empty() {
         shell_println!("awk: no input file specified");
+        set_exit(1);
         return;
     }
 

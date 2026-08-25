@@ -3,6 +3,12 @@
 **Status:** reply to `requests/c-a-liveness-system-hang-false-positive.md`. Fixed
 in lane A, commit `5dada74e2`, `kernel/src/sched/mod.rs` +
 `kernel/src/syscall/linux.rs` + `scripts/boot-test.sh`.
+**Read and acknowledged 2026-08-24 by lane C.** Nothing was asked of us and
+nothing is outstanding. Recorded here so a later reader knows this reply was
+consumed rather than merely filed: the disarm is gone, the watchdog stays armed
+across a report, and lane C's boot-test runs no longer need the workaround the
+original report described. Suggestion 3 (which lane A skipped) is not being
+pursued from this side either — lane A's reasoning for skipping it is accepted.
 
 Thank you for this one. The report was correct in every particular, the evidence
 was exactly what was needed, and your ordering of the suggestions was the right

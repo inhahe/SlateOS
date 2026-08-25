@@ -41,15 +41,30 @@
 //!   [`Server::run_with`](crate::Server::run_with) — which is the claim this
 //!   trait was designed to make good on.
 //!
+//! ## The screen and the keyboard are different devices
+//!
+//! [`drm::DrmScanout`] is a screen and only a screen: it inherits the default
+//! [`Present::input`], which returns nothing, because a graphics card is not
+//! where keystrokes come from. Those arrive from `/dev/input/eventN`, which is
+//! [`evdev::EvdevInput`] — and that is an [`InputSource`], not a [`Present`],
+//! precisely because it has no frame to show.
+//!
+//! [`Paired`] is what makes one out of two. It holds a screen and an input
+//! source, forwards each method to whichever half owns it, and is itself a
+//! [`Present`], so [`Server::run_with`](crate::Server::run_with) never learns
+//! that its display grew a keyboard. This is what closed `known-issues.md` →
+//! `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`.
+//!
 //! ## What is still missing
 //!
-//! Input on SlateOS. [`drm::DrmScanout`] is a screen and only a screen: it
-//! inherits the default [`Present::input`], which returns nothing, because the
-//! kernel exposes no evdev-style device for the keyboard and mouse yet. A
-//! SlateOS desktop therefore draws correctly and cannot be typed at. That is
-//! `known-issues.md` → `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`, and it plugs into
-//! this same seam — either as a second method on the scanout or as a separate
-//! device the binary polls alongside it.
+//! Nothing in this module — but the SlateOS build only *works* if the process
+//! was granted a `ResourceType::InputDevice` capability at spawn, which is the
+//! service manager's business rather than the compositor's. Without it every
+//! `open` of an input node fails with `EACCES` and
+//! [`evdev::EvdevError::Denied`] says so in as many words, because a permission
+//! error that looks like a missing file is a day lost to the wrong hypothesis.
+
+use inputsettings::InputSettings;
 
 use crate::InputEvent;
 
@@ -154,6 +169,27 @@ pub trait Present {
     fn monitors(&mut self) -> Option<Vec<MonitorInfo>> {
         None
     }
+
+    /// Adopt the user's input preferences, which have just changed.
+    ///
+    /// Pointer speed, acceleration, button mapping, scroll direction and the
+    /// key-repeat rate are all applied where raw device deltas arrive — which
+    /// is here and not in the compositor, because a *relative* mouse delta is
+    /// only a pointer position once someone has integrated it, and the thing
+    /// doing the integrating is the input source. The compositor reads
+    /// `input.yaml` and knows what it says; it has no device to say it to.
+    ///
+    /// Called by [`Server::run_with`](crate::Server::run_with) when
+    /// [`Compositor::input_settings`](crate::Compositor::input_settings) starts
+    /// answering something other than what was last passed here. That is the
+    /// same polled, idempotent shape as [`Self::monitors`], for the same
+    /// reason: a push would need a queue, and a queue is a thing that can get
+    /// out of step with what it describes.
+    ///
+    /// The default body ignores it, like [`Self::monitors`]'s: a headless
+    /// server, a recording and a host window have no pointer whose speed could
+    /// change. Only the implementor that owns a device needs to care.
+    fn reload_input(&mut self, _settings: &InputSettings) {}
 }
 
 /// A display server with no display.
@@ -297,7 +333,125 @@ impl Present for Recording {
     }
 }
 
+/// Somewhere input comes from that is not a screen.
+///
+/// The other half of [`Present`], split off because on the real target they are
+/// two devices and not one: a graphics card produces no keystrokes and a
+/// keyboard has no frame to show. Implementing [`Present`] for a keyboard would
+/// mean writing a [`Present::show`] that throws its argument away, which is a
+/// lie the type system would then let anyone tell.
+///
+/// Pair one of these with a screen using [`Paired`] to get something
+/// [`Server::run_with`](crate::Server::run_with) can drive.
+pub trait InputSource {
+    /// Whatever the user has done since the last call.
+    ///
+    /// Same contract as [`Present::input`]: owned events, empty on an idle
+    /// desktop, called once per tick.
+    fn poll(&mut self) -> Vec<InputEvent>;
+
+    /// Tell the source how big the desktop is.
+    ///
+    /// A pointer needs this and a keyboard does not, hence the default. An
+    /// evdev mouse reports *relative* motion, so the only thing that knows
+    /// where the pointer ended up is whoever integrated those deltas — and it
+    /// cannot clamp the result to the screen without being told what the screen
+    /// is. Called whenever the composited frame changes size, which covers
+    /// monitor hotplug; the initial size has to come from construction, because
+    /// [`Server::run_with`](crate::Server::run_with) polls input *before* it
+    /// shows the first frame.
+    fn set_bounds(&mut self, _width: u32, _height: u32) {}
+
+    /// Adopt the user's input preferences, which have just changed.
+    ///
+    /// The [`InputSource`] half of [`Present::reload_input`], and the one that
+    /// actually does the work: a source that integrates relative deltas into a
+    /// pointer position is the only thing in the system that can apply a
+    /// pointer speed, and the only thing that can decide a key has repeated is
+    /// the thing holding the key-down timestamp. The default ignores the
+    /// settings for the same reason [`Self::set_bounds`]'s does — a source with
+    /// no pointer and no repeat clock has nothing to change.
+    fn reload_input(&mut self, _settings: &InputSettings) {}
+}
+
+/// A screen and an input source, presented as one display.
+///
+/// The adapter that lets [`Server::run_with`](crate::Server::run_with) stay
+/// unchanged now that input has stopped coming from the same device as output.
+/// Every method goes to the half that owns it: frames and monitors to the
+/// screen, events to the source, and the screen alone decides when the display
+/// is gone — a keyboard being unplugged is not a reason to end the session.
+///
+/// [`Self::show`] is also where [`InputSource::set_bounds`] is kept current. It
+/// forwards only on a *change*, so the common case is a comparison of two pairs
+/// of integers per frame rather than a call into the pointer.
+#[derive(Clone, Copy, Debug)]
+pub struct Paired<S, I> {
+    /// The half that draws.
+    screen: S,
+    /// The half that listens.
+    input: I,
+    /// The last size passed to [`Present::show`], so a resize can be spotted.
+    bounds: (u32, u32),
+}
+
+impl<S: Present, I: InputSource> Paired<S, I> {
+    /// Pair a screen with an input source.
+    ///
+    /// `width` and `height` are the desktop's size at start-up, which the
+    /// source is told immediately rather than on the first frame: `run_with`
+    /// polls input before it shows anything, so a source that waited for
+    /// [`Present::show`] would spend its first tick not knowing where the edges
+    /// of the screen are.
+    pub fn new(screen: S, mut input: I, width: u32, height: u32) -> Self {
+        input.set_bounds(width, height);
+        Self {
+            screen,
+            input,
+            bounds: (width, height),
+        }
+    }
+
+    /// The screen half, for a caller that needs it back.
+    pub const fn screen(&self) -> &S {
+        &self.screen
+    }
+
+    /// The input half, mutably — for reloading settings while running.
+    pub const fn input_mut(&mut self) -> &mut I {
+        &mut self.input
+    }
+}
+
+impl<S: Present, I: InputSource> Present for Paired<S, I> {
+    fn show(&mut self, pixels: &[u32], width: u32, height: u32) {
+        if self.bounds != (width, height) {
+            self.bounds = (width, height);
+            self.input.set_bounds(width, height);
+        }
+        self.screen.show(pixels, width, height);
+    }
+
+    fn input(&mut self) -> Vec<InputEvent> {
+        self.input.poll()
+    }
+
+    fn is_open(&self) -> bool {
+        self.screen.is_open()
+    }
+
+    fn monitors(&mut self) -> Option<Vec<MonitorInfo>> {
+        self.screen.monitors()
+    }
+
+    fn reload_input(&mut self, settings: &InputSettings) {
+        self.input.reload_input(settings);
+    }
+}
+
 pub mod drm;
+
+pub mod evdev;
 
 #[cfg(windows)]
 pub mod host;
@@ -315,7 +469,9 @@ mod tests {
         clippy::arithmetic_side_effects
     )]
 
-    use super::{Headless, Present, Recording};
+    use inputsettings::InputSettings;
+
+    use super::{Headless, InputSource, MonitorInfo, Paired, Present, Recording};
     use crate::InputEvent;
 
     #[test]
@@ -428,5 +584,156 @@ mod tests {
         assert!(rec.is_open());
         rec.open = false;
         assert!(!rec.is_open(), "which is what a closed window looks like");
+    }
+
+    // -----------------------------------------------------------------------
+    // Pairing a screen with an input source
+    // -----------------------------------------------------------------------
+
+    /// An input source that records what it was told and hands back a script.
+    #[derive(Debug, Default)]
+    struct ScriptedSource {
+        /// Batches to return, one per [`InputSource::poll`].
+        script: std::collections::VecDeque<Vec<InputEvent>>,
+        /// Every size this source was told about, in order.
+        bounds: Vec<(u32, u32)>,
+        /// Every settings it was told about, in order.
+        reloads: Vec<InputSettings>,
+    }
+
+    impl InputSource for ScriptedSource {
+        fn poll(&mut self) -> Vec<InputEvent> {
+            self.script.pop_front().unwrap_or_default()
+        }
+
+        fn set_bounds(&mut self, width: u32, height: u32) {
+            self.bounds.push((width, height));
+        }
+
+        fn reload_input(&mut self, settings: &InputSettings) {
+            self.reloads.push(settings.clone());
+        }
+    }
+
+    #[test]
+    fn a_pair_sends_frames_to_the_screen_and_takes_events_from_the_source() {
+        let mut source = ScriptedSource::default();
+        source
+            .script
+            .push_back(vec![InputEvent::MouseMove { x: 7, y: 9 }]);
+        let mut pair = Paired::new(Recording::new(), source, 2, 2);
+
+        assert!(matches!(
+            pair.input().as_slice(),
+            [InputEvent::MouseMove { x: 7, y: 9 }]
+        ));
+        pair.show(&[0xFF00_00AB; 4], 2, 2);
+        assert_eq!(pair.screen().pixel(0, 0), Some(0xFF00_00AB));
+        // The screen was never asked for input and the source was never asked
+        // to draw: each half only does the thing it is.
+        assert_eq!(pair.screen().ticks(), 0);
+    }
+
+    #[test]
+    fn a_source_learns_the_desktop_size_before_the_first_frame_is_shown() {
+        // `Server::run_with` polls input *before* it shows anything, so a
+        // source that waited for `show` would spend its first tick not knowing
+        // where the edges of the screen are — and a pointer would clamp to a
+        // desktop of nothing.
+        let pair = Paired::new(Recording::new(), ScriptedSource::default(), 1920, 1080);
+        assert_eq!(pair.input.bounds, vec![(1920, 1080)]);
+    }
+
+    #[test]
+    fn a_resized_desktop_is_passed_on_but_an_unchanged_one_is_not() {
+        let mut pair = Paired::new(Recording::new(), ScriptedSource::default(), 800, 600);
+        // Real frames rather than short ones, on the heap: a frame whose pixel
+        // count did not match its stated size would be testing against a
+        // display that could never happen.
+        let big = vec![0u32; 800 * 600];
+        let small = vec![0u32; 640 * 480];
+        pair.show(&big, 800, 600);
+        pair.show(&big, 800, 600);
+        assert_eq!(
+            pair.input.bounds,
+            vec![(800, 600)],
+            "an unchanged size is two integer comparisons, not a call"
+        );
+
+        pair.show(&small, 640, 480);
+        assert_eq!(pair.input.bounds, vec![(800, 600), (640, 480)]);
+    }
+
+    #[test]
+    fn the_screen_alone_decides_when_the_session_ends() {
+        let mut pair = Paired::new(Recording::new(), ScriptedSource::default(), 2, 2);
+        assert!(pair.is_open());
+        pair.screen.open = false;
+        // A keyboard being unplugged is not a reason to end the session, so
+        // there is no way for the source to answer this at all.
+        assert!(!pair.is_open());
+    }
+
+    #[test]
+    fn the_monitors_are_the_screens_and_the_pairing_does_not_invent_any() {
+        let mut bare = Paired::new(Recording::new(), ScriptedSource::default(), 2, 2);
+        assert_eq!(bare.monitors(), None, "a recorder with no opinion");
+
+        let heads = vec![MonitorInfo {
+            id: 42,
+            width: 800,
+            height: 600,
+            refresh_hz: 60,
+        }];
+        let mut screen = Recording::new();
+        screen.monitors = Some(heads.clone());
+        let mut pair = Paired::new(screen, ScriptedSource::default(), 800, 600);
+        assert_eq!(pair.monitors(), Some(heads));
+    }
+
+    #[test]
+    fn the_input_half_can_be_reached_again_to_reload_its_settings() {
+        let mut pair = Paired::new(Recording::new(), ScriptedSource::default(), 2, 2);
+        pair.input_mut()
+            .script
+            .push_back(vec![InputEvent::KeyUp { scancode: 0x1E }]);
+        assert!(matches!(
+            pair.input().as_slice(),
+            [InputEvent::KeyUp { scancode: 0x1E }]
+        ));
+    }
+
+    #[test]
+    fn a_pair_hands_the_users_input_settings_to_the_source_and_not_to_the_screen() {
+        // The whole reason `Present::reload_input` exists: a pointer speed is
+        // applied where the raw deltas are integrated, which is the source, and
+        // a screen has no pointer at all. Forwarding to the wrong half would
+        // compile and do nothing — the default body ignores its argument — so
+        // the check is that the source *did* hear it.
+        let mut settings = InputSettings::default();
+        settings.mouse.speed = 7;
+        let mut pair = Paired::new(Recording::new(), ScriptedSource::default(), 2, 2);
+
+        pair.reload_input(&settings);
+
+        assert_eq!(
+            pair.input_mut().reloads.len(),
+            1,
+            "the source was told, exactly once"
+        );
+        assert_eq!(pair.input_mut().reloads[0].mouse.speed, 7);
+    }
+
+    #[test]
+    fn a_display_with_no_pointer_ignores_the_input_settings_rather_than_refusing_them() {
+        // The default body, exercised on purpose. A headless server and a
+        // recording have nothing whose speed could change, and the alternative
+        // to a no-op default is every implementor writing one — which is how a
+        // trait grows a method that half its implementors get wrong.
+        let mut headless = Headless;
+        headless.reload_input(&InputSettings::default());
+        let mut rec = Recording::new();
+        rec.reload_input(&InputSettings::default());
+        assert!(headless.is_open() && rec.is_open(), "and nothing broke");
     }
 }

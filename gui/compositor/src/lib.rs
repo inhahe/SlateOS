@@ -149,7 +149,9 @@ const TITLE_BUTTON_SPACING: u32 = 4;
 // them had moved, and the whole point of the reload path added alongside this
 // is that the number the user chose in Settings, the number the file clamps to,
 // and the number this compares two timestamps against are one number.
-use inputsettings::{DEFAULT_DOUBLE_CLICK_MS, MAX_DOUBLE_CLICK_MS, MIN_DOUBLE_CLICK_MS};
+use inputsettings::{
+    DEFAULT_DOUBLE_CLICK_MS, InputSettings, MAX_DOUBLE_CLICK_MS, MIN_DOUBLE_CLICK_MS,
+};
 
 /// Default window opacity (fully opaque).
 const DEFAULT_OPACITY: f32 = 1.0;
@@ -4404,6 +4406,25 @@ pub struct Compositor {
     /// the exact thing that crate exists to prevent. The colours in
     /// [`DecorationTheme`] are the next thing to come from here.
     appearance: AppearanceSettings,
+    /// The user's input preferences, or `None` until `input.yaml` has been
+    /// read once.
+    ///
+    /// `None` is load-bearing and is not the same as
+    /// [`InputSettings::default`]. The input source is constructed with the
+    /// user's settings already in hand, and
+    /// [`Server::run_with`](crate::Server::run_with) pushes this into it
+    /// whenever it differs from what was pushed last. If "not read yet" were
+    /// spelled as the defaults, the first tick of a session would push the
+    /// defaults over the settings the source was built with — a pointer that
+    /// reverted to stock speed for as long as nobody edited the file.
+    ///
+    /// Held whole rather than as the fields the compositor itself consumes, for
+    /// the same reason [`Self::appearance`] is: the file has one owner
+    /// (`gui/inputsettings`), and the compositor is a *carrier* for most of it.
+    /// Only [`Self::double_click_interval`] is read here; pointer speed,
+    /// acceleration, button mapping and key repeat are applied by whoever
+    /// integrates the raw device deltas, which is why they have to travel.
+    input: Option<InputSettings>,
     /// Outbound event notifications for clients (stub queue).
     pending_notifications: VecDeque<EventNotification>,
     /// Reused encoding buffer for
@@ -4475,6 +4496,11 @@ impl Compositor {
             // `$HOME` would make every test of this crate depend on the machine
             // running it. `main` loads the file and calls `set_appearance`.
             appearance: AppearanceSettings::default(),
+            // `None`, not the defaults, and for a sharper reason than the line
+            // above: this is pushed into the input source, so "the defaults"
+            // would be a push that overwrites the settings that source was
+            // built with. Not knowing cannot overwrite anything.
+            input: None,
             pending_notifications: VecDeque::new(),
             window_list_scratch: Vec::new(),
             modifiers: ModifierState::new(),
@@ -4565,24 +4591,62 @@ impl Compositor {
     /// pointed somewhere harmless in tests by the same
     /// `inputsettings::config::testing::with_scratch_config`.
     ///
-    /// **What it applies, and what it does not.** Today the compositor is the
-    /// consumer of exactly one of these settings — the double-click window —
-    /// because that is the only one it is the consumer of at all: pointer speed
-    /// and acceleration are applied where raw device deltas arrive, and the
-    /// compositor has no local input source yet (`known-issues.md`
-    /// `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`); scroll mode and cursor size are
-    /// read by the toolkit and the cursor renderer. Storing a value here that
-    /// nothing acts on would be worse than ignoring it: a getter reporting it
-    /// would say a preference was in force while the pointer still behaved the
-    /// old way. So this reads the whole file — the model has one owner, and
-    /// parsing only part of it is how two readers start to disagree — and
-    /// applies the part that has somewhere to go.
+    /// **What it applies, and what it carries.** The compositor is the consumer
+    /// of exactly one of these settings — the double-click window — and it
+    /// applies that one directly. The rest it *carries*: pointer speed,
+    /// acceleration, button mapping and key repeat are applied where raw device
+    /// deltas arrive, because a relative delta is only a pointer position once
+    /// something has integrated it, and the thing integrating it is the input
+    /// source. So the whole file is kept in [`Self::input_settings`], from
+    /// which [`Server::run_with`](crate::Server::run_with) pushes it into the
+    /// source via [`Present::reload_input`](present::Present::reload_input).
+    ///
+    /// That carrying is the whole point of the method. Before it existed this
+    /// read the file and threw away everything but the double-click window, so
+    /// the Settings panel's pointer-speed slider wrote a value that nothing
+    /// read until the next login — a control that appeared not to work.
     ///
     /// Unlike an appearance reload this never repaints: no pixel on the screen
-    /// depends on how long a double click may take.
+    /// depends on how long a double click may take, and the settings that do
+    /// change what the user sees change it by moving the pointer, not by
+    /// redrawing it.
     pub fn reload_input(&mut self) {
-        let settings = inputsettings::InputFile::load().settings;
+        self.set_input_settings(inputsettings::InputFile::load().settings);
+    }
+
+    /// Adopt the given input preferences, without reading any file.
+    ///
+    /// The counterpart of [`set_appearance`](Self::set_appearance), split from
+    /// [`reload_input`](Self::reload_input) for the same reason that one is
+    /// split from `reload_appearance`: where the settings came from is the
+    /// caller's business, and a test that had to write `$HOME/input.yaml` to
+    /// check that a pointer speed travels would be testing the config crate.
+    ///
+    /// Unlike `set_appearance` this does not compare before storing and does
+    /// not repaint. There is nothing to repaint, and the one reader that could
+    /// be made to do redundant work by a repeated store —
+    /// [`Server::run_with`](crate::Server::run_with) — does its own comparison,
+    /// because it has to: it must also not act on the *first* value if that
+    /// value is the one the input source already has.
+    pub fn set_input_settings(&mut self, settings: InputSettings) {
         self.set_double_click_ms(settings.mouse.double_click_ms);
+        self.input = Some(settings);
+    }
+
+    /// The input preferences currently in force, or `None` if `input.yaml` has
+    /// not been read yet.
+    ///
+    /// Polled once per tick by [`Server::run_with`](crate::Server::run_with),
+    /// which forwards any *change* to the input source. Deliberately polled
+    /// rather than pushed, matching
+    /// [`Present::monitors`](present::Present::monitors) in the same spirit: a
+    /// push needs a queue, and a queue is a thing that can get out of step with
+    /// what it describes.
+    ///
+    /// See [`Self::input`] for why the `None` is not spelled as the defaults.
+    #[must_use]
+    pub const fn input_settings(&self) -> Option<&InputSettings> {
+        self.input.as_ref()
     }
 
     /// The appearance preferences currently in force.

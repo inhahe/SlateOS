@@ -47,6 +47,7 @@ use std::time::{Duration, Instant};
 
 use guiremote::client::Transport;
 use guiremote::socket::{Listener, Socket};
+use inputsettings::InputSettings;
 
 use crate::present::{Headless, Present};
 use crate::wire::ClientLink;
@@ -522,6 +523,43 @@ impl Server {
         }
     }
 
+    /// Push the user's input preferences into the display, if they have moved.
+    ///
+    /// The compositor reads `input.yaml` and applies the one setting it is
+    /// itself the consumer of (the double-click window); everything else —
+    /// pointer speed, acceleration, button mapping, key repeat — has to reach
+    /// the thing that turns raw device deltas into a pointer position and a
+    /// repeat, which is the input source behind `present`. This is the wire
+    /// between the two.
+    ///
+    /// **Polled, not pushed**, exactly like [`Self::reconcile_monitors`] and
+    /// for the same reason: a push would need a queue between the request
+    /// handler and the loop, and a queue is a thing that can get out of step
+    /// with what it describes. Once a tick, ask what the settings are; if they
+    /// are not what was last handed over, hand them over.
+    ///
+    /// `pushed` is the loop's memory of what it last sent, and comparing
+    /// against it is what keeps this to an equality test per frame rather than
+    /// a call into the pointer sixty times a second. It starts as `None`, and
+    /// so does [`Compositor::input_settings`] until the file has been read —
+    /// which is the case that must *not* push, because the input source was
+    /// constructed with the user's real settings and a "default" push would
+    /// undo them.
+    fn reconcile_input<P: Present>(
+        compositor: &Compositor,
+        present: &mut P,
+        pushed: &mut Option<InputSettings>,
+    ) {
+        let Some(settings) = compositor.input_settings() else {
+            return;
+        };
+        if pushed.as_ref() == Some(settings) {
+            return;
+        }
+        present.reload_input(settings);
+        *pushed = Some(settings.clone());
+    }
+
     /// Serve clients and composite for ever, onto `present`.
     ///
     /// The loop, in order: take whatever the user did and give it to the
@@ -550,9 +588,18 @@ impl Server {
             .display_manager()
             .primary()
             .map_or(Duration::from_micros(16_667), Display::frame_interval);
+        // What was last handed to the input source. Lives here rather than on
+        // `Server` because it describes this display, and a `Server` outlives
+        // the `Present` it is run with.
+        let mut pushed_input: Option<InputSettings> = None;
         while present.is_open() {
             let began = Instant::now();
             Self::reconcile_monitors(compositor, present);
+            // Before the poll, not after: the events this tick returns were
+            // scaled by whatever the source is holding when it is asked, so
+            // pushing afterwards would spend one frame moving the pointer at
+            // the old speed after the user let go of the slider.
+            Self::reconcile_input(compositor, present, &mut pushed_input);
             for event in present.input() {
                 compositor.handle_input(event);
             }
@@ -1132,5 +1179,155 @@ mod tests {
              two monitors"
         );
         assert_eq!(compositor.frame_size(), (2944, 1080));
+    }
+
+    // -----------------------------------------------------------------------
+    // Carrying the user's input preferences to the device
+    // -----------------------------------------------------------------------
+
+    /// A display that records what it is told about input, and in what order.
+    ///
+    /// A whole [`Present`] rather than a [`Paired`] with a listening
+    /// [`InputSource`](crate::present::InputSource) in it, for two reasons.
+    /// What is under test here is the loop's own behaviour — when it pushes and
+    /// when it does not — and the loop only ever sees a `Present`; that
+    /// `Paired` hands the call on to its source is proved where `Paired` lives.
+    /// And a `Paired<Recording, _>` cannot end a `run_with` at all:
+    /// `Recording::closing_after` counts calls to `Recording::input`, which a
+    /// pairing never makes, because it polls the source instead.
+    #[derive(Debug, Default)]
+    struct Listening {
+        /// Every settings pushed into it, in order.
+        reloads: Vec<InputSettings>,
+        /// `"reload"` and `"poll"`, in the order they happened.
+        log: Vec<&'static str>,
+        /// Ticks so far.
+        ticks: u64,
+        /// Ticks to stay open for.
+        limit: u64,
+    }
+
+    impl Present for Listening {
+        fn show(&mut self, _pixels: &[u32], _width: u32, _height: u32) {}
+
+        fn input(&mut self) -> Vec<InputEvent> {
+            self.ticks = self.ticks.saturating_add(1);
+            self.log.push("poll");
+            Vec::new()
+        }
+
+        fn is_open(&self) -> bool {
+            self.ticks < self.limit
+        }
+
+        fn reload_input(&mut self, settings: &InputSettings) {
+            self.log.push("reload");
+            self.reloads.push(settings.clone());
+        }
+    }
+
+    /// A listening display that ends the loop after `ticks` ticks.
+    fn listening_display(ticks: u64) -> Listening {
+        Listening {
+            limit: ticks,
+            ..Listening::default()
+        }
+    }
+
+    #[test]
+    fn the_pointer_speed_the_user_chose_reaches_the_device_without_a_relogin() {
+        // The bug this closes: `Compositor::reload_input` read `input.yaml`,
+        // kept the double-click window and threw the rest away, so the Settings
+        // panel's speed slider wrote a number that nothing read until the next
+        // login. The control appeared not to work.
+        let (mut server, mut compositor, _addr) = server();
+        let mut settings = InputSettings::default();
+        settings.mouse.speed = 6;
+        compositor.set_input_settings(settings);
+
+        let mut display = listening_display(3);
+        server.run_with(&mut compositor, &mut display).expect("run");
+
+        assert_eq!(display.reloads.len(), 1, "three ticks, one push");
+        assert_eq!(
+            display.reloads[0].mouse.speed, 6,
+            "and it carried the user's speed"
+        );
+    }
+
+    #[test]
+    fn a_settings_change_mid_session_is_pushed_and_an_unchanged_one_is_not() {
+        // The push is on the *difference*, not on the reply, for exactly the
+        // reason the monitor poll is: this runs sixty times a second, and a
+        // push per tick would be a call into the pointer for every frame the
+        // user did not touch the Settings panel. Driven a tick at a time rather
+        // than through `run_with`, because the interesting moment is a change
+        // that happens *between* two ticks of one session.
+        let (_server, mut compositor, _addr) = server();
+        compositor.set_input_settings(InputSettings::default());
+        let mut display = listening_display(0);
+        let mut pushed = None;
+
+        for _ in 0..4 {
+            Server::reconcile_input(&compositor, &mut display, &mut pushed);
+        }
+        assert_eq!(display.reloads.len(), 1, "four ticks, one push");
+
+        // The user drags the slider and Settings sends `ReloadInput`.
+        let mut faster = InputSettings::default();
+        faster.mouse.speed = -3;
+        compositor.set_input_settings(faster);
+        for _ in 0..4 {
+            Server::reconcile_input(&compositor, &mut display, &mut pushed);
+        }
+
+        assert_eq!(
+            display.reloads.len(),
+            2,
+            "the change never reached the pointer"
+        );
+        assert_eq!(
+            display.reloads[1].mouse.speed, -3,
+            "or reached it with the old value"
+        );
+    }
+
+    #[test]
+    fn a_compositor_that_has_not_read_the_file_pushes_nothing_at_all() {
+        // `None` is not the defaults, and this is why. The input source is
+        // built with the user's real settings already in hand; if "not read
+        // yet" were spelled as `InputSettings::default()`, the first tick of
+        // every session would push stock settings over them and the pointer
+        // would revert to default speed until somebody edited the file.
+        let (mut server, mut compositor, _addr) = server();
+        assert_eq!(compositor.input_settings(), None, "nothing was loaded");
+
+        let mut display = listening_display(3);
+        server.run_with(&mut compositor, &mut display).expect("run");
+
+        assert!(
+            display.reloads.is_empty(),
+            "a compositor that knows nothing overwrote what the device knew"
+        );
+    }
+
+    #[test]
+    fn the_settings_reach_the_device_before_the_first_event_is_polled() {
+        // Ordering, and not a detail: the events a poll returns were already
+        // scaled by whatever the source was holding when it was asked. Pushing
+        // after the poll would spend a frame moving the pointer at the old
+        // speed after the user let go of the slider — visible as a control
+        // that lags one frame behind itself.
+        let (mut server, mut compositor, _addr) = server();
+        compositor.set_input_settings(InputSettings::default());
+
+        let mut display = listening_display(2);
+        server.run_with(&mut compositor, &mut display).expect("run");
+
+        assert_eq!(
+            display.log,
+            vec!["reload", "poll", "poll"],
+            "the device was told after it had already answered"
+        );
     }
 }

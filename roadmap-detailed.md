@@ -1821,8 +1821,14 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
     attribute-choosing dialogs where live preview is useful.
 - [ ] Scroll bars (auto-hide when nothing to scroll)
 - [ ] Tooltips
-- [ ] Modal and non-modal dialogs
-- [ ] Simple alert popup with icon
+- [x] Modal and non-modal dialogs — `gui/toolkit/src/modal.rs`: `ModalOverlay`,
+  `AlertDialog`, `InputDialog`, `ProgressDialog`, `NonModalDialog`. Keyboard
+  (Tab/Enter/Escape) and mouse both work; a dialog records where it drew itself
+  and hit-tests only against that, so clicks land on the buttons the user sees
+  at any parent size (`design-decisions.md` §547, proved by
+  `scripts/reintro-modal-geometry.py`).
+- [x] Simple alert popup with icon — `AlertDialog::{info,warning,error,question}`,
+  wrapped multi-line message, button row bottom-right, click-outside dismissal.
 
 _Click selected radio button to deselect (returns group to no-selection state)._
 
@@ -3150,8 +3156,15 @@ options with warnings" decision.)_
 ### 5.2 Input
 
 - [ ] Mouse pointer style
-- [ ] Mouse pointer speed
-- [ ] Keyboard repeat speed
+- [x] Mouse pointer speed — Settings → Mouse writes `input.yaml`; a `ReloadInput`
+  request makes the compositor re-read it, and `Server::run_with` polls
+  `Compositor::input_settings` each tick and pushes any change through
+  `Present::reload_input` into `EvdevInput`, so speed, acceleration, button
+  mapping and scroll direction take effect at once rather than at the next
+  login. See `design-decisions.md` §548 and
+  `scripts/reintro-input-settings.py`.
+- [x] Keyboard repeat speed — same file, same live-reload route; applied by
+  `EvdevInput`'s repeat clock (`design-decisions.md` §544).
 - [ ] Keyboard layout customizer: arbitrary remap from any starting layout, save as named layout
 - [ ] Include optimized keyboard layouts (Dvorak, Colemak, others)
 

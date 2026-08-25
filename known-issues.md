@@ -33665,6 +33665,159 @@ its own event synthesis, focus rules and tests — all of which get deleted when
 the real device lands. That is exactly the band-aid accumulation `CLAUDE.md`
 names. This entry stays open and honest instead.
 
+**Update 2026-08-24 — both halves are built. Closed here; one dependency
+remains, and it is lane B's.**
+
+Lane A landed the kernel half on 2026-08-21
+(`requests/a-c-evdev-input-devices-exist-and-they-need-a-capability.md`): real
+`/dev/input/event0` and `event1`, 24-byte `input_event` records, `EV_KEY`/
+`EV_REL`/`EV_MSC`/`EV_SYN`, `SYN_DROPPED` with a per-fd cursor, the full
+`EVIOC*` interrogation sequence, and — more than was asked for — the set-1 →
+Linux-keycode translation done kernel-side, so the offer above to own that table
+in lane C was not taken up.
+
+Lane C has now landed the compositor half:
+
+* **`gui/compositor/src/present/evdev.rs`** and its `uapi`/`sys` submodules —
+  the client. Split three ways for the same reason `present/drm.rs` is: `uapi`
+  is the wire format and the keycode table with no fds and no `unsafe`, `sys` is
+  the four syscalls behind a trait, and the parent file holds every decision and
+  is generic over that trait. Every bug this module can have is a protocol or
+  policy bug, and none of them need a keyboard to find — but all of them would
+  be invisible if the module were behind `#[cfg(target_os = "linux")]`, because
+  the machine this tree is compiled on is not Linux.
+* **`present::Paired`** — the answer to the "alongside `DrmScanout` rather than
+  inside it" question this entry raised. `Paired<S, I>` is a `Present` made of a
+  screen and an `InputSource`: frames and monitors go to the screen, events come
+  from the source, and the screen alone decides when the session ends (a
+  keyboard being unplugged is not a reason to end it). It also keeps
+  `InputSource::set_bounds` current, which is how monitor hotplug reaches the
+  pointer. `Server::run_with` is unchanged.
+* **`main.rs`** pairs the two on the SlateOS target, and prints each node that
+  opened with its `EVIOCGNAME`.
+
+Three things the kernel deliberately does not do are done here, and are listed
+in the module docs so nobody later builds a second one: key repeat (synthesised
+from key-down/up timing at the user's own `input.yaml` delay/interval, capped
+per tick, modifiers excluded, and hardware autorepeat passed through in a way
+that pushes our timer out of the way rather than doubling with it); absolute
+pointer position (integration, the user's speed and acceleration profile,
+clamping, and the sub-pixel remainder without which a 0.25× speed setting is
+immovable); and `SYN_DROPPED` resync via `EVIOCGKEY`, reconciled *both* ways —
+releasing what is no longer held, which is the stuck-Shift bug, and pressing
+what is held and was missed, which is the Ctrl that stops making shortcuts.
+
+**Tested:** 66 tests across `evdev/tests.rs`, `uapi.rs` and `present.rs`, all
+driven by a fake device that scripts a real byte stream, so none of them need
+the capability. Proved non-vacuous by `scripts/reintro-evdev.py`, which puts 54
+one-line defects back one at a time — `REL_Y` counting upwards, the scroll axes
+crossed, `packet.scan` read instead of taken, the per-device check dropped from
+resync, `MSC_SCAN` consulted before the keycode table — and records the test
+that has to name each one.
+
+**The one dependency left is not lane C's and cannot be made so.**
+`open("/dev/input/event*")` returns `EACCES` until the compositor holds a
+`(ResourceType::InputDevice, 0, Rights::READ)` capability, which is obtainable
+only at spawn or by inheritance from an ancestor — init / the service manager,
+lane B's tree, filed as
+`requests/a-b-the-compositor-needs-an-inputdevice-capability-to-inherit.md`.
+`EvdevError::Denied` is its own variant so that this reports itself in those
+words rather than as a missing file, and the compositor prints the fix and the
+request filename on the way past, then carries on without local input. **Nothing
+here changes when that grant lands** — the code path is the one the tests
+exercise, with `sys::Devices` in place of the fake. Reply to lane A:
+`requests/c-a-the-compositor-now-reads-your-evdev-nodes-and-is-waiting-only-on-the-capability.md`.
+
+**Tracked separately, and since closed:** a `ReloadInput` request reached
+`Compositor::reload_input`, which adopted only `double_click_ms` — it had no way
+to reach `EvdevInput::set_settings`, so a pointer-speed change made in Settings
+did not take effect until the next login. See
+`TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER`. *(Closed later the
+same day: `Server::run_with` now polls `Compositor::input_settings` and pushes
+any change through `Present::reload_input` into the device —
+`design-decisions.md` §548.)*
+
+## TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER (lane C, 2026-08-24) — **fixed 2026-08-24**
+
+**In short:** the Settings → Mouse page can change the pointer speed, the
+acceleration profile, the button mapping and the key-repeat rate, and the file
+it writes is read by the compositor — but only one setting out of that file is
+adopted while the desktop is running. The rest take effect at the next login. A
+user who drags the speed slider sees nothing happen.
+
+**What.** `Compositor::reload_input` (`gui/compositor/src/lib.rs`) is what a
+`ReloadInput` request lands in. It does:
+
+```rust
+let settings = inputsettings::InputFile::load().settings;
+self.set_double_click_ms(settings.mouse.double_click_ms);
+```
+
+Everything else in `InputSettings` — `mouse.speed`, `accel_profile`,
+`accel_gain`, `accel_threshold`, `natural_scroll`, `scroll_speed`,
+`button_mapping`, and the whole of `keyboard` — is used by
+`present::evdev::EvdevInput`, which has a `set_settings` for exactly this
+purpose and no caller. `reload_input` cannot reach it: the `EvdevInput` lives
+inside a `Paired` inside the `Present` that `Server::run_with` holds, and
+`Compositor` has no reference to its own display.
+
+**Why it was not fixed in the same change.** It is not a missing line; it is a
+missing direction. `Compositor` is deliberately display-agnostic — that is what
+lets the same compositor run headless, into a recording, onto a Win32 window and
+onto a DRM card — so "the compositor tells the display to reload" needs a route
+that does not put a display type into `Compositor`. The route that fits the
+existing shapes is for `Server::run_with` to notice the request instead: it
+already owns both the compositor and the `&mut dyn Present`, and it already
+drives the loop that would apply it.
+
+**The proper fix.** Add a `Present::reload_input(&mut self, settings:
+&InputSettings)` with an empty default body — the same pattern
+`Present::monitors` already uses for a capability only one implementor has —
+have `Paired` forward it to `InputSource`, add the matching
+`InputSource::reload_input` forwarding to `EvdevInput::set_settings`, and have
+`Server::run_with` call it when the tick reports that a `ReloadInput` was
+handled. `Compositor::reload_input` then returns the loaded `InputSettings`
+rather than swallowing them, so the file is read once rather than twice.
+
+**How to reproduce.** Not reproducible on the dev machine today, because the
+capability grant is not landed and there is no `EvdevInput` to reload. On
+hardware: set Settings → Mouse → pointer speed to its maximum, apply, and move
+the mouse. The double-click interval will have changed (that one setting works);
+the pointer speed will not, until the desktop is restarted.
+
+**Severity.** Medium. The setting is not lost — it is in `input.yaml` and is
+honoured at the next start — so this is a latency bug, not a data bug. But a
+slider that appears to do nothing is indistinguishable to a user from a slider
+that is broken, and it is the *second* time this exact shape has been found in
+this area (`TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING` was the first).
+
+### 2026-08-24 — fixed, polled rather than told, and one thing the plan above got wrong
+
+The chain now runs end to end: `Compositor::set_input_settings` keeps the whole
+`InputSettings` (applying the one it is itself the consumer of),
+`Server::reconcile_input` polls `Compositor::input_settings` once a tick and
+pushes any *change* into `Present::reload_input`, `Paired` forwards that to its
+input half, and `EvdevInput::reload_input` calls the `set_settings` that had
+been sitting there with no caller. `main` no longer reads `input.yaml` a second
+time; it takes the compositor's copy, so the file is read once.
+
+**The plan above said "call it when the tick reports that a `ReloadInput` was
+handled". That is not what landed, and deliberately.** A flag or a queue saying
+"a reload happened" is a second description of the settings, and a second
+description is a thing that can disagree with the first — a dropped
+notification is a preference that silently never arrives, and a display
+attached mid-session starts stale unless someone remembers to re-arm the flag.
+`present.rs` already documents the alternative for `Present::monitors`: polled,
+idempotent, `None` meaning "no opinion". Using a push for input settings and a
+poll for monitor hotplug — two problems of identical shape, three lines apart
+in the same loop body — would have been two mechanisms where one does. The
+reasoning, including the cost (a `PartialEq` on a small struct per frame,
+forever) and why `None` must not be spelled `InputSettings::default()`, is
+`design-decisions.md` §548.
+
+**Proved by `scripts/reintro-input-settings.py`** — ten one-line defects, one
+per link in the chain, all caught, all restored by SHA-256.
+
 ## TD-COMPOSITOR-COPIES-EVERY-FRAME-TWICE (lane C, 2026-08-21)
 
 **In short:** every frame the desktop draws is copied one extra time on its way
@@ -73715,7 +73868,35 @@ converted only 11 of 15 sites — the rewriter matched `&out`, and four captures
 are bound to other names (`0ddfaa5bc`). A mechanical sweep's own coverage is
 worth re-deriving from the source rather than from the count the sweep reported.
 
-## TD-C-TWO-TOOLKIT-TEXT-FIELDS-DRAW-NO-CARET-AT-ALL (lane C, 2026-08-24) — **open**
+## TD-C-TWO-TOOLKIT-TEXT-FIELDS-DRAW-NO-CARET-AT-ALL — RESOLVED 2026-08-24
+
+**Both fields are done.** `WidgetKind::TextInput` and `InputDialog` now share one
+implementation of a single-line field's caret, selection and scrolling —
+`gui/toolkit/src/textedit.rs`, written for this fix precisely so that the five
+text fields in the tree stop each having their own answer. `InputDialog`
+converts its offsets through `drawn_offset` first, so a password field's caret
+and selection are measured in mask characters and never leak the secret's byte
+length. Reasoning in `design-decisions.md` §546.
+
+**One piece was deliberately not done at the time: clicking in an `InputDialog`
+did not move its caret.** It could not, and the reason was a separate defect —
+`TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED` below. The widget
+text field did support click-to-place, because a `Widget` has a layout box.
+*(Closed later the same day: that entry is now fixed, and `InputDialog` places
+its caret from a click like any other field. The shared arithmetic lives in
+`textedit::cursor_at_click`, which both call.)*
+
+The original report follows.
+
+---
+
+**`WidgetKind::TextInput` was done first**: it now has a focus, a caret gated on it, a
+selection anchor with Shift+Arrow and painted selection boxes, click-to-place-
+caret, and a horizontal scroll offset that keeps the caret inside the box. See
+`design-decisions.md` §546, and the twenty tests from
+`a_focused_field_draws_a_caret_and_an_unfocused_one_does_not` onwards in
+`gui/toolkit/src/widget.rs`. **`InputDialog` in `gui/toolkit/src/modal.rs` is
+still untreated** — the rest of this entry is about it.
 
 `WidgetKind::TextInput` (`gui/toolkit/src/widget.rs`, render arm at ~line 618)
 and `InputDialog` (`gui/toolkit/src/modal.rs`, ~line 1376) both **track** a
@@ -73770,6 +73951,108 @@ their arrows were equally invisible before the switch. Bundling a
 caret/selection/scrolling implementation into the change that moved five
 fields' arrows would have made a reviewable diff unreviewable. Nothing depends
 on it: `pathbar` is the toolkit field the shell actually uses for typing.
+
+## TD-C-THE-LOCK-SCREEN-THROWS-AWAY-THE-ANSWER-TO-THE-ONLY-QUESTION-IT-ASKS — RESOLVED 2026-08-24
+
+**Lane C, found 2026-08-24 while planning the `authlib` rework.**
+
+**RESOLVED 2026-08-24.** Fixed exactly as the plan at the bottom of this
+entry describes, and the plan is left in place because it is the record of
+what was done. `submit_password` returns `AuthOutcome`; `unlock_requested`
+is a real field collected by `take_unlock_request()`; `PasswordAuthority`
+is the trait the verdict arrives through and `PasswordValidator` is now
+one interim implementor of it rather than the only way to get an answer.
+Eight tests drive `handle_event` and the mouse path instead of calling
+`submit_password` directly, including one that presses Enter with the
+right password and asserts an unlock was authorised — which is the
+assertion whose absence let this ship.
+
+Two things deliberately *not* done here, both recorded rather than
+silently decided:
+
+- **The `NoPassword` policy is unchanged**, so a passwordless account's
+  screen still opens on Enter as it always has. Refusing is the secure
+  answer and also locks the real user out forever; it is now one function
+  (`LockScreen::unlocks_for`) and one question in `open-questions.md`.
+  Changing who can unlock a machine is not something to slip into a
+  commit about interface shape.
+- **`PasswordValidator` is still here**, because `logind` answers
+  `system.logind.Error.UnknownCaller` to everyone until lane A can tell a
+  service who is calling it
+  (`requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`). Its
+  `PasswordAuthority` impl carries the note; when that lands the impl is
+  deleted and a bus connection is constructed in its place, and nothing
+  else in the file moves.
+
+`apps/lockscreen/src/main.rs` — `LockScreen::submit_password` returns `bool`,
+and **both of its call sites discard it**:
+
+```rust
+Key::Enter => {
+    let _ = self.submit_password();      // :1025
+    EventResult::Consumed
+}
+// and on the submit button, :1064
+```
+
+So typing the correct password and pressing Enter runs the key derivation,
+clears the buffer, resets the failure count — and reports nothing to anybody.
+There is no path by which the screen can unlock.
+
+**What makes this worse than a missing line is the comment above it.**
+`handle_event`'s doc says:
+
+> Special return: if the screen should unlock, this is signaled by the
+> `unlock_requested` flag on the struct (checked separately).
+
+There is no `unlock_requested` field. `grep -rn unlock_requested apps/` matches
+that sentence and nothing else. The comment does not describe a mechanism that
+broke; it describes one that was never written, and it is the only
+documentation the first caller of `handle_event` will read. That caller will
+look for the flag, not find it, and have to reverse-engineer the fact that the
+verdict is unreachable — which is the `days_in_month` failure shape again: a
+second answer justified by a false statement about the first.
+
+### Why the tests are all green
+
+Every test calls `submit_password()` **directly** and asserts on its return
+(`assert!(ls.submit_password())`, `:1887`). Not one of them goes in through
+`handle_event`, which is the only path a user has. The unit under test is
+correct; the wiring between it and the world is absent, and nothing looks at
+the wiring.
+
+### Why it has not bitten yet
+
+`apps/lockscreen` has `fn main() {}` — it is a library wearing a binary's
+clothes, with no compositor session driving it. So this is not a live
+"correct password rejected" bug today; it is a trap set for whoever writes the
+first driver. That is exactly when it is cheapest to fix.
+
+### The proper fix — and it lands with the `authlib` rework, not before
+
+The return type is changing anyway. `requests/b-c-desktop-password-checks-go-through-a-privileged-verifier.md`
+asks for the verdict to arrive from *outside* the screen as a four-way outcome
+rather than a `bool` computed in-process, so both changes touch the same
+signature and splitting them would mean editing every call site twice:
+
+- `AuthOutcome` mirroring `authlib::Outcome` and logind's `OUTCOME_*` wire
+  codes — `Accepted` / `Rejected` / `Locked` / `NoPassword` / `Unusable` /
+  `RateLimited { retry_after_secs }`. Lane B's point that this is not a `bool`
+  is the same point as this entry: `Unusable` means the *system* is broken and
+  must reach an administrator rather than be counted as a typo.
+- A `PasswordAuthority` trait with `authenticate(&mut self, username, password)
+  -> AuthOutcome`. `PasswordValidator` implements it as the interim local path
+  and is deleted when logind can identify its callers (blocked on
+  `requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`, which is lane
+  A's — until it lands, a real bus call gets a refusal rather than a verdict).
+- `submit_password() -> AuthOutcome`, and a real `unlock_requested` flag with a
+  `take_unlock_request()` accessor, so the comment above becomes true by
+  construction rather than aspirationally.
+- **A test that drives `handle_event` rather than `submit_password`** — typing
+  the password a character at a time and pressing Enter. Without it the new
+  wiring is exactly as untested as the old, and the whole entry recurs.
+
+---
 
 ---
 
@@ -74049,6 +74332,161 @@ Never run `git checkout --`, `git restore`, or `git stash` against
 `bench/boot-history.jsonl`. If it is dirty before a merge, **commit it**, do not
 clear it.
 
+## TD-C-EVERY-KEYSTROKE-WENT-TO-THE-LAST-TEXT-FIELD-IN-THE-WINDOW — RESOLVED 2026-08-24
+
+**Lane C, found 2026-08-24 while adding a caret to `WidgetKind::TextInput`.**
+
+The toolkit had no concept of keyboard focus. `Widget::handle_event`
+(`gui/toolkit/src/widget.rs`) walked its children back to front and gave the
+event to the first one that consumed it — and it did that for **key** events as
+well as for mouse events, where the back-to-front walk is correct because it
+means "topmost under the pointer". A key event has no pointer, so "the first
+child that takes it, searched back to front" resolves to *the last text field in
+the tree*, unconditionally.
+
+So on any form with two text fields, everything the user typed went into the
+second one, whatever they had clicked. The click itself was delivered correctly
+— to the field under the pointer — which made the symptom look like a rendering
+fault rather than a routing one.
+
+### Why no test caught it
+
+Every text-input test in the file built a tree with exactly *one* text field, so
+"the field the user clicked" and "the last field in the tree" were the same
+widget and no test could tell them apart. The regression test that does is
+`typing_goes_to_the_field_that_was_clicked_and_not_the_last_one_in_the_tree`,
+which uses two fields and clicks the first.
+
+### The fix
+
+A focus, introduced properly rather than as a flag on the key path — see
+`design-decisions.md` §546 for the four choices it involved. The line that
+closes the bug is the guard in `Widget::handle_event`:
+
+```rust
+Event::Key(key) if self.focused => self.handle_key(key),
+```
+
+with `WidgetTree::handle_event` moving the focus on a mouse press (by hit-test,
+before the click is dispatched) and consuming Tab / Shift+Tab to step it.
+
+### What it means for callers
+
+`WidgetTree` now swallows typing until something is focused, where before it
+delivered it to an arbitrary widget. A window that wants a field ready to type
+into on open must say so with `WidgetTree::focus_first()`. That is a behaviour
+change, but not one that breaks any current caller: no app in the tree routes
+events through `WidgetTree::handle_event` today — they were all doing their own
+key handling, which is itself a sign that this path was not usable.
+
+## TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED (lane C, 2026-08-24) — **fixed 2026-08-24**
+
+`ModalOverlay` has a `content_rect` — the dialog's own rectangle, which
+`handle_mouse` tests a click against to decide whether it landed outside the
+dialog and should dismiss it. **Nothing ever sets it.** The only callers of
+`set_content_rect` in the tree are two unit tests (`gui/toolkit/src/modal.rs`);
+no dialog calls it, so every live dialog carries `(0.0, 0.0, 0.0, 0.0)` and
+`point_in_content` answers `false` for every point on the screen.
+
+### What breaks
+
+- **`dismiss_on_click_outside` dismisses on a click *anywhere*, including on the
+  dialog's own buttons.** `ModalOverlay::new()` turns it on by default, so this
+  is the behaviour of any dialog that does not turn it off. `InputDialog` and
+  `ProgressDialog` set it to `false` in their constructors and are unaffected;
+  `AlertDialog` and `NonModalDialog` need checking, and the default itself is
+  the trap for whatever is written next.
+- **No dialog can hit-test anything inside itself.** That is why `InputDialog`
+  has a caret it can place with the arrows but not with the mouse: the geometry
+  it would need is computed inside `render(&self, parent_width, parent_height,
+  …)` from the parent's size, discarded when that call returns, and unavailable
+  to `handle_mouse`, which is not told the parent's size at all.
+
+### Why it is a design fault and not a missing call
+
+Adding `self.overlay.set_content_rect(...)` inside `render` is impossible as
+written — `render` takes `&self`. Threading the parent size into `handle_mouse`
+instead would give two independent copies of the layout arithmetic, in two
+methods, that have to agree exactly or the click lands in the wrong place; that
+is the bug it is trying to fix, moved.
+
+### The proper fix
+
+Give the dialogs a **layout step**, as `Widget`/`WidgetTree` already have: a
+`fn layout(&mut self, parent_width: f32, parent_height: f32)` that computes the
+rectangles once, stores them (dialog rect, input-field rect, button rects), and
+is called before `render` and consulted by `handle_mouse`. `render` then draws
+from the stored boxes rather than recomputing them, and `handle_mouse` hit-tests
+against the same numbers that were drawn — which is the property that makes a
+click land where the user aimed it.
+
+Once that exists, `InputDialog` gains click-to-place-caret in a few lines, using
+`text::cursor_at` against the stored field rect exactly as
+`WidgetKind::TextInput` does today, and `dismiss_on_click_outside` starts
+meaning what it says.
+
+### 2026-08-24, later — the survey before the fix found three more, and they are all the same fault
+
+Reading every `handle_mouse` in the file before starting the layout step turned
+up that the missing geometry is not one dialog's problem. It is the file's:
+
+- **`InputDialog::handle_mouse` hit-tests nothing at all.** Its whole body is
+  the overlay-dismiss check. So its OK and Cancel buttons — which it draws,
+  and highlights, and moves a focus ring between — **cannot be clicked**. The
+  dialog is keyboard-only, and nothing says so.
+- **`ProgressDialog` has no `handle_mouse` at all**, and its `handle_event`
+  has no `Event::Mouse` arm. A `.cancelable()` progress dialog draws a Cancel
+  button that can only be worked with Escape.
+- **`AlertDialog::handle_mouse` hit-tests against `compute_layout(800.0,
+  600.0)`** — a hardcoded parent size, because `handle_mouse` is not told the
+  real one. Its buttons therefore land correctly only on an 800×600 parent and
+  are offset by half the difference on any other; on a 1920×1080 desktop the
+  hit areas sit 560 px left and 240 px above the buttons the user can see.
+  This is the same bug as the other two wearing a plausible number.
+
+That last one is the reason the fix is a stored layout and not a parameter.
+`AlertDialog` already has the shared `compute_layout` the entry above asks for,
+and it *still* clicks in the wrong place — because the input the layout needs
+is not available where the click is handled. Threading it in would not have
+been "two copies of the arithmetic"; it would have been one copy fed a guess.
+
+### 2026-08-24 — fixed, with one change to the plan above and a fourth bug found on the way
+
+The layout step landed, but **not as the separate `fn layout(&mut self, …)` the
+plan asked for.** A separate call is a call that can be forgotten, and a
+forgotten one reproduces this entry exactly: hit areas that do not match what is
+on screen, compiling and rendering perfectly and failing only under the mouse.
+The tree already had the evidence — `ModalOverlay::set_content_rect` *was* that
+separate call, and in the whole repository only two unit tests ever made it.
+So instead `render` itself took `&mut self` and records where it put things as a
+side effect of drawing them; `handle_mouse` can consult nothing else. The
+reasoning, and the cost of `&mut self` on a draw method, are `design-decisions.md`
+§547.
+
+**The fourth bug, found while fixing the other three:** `content_rect` was a
+plain tuple starting at all zeroes, so before the first frame *every* point on
+screen is "outside the dialog". A dialog with `dismiss_on_click_outside` on —
+which is `ModalOverlay::new()`'s default — therefore dismissed itself if a click
+arrived between `show()` and its first frame, before the user had seen it. It is
+now `Option`, so "I do not know where I am" classifies no clicks rather than all
+of them.
+
+What is fixed:
+
+- `AlertDialog` hit-tests the rectangles it drew, at any parent size, and
+  `render_buttons` draws *from* those rectangles rather than re-deriving them.
+- `InputDialog` has working OK, Cancel and click-to-place-caret, the last of
+  those correct through a horizontal scroll (shared with `WidgetKind::TextInput`
+  via the new `textedit::cursor_at_click`) and through password masking (the
+  click is resolved against the row of marks and mapped back to a byte offset in
+  the secret, so it can never land inside a character).
+- `ProgressDialog` has an `Event::Mouse` arm and a clickable Cancel button.
+- `dismiss_on_click_outside` means what it says, and means nothing before the
+  first frame.
+
+Proved by `scripts/reintro-modal-geometry.py` — nineteen one-line defects, each
+of which compiles.
+
 ---
 
 ### 2026-08-24 — the `cmp`/`diff` verdict: reversing this file's own recommendation, from flat-1 to 0/1/2
@@ -74255,3 +74693,127 @@ above.
 
 **Reproduce.** `printf '\\n' | grep -E '^[\.]$'` — GNU prints the backslash,
 ours prints nothing.
+---
+
+### 2026-08-24 — `gunzip FILE` compresses a file that isn't gzip, instead of refusing — ✅ FIXED same day (lane A, `4d9990f4c`)
+
+**In short:** typing `gunzip notes.txt` does not report "that isn't a gzip
+file". It *compresses* `notes.txt` and writes `notes.txt.gz` — the exact
+opposite of what was asked. The command cannot tell which name it was invoked
+as, so it guesses from the file's contents, and guesses wrong in the one case
+where the user was most explicit.
+
+**Where.** `kernel/src/kshell.rs`, `cmd_gunzip` (the mode test is the
+`if compress_mode || (!is_gzip && !test_only && !list_mode)` at the top of the
+decompress path), and the dispatch entry `"gunzip" | "gzip" => cmd_gunzip(args)`.
+
+**Root cause.** One function serves both commands, and `dispatch` passes only
+the arguments — argv[0] is discarded before the function runs. Lacking the name,
+`cmd_gunzip` infers the mode from the file's magic bytes: gzip magic means
+decompress, anything else means compress. That inference is right for `gzip`
+and backwards for `gunzip`, and no amount of care inside the function can fix
+it, because the information it needs was thrown away by the caller.
+
+Two consequences beyond the obvious one:
+
+* `gunzip -d FILE` does not help. `-d` is parsed and then ignored (`"-d" => {}`,
+  commented "no-op, default for gunzip"), so the magic-byte guess still runs.
+  Only `-t` and `-l` suppress it, because they are checked in the same
+  condition — which is why self-test rung 29 has to spell `gunzip -t` to reach
+  the `not in gzip format` diagnostic at all.
+* The same shape is worth checking in the sibling pairs. `bunzip2`/`bzip2`,
+  `unxz`/`xz`, `unzstd`/`zstd` and `unlz4`/`lz4` are separate `cmd_*` functions,
+  so they are probably fine, but that has not been verified.
+
+**Proper fix.** Pass the invoked name down: `"gunzip" => cmd_gunzip(args, Mode::Decompress)`,
+`"gzip" => cmd_gunzip(args, Mode::Compress)`, with `-d` and `-c` overriding it
+and the magic-byte sniff kept only as the tie-break for `gzip` with no flags
+(where it is genuinely useful — `gzip file.gz` should not double-compress).
+Then `gunzip` on a non-gzip file reports `gunzip: 'FILE': not in gzip format`
+and exits 1, which is what real gunzip does and what the site already says when
+it is reachable.
+
+**Why it wasn't fixed on the spot.** Found while writing rung 29's assertions
+for the 111-site statusless-bail sweep, which is a mechanical change across
+dozens of commands; folding a behavioural change to the gzip family into that
+commit would make both harder to review and to revert. Queued as the next task.
+
+**Severity.** Data-affecting but not destructive: the original file is not
+removed, so the outcome is a spurious `.gz` alongside it and a command that
+reported success for doing the reverse of its name.
+
+**Fixed 2026-08-24 in `4d9990f4c`**, along the lines proposed above but with one
+deliberate departure. The proposal kept the magic-byte sniff "as the tie-break
+for `gzip` with no flags (where it is genuinely useful — `gzip file.gz` should
+not double-compress)". That would have left the guess deciding the direction in
+exactly one case, and the case it decides is one where the two possible answers
+are *compress again* and *decompress* — i.e. it would still silently do the
+reverse of what `gzip` means, just from a narrower doorway. The fix instead
+makes the name decide unconditionally and answers `gzip file.gz` by **refusing**
+(`already gzip-compressed, not compressing again`, exit 1), which is what GNU
+gzip does. The magic bytes now decide nothing; they are only consulted where the
+direction is already settled, to ask whether the file is consistent with it.
+
+The refusal is keyed on the header rather than on a `.gz` suffix — a suffix is a
+claim and the header is the fact — and `-o` bypasses it, since naming the output
+explicitly reads as deliberate.
+
+Also fixed the `-d` half: `"-d" => {}` became `"-d" | "--decompress"` setting a
+real flag, so the flag that had been documented in the command's own usage text
+all along now does what the text says.
+
+The two loose ends the entry raised are both closed. Self-test **rung 30**
+covers all five directions, each on a file whose contents point the other way,
+so the old guess cannot satisfy any of them; the round-trip is asserted on the
+recovered bytes rather than on the success line. Rung 29's `-t` workaround is
+kept, but now as a test of the sweep rather than a way around this bug, and its
+comment says so. Rung 30 also picks up the `-t`-success assertion rung 29 had to
+drop for want of a working compressor.
+
+**The sibling pairs were checked and are fine.** `bzip2`/`bunzip2`, `xz`/`unxz`,
+`zstd`/`unzstd` and `lz4`/`unlz4` each have separate `cmd_*` functions and
+separate dispatch arms; the `un*`/`*cat` arms are decompress-only aliases. Only
+gzip/gunzip ever conflated the two directions, which is why only it could guess.
+
+### TD-A-COMPRESSORS-KEEP-THE-INPUT-FILE-WHERE-GNU-REPLACES-IT (lane A, 2026-08-24)
+
+**In short:** typing `gzip big.log` leaves you with **both** `big.log` and
+`big.log.gz`. On Linux you would be left with only `big.log.gz` — GNU `gzip`
+deletes the original once it has written the compressed copy, and `gunzip`
+likewise deletes the `.gz` once it has unpacked it. So someone compressing a
+directory to reclaim disk space reclaims none of it, and a script that compresses
+a log and then counts files finds one more than it expected.
+
+**Where.** `kernel/src/kshell.rs`. It applies to the whole family, not one
+command: there is no `Vfs::remove` call anywhere in the compressor region, so
+`gzip`/`gunzip`, `bzip2`/`bunzip2`, `xz`/`unxz`, `zstd`/`unzstd` and
+`lz4`/`unlz4` all write the output and leave the input untouched. The behaviour
+is at least *uniform*, which is why this is one entry and not five.
+
+**How it was found.** Self-test rung 30 asserted that a refused `gunzip` had
+written no archive, and the assertion failed even though the code under test was
+correct — the archive it found was a leftover from the rung's own earlier
+compress step, still present because `gzip` had not removed it. Cost one boot
+cycle (`aed60824f`). The rung now deletes the file first (`a6155cb82`), which is
+also what makes the assertion mean what it says.
+
+**Is it a bug?** Genuinely arguable, which is why it is filed as tech debt rather
+than fixed on sight:
+
+* *For matching GNU:* it is what every script and every user expects, and the
+  surprise is silent — you only notice when the disk does not empty.
+* *For keeping the input:* deleting the user's original file is destructive, and
+  this shell has no `--keep`/`-k` flag to opt out of it yet, so adopting GNU's
+  behaviour without that flag would make the safe case unreachable. The current
+  behaviour is the conservative half of the tradeoff.
+
+**Proper fix.** Add `-k`/`--keep` to the family, then make removal the default so
+the commands match GNU, with `-k` preserving today's behaviour. Removal must
+happen only after the output write has been confirmed to succeed — otherwise a
+write error midway through would delete the input and leave nothing behind,
+which converts a harmless failure into data loss. Doing it in the other order is
+the whole reason this is worth writing down rather than just doing.
+
+**Severity.** Low and non-destructive as it stands — the divergence costs disk
+space and script compatibility, never data. Note that fixing it moves it *toward*
+being destructive, so the fix needs more care than the bug does.

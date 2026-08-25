@@ -10102,17 +10102,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // `tr` — this one did not merely corrupt, it produced a set that could
         // never match, so the translation silently did nothing. `expand_tr_set`
         // now scans characters.
-        assert_eq!(expand_tr_set("é"), alloc::vec!['é']);
-        assert_eq!(expand_tr_set("aéb"), alloc::vec!['a', 'é', 'b']);
-        assert_eq!(expand_tr_set("a-c"), alloc::vec!['a', 'b', 'c']);
+        // `expand_tr_set` reports rather than returns, so these unwrap through
+        // a helper that turns a refusal into a named test failure.
+        let tset = |s: &str| expand_tr_set(s).ok().unwrap_or_default();
+        assert_eq!(tset("é"), alloc::vec!['é']);
+        assert_eq!(tset("aéb"), alloc::vec!['a', 'é', 'b']);
+        assert_eq!(tset("a-c"), alloc::vec!['a', 'b', 'c']);
         // An escaped multi-byte character stands for itself.
-        assert_eq!(expand_tr_set("\\é"), alloc::vec!['é']);
+        assert_eq!(tset("\\é"), alloc::vec!['é']);
         // ASCII escapes and ranges are unchanged by the rewrite.
-        assert_eq!(expand_tr_set("\\n\\t"), alloc::vec!['\n', '\t']);
-        assert_eq!(expand_tr_set("0-9").len(), 10);
+        assert_eq!(tset("\\n\\t"), alloc::vec!['\n', '\t']);
+        assert_eq!(tset("0-9").len(), 10);
         // A code-point range, which the byte version could not express at all
         // (it would have walked from one character's bytes into another's).
-        assert_eq!(expand_tr_set("à-â"), alloc::vec!['à', 'á', 'â']);
+        assert_eq!(tset("à-â"), alloc::vec!['à', 'á', 'â']);
 
         // awk — a string literal and the comma splitter, both byte-indexed
         // over ASCII delimiters.
@@ -13314,7 +13317,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // `expand_tr_set` no longer strips an outer quote pair, because
         // `split_words` has already removed the quoting and what is left is
         // data. Two apostrophes are a set of two apostrophes.
-        assert_eq!(expand_tr_set("''"), alloc::vec!['\'', '\'']);
+        assert_eq!(
+            expand_tr_set("''").ok().unwrap_or_default(),
+            alloc::vec!['\'', '\'']
+        );
 
         // The other half of the bug. The file read was
         // `from_utf8(&data).unwrap_or("")`, so a file `tr` could not decode
@@ -13781,6 +13787,71 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 script
             );
         }
+    }
+
+    serial_println!("  kshell::self_test 49: tr knows the control escapes");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // Each of these named its own letter before. `tr -d '\a'` deleting
+        // every `a` is the shape that makes this class dangerous: the wrong
+        // answer is a completely plausible right answer to a different
+        // question, so nothing about the output looks wrong.
+        let out = piped("tr -d '\\a'", b"a\x07b\n");
+        assert_eq!(out.as_slice(), b"ab\n", "\\a is BEL, not the letter a");
+        let out = piped("tr -d '\\b'", b"a\x08b\n");
+        assert_eq!(out.as_slice(), b"ab\n", "\\b is BS, not the letter b");
+        let out = piped("tr -d '\\f'", b"a\x0cb\n");
+        assert_eq!(out.as_slice(), b"ab\n", "\\f is FF, not the letter f");
+        let out = piped("tr -d '\\v'", b"a\x0bb\n");
+        assert_eq!(out.as_slice(), b"ab\n", "\\v is VT, not the letter v");
+
+        // `tr -d '\0'` is the example this file's own byte-table
+        // documentation gives as a common shape, and it was deleting the
+        // digit `0`.
+        let out = piped("tr -d '\\0'", b"a\x00b0\n");
+        assert_eq!(out.as_slice(), b"ab0\n", "\\0 is NUL, and 0 is untouched");
+
+        // Multi-digit octal, which was read as its digits one at a time.
+        let out = piped("tr -d '\\101'", b"A10\n");
+        assert_eq!(out.as_slice(), b"10\n", "\\101 is A, not 1 then 0 then 1");
+        let out = piped("tr '\\101' 'x'", b"A\n");
+        assert_eq!(out.as_slice(), b"x\n", "octal works in SET1 of a translate");
+        let out = piped("tr 'A' '\\102'", b"A\n");
+        assert_eq!(out.as_slice(), b"B\n", "and in SET2");
+
+        // The octal scan stops at three digits and at a non-octal digit, so
+        // the characters after an escape are still their own.
+        let out = piped("tr -d '\\1011'", b"A1B\n");
+        assert_eq!(out.as_slice(), b"B\n", "\\101 then a literal 1");
+        let out = piped("tr -d '\\08'", b"a\x008b\n");
+        assert_eq!(out.as_slice(), b"ab\n", "\\0 then a literal 8");
+
+        // Above \177 an octal escape names a byte, and this tr's sets are
+        // code points. Refused rather than answered as U+00C3.
+        let out = piped("tr -d '\\303'", b"zz_octal\n");
+        assert_eq!(last_exit(), 1, "an octal escape above \\177 is refused");
+        assert_output_contains("and says why", &out, b"above \\177");
+        assert!(
+            !out.windows(8).any(|w| w == b"zz_octal"),
+            "and does not also transform its input"
+        );
+
+        // What must not change: the escapes that already worked, and a
+        // backslash before an ordinary character still standing for that
+        // character.
+        let out = piped("tr -d '\\n'", b"a\nb\n");
+        assert_eq!(out.as_slice(), b"ab", "\\n is still newline");
+        let out = piped("tr -d '\\t'", b"a\tb\n");
+        assert_eq!(out.as_slice(), b"ab\n", "\\t is still tab");
+        let out = piped("tr -d '\\z'", b"azb\n");
+        assert_eq!(out.as_slice(), b"ab\n", "\\z is still the letter z");
+        let out = piped("tr -d '\\\\'", b"a\\b\n");
+        assert_eq!(out.as_slice(), b"ab\n", "\\\\ is still a backslash");
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -108924,6 +108995,10 @@ enum TrParseError {
     MissingSet2(String),
     /// More operands than there are places to put them.
     ExtraOperand(String),
+    /// An octal escape above `\177`, which names a byte rather than a
+    /// character. Carries the digits as written, so the message can quote
+    /// back what the user typed rather than a normalised form.
+    OctalTooLarge(String),
 }
 
 impl TrParseError {
@@ -108947,6 +109022,15 @@ impl TrParseError {
             }
             Self::ExtraOperand(ref word) => {
                 shell_println!("tr: extra operand '{}'", word);
+            }
+            Self::OctalTooLarge(ref digits) => {
+                shell_println!("tr: octal escape '\\{}' is above \\177", digits);
+                shell_println!(
+                    "      SET1 and SET2 are sets of characters, not bytes, so there is no"
+                );
+                shell_println!(
+                    "      one answer here; write the character itself, or a range of them"
+                );
             }
         }
     }
@@ -109047,11 +109131,11 @@ fn parse_tr_args(args: &str) -> Result<TrSpec, TrParseError> {
         return Err(TrParseError::ExtraOperand(extra.clone()));
     }
 
-    let set1 = expand_tr_set(operands.first().map_or("", String::as_str));
+    let set1 = expand_tr_set(operands.first().map_or("", String::as_str))?;
     let set2 = if delete {
         Vec::new()
     } else {
-        expand_tr_set(operands.get(1).map_or("", String::as_str))
+        expand_tr_set(operands.get(1).map_or("", String::as_str))?
     };
     Ok(TrSpec {
         set1,
@@ -109254,7 +109338,7 @@ fn tr_delete(text: &str, s1: &[char]) {
 /// [`split_words`], which removes the quoting itself, so a quote reaching here
 /// is data. Stripping it would eat the outer pair of `tr "''" x`, which is how
 /// you ask to translate two apostrophes.
-fn expand_tr_set(set: &str) -> Vec<char> {
+fn expand_tr_set(set: &str) -> Result<Vec<char>, TrParseError> {
     let src: Vec<char> = set.chars().collect();
     let len = src.len();
     let mut chars = Vec::new();
@@ -109266,16 +109350,59 @@ fn expand_tr_set(set: &str) -> Vec<char> {
         };
         let next = src.get(i.saturating_add(1)).copied();
         if cur == '\\' && next.is_some() {
+            // Every escape consumes the backslash and one character unless it
+            // says otherwise; only the octal form is longer.
+            let mut used = 2usize;
             match next {
                 Some('n') => chars.push('\n'),
                 Some('t') => chars.push('\t'),
                 Some('r') => chars.push('\r'),
+                // The four that were missing. Each of them used to fall into
+                // the catch-all below and stand for its own letter, so
+                // `tr -d '\a'` deleted every `a` — a wrong answer reported as
+                // success, and a particularly quiet one because deleting the
+                // letter `a` is a perfectly plausible thing to have asked for.
+                Some('a') => chars.push('\x07'),
+                Some('b') => chars.push('\x08'),
+                Some('f') => chars.push('\x0c'),
+                Some('v') => chars.push('\x0b'),
+                Some(first @ '0'..='7') => {
+                    // Up to three octal digits, as every tr reads them. These
+                    // fell into the catch-all too, so `tr -d '\0'` — deleting
+                    // NUL bytes, and the example this file's own byte-table
+                    // documentation gives as a common shape — deleted the
+                    // digit `0` instead, and `\101` deleted `1` and `0`.
+                    let mut val: u32 = first.to_digit(8).unwrap_or(0);
+                    let mut digits = alloc::string::String::from(first);
+                    for k in 0..2usize {
+                        let at = i.saturating_add(2).saturating_add(k);
+                        let Some(d) = src.get(at).copied().and_then(|c| c.to_digit(8)) else {
+                            break;
+                        };
+                        val = val.saturating_mul(8).saturating_add(d);
+                        digits.push(char::from_digit(d, 8).unwrap_or('0'));
+                        used = used.saturating_add(1);
+                    }
+                    // Above `\177` an octal escape means a *byte* in every tr,
+                    // and this one's sets are code points — a deliberate choice
+                    // recorded above, and the only one under which `à-â` is a
+                    // range of three characters rather than of six bytes. There
+                    // is no reading of `\303` that is right under both, so it is
+                    // refused instead of silently answered as U+00C3.
+                    if val > 0o177 {
+                        return Err(TrParseError::OctalTooLarge(digits));
+                    }
+                    let Some(c) = char::from_u32(val) else {
+                        return Err(TrParseError::OctalTooLarge(digits));
+                    };
+                    chars.push(c);
+                }
                 // Any other escaped character stands for itself — including a
                 // multi-byte one, which is the case the byte scan mangled.
                 Some(c) => chars.push(c),
                 None => {}
             }
-            i = i.saturating_add(2);
+            i = i.saturating_add(used);
         } else if next == Some('-') && i.saturating_add(2) < len {
             // Range: `a-z`. Over `char`s this is a code-point range, which is
             // what someone writing `à-ÿ` means and what the byte version could
@@ -109292,7 +109419,7 @@ fn expand_tr_set(set: &str) -> Vec<char> {
             i = i.saturating_add(1);
         }
     }
-    chars
+    Ok(chars)
 }
 
 /// `yes [STRING]` — repeatedly output STRING (default "y").

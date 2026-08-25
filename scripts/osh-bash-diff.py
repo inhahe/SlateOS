@@ -35,25 +35,39 @@ files without disturbing the next one). Three magic comments are recognised:
                              waits on jobs, sleeps, etc.); a case that exceeds
                              its budget twice in a row is reported as a hang
 
-Reference shell
----------------
-Defaults to MSYS/Git-for-Windows bash on the dev host, overridable with
-`--bash`. Note that MSYS bash differs from real Linux bash in a few documented
-places (C-locale byte-wise string ops, signal numbering, exit 127 for fatal
-expansion errors) — see the TD-OILS-* "probe artifact" entries in
-`known-issues.md`. Cases that hit those need an `# EXPECT-DIFF` waiver.
+Reference shell — run this through `scripts/osh-diff.sh`
+--------------------------------------------------------
+    sh scripts/osh-diff.sh                          # the whole corpus
+    sh scripts/osh-diff.sh -k trap                  # cases matching "trap"
 
-Usage
------
-    python scripts/osh-bash-diff.py                 # run the whole corpus
-    python scripts/osh-bash-diff.py -k trap         # only cases matching "trap"
-    python scripts/osh-bash-diff.py -v              # show output for every case
+That wrapper sources `scripts/diff-wsl.sh`, which re-execs into WSL, builds
+`osh` for `x86_64-unknown-linux-gnu`, refuses a build cache that silently did
+nothing, and pins the locale — so both sides are glibc and both are Linux. It
+passes every argument documented here straight through, so there is no reason
+to invoke this file directly except to compare two shells you have named
+yourself with `--osh` and `--bash`.
 
-The binary under test is the newest of `target/{release,debug}/osh`, and the run
-is refused outright if that binary is older than anything under
+Invoked with neither, on the Windows host, it falls back to whatever it can
+find — a `x86_64-pc-windows-gnu` osh against Git-for-Windows bash — and says so
+loudly, because that pair certifies nothing. MSYS is a Cygwin derivative: it
+links `msys-2.0.dll` rather than glibc, and its getopt wording, signal table,
+locale handling and process model are Cygwin's, not GNU's. Four entries in
+`known-issues.md` (`TD-OILS-SIGNAL-NUMBERS-…`, `TD-OILS-MSYS-CHMOD-TYPE-A`,
+`TD-OILS-HOST-ARGV0`, `TD-OILS-A-NON-UTF-8-ARGUMENT-…`) exist only because that
+was once the only pair available.
+
+Staleness
+---------
+Under the wrapper this is already settled before the harness starts:
+`diff-wsl.sh` builds the subject every run and then checks the *library*
+artifact the build produced, which is strictly stronger than an mtime compare.
+
+Run directly, the binary under test is the newest of `target/{release,debug}/osh`
+and the run is refused outright if that binary is older than anything under
 `userspace/oils` — `cargo test --lib` and `cargo clippy` do not relink it, so
 without the check a sweep can report a previous build green. `--allow-stale`
-downgrades the refusal to a warning; `--osh <path>` skips the check entirely.
+downgrades the refusal to a warning; `--osh <path>` skips the check entirely,
+which is why the wrapper (whose own check has already run) passes it.
 
 Exit status: 0 if every case matched (or diverged exactly as waived), 1 if any
 case diverged unexpectedly, a waived case unexpectedly matched, or a case could
@@ -226,6 +240,55 @@ def find_shell(explicit: str | None, candidates: list[Path], what: str, newest: 
         f"osh-bash-diff: no {what} found (looked in "
         + ", ".join(str(c) for c in candidates)
         + "). Build it or pass an explicit path."
+    )
+
+
+def machtype(shell: Path) -> str:
+    """The reference shell's own name for the system it was built for.
+
+    Asked of the shell rather than inferred from its path, because the path is
+    a coincidence and the answer is a fact: `$MACHTYPE` is baked in at bash's
+    configure time, so Git-for-Windows bash says `x86_64-pc-msys` from wherever
+    it is installed and a glibc one says `x86_64-pc-linux-gnu`. A path
+    heuristic would be fooled by a copy, a symlink, or a `--bash` naming either.
+
+    Returns "" if the shell could not be asked — a reference that will not run
+    is a problem the first case will report far better than a guess here would.
+    """
+    try:
+        out = subprocess.run(
+            [str(shell), "-c", "printf %s \"$MACHTYPE\""],
+            capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.decode("utf-8", "replace").strip()
+
+
+def warn_if_not_glibc(bash: Path) -> None:
+    """Say so, loudly, when the reference is a Cygwin port rather than glibc.
+
+    This harness spent its first weeks measuring against MSYS bash, and the
+    cost was not that it failed — it passed, and pinned four Cygwin artifacts
+    into `known-issues.md` as though they were facts about osh. A wrong
+    reference does not announce itself in the results; it announces itself as a
+    green run. So it gets announced here instead, once, at the top, where the
+    reader has not yet been told 662 times that everything matched.
+
+    A warning and not a refusal: comparing against whatever bash is to hand is
+    still the fastest way to check a single case by name, and `-k` exists for
+    exactly that. What must not happen is doing it without noticing.
+    """
+    triple = machtype(bash)
+    if "linux" in triple:
+        return
+    print(
+        f"WARNING: the reference is {triple or 'not a Linux'} bash, not glibc."
+        "\n  Cygwin/MSYS has its own getopt wording, signal numbers, locale"
+        "\n  handling and process model, so a green run here certifies osh"
+        "\n  against a port no SlateOS user will ever run."
+        "\n  Use `sh scripts/osh-diff.sh`, which compares glibc against glibc"
+        "\n  inside WSL, before believing any of the results below.\n"
     )
 
 
@@ -503,6 +566,7 @@ def main() -> int:
     if not args.osh:
         check_not_stale(osh, args.allow_stale)
     bash = find_shell(args.bash, BASH_CANDIDATES, "bash")
+    warn_if_not_glibc(bash)
     cases = load_cases(args.filter, args.timeout_scale)
     if not cases:
         sys.exit(f"osh-bash-diff: no cases found in {CORPUS}")

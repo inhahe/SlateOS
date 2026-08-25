@@ -113,7 +113,7 @@
 # harness `OURS` names the directory instead — `/usr/bin` — since there is no
 # single subject for it to name.
 #
-# ## `DIFF_NO_BINDIR` is for two situations, and neither is "I have a family"
+# ## `DIFF_NO_BINDIR` is for three situations, and none is "I have a family"
 #
 # Three harnesses set it and then rebuilt this file's multi-binary `$bindir`
 # by hand, name for name (`interleave-diff.sh`, `digest-diff.sh`,
@@ -123,7 +123,7 @@
 # name in silence rather than saying so. Two copies of one judgement is one
 # copy that is wrong, and the wrong one is the one nobody rereads.
 #
-# The two situations the knob is actually for:
+# The situations the knob is actually for:
 #
 # * **The subject has no same-named counterpart to symlink beside.**
 #   `extfloat-diff.sh`: its subject is a `--example`, and its reference is a C
@@ -131,6 +131,12 @@
 # * **The reference is not known yet when this file runs.** `ls-diff.sh` builds
 #   GNU coreutils 9.5 from source, because the 9.4 WSL ships lays out columns
 #   differently; the symlinks cannot be made until that build has finished.
+# * **The two sides must keep their own distinct names.** `osh-diff.sh`
+#   compares `osh` against `bash`, and its harness strips each shell's *own*
+#   name from that shell's diagnostics before comparing them, so that it
+#   compares the message rather than the program. It can only do that if it
+#   knows which name to strip; a `$bindir` that called both sides `osh` would
+#   defeat the normalisation it was meant to serve.
 #
 # Anything else — including "my harness compares a family" — wants `DIFF_BINS`
 # with more than one name in it and no `DIFF_NO_BINDIR` at all.

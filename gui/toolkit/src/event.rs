@@ -119,8 +119,80 @@ pub struct KeyEvent {
     pub pressed: bool,
     /// Modifier keys held.
     pub modifiers: Modifiers,
-    /// Character generated (if applicable, for text input).
-    pub text: Option<char>,
+    /// The text this keystroke produced — empty for the keys that produce
+    /// none, and for every release.
+    ///
+    /// A string rather than the `Option<char>` this was until dead keys
+    /// arrived, because one keystroke can produce **none, one, or several**
+    /// characters and only the first two of those fit in an `Option`:
+    ///
+    /// * a dead key (`´` on a German board) types nothing on its own — it
+    ///   waits for the next key and composes with it;
+    /// * `´` then `e` types the single character `é`;
+    /// * `´` then `x` — a pair that composes to nothing — types **`´x`**,
+    ///   two characters, because the alternative is to discard silently what
+    ///   someone typed. See `design-decisions.md` §550.
+    ///
+    /// Every real system agrees on the shape even where it disagrees on that
+    /// last case: X11's `XLookupString` returns a character *count*, Wayland's
+    /// text-input commits a *string*, and Windows sends as many `WM_CHAR`
+    /// messages as the keystroke produced.
+    ///
+    /// **Most callers want [`typed`](Self::typed), not this field.** A widget
+    /// that inserts text should insert all of it *and* drop the control
+    /// characters, which is exactly what `typed` does; reading `text` raw is
+    /// right only where control characters are the point (the terminal, which
+    /// forwards them to a shell). One that is matching a single character —
+    /// type-ahead in a list, a mnemonic — wants [`single_char`](Self::single_char),
+    /// which answers `None` for the multi-character case rather than acting on
+    /// half of it.
+    pub text: String,
+}
+
+impl KeyEvent {
+    /// The one character this keystroke produced, if it produced exactly one.
+    ///
+    /// `None` both for a keystroke that produced no text and for one that
+    /// produced several. Deliberately not "the first character": a caller
+    /// reaching for this is choosing *between* characters — jumping to a list
+    /// item, matching a mnemonic — and acting on the first half of `´x` would
+    /// be acting on something the user did not type as a unit.
+    #[must_use]
+    pub fn single_char(&self) -> Option<char> {
+        let mut chars = self.text.chars();
+        let first = chars.next()?;
+        chars.next().is_none().then_some(first)
+    }
+
+    /// The characters this keystroke typed that belong in a text field:
+    /// [`text`](Self::text) with control characters dropped.
+    ///
+    /// Every text-entry site in the tree wants exactly this and used to spell
+    /// it out itself — thirty-odd copies of `if let Some(ch) = k.text && !ch
+    /// .is_control()`, which is thirty chances to forget the second half. The
+    /// filter is not optional politeness: on most layouts Enter, Tab, Escape
+    /// and Backspace all *produce* text (`\r`, `\t`, `\x1b`, `\x08`), so a
+    /// field that appends whatever arrives fills up with unprintable bytes the
+    /// moment someone presses Escape.
+    ///
+    /// Yields nothing for a release, for a dead key awaiting its next
+    /// keystroke, and for a key that types only a control character. Pair it
+    /// with [`types_text`](Self::types_text) when the answer to "did this
+    /// keystroke belong to the text field at all?" decides whether the event is
+    /// consumed.
+    pub fn typed(&self) -> impl Iterator<Item = char> + '_ {
+        self.text.chars().filter(|c| !c.is_control())
+    }
+
+    /// Whether [`typed`](Self::typed) would yield anything.
+    ///
+    /// Separate from `typed().next().is_some()` only in reading better at the
+    /// call site, where it is nearly always the condition on which a widget
+    /// decides to claim the keystroke.
+    #[must_use]
+    pub fn types_text(&self) -> bool {
+        self.typed().next().is_some()
+    }
 }
 
 /// Virtual key codes.
@@ -272,4 +344,110 @@ pub enum EventResult {
     Consumed,
     /// Event was ignored (propagate to parent).
     Ignored,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Key, KeyEvent, Modifiers};
+
+    /// The five cases `text` exists to tell apart, built by hand so each test
+    /// below reads as the keystroke it is about.
+    fn typing(text: &str) -> KeyEvent {
+        KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn an_ordinary_keystroke_types_its_one_character() {
+        assert_eq!(typing("a").typed().collect::<String>(), "a");
+        assert!(typing("a").types_text());
+        assert_eq!(typing("a").single_char(), Some('a'));
+    }
+
+    #[test]
+    fn a_dead_key_types_nothing_and_is_not_the_same_as_a_key_that_types_nothing() {
+        // Both spell as an empty string here — the *distinction* lives in the
+        // compositor, which knows it is holding a pending accent. What matters
+        // to a widget is that neither belongs in a text field, and both agree.
+        let dead = typing("");
+        assert!(!dead.types_text());
+        assert_eq!(dead.typed().count(), 0);
+        assert_eq!(dead.single_char(), None);
+    }
+
+    #[test]
+    fn a_composition_that_succeeded_types_one_character_not_two() {
+        // `´` then `e`. The compositor has already done the composing; the
+        // event carries the result, so a text field inserts one character and
+        // one Backspace removes it.
+        let composed = typing("é");
+        assert_eq!(composed.typed().collect::<String>(), "é");
+        assert_eq!(composed.single_char(), Some('é'));
+    }
+
+    #[test]
+    fn a_composition_that_failed_types_both_characters() {
+        // `´` then `x`, which composes to nothing. Following Windows and macOS
+        // rather than X11, both are typed — see `design-decisions.md` §550.
+        // The accent is wrong but *visible*, and one Backspace from right;
+        // discarding it would lose a keystroke with nothing on screen to say so.
+        let failed = typing("´x");
+        assert_eq!(failed.typed().collect::<String>(), "´x");
+    }
+
+    /// The distinction that makes `single_char` worth having over
+    /// `text.chars().next()`.
+    #[test]
+    fn single_char_refuses_a_keystroke_that_typed_two_rather_than_taking_the_first() {
+        // A type-ahead list jumping to `´` would select an entry the user never
+        // named. `None` is the honest answer: two characters named no one item.
+        assert_eq!(typing("´x").single_char(), None);
+    }
+
+    #[test]
+    fn control_characters_are_not_text_however_they_arrive() {
+        // Our own compositor reports no text for these, but a `guiremote` peer
+        // running someone else's keymap does report them, and every text field
+        // in the tree decides whether to claim a keystroke on this answer.
+        for control in ["\r", "\n", "\t", "\x1b", "\x08", "\x7f"] {
+            let ev = typing(control);
+            assert!(
+                !ev.types_text(),
+                "{:?} must not count as text",
+                control.escape_debug().to_string()
+            );
+            assert_eq!(ev.typed().count(), 0);
+        }
+    }
+
+    #[test]
+    fn a_control_mixed_into_real_text_loses_only_the_control() {
+        // Rejecting the whole run would lose the part the user meant; taking
+        // the whole run would put an unprintable byte in the field.
+        assert_eq!(typing("a\x1bb").typed().collect::<String>(), "ab");
+        assert!(typing("a\x1bb").types_text());
+    }
+
+    #[test]
+    fn a_release_carries_no_text() {
+        let release = KeyEvent {
+            key: Key::A,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+        assert!(!release.types_text());
+    }
+
+    /// `single_char` counts *characters*, not bytes — the multi-byte case must
+    /// not read as "several".
+    #[test]
+    fn a_multi_byte_character_is_still_one_character() {
+        assert_eq!(typing("ü").single_char(), Some('ü'));
+        assert_eq!(typing("€").single_char(), Some('€'));
+    }
 }

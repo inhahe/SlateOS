@@ -25,12 +25,12 @@
 //! ball launching.
 
 use guitk::color::Color;
-use randrange::{seeded_from_system, RandomSource, SeededRng};
 #[cfg(test)]
 use guitk::event::Modifiers;
 use guitk::event::{Event, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use randrange::{RandomSource, SeededRng, seeded_from_system};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -1072,24 +1072,20 @@ impl Pinball {
                 }
             }
             // N: new game.
-            Key::N
-                if ke.pressed => {
-                    self.new_game();
-                }
+            Key::N if ke.pressed => {
+                self.new_game();
+            }
             // P: pause/unpause.
-            Key::P
-                if ke.pressed => {
-                    match self.phase {
-                        GamePhase::Paused => {
-                            self.phase = self.phase_before_pause;
-                        }
-                        GamePhase::GameOver => {}
-                        other => {
-                            self.phase_before_pause = other;
-                            self.phase = GamePhase::Paused;
-                        }
-                    }
+            Key::P if ke.pressed => match self.phase {
+                GamePhase::Paused => {
+                    self.phase = self.phase_before_pause;
                 }
+                GamePhase::GameOver => {}
+                other => {
+                    self.phase_before_pause = other;
+                    self.phase = GamePhase::Paused;
+                }
+            },
             _ => {}
         }
     }
@@ -2005,7 +2001,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         })
     }
 
@@ -2015,7 +2011,7 @@ mod tests {
             key,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         })
     }
 
@@ -2318,7 +2314,10 @@ mod tests {
         a.activate_multi_ball();
         b.activate_multi_ball();
         let velocities = |app: &Pinball| -> Vec<(f32, f32)> {
-            app.balls.iter().map(|ball| (ball.vel.x, ball.vel.y)).collect()
+            app.balls
+                .iter()
+                .map(|ball| (ball.vel.x, ball.vel.y))
+                .collect()
         };
         assert_eq!(velocities(&a), velocities(&b));
     }

@@ -1724,7 +1724,7 @@ mod tests {
             key: Key::A,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         game.handle_event(&event);
         assert_eq!(game.current_input.len(), 1);
@@ -1739,7 +1739,7 @@ mod tests {
             key: Key::Backspace,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         game.handle_event(&event);
         assert!(game.current_input.is_empty());
@@ -1757,7 +1757,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         game.handle_event(&event);
         assert_eq!(game.guesses.len(), 1);
@@ -1770,7 +1770,7 @@ mod tests {
             key: Key::Num1,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         game.handle_event(&event);
         assert_eq!(game.difficulty, Difficulty::Easy);
@@ -1784,7 +1784,7 @@ mod tests {
             key: Key::N,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         game.handle_event(&event);
         assert_eq!(game.phase, GamePhase::Playing);
@@ -1797,7 +1797,7 @@ mod tests {
             key: Key::N,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         game.handle_event(&event);
         assert_eq!(game.current_input.len(), 1);
@@ -1812,7 +1812,7 @@ mod tests {
             key: Key::Escape,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         game.handle_event(&event);
         assert_eq!(game.phase, GamePhase::Playing);
@@ -1941,7 +1941,7 @@ mod tests {
             key: Key::H,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         game.handle_event(&event);
         assert!(game.hard_mode);
@@ -1955,7 +1955,7 @@ mod tests {
             key: Key::H,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         game.handle_event(&event);
         assert_eq!(game.current_input.len(), 2);
@@ -1975,7 +1975,7 @@ mod tests {
                 super_key: false,
             },
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         game.handle_event(&event);
         assert!(game.current_input.is_empty());

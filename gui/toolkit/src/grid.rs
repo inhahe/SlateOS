@@ -1208,7 +1208,13 @@ impl GridView {
             }
             _ => {
                 // Type-ahead search: printable characters.
-                if let Some(ch) = key.text.filter(|c| {
+                //
+                // `single_char`, not every character the keystroke typed: this
+                // is choosing *between* items, and a keystroke that produced
+                // two characters — a dead key whose composition failed — did
+                // not name one item. Jumping on the accent alone would select
+                // something the user never asked for.
+                if let Some(ch) = key.single_char().filter(|c| {
                     c.is_alphanumeric() || *c == ' ' || *c == '.' || *c == '_' || *c == '-'
                 }) {
                     return self.type_ahead_search(ch);
@@ -1891,7 +1897,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         grid.handle_key(&key);
         assert_eq!(grid.selection.focused(), Some(1));
@@ -1911,7 +1917,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         grid.handle_key(&key);
         // Should move down one row (by `columns` items).
@@ -1930,7 +1936,7 @@ mod tests {
             key: Key::Home,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         grid.handle_key(&home);
         assert_eq!(grid.selection.focused(), Some(0));
@@ -1939,7 +1945,7 @@ mod tests {
             key: Key::End,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         grid.handle_key(&end);
         assert_eq!(grid.selection.focused(), Some(19));
@@ -1959,7 +1965,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::shift(),
-            text: None,
+            text: String::new(),
         };
         grid.handle_key(&key);
         // Anchor stays at 0, range extends to 1.
@@ -1978,7 +1984,7 @@ mod tests {
             key: Key::A,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         };
         let result = grid.handle_key(&key);
         assert_eq!(result, EventResult::Consumed);
@@ -2149,7 +2155,7 @@ mod tests {
             key: Key::D,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('d'),
+            text: "d".to_string(),
         };
         grid.handle_key(&key);
         assert_eq!(grid.selection.focused(), Some(3));
@@ -2160,7 +2166,7 @@ mod tests {
             key: Key::O,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('o'),
+            text: "o".to_string(),
         };
         grid.handle_key(&key2);
         assert_eq!(grid.selection.focused(), Some(3));
@@ -2171,7 +2177,7 @@ mod tests {
             key: Key::C,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('c'),
+            text: "c".to_string(),
         };
         grid.handle_key(&key3);
         assert_eq!(grid.selection.focused(), Some(5));
@@ -2192,7 +2198,7 @@ mod tests {
             key: Key::A,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('a'),
+            text: "a".to_string(),
         };
         grid.handle_key(&key);
         assert_eq!(grid.selection.focused(), Some(1));
@@ -2203,7 +2209,7 @@ mod tests {
             key: Key::B,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('b'),
+            text: "b".to_string(),
         };
         grid.handle_key(&key2);
         assert_eq!(grid.selection.focused(), Some(2));
@@ -2296,7 +2302,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let result = grid.handle_key(&key);
         assert_eq!(result, EventResult::Ignored);
@@ -2388,7 +2394,7 @@ mod tests {
             key: Key::PageDown,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert!(grid.selection().focused().is_some_and(|i| i < 10));
 
@@ -2396,7 +2402,7 @@ mod tests {
             key: Key::PageUp,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(grid.selection().focused(), Some(0));
     }

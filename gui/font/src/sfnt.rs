@@ -64,13 +64,13 @@ use core::fmt;
 use crate::device::{Corrections, Ppem};
 use crate::gpos::{Adjust, Positioning, Run};
 use crate::gsub::{SubGlyph, Substitutions};
+use crate::gvar;
 use crate::indic_shape::{self, Script};
 use crate::kern::Kerning;
 use crate::lang::Lang;
 use crate::mark::MarkPositioning;
 use crate::otl;
 use crate::script::ScriptTags;
-use crate::gvar;
 use crate::var;
 use crate::varstore;
 
@@ -939,7 +939,11 @@ impl Face {
 
         let Some(os2) = os2 else {
             return Style {
-                weight: if mac_bold { Style::BOLD } else { Style::REGULAR },
+                weight: if mac_bold {
+                    Style::BOLD
+                } else {
+                    Style::REGULAR
+                },
                 italic: mac_italic,
                 width: Style::NORMAL_WIDTH,
             };
@@ -1425,7 +1429,10 @@ impl Face {
             return Ok(base);
         }
         let delta = hvar.advance_delta(&self.data, gid, coords.as_slice());
-        Ok(u16::try_from(i32::from(base).saturating_add(i32::from(delta)).max(0)).unwrap_or(u16::MAX))
+        Ok(
+            u16::try_from(i32::from(base).saturating_add(i32::from(delta)).max(0))
+                .unwrap_or(u16::MAX),
+        )
     }
 
     /// The correction `MVAR` applies to the face-wide metric `tag` at `coords`,
@@ -1452,11 +1459,15 @@ impl Face {
     #[must_use]
     pub fn metrics_at(&self, coords: &var::Coords) -> FaceMetrics {
         let mut m = self.metrics;
-        m.ascender = m.ascender.saturating_add(self.metric_delta(*b"hasc", coords));
+        m.ascender = m
+            .ascender
+            .saturating_add(self.metric_delta(*b"hasc", coords));
         m.descender = m
             .descender
             .saturating_add(self.metric_delta(*b"hdsc", coords));
-        m.line_gap = m.line_gap.saturating_add(self.metric_delta(*b"hlgp", coords));
+        m.line_gap = m
+            .line_gap
+            .saturating_add(self.metric_delta(*b"hlgp", coords));
         m
     }
 
@@ -1609,9 +1620,7 @@ impl Face {
         // That is HarfBuzz's rule and this crate's, and the filter has to be
         // the same one the Indic arm below uses or the two would disagree
         // about the same face.
-        if crate::myanmar::shapes(script)
-            && !crate::fallback::shaped_as_default(script, chosen)
-        {
+        if crate::myanmar::shapes(script) && !crate::fallback::shaped_as_default(script, chosen) {
             crate::myanmar::shape(&self.data, subs, script, lang, glyphs, |ch| {
                 self.glyph_index(ch)
             });
@@ -1624,9 +1633,7 @@ impl Face {
         // `latn` has said it wants none of this. The arms stay exclusive: the
         // USE tag list is `fallback::COMPLEX_SCRIPTS` with the other shapers'
         // tags removed, which is checked by a test in `universal`.
-        if crate::universal::shapes(script)
-            && !crate::fallback::shaped_as_default(script, chosen)
-        {
+        if crate::universal::shapes(script) && !crate::fallback::shaped_as_default(script, chosen) {
             crate::universal::shape(&self.data, subs, script, lang, glyphs, |ch| {
                 self.glyph_index(ch)
             });
@@ -1636,9 +1643,16 @@ impl Face {
             .filter(|_| !crate::fallback::shaped_as_default(script, chosen))
         {
             Some(indic) => {
-                indic_shape::shape(&self.data, subs, script, lang, chosen, indic, glyphs, |ch| {
-                    self.glyph_index(ch)
-                });
+                indic_shape::shape(
+                    &self.data,
+                    subs,
+                    script,
+                    lang,
+                    chosen,
+                    indic,
+                    glyphs,
+                    |ch| self.glyph_index(ch),
+                );
             }
             None => {
                 if let Some(subs) = subs {
@@ -2321,7 +2335,11 @@ fn read_components(data: &[u8]) -> Result<Vec<Component>, SfntError> {
         // have already collapsed into path commands. Treat it as no
         // translation rather than mis-placing the component.
         let offset_placed = flags & ARGS_ARE_XY_VALUES != 0;
-        let (tx, ty) = if offset_placed { (arg1, arg2) } else { (0.0, 0.0) };
+        let (tx, ty) = if offset_placed {
+            (arg1, arg2)
+        } else {
+            (0.0, 0.0)
+        };
 
         let mut xform = Transform {
             e: tx,
@@ -3388,7 +3406,11 @@ pub(crate) mod tests {
         g2.extend_from_slice(&[0x02, 0x01, 0x00, 0x02]);
         g2.extend_from_slice(&[0x01, 0, 100]); // x deltas for those two
         g2.extend_from_slice(&[0x01, 0, 0]); // y deltas
-        assert_eq!(g2.len(), 33, "glyph 2's variation data is 16 + 7 + 10 bytes");
+        assert_eq!(
+            g2.len(),
+            33,
+            "glyph 2's variation data is 16 + 7 + 10 bytes"
+        );
 
         // Glyph 3: one component plus four phantoms.
         let mut g3 = Vec::new();
@@ -3484,7 +3506,11 @@ pub(crate) mod tests {
     fn the_non_default_half_names_a_glyph_of_its_own() {
         let f = uvs_face(&[(VS1 as u32, &[], &[('A' as u32, 2)])]);
         assert!(f.has_variation_sequences());
-        assert_eq!(f.glyph_index('A'), Some(1), "the ordinary cmap is untouched");
+        assert_eq!(
+            f.glyph_index('A'),
+            Some(1),
+            "the ordinary cmap is untouched"
+        );
         assert_eq!(f.variation_glyph('A', VS1), Some(2));
     }
 
@@ -3498,7 +3524,11 @@ pub(crate) mod tests {
         // One range: U+0041 plus two more code points, so U+0041..=U+0043.
         let f = uvs_face(&[(VS1 as u32, &[('A' as u32, 2)], &[])]);
         for (ch, gid) in [('A', 1), ('B', 2), ('C', 3)] {
-            assert_eq!(f.variation_glyph(ch, VS1), Some(gid), "{ch} is in the range");
+            assert_eq!(
+                f.variation_glyph(ch, VS1),
+                Some(gid),
+                "{ch} is in the range"
+            );
         }
     }
 
@@ -3574,7 +3604,10 @@ pub(crate) mod tests {
         assert_eq!(non_default_only.variation_glyph('B', VS1), Some(2));
 
         let neither = uvs_face(&[(VS1 as u32, &[], &[])]);
-        assert!(neither.has_variation_sequences(), "the table is still there");
+        assert!(
+            neither.has_variation_sequences(),
+            "the table is still there"
+        );
         assert_eq!(neither.variation_glyph('A', VS1), None);
     }
 
@@ -3628,7 +3661,11 @@ pub(crate) mod tests {
     #[test]
     fn a_truncated_record_array_searches_toward_the_low_end() {
         assert_eq!(first_at_or_after(&[], 0, 4, 8, 5), 0);
-        assert_eq!(first_at_or_after(&[0, 0, 9], 0, 4, 8, 5), 0, "one short record");
+        assert_eq!(
+            first_at_or_after(&[0, 0, 9], 0, 4, 8, 5),
+            0,
+            "one short record"
+        );
     }
 
     #[test]
@@ -3710,7 +3747,11 @@ pub(crate) mod tests {
         let f = face();
         assert!(!f.has_positioning());
         for tag in [b"latn", b"DFLT", b"hebr"] {
-            assert!(!f.gpos_names_script(tag), "{} cannot be named", tag_text(tag));
+            assert!(
+                !f.gpos_names_script(tag),
+                "{} cannot be named",
+                tag_text(tag)
+            );
         }
     }
 
@@ -3858,7 +3899,9 @@ pub(crate) mod tests {
         let f = variable_face();
         for gid in 0..4 {
             let plain = f.outline(gid).unwrap();
-            let varied = f.outline_at(gid, &f.variation_axes().unwrap().default_coords()).unwrap();
+            let varied = f
+                .outline_at(gid, &f.variation_axes().unwrap().default_coords())
+                .unwrap();
             assert_eq!(varied.commands, plain.commands, "glyph {gid}");
         }
     }

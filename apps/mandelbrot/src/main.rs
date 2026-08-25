@@ -741,7 +741,7 @@ mod tests {
             key: Key::Up,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(app.center_y < old_y);
     }
@@ -754,7 +754,7 @@ mod tests {
             key: Key::Z,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(app.scale < old_scale);
     }
@@ -767,7 +767,7 @@ mod tests {
             key: Key::X,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(app.scale > old_scale);
     }
@@ -780,7 +780,7 @@ mod tests {
             key: Key::R,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.center_x, -0.5);
     }
@@ -793,7 +793,7 @@ mod tests {
             key: Key::C,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.color_scheme, ColorScheme::Fire);
     }
@@ -806,7 +806,7 @@ mod tests {
             key: Key::I,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(!app.show_info);
     }
@@ -819,7 +819,7 @@ mod tests {
             key: Key::F1,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(app.show_help);
     }
@@ -831,7 +831,7 @@ mod tests {
             key: Key::F2,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!((app.center_x - (-0.745)).abs() < 0.001);
     }
@@ -843,7 +843,7 @@ mod tests {
             key: Key::F3,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!((app.center_x - 0.281717).abs() < 0.001);
     }
@@ -855,7 +855,7 @@ mod tests {
             key: Key::F4,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!((app.center_x - (-1.7497)).abs() < 0.001);
     }
@@ -867,7 +867,7 @@ mod tests {
             key: Key::Num1,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.max_iter, 150);
     }
@@ -879,7 +879,7 @@ mod tests {
             key: Key::Num2,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.max_iter, 50);
     }
@@ -895,7 +895,7 @@ mod tests {
                 ..Modifiers::default()
             },
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.center_x, old_x);
     }

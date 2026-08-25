@@ -405,23 +405,24 @@ impl TypingTutorApp {
 
     fn finish_lesson(&mut self) {
         if let Some(ref session) = self.session
-            && session.finished {
-                let wpm = session.wpm(self.current_time_ms);
-                let acc = session.accuracy();
-                let dur = session.elapsed_ms(self.current_time_ms);
-                let title = self.lessons[self.selected_lesson].title.clone();
-                let cat = self.lessons[self.selected_lesson].category;
-                let tlen = session.text.len();
-                self.results.push(SessionResult {
-                    lesson_title: title,
-                    category: cat,
-                    wpm,
-                    accuracy: acc,
-                    duration_ms: dur,
-                    text_length: tlen,
-                });
-                self.view = AppView::Results;
-            }
+            && session.finished
+        {
+            let wpm = session.wpm(self.current_time_ms);
+            let acc = session.accuracy();
+            let dur = session.elapsed_ms(self.current_time_ms);
+            let title = self.lessons[self.selected_lesson].title.clone();
+            let cat = self.lessons[self.selected_lesson].category;
+            let tlen = session.text.len();
+            self.results.push(SessionResult {
+                lesson_title: title,
+                category: cat,
+                wpm,
+                accuracy: acc,
+                duration_ms: dur,
+                text_length: tlen,
+            });
+            self.view = AppView::Results;
+        }
     }
 
     fn cycle_category_filter(&mut self) {
@@ -481,14 +482,12 @@ impl TypingTutorApp {
     fn handle_lesson_select(&mut self, event: &KeyEvent) {
         let filtered = self.filtered_lessons();
         match event.key {
-            Key::Up
-                if self.selected_lesson > 0 => {
-                    self.selected_lesson -= 1;
-                }
-            Key::Down
-                if self.selected_lesson + 1 < filtered.len() => {
-                    self.selected_lesson += 1;
-                }
+            Key::Up if self.selected_lesson > 0 => {
+                self.selected_lesson -= 1;
+            }
+            Key::Down if self.selected_lesson + 1 < filtered.len() => {
+                self.selected_lesson += 1;
+            }
             Key::Enter => {
                 if let Some(&idx) = filtered.get(self.selected_lesson) {
                     self.start_lesson(idx);
@@ -521,14 +520,20 @@ impl TypingTutorApp {
             return;
         }
 
-        // Type the character
-        if let Some(ch) = event.text
-            && let Some(ref mut session) = self.session {
+        // Type the character.
+        //
+        // `typed`, not `text`: Enter and Tab produce `\r` and `\t` on most
+        // layouts, and a lesson that scored those would count a carriage
+        // return the user never saw as a mistyped letter — and then report an
+        // accuracy the typist has no way to explain.
+        if let Some(ref mut session) = self.session {
+            for ch in event.typed() {
                 session.type_char(ch, self.current_time_ms);
-                if session.finished {
-                    self.finish_lesson();
-                }
             }
+            if session.finished {
+                self.finish_lesson();
+            }
+        }
     }
 
     fn handle_results(&mut self, event: &KeyEvent) {
@@ -1174,7 +1179,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text,
+            text: text.map_or_else(String::new, |c| c.to_string()),
         }
     }
 
@@ -1517,7 +1522,7 @@ mod tests {
             key: Key::A,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some(first_char),
+            text: first_char.to_string(),
         });
         let session = app.session.as_ref().unwrap();
         assert_eq!(session.cursor, 1);
@@ -1533,7 +1538,7 @@ mod tests {
             key: Key::A,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some(first_char),
+            text: first_char.to_string(),
         });
         app.handle_key(&make_key(Key::Backspace, None));
         let session = app.session.as_ref().unwrap();
@@ -1556,14 +1561,14 @@ mod tests {
             key: Key::A,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('a'),
+            text: "a".to_string(),
         });
         app.current_time_ms = 2000;
         app.handle_key(&KeyEvent {
             key: Key::B,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('b'),
+            text: "b".to_string(),
         });
         assert_eq!(app.view, AppView::Results);
         assert_eq!(app.results.len(), 1);
@@ -1869,7 +1874,7 @@ mod tests {
             key: Key::Down,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.selected_lesson, 0);
     }

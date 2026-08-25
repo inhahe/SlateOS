@@ -32763,6 +32763,123 @@ is a real difference from how those keyboards behave. That is the shape of the
 remaining debt: not a missing feature so much as three layouts that type a
 standalone accent where a real one would compose.
 
+**Update 2026-08-24, later — (3) is under way: the event can now describe a
+dead key, though nothing produces one yet.** This is step 1 of four, and it is
+deliberately only the shape:
+
+- `guitk::event::KeyEvent::text` is a `String` rather than an `Option<char>`.
+  That is what makes the two cases dead keys need *expressible*: a keystroke
+  that types **nothing yet** (distinct from `None`, which already meant "this
+  key produces no text at all" — F5, an arrow) and one that types **two
+  characters**, which is what a failed composition must emit. See
+  `design-decisions.md` §550, which also records the failed-composition policy:
+  `´` then `x` types `´x`, following Windows and macOS rather than X11, because
+  silently discarding a keystroke is the one failure a text field must not have.
+- `guiremote::PROTOCOL_VERSION` is 3. The old encoding (a present-flag plus one
+  codepoint) could not carry either case, and a version-2 decoder reading a
+  version-3 stream desynchronises *silently* rather than erroring.
+- Forty-odd call sites were converted. Reading the field raw is now wrong almost
+  everywhere: `KeyEvent::typed()` yields the characters minus control
+  characters, and `KeyEvent::types_text()` answers "did this keystroke belong to
+  the text field at all?". Seven sites had been missing the control filter and
+  would put `\x1b` in a search box when the user pressed Escape; those are fixed
+  as a side effect of the rule now having one home.
+
+**Still to do for (3):** layouts must be able to declare a key's face *dead*
+(step 2, in `gui/keylayout`, composing through the exact NFC tables already in
+`gui/font/src/norm.rs` rather than a second hand-written accent table), and the
+compositor must hold the pending accent between two key events (step 3, which is
+the part that turns `Layout::character` from a pure function into a machine with
+a memory). **(4) compose sequences remain untouched** and are the same shape of
+problem over longer sequences.
+
+**Update 2026-08-24, later still — step 2 is done, in both halves. Only the
+compositor's memory (step 3) is left.**
+
+*Step 2a — which faces are dead* (`38348bf9b`, `gui/keylayout`). `KeyDef` gained
+`dead: DeadFaces`, four flags, one per level. Four and not one because **deadness
+belongs to a key's face, not to a character**: French AZERTY carries `^` twice —
+plain on the key right of `P`, where it is dead and makes `ê`, and on AltGr+9,
+where it is the ordinary ASCII circumflex a programmer types into a shell. Any
+per-*character* "is this an accent" table is necessarily wrong about one of them.
+The three national layouts declare seven dead faces between them; the five
+English ones declare none, which a test asserts rather than assumes.
+
+The load-bearing part is not the flags but a refactor next to them.
+`KeyDef::face(level) -> Option<Face>` now decides *once* which of the four levels
+the modifiers select, and both `character()` and `is_dead()` read its answer, so
+they are structurally unable to disagree. The case that forces this: AltGr+Shift
+on a key with no fourth-level character falls back to the AltGr *character*, so
+its *deadness* has to fall back too — otherwise the key types a live `~` while
+the compositor sits waiting for a vowel, and the user's next letter vanishes.
+
+*Step 2b — what an accent and the next key make* (`30b0864a7`,
+`gui/font/src/deadkey.rs`). No accent table: composing `e` and an acute into `é`
+is exactly the question `norm.rs` already answers on every string it shapes, from
+generated UAX #15 tables covering ~1050 pairs. A hand-written
+`match ('e', '´') => 'é'` would be a second answer to that question — shorter,
+and therefore the one that eventually disagrees, most likely by omitting the
+letter nobody thought to list. So the module adds one thing: the map from the
+*spacing* accent a key cap carries (`´` U+00B4) to the *combining* mark the
+tables are indexed by (U+0301). Thirteen accents, through the eighteen
+characters keyboards print them as.
+
+U+00B0 DEGREE SIGN is deliberately **not** in that map, and a test pins its
+absence. It is indistinguishable from U+02DA RING ABOVE on screen, and German
+puts it on the shifted face of a key whose plain face is a dead circumflex —
+precisely the arrangement in which a mis-declared `°` would quietly compose `å`.
+
+**Still to do for (3):** the compositor must hold the pending accent between two
+key events, implement §550's failed-composition policy (type both characters),
+and decide the two conventions that are facts about keyboards rather than about
+Unicode — what a dead key pressed twice does, and what a dead key followed by a
+space does. It is also the only crate that links both `keylayout` and `osfont`,
+so it is where a test belongs asserting that every dead face in every builtin
+layout maps to a real `deadkey::combining` entry. Until that lands, the three
+national layouts still type a standalone accent where a real board would compose.
+
+**Update 2026-08-24, later still — step (3) is done; dead keys work end to
+end.** `gui/compositor/src/deadkey.rs` holds the pending accent: an
+`Option<char>` on the compositor beside `ModifierState`, consulted from
+`handle_key` on the path where the compositor did the translation, disarmed by
+`release_all_modifiers` and by a focus change. Typing `´` then `e` on
+`de-qwertz` now produces one key event carrying no text and a second carrying
+`é`.
+
+The two conventions the note above asked for — plus a third it did not
+anticipate — are decided and recorded as `design-decisions.md` §551. **Space**
+types the bare accent alone: the only way to type a `´` at all on a board where
+that key is dead, and the escape hatch that lets the third rule discard safely.
+**A second dead key** flushes the first and re-arms, checked *before* the
+composition table is consulted, because `¨` really does compose with an acute
+into U+0385 GREEK DIALYTIKA TONOS — an ordering that is invisible except in
+that one case. "Pressed twice types one accent and leaves one waiting" then
+falls out of that with no rule of its own, which is why it needed no separate
+decision. **A key that types no text** discards the accent, Backspace being the
+case that decides it, with modifier keys excluded so that `É` stays typeable.
+
+The cross-crate test the note asked for exists as
+`every_dead_face_in_every_builtin_layout_composes_with_something`, and it
+counts rather than merely sweeping: thirteen dead faces reached across the
+three national layouts, so a layout that lost its `dead` block fails here
+instead of passing by checking nothing.
+
+**Found and fixed on the way:** `key_for_layout` answered `None` for the space
+bar, because a `Layout` is the alphanumeric block and space is not in it. On
+the evdev path — every real machine — the space bar therefore typed no text at
+all and no text field could hold a space. The host backend hid it completely,
+because it supplies its own character. Fixed by
+`keymap::text_outside_the_block`; the numeric keypad is the same shape of gap
+and is now tracked as
+`TD-C-THE-NUMERIC-KEYPAD-TYPES-NOTHING-BECAUSE-NOTHING-TRACKS-NUM-LOCK`.
+
+**What remains of this entry is step (4) only:** compose sequences (`Compose`,
+`o`, `c` → `©`). Unlike a dead key, which remembers exactly one character, a
+compose sequence is a prefix tree of arbitrary depth and needs a table of its
+own rather than the pair-at-a-time composition dead keys reuse. Nothing else in
+(1)-(3) is outstanding, and the three national layouts now compose where a real
+board would.
+
 ## A-JOB-CONTROL-SELF-STOP-LOST-A-RACING-SIGCONT (lane A, 2026-08-17) - **fixed**
 
 **In short:** when a program stopped itself for job control (what a shell does
@@ -72233,6 +72350,179 @@ be resolved first. A coverage report computed against a list containing 56
 entries that no longer apply would have overstated the proved set by exactly
 those 56, and been wrong in a way that is very hard to see.
 
+**RE-MEASURED 2026-08-25, and three faults in the harness itself found on the
+way.** The figures moved because the dead-key work added tests, but the run
+that produced them only became trustworthy after fixing three bugs in
+`reintro-palette.py` — every one of which made the harness *understate* a
+problem, which is the direction that matters:
+
+```
+2935 tests in the swept packages, 2473 unproved (15.7% proved),
+0 dangling, 84 single-prover
+```
+
+- **The dangling universe was the wrong set.** `COVERED_DIRS` was doing double
+  duty: it is the denominator for *unproved*, which is a deliberately narrow
+  set of directories, and it was also being used to answer "does this declared
+  test name exist?" — a strictly wider question, because a defect may patch a
+  crate that is not swept. Fifteen live tests in `gui/toolkit` were reported as
+  dangling on that basis. Fixed by splitting `tests_in_tree()` (the sweep set)
+  from a new `names_in_tree()` (the existence set), the latter **derived from
+  the `DEFECTS` list** so the next crate a defect reaches widens it by itself
+  rather than reintroducing the same false alarm.
+- **Patterns were never normalised for line endings.** Git here runs
+  `core.autocrlf=input`, which normalises on commit but never on checkout, so a
+  file once written by something CRLF-aware stays CRLF in the working tree
+  while its committed bytes are LF. Every pattern in `DEFECTS` is spelled with
+  `\n`, so in such a file *every multi-line pattern silently stops matching*
+  and reports as `PATTERN NOT FOUND` — indistinguishable from the genuine
+  rename this script exists to catch. Three of the four stale defects were
+  purely this — `Y`, `PPPP…` and `QQQQ…`, all three in
+  `gui/desktop/src/run_dialog.rs`. Note *how selectively* it strikes:
+  `gui/desktop/src/lib.rs` is CRLF as well and was completely unaffected,
+  because its defects happen to be single-line patterns. The bug hides only
+  the multi-line defects, and only in files that happen to be CRLF — which is
+  why it survived so long. `reintro-keylayout.py` had already learned the
+  lesson; the fix here is a shared `source()` helper used by *both* the
+  preflight and `apply_to`, because those two had duplicate copies of the
+  matching logic and fixing only one changed nothing.
+- **A stale defect was tallied twice.** The preflight `break`s on the first
+  missing pattern, which leaves the text untouched — which is exactly what a
+  self-cancelling defect looks like, so the no-op check fired as well. One
+  fault arrived as two, and the misleading half was the no-op line, which
+  claims the edits undo each other when in fact none of them ran. This is why
+  the stale and no-op counts moved in lockstep (4/4, then 1/1) and looked like
+  a correlation rather than a duplicate.
+
+Only the fourth stale defect was real: the tray's layout label had gone from
+`.unwrap_or("??")` to `self.active_layout().map_or("??", |l| l.short_label)`
+when the accessor became fallible. It is retargeted. The list is once again
+**1722 defects, 0 stale, 0 ambiguous, 0 no-op** (1737 after module 82 below).
+
+**All four were then re-run for real, not left at preflight-green** — which is
+the whole point of this harness applied to itself. A defect that merely
+*matches* again has proved nothing; it has to go in, make the right tests fail,
+and come back out. All four now do:
+
+| defect | verdict |
+|---|---|
+| `Y` (run dialog focus border) | caught by 1 |
+| `PPPP…` (arrows step by string) | caught by 2 |
+| `QQQQ…` (caret slices on byte offset) | caught by 2 |
+| `BBBB…` (tray label fallback) | caught by 2 |
+
+`4 caught, 0 escaped, 0 never asked, 0 under-caught, 0 under-declared`, each
+run ending in `restored: all files match their recorded SHA-256` — which also
+confirms the newline round-trip is lossless, since `run_dialog.rs` is the CRLF
+file and its restore is byte-compared, not text-compared.
+
+The shape of all three is the same and worth naming, because it will recur:
+each was a case of the harness answering a *slightly different question* from
+the one asked — a narrower directory set, an LF file that is really CRLF, a
+skipped loop that looks like a cancelled one — and reporting the answer as if
+it were to the original. A harness that exists to stop tests being trusted on
+faith is the last place that should be trusted on faith itself; every one of
+these fixes is therefore a permanent check rather than a repair to one entry.
+
+**MODULE 82, 2026-08-25 — the first tranche aimed at *logic* rather than
+colour, and it found three genuinely broken tests.** Target chosen by
+measurement rather than taste: `gui/desktop/src/calendar.rs` was the largest
+single hole in the tree — **102 of its 113 tests unproved**. The reason turned
+out to be structural and worth recording, because it holds for every file
+converted in the colour campaign: calendar.rs already *had* 49 defects, and
+every one of them was a palette defect. The colour half of the file was
+thoroughly proved and the logic half — recurrence expansion, timestamp
+arithmetic, range queries, search, sorting — had never been asked a single
+question. **A file is not "covered" because it appears in the defect list; it
+is covered in the dimension the defects were written along.**
+
+Fifteen defects (`A`…`O`, labelled with 82-character runs per the
+run-length-is-the-module-number convention). Final sweep, 708 s:
+
+```
+15 defects: 15 caught, 0 escaped, 0 never asked, 0 under-caught,
+0 under-declared
+restored: all files match their recorded SHA-256
+```
+
+That clean line is the *second* run. The first exposed four problems, three of
+which were faults in the production tests rather than in the defects, and all
+three were fixed in the tests rather than by weakening or dropping the defect:
+
+- **Lesson 26: a count-only assertion cannot tell a monthly series from a
+  30-day one.** `recurring_monthly` asserted `events.len() == 6` and nothing
+  else, so defect `B` (monthly recurrence steps a flat 30 days) reported
+  `[MISSING: recurring_monthly]` — stepping 30 days also produces six hits
+  across six months. It just walks them off the 15th, one or two days further
+  each time. Landing on the same day of each month is the *entire point* of
+  anchoring a recurrence to the original date instead of repeatedly adding to
+  the previous occurrence, so that is what the test now asserts: every
+  occurrence is `(2024, i+1, 15, 09:00)`. The general form — **a length check
+  proves a series has the right number of elements, never that they are the
+  right elements** — applies to every `assert_eq!(x.len(), n)` in the suite.
+- **Lesson 27: a case-insensitivity test whose every query is lower-case
+  constrains only half the rule.** Defect `K` deleted `query.to_lowercase()`
+  from `EventStore::search` and escaped outright. `search_case_insensitive`
+  passed only lower-case queries in, and the haystack is lower-cased too — so
+  it tested the haystack half and was blind to the query half. Three
+  assertions were added with capitals in the query (`"MEETING"`, `"Team"`,
+  `"ENGINEERING"`), and note the ordinary path to them is a user typing a
+  proper noun, not an exotic input. A test named for a symmetric property must
+  exercise **both** sides of the symmetry or it has tested one.
+- **Lesson 28: a sort with no interleaved fixture has no test at all.** Defect
+  `O` deleted `result.sort_by_key(|e| e.start_timestamp)` from
+  `events_for_range` and the entire 2936-test suite stayed green. Every other
+  caller either stores its events already in order or gets exactly one back, so
+  the sort was load-bearing in production and unobserved in test. Order is not
+  cosmetic here: the day cells, the detail card and the `N more` overflow all
+  render the list front-to-back, so an unsorted result puts a 5pm meeting above
+  a 9am one and hides the *later* event behind the overflow.
+  `events_come_back_in_time_order_whatever_order_they_were_stored_in` now
+  stores four events latest-first and interleaved across two days — so neither
+  insertion order nor a per-day grouping would pass — and states the
+  non-decreasing invariant as well as the exact list, so a future event added
+  to the fixture cannot quietly weaken it.
+- **Lesson 29: a `match` arm can be the type-pinning site, so a defect that
+  adds a method call there fails to compile instead of proving anything.**
+  Defect `D` was first written as `Recurrence::Daily =>
+  anchor.add_days(step.saturating_mul(2))` and produced two
+  `error[E0689]: can't call method saturating_mul on ambiguous numeric type
+  {integer}`. The Daily arm is where `step`'s integer type gets fixed for the
+  *whole* `match`; calling a method there makes every arm's literal ambiguous
+  at once. Retargeted to `anchor.add_days(step + 1)` — "a daily event skips its
+  own first day" — which needs no method resolution. The general rule: a
+  reintroduced defect must be spelled in operations that do not depend on
+  inference the defect itself removes, or `DID NOT COMPILE` replaces the
+  verdict you were after.
+
+Two further defects were wrong about *where* the behaviour lives, which is the
+ordinary cost of writing declarations before seeing them fire:
+
+- `C` (yearly recurrence) escaped when written as `add_years` → `add_months`,
+  because a monthly step still hits the anniversary on the way past and never
+  lands on the day after. Retargeted to a flat 365-day step, which drifts to
+  2024-03-13 because 2024 is a leap year — the failure exists only because the
+  fixture happens to cross a leap year, which is the sort of thing to choose
+  deliberately rather than notice afterwards.
+- `E` (the range guard `occ_end > range_start` opened to `>=`) was declared
+  against `events_for_date_spanning_midnight`, but the guard lives inside
+  `expand_recurrence`, which a *non-recurring* event never reaches. Re-declared
+  against `recurring_yearly`, where an all-day occurrence ends exactly where
+  the queried day starts.
+
+Two defects declare unusually long catcher lists on purpose: `I` (the minute
+component read off the day's remainder rather than divided by 60) declares
+**12** and `N` (the day window is an hour long) declares **8**. Those lists are
+not padding — they *measure* how central `timestamp_parts` and the day window
+are to the module, and a future refactor that shrinks either list is telling
+you something about the file.
+
+Net effect on the campaign: unproved **2473 → 2442**, proved **15.7 % →
+16.8 %**, `0 dangling`, single-prover 84 → 113, on `1737 defects, 0 stale, 0
+ambiguous, 0 no-op`. The single-prover rise is expected and is not a
+regression: fifteen new defects against a module with one view of each
+behaviour produce mostly-sole catchers, exactly as `blur.rs` did.
+
 ### BUG-C-GUITK-CONTRAST_TEXT-PICKS-WHITE-WHERE-BLACK-IS-FOUR-TIMES-MORE-LEGIBLE
 
 **Status: FIXED** 2026-08-24, the same day it was found — see §537. Kept here
@@ -75122,6 +75412,139 @@ so the shell speaks one convention rather than two.
 
 **Severity.** Medium in scripts, invisible interactively.
 
+## TD-SHARED-PRE-PUSH-GATE-7-CHECKS-A-WHOLE-CRATE-WHEN-A-CRATE-ROOT-IS-TOUCHED (lane C, 2026-08-24) — **open; a documentation fault, not a behaviour one**
+
+**In short.** The push hook refuses a push containing a `.rs` file that
+`rustfmt` (the Rust code formatter) would reformat. Its own comment promises
+this is scoped to the files your commits touched — "this is never complaining
+about someone else's code." That promise is false for one shape of file:
+`rustfmt` follows `mod` declarations, so checking a crate's `lib.rs` checks
+*every* module the crate declares. Adding a single line to a crate root is
+therefore checked as the whole crate.
+
+Nothing here is unsafe and nothing is silently wrong; the surprise is the cost.
+An agent who adds `pub mod foo;` to a crate root expects to be told about
+`foo.rs` and is instead handed a diff over thirty files it never opened, which
+reads exactly like a broken gate — and the documented reaction to a gate that
+complains about someone else's code is to bypass it. That is the actual risk:
+a correct gate that looks broken gets `ALLOW_FMT_DRIFT=1` by habit, and then it
+protects nothing.
+
+### Where it lives
+
+`scripts/hooks/pre-push`, gate 7 — the loop that builds the path list from
+`git log --name-only … HEAD --not --remotes`, and the `fmt_check` that hands
+those paths to `rustfmt` directly. The scoping claim is in the comment block
+headed "Gate 7 — a source file rustfmt would reformat", in the paragraph
+beginning "Scope: exactly the .rs files the commits being pushed add or
+modify", and it is repeated in the refusal message printed to the pusher.
+
+The mechanism is `rustfmt`'s own, not the hook's: given a file, `rustfmt`
+parses it and recurses into every `mod name;` it finds, because that is how it
+formats a crate from its root. `cargo fmt` relies on exactly this. So the hook
+cannot get per-file scoping merely by naming one file — the file names a tree.
+
+### How it was hit
+
+2026-08-24, lane C, adding `pub mod deadkey;` (one line) to `gui/font/src/lib.rs`
+for the dead-key composer. The push was refused with a `rustfmt` diff over
+`gui/font/src/bidi.rs` and thirty-eight other files, none of them in the commit.
+`osfont` had never been through the formatter, and the gate — correctly, by its
+real behaviour — declined to let the crate root move until the crate was clean.
+
+### What the proper fix looks like
+
+Two candidates, and they are not exclusive:
+
+1. **Make the comment and the refusal message true.** Say that a crate root or
+   a `mod.rs` is checked as the subtree it declares, because `rustfmt` follows
+   `mod`, and that the fix in that case is `cargo fmt -p <crate>` rather than
+   `rustfmt <file>`. This is a few lines of prose and removes the whole
+   "the gate is broken" reading. It is the fix this entry recommends.
+
+2. **Pass `--skip-children`** so `rustfmt` checks only the named file. This
+   makes the scoping claim literally true, at the price of the gate no longer
+   noticing that a crate root's *siblings* drifted — which, on the evidence of
+   `osfont`, is drift worth noticing. Not recommended on its own; if taken, it
+   should be paired with something that does check whole crates on a slower
+   cadence, or the drift simply stops being visible anywhere.
+
+Note that `--skip-children` is also what would have let `osfont` stay
+unformatted indefinitely, so option 1 is the one that keeps the value the gate
+delivered here.
+
+### Lane
+
+`scripts/hooks/pre-push` is in no lane's `owns` list in
+`scripts/which-lane.py` and in no lane's `never writes` list — it is shared
+infrastructure, added by the lane that wrote gate 7 (`0c7d8bfa3`). Lane C is
+logging it rather than editing it. Whoever picks it up should also copy the
+result to `.git/hooks/pre-push` in each worktree, or re-run
+`scripts/install-hooks.sh`, since the tracked file is only the source.
+
+**Severity.** Low as a defect, medium as an invitation to bypass a working
+gate.
+
+### 2026-08-24 — what lane C did instead of bypassing it
+
+Made `osfont` genuinely formatted (`e0cb965d6`), which is what the gate was
+asking for. Eight of the crate's files are generated by
+`gui/font/tools/gen_*.py`, and formatting those would have fought the next
+regeneration forever — so the eleven table generators now run `rustfmt` over
+what they write, via `gui/font/tools/rustfmt_out.py`. Proven idempotent rather
+than assumed: after `cargo fmt -p osfont`, re-running `gen_norm_tables.py`
+leaves `norm_tables.rs` byte-identical (SHA-256 `434108c5…`), and
+`scripts/check-generated-tables.py` still reports all four of its tables
+matching. Any other crate that mixes generated and hand-written modules will
+hit the same wall the first time its root is touched; the same fix applies.
+
+## TD-C-THE-NUMERIC-KEYPAD-TYPES-NOTHING-BECAUSE-NOTHING-TRACKS-NUM-LOCK (lane C, 2026-08-24)
+
+**In short.** On a real SlateOS machine the number keys on the right-hand
+block of the keyboard — the calculator-style pad — type nothing at all. The
+main number row across the top works fine, so this is not "digits are broken",
+it is "one particular set of keys is". The reason is that the keypad's keys are
+double-duty (`4` or Left-arrow, `7` or Home) and which one you get depends on
+the Num Lock light, which the compositor does not currently pay any attention
+to. Rather than guess, those keys were left typing nothing.
+
+**Where.** `gui/compositor/src/keymap.rs` — `text_outside_the_block`, the
+fallback for scancodes no [`Layout`] describes. It answers `Some(' ')` for
+`0x39` and `None` for everything else, keypad included. `ModifierState`
+(same file) tracks Caps Lock as a latch but has no Num Lock equivalent, and
+`ModifierState::update` ignores `0x45` entirely.
+
+**Why not just add the digits.** The keypad reports the *same* set-1 scancodes
+whichever way the latch is set — `0x4B` is keypad-4 and keypad-Left both — so a
+table that unconditionally maps `0x4B` to `'4'` would type a `4` every time a
+user pressed keypad-Left with Num Lock off. `key_for_scancode` already maps
+those codes to `Key::Numpad*` names, and
+`the_navigation_cluster_is_not_conflated_with_the_keypad` guards that the pad
+and the arrow cluster stay distinct, so the `Key` half is already right; it is
+only the character half that is unanswerable without the latch.
+
+**Reproduce.** Boot the evdev backend (any bare-metal or QEMU run), focus a
+text field, press keypad-1 with Num Lock on. Nothing is inserted. On the host
+backend it works, because Windows hands the compositor its own character and
+that branch wins before the layout is ever consulted — the same masking that
+hid the space-bar bug fixed in this commit.
+
+**Proper fix.** Give `ModifierState` a `num_lock: bool` latch alongside
+`caps_lock`, toggled on press of `0x45` and ignored on release exactly as
+`0x3A` is, defaulting to **on** (which is what firmware sets on essentially
+every desktop keyboard, and what a user who bought a keypad expects). Then let
+`key_for_layout` consult it: with the latch on, `0x47`–`0x53` type
+`7 8 9 - 4 5 6 + 1 2 3 0 .`; with it off they keep answering `None` and stay
+navigation keys. `0x4A`/`0x4E`/`0xE035` (`-`, `+`, `/`) and `0x37` (`*`) are
+not double-duty and could type unconditionally. The decimal separator is the
+one genuinely locale-dependent key — a German keypad is engraved `,` — so it
+should come from the layout rather than the table, which is an argument for
+`LayoutSpec` growing a `decimal_separator` field rather than for hard-coding
+`'.'`.
+
+**Severity.** Medium. It is a whole physical key block that does nothing, and
+data-entry users reach for it first. Not urgent only because the top row works.
+
 **Two more found in the same function while reading it for the fix** (2026-08-24):
 
 * **`-n` swallows an argument it could not read.** The parse is
@@ -75496,22 +75919,22 @@ carry their own copy of the BEGIN/record/END driver, and
 `cmd_mapfile`/`cmd_mapfile_input` each carry their own copy of the `-t` flag
 scan. Both are the same accident waiting for its first divergence.
 
-## TD-GREP-IS-MISSING-CONTEXT-COLOUR-BYTE-OFFSETS-AND-THE-FILE-SELECTORS (lane B, 2026-08-25) — **open** (the missing features; the defects below were fixed the same day)
+## TD-GREP-IS-MISSING-CONTEXT-COLOUR-BYTE-OFFSETS-AND-THE-FILE-SELECTORS (lane B, 2026-08-25) — **resolved 2026-08-25** (every feature the title names is built; what is left is diagnostic wording, tracked with the getopt debt)
 
-**In short:** our `grep` handles matching well and is missing a lot of the
-things people actually type at it. `--color`, `-b` (print each hit's byte
-offset), `-T` (line up the output in columns), `-d` (what to do when an operand
-is a directory), and `--include`/`--exclude`/`--exclude-dir` (search only some
-of the files a recursive search would reach) are all missing. Typing any of
-them gets `grep: unknown option`, so a script that uses one fails outright
-rather than degrading. The largest gap, context selection — `grep -C 3 pattern
-file`, show three lines either side of each hit — was closed on 2026-08-25 and
-is recorded below. Five further things were wrong rather than absent — the recursive walk
-followed symbolic links it should have skipped, an unreadable directory did not
-raise the exit status, a failed write to a closed output was thrown away, `-q`
-stopped too late, and a long option refused a value given as the next argument
-— and all five were fixed on 2026-08-25; they are kept below because the fix
-for each is what the harness now pins.
+**In short:** our `grep` handled matching well and was missing a lot of the
+things people actually type at it. All of it is now built. `-d` (what to do when
+an operand is a directory), `-D` (the same question for a device or a FIFO) and
+`--include`/`--exclude`/`--exclude-dir`/`--exclude-from` (search only some of the
+files a recursive search would reach) landed on 2026-08-25, joining context
+selection (`grep -C 3 pattern file`, show three lines either side of each hit),
+`-b` (print each hit's byte offset), `-T` (line up the output in columns) and
+`--color` (paint the matched text, and the rest of the line, in terminal
+colours) from earlier the same day. Five further things were wrong rather than
+absent — the recursive walk followed symbolic links it should have skipped, an
+unreadable directory did not raise the exit status, a failed write to a closed
+output was thrown away, `-q` stopped too late, and a long option refused a value
+given as the next argument — and all five were fixed on 2026-08-25; they are kept
+below because the fix for each is what the harness now pins.
 
 **How they were found.** All of it in one run, by `scripts/grep-diff.sh`'s
 first execution after it was moved onto `diff-wsl.sh` (2026-08-25). None of it
@@ -75522,19 +75945,11 @@ had introduced. Each item below is a live case in that harness carrying a `?`
 marker, which means the harness fails the moment the gap closes — deleting the
 marker is part of closing it, and nothing here can be fixed and forgotten.
 
-**Missing features**, in the order worth doing them:
-
-| | What it does | Harness cases |
-|---|---|---|
-| `--color=never\|always\|auto` + `GREP_COLORS` | wrap the matched text in SGR escapes; `auto` means "only if stdout is a terminal" | 7 |
-| `-b` | prefix each output line with the byte offset it starts at | 5 |
-| `--include=GLOB` `--exclude=GLOB` `--exclude-dir=GLOB` | filter what a recursive search descends into and reports | 3 |
-| `-d ACTION` | `read` (the default), `skip`, or `recurse` for a directory operand | 2 |
-| `-T` | pad the filename/line-number prefix so the text lines up | 2 |
-
-`--color` is now the largest group and the one to do next; `-b` and `-T` are
-small and share the prefix-building code that context selection has just
-reworked, so they are cheap to do alongside it.
+**Nothing is missing any more.** A table here used to list the two
+file-selection groups as the last gaps, with the note that they had to land
+together because `-d recurse` *is* `-r`, `-d skip` is the degenerate case of
+`--exclude`, and all of them want the same glob matcher and the same hook in the
+recursive walk. They did land together, and the write-up is below.
 
 **Defects — all fixed 2026-08-25**, and each now pinned by plain (unmarked)
 cases in `scripts/grep-diff.sh`, so a regression fails the harness:
@@ -75615,20 +76030,201 @@ not obvious, each measured against GNU 3.11 rather than recalled:
   why the "printed before" flag lives on `Run` and not in `search_stream`.
 * `-c`, `-l`, `-L` and `-q` ignore context outright, separator included.
 
-**Diagnostic wording** (four more `?` cases, lower value than the above):
-`grep` with no operands answers `grep: missing PATTERN` where GNU prints the
-usage summary; `--zzz` is `unknown option: --zzz` against GNU's `unrecognized
-option '--zzz'`; `-m x` names the offending value where GNU's does not; and a
-leading quantifier under `-E` (`grep -E '*a'`) is accepted silently where GNU
-also warns `grep: warning: * at start of expression` on stderr while still
-exiting 0. The first two belong with
-`TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE` rather than with grep.
+**`-b` and `-T` — implemented 2026-08-25.** The seven `?` cases that pinned
+their absence are now 33 plain cases. Both were measured against GNU 3.11 with
+`od -c` rather than recalled, and twice the recollection was wrong:
 
-**Severity.** Medium, and lower than it was: the four defects are gone, which
-removes the only hang and the only silently-wrong exit status. What is left
-produces no wrong answer to a query that works — the matching itself agrees
-with GNU across 217 cases — but `-C` and `--color` are common enough that a
-script or a habit that uses them simply does not run.
+* **`-T`'s field width is computed from the file's `st_size` before a single
+  line is read**, which is the whole reason it can be applied to a stream at
+  all. The rule is `num = size; num += 1 if -n; width = decimal_digits(num)` —
+  the `+1` because a file of N bytes can hold N+1 lines. So a 99-byte file pads
+  line numbers to three columns and byte offsets to two. There is *one* width,
+  shared by both numeric fields, not one per field. An input with no size (a
+  pipe) uses what a signed `off_t` holds, giving 19 columns; `grep -Tn HIT
+  < file` is *not* that case, because redirected stdin is a regular file. This
+  is why `scripts/grep-diff.sh` grew a `w99` fixture: every other fixture is
+  small enough that a hardcoded width of 1 would pass.
+* **The tab goes after the last separator, with no backspace.** GNU's
+  `print_line_head` reads as if it emitted `"	"` *before* the separator;
+  the dump says `a.txt: 1:	foo`. And `-Z` does not suppress it —
+  `a.txt  1:	foo`, and `a.txt 	foo` with no numbers at all. What *does*
+  suppress it is having no field to follow: bare `-T` prints no tab, and
+  neither do `-c`, `-l` or `-L`, which print no line prefix.
+* **`-b` reports the offset of what is printed, not of the line.** Under `-o`
+  each match carries its own, so `grep -bo foo` over `foo bar foo` prints `0`
+  and `8`. Under `-z` the NUL separators count as bytes like any other. A
+  context line gets an offset too, punctuated with `-` like its other fields.
+
+Implementation notes: `line_prefix` now takes a `Prefix` struct rather than
+five positionals, and `search_stream` a `Source`, because the alternative was
+tripping `clippy::too_many_arguments` in a crate that denies pedantic. The
+"is this a regular file, honestly" test that `-T` needs on stdin was already
+written for `wc`; it moved to `coreutils::filekind::borrowed_stdin` and `wc`'s
+private copy was deleted rather than a third one written.
+
+**`--color`/`--colour` and `GREP_COLORS` — implemented 2026-08-25.** The
+seven `?` cases that pinned their absence are now 36 plain cases. The whole
+model below was **measured** against GNU 3.11 with `od -c` — three throwaway
+probe scripts, ~96 dumps — and not recalled, because two of its rules are ones
+recall gets wrong.
+
+The selection rules are small:
+
+```
+matching    = selected ^ invert
+line_color  = if selected ^ (invert && rv) { sl } else { cx }
+match_color = if selected { ms } else { mc }
+```
+
+An escape is `\e[<cap>m\e[K` — text — `\e[m\e[K`, with the `\e[K` (erase to
+end of line) dropped under `ne`. **An empty capability emits nothing at all**,
+which is not the same as emitting an empty escape, and is what makes the next
+point observable.
+
+* **The body is printed in two independent stages, and either can be skipped.**
+  The *middle* runs only when `matching && !match_color.is_empty()`: for each
+  non-empty match it emits `start(line_color)`, then the text since the previous
+  match — **which is never closed** — then the matched text wrapped in
+  `match_color`. The *tail* runs only when `!line_color.is_empty()`:
+  `start(line_color)`, the rest of the line, `end(line_color)`. Whatever neither
+  stage claimed is written plainly. The consequence recall gets wrong is that
+  `GREP_COLORS='ms='` does not produce the default output minus one escape — it
+  produces a *differently shaped* output, because switching off the match colour
+  switches off the whole middle stage, so the line becomes one closed `sl` run
+  instead of a sequence of unclosed ones.
+* **A value capability written without `=` is ignored, not set to empty.**
+  `GREP_COLORS='ms'` leaves the match colour at its default; `GREP_COLORS='ms='`
+  turns it off. The booleans `rv` and `ne` fire either way. This is the second
+  thing recall gets wrong, and it is the difference between "no highlight" and
+  "the default highlight".
+* An unknown key, a value that is not SGR parameters (digits and `;`), and an
+  empty item between two colons are all ignored in silence. `mt` sets `ms` and
+  `mc` together, and the last assignment in the string wins.
+* **`-T`'s padding goes inside the number's escape**, not before it: the dump is
+  `\e[32m\e[K  12\e[m\e[K`, which matters on a terminal whose `ln` sets a
+  background. `-T`'s tab and `-Z`'s NUL are the two delimiters that stay
+  *outside* every escape — painting whitespace would drag a background across
+  the gutter, and the NUL is for a machine.
+* Every other prefix field carries its own capability: the file name in `fn`,
+  the line number in `ln`, the byte offset in `bn`, and **every** separator
+  (`:`, `-`, and the `--` between groups) in `se`. The newline after a group
+  separator is plain.
+* **`-o` ignores `sl` and `cx` entirely.** Everything it prints is matched text,
+  so everything it prints is `ms` — there is no line to colour.
+* `-c` paints the name and the `:` but never the count; there is no capability
+  for a count. `-l`/`-L` paint the name and nothing else.
+* A `\r` that ends a line is terminator, not text: the tail run stops before it.
+  A `\r` in the middle of a line is ordinary text and is painted. Hence the
+  `crlf` fixture in the harness.
+* An empty match is not painted, for the same reason `-o` does not print one:
+  it occurs at every position, and highlighting it would bury the line in
+  escapes.
+* `GREP_COLOR` (singular) is deprecated: it warns on stderr and sets both match
+  colours. An empty value warns nothing and changes nothing. Neither variable is
+  read when colour is off, so `GREP_COLOR=1;32 grep --color=never` is silent.
+* `--color=auto` and a bare `--color` mean "only if stdout is a terminal", which
+  is `IsTerminal` — and off in the harness, which is why the harness always says
+  `always`.
+
+**`-d`, `-D` and the file selectors — implemented 2026-08-25.** The five `?`
+cases that pinned their absence are now 65 plain cases and one `?` (`-d bogus`,
+whose diagnostic is the getopt-shape debt rather than anything about `-d`). The
+model below was **measured** against GNU 3.11 — five throwaway probe scripts —
+and in one place the measurement flatly contradicted what reading gnulib from
+memory had concluded.
+
+* **`-d` and `-r` are one setting, not three flags.** `-d recurse` *is* `-r`;
+  `-d read` is the default that says `Is a directory` and exits 2 (`-s` silences
+  the message, not the status); `-d skip` says nothing and exits 1, because
+  skipping is not an error. Being one setting, the last one written wins in both
+  directions — `-r -d skip` skips and `-d skip -r` recurses. `-R` differs from
+  `-r` only in *also* turning on symlink dereferencing, which a following `-d`
+  leaves behind when it takes the recursion away. Ours therefore stores a
+  `Directories` enum where it had a `recursive: bool`, with
+  `Options::recursive()` reading it.
+* **`-D` is tri-state, and that is what stops `grep -r pat /` hanging.** A device
+  *named on the command line* is read; a device the *walk finds* is skipped.
+  Neither is spelled by an argument, so the default is its own variant. Opening a
+  FIFO with no writer blocks forever, so the skip has to be decided from a `stat`
+  and never from an open — which is why the predicate is
+  `coreutils::filekind::is_device(&Metadata)` and not a question asked of an open
+  `File`. (GNU dodges the same hang from the other side, by adding `O_NONBLOCK`
+  when devices are to be skipped.) It is four `S_IS*` tests — char device, block
+  device, socket, FIFO — and no others: a directory is not a device, so `-D skip`
+  still descends into one.
+* **The combination rule is neither "includes win" nor "the last one wins".**
+  Consecutive options of the same kind coalesce into a segment; the segments are
+  scanned **newest first** and the first one holding a matching glob decides; a
+  name no segment matches is dropped only if the **oldest** segment is an
+  include. So the same two options in the other order are not the same command:
+
+  | command | `t1.txt` | `l1.log` |
+  |---|---|---|
+  | `--include='*.txt' --exclude='t1*'` | dropped | dropped |
+  | `--exclude='t1*' --include='*.txt'` | **kept** | **kept** |
+
+  Reversing them makes the exclude the *newer* segment, so `t1.txt` is reached by
+  the include first and kept; and it makes the include the *older* segment, so a
+  name neither matches — `l1.log` — is kept rather than dropped.
+* **Which list a glob joins is decided by the option, not by what it names.**
+  `--exclude` and `--exclude-from` ask about files only, `--exclude-dir` about
+  directories only, and there is no `--include-dir`. `--exclude=drop` therefore
+  does not stop the walk entering `drop/`, and `--exclude-dir=t1.txt` does not
+  stop `t1.txt` being searched. Trailing slashes are stripped from an
+  `--exclude-dir` pattern, because `--exclude-dir=drop/` is what tab completion
+  produces.
+* **A command-line operand is matched as written *and* at every suffix that
+  starts after a `/`.** Recalling gnulib said the opposite — that command-line
+  names are `EXCLUDE_ANCHORED` and so match whole or not at all — and the probe
+  disproved it: `--exclude=deepfile.txt` excludes `a/b/c/deepfile.txt` and
+  `--exclude=top.txt` excludes `./top.txt`. During the walk only the base name is
+  ever offered, so the suffix loop is unobservable there; it is written once and
+  used by both paths rather than special-cased.
+* The globs are `fnmatch` with **no** `FNM_PATHNAME` and **no** `FNM_PERIOD`: `*`
+  crosses a `/` and matches a leading dot, which is the opposite of what a shell
+  would do and the assumption a reader is most likely to bring. `\` still
+  escapes.
+* **Selection happens after the `stat`, not instead of it.** `grep --exclude='*'
+  foo abc /nonexistent` still reports the missing file and still exits 2. Stdin
+  is exempt from the whole mechanism, there being no name to match.
+* **`--exclude-from` has no comment syntax.** One glob per line, a final line
+  without a newline still counted, `#t1*` a glob and not a remark, and an empty
+  file excluding nothing — which is not the same as excluding everything. It is
+  read at parse time and its globs join the neighbouring `--exclude` segment, so
+  where it sits among the other options changes the answer.
+* **With no operand at all, `-r` walks `.` and prints the names without the `./`**
+  that naming `.` explicitly would have kept. That is a property of the
+  defaulting rather than of the walk, so it rides on its own flag set at the end
+  of `parse_args`.
+
+**One harness lesson, kept because it nearly cost the whole tranche.** The `-D`
+cases can hang rather than fail if the "skip a device found by the walk" rule is
+ever lost, so `scripts/grep-diff.sh` wraps each side in `timeout 20`. Written as
+`env PATH=$bindir/$side timeout 20 grep`, that resolves `timeout` through the
+PATH it has just set — a directory holding one symlink named `grep` — so
+`timeout` was not found, **both** sides exited 127, and all 435 cases agreed at
+once. A completely clean run is what a harness that cannot fail looks like from
+the outside. `timeout` now comes before `env`, and `DIFF_NEED` names both it and
+`sort` so a missing one skips the run instead of greening it.
+
+**Diagnostic wording** — five kinds, eight `?` cases, every one of lower value
+than the above: `grep` with no operands answers `grep: missing PATTERN` where GNU
+prints the usage summary; `--zzz` is `unknown option: --zzz` against GNU's
+`unrecognized option '--zzz'`; `-m x` names the offending value where GNU's does
+not; `-d bogus` prints gnulib's argmatch block but stops before the
+`Usage:`/`Try 'grep --help'` pair and exits 2 where GNU exits 1; and a leading
+quantifier under `-E` (`grep -E '*a'`) is accepted silently where GNU also warns
+`grep: warning: * at start of expression` on stderr while still exiting 0. All
+but the last belong with `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`
+rather than with grep. (`-D bogus` is *not* among them: GNU does not use argmatch
+for it, and we reproduce its one-liner and its status exactly.)
+
+**Severity.** Low, and only wording is left. Every feature this entry was opened
+for is implemented and pinned by plain cases in `scripts/grep-diff.sh`, which now
+runs **435 agreeing cases** against GNU 3.11 with five deliberate divergences and
+eight wording gaps. The deliberate five are the two choices recorded elsewhere:
+we never suppress binary output, and we list a directory sorted where GNU uses
+readdir order (design-decisions.md §380).
 
 #### TD-A-POISON-CHECK-READS-EVERY-BYTE-ONE-AT-A-TIME-WHILE-THE-FILL-USES-REP-STOSB (lane A, 2026-08-25) — **open**
 

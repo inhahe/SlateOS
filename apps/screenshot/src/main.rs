@@ -1139,8 +1139,8 @@ impl ScreenshotApp {
             _ => {
                 // Capture text input for text annotation tool.
                 if self.annotation_tool == AnnotationTool::Text {
-                    if let Some(ch) = event.text {
-                        self.annotation_text_input.push(ch);
+                    if event.types_text() {
+                        self.annotation_text_input.extend(event.typed());
                         return true;
                     }
                     if event.key == Key::Backspace && !self.annotation_text_input.is_empty() {
@@ -2180,7 +2180,7 @@ mod tests {
                 ctrl: true,
                 ..Modifiers::default()
             },
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -3180,7 +3180,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&esc);
         assert_eq!(app.view, AppView::Menu);
@@ -3262,7 +3262,7 @@ mod tests {
             key: Key::PrintScreen,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert!(app.current_capture.is_some());
@@ -3277,7 +3277,7 @@ mod tests {
             key: Key::PrintScreen,
             pressed: true,
             modifiers: Modifiers::alt(),
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(app.mode, CaptureMode::Window);
@@ -3292,7 +3292,7 @@ mod tests {
             key: Key::PrintScreen,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(app.mode, CaptureMode::Region);
@@ -3307,7 +3307,7 @@ mod tests {
             key: Key::PrintScreen,
             pressed: true,
             modifiers: Modifiers::shift(),
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(app.mode, CaptureMode::Delayed(3));

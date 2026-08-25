@@ -1025,20 +1025,34 @@ impl Widget {
                 selection_anchor,
                 ..
             } => {
-                if let Some(ch) = key.text {
+                // `types_text`, not `!key.text.is_empty()`: our own compositor
+                // reports no text for Enter, Tab and Escape, but this widget
+                // also serves events that arrived over `guiremote` from a peer
+                // whose keymap is not ours, and on most systems those keys
+                // produce `\r`, `\t` and `\x1b`. Claiming such a keystroke as
+                // text would put an unprintable byte in the field *and* stop
+                // the `match` below from ever seeing the Enter that submits it.
+                if key.types_text() {
                     // Typing over a selection replaces it. Doing this *before*
                     // the insert is what makes the caret land in the right
                     // place: the deletion moves every offset after it, so an
                     // insert positioned first would end up somewhere else.
                     crate::textedit::delete_selection(value, cursor, selection_anchor);
-                    value.insert(cursor.byte(), ch);
-                    // Typing lands the caret after what was typed, which is the
-                    // downstream side of the new boundary whichever way the
-                    // surrounding text runs — and, now that the text contains
-                    // the character, the next boundary the text itself names.
-                    *cursor = cursor
-                        .next_in(value)
-                        .unwrap_or_else(|| TextCursor::from(value.len()));
+                    // *Every* character the keystroke produced, not just the
+                    // first: a dead key whose composition failed types two
+                    // (`´` then `x` gives `´x`), and taking one of them would
+                    // silently eat half of what the user typed.
+                    for ch in key.typed() {
+                        value.insert(cursor.byte(), ch);
+                        // Typing lands the caret after what was typed, which is
+                        // the downstream side of the new boundary whichever way
+                        // the surrounding text runs — and, now that the text
+                        // contains the character, the next boundary the text
+                        // itself names.
+                        *cursor = cursor
+                            .next_in(value)
+                            .unwrap_or_else(|| TextCursor::from(value.len()));
+                    }
                     return EventResult::Consumed;
                 }
                 match key.key {
@@ -1404,7 +1418,7 @@ mod tests {
             key: crate::event::Key::Unknown(0),
             pressed: true,
             modifiers: crate::event::Modifiers::NONE,
-            text: Some(ch),
+            text: ch.to_string(),
         }
     }
 
@@ -1413,7 +1427,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: crate::event::Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -1521,7 +1535,7 @@ mod tests {
                 shift: true,
                 ..crate::event::Modifiers::NONE
             },
-            text: None,
+            text: String::new(),
         }
     }
 

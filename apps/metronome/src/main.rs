@@ -454,15 +454,12 @@ impl MetronomeApp {
             Key::Escape | Key::Enter => {
                 self.show_settings = false;
             }
-            Key::Up
-                if self.practice_mode => {
-                    self.practice_target_bpm = (self.practice_target_bpm + 10).min(MAX_BPM);
-                }
-            Key::Down
-                if self.practice_mode => {
-                    self.practice_target_bpm =
-                        self.practice_target_bpm.saturating_sub(10).max(MIN_BPM);
-                }
+            Key::Up if self.practice_mode => {
+                self.practice_target_bpm = (self.practice_target_bpm + 10).min(MAX_BPM);
+            }
+            Key::Down if self.practice_mode => {
+                self.practice_target_bpm = self.practice_target_bpm.saturating_sub(10).max(MIN_BPM);
+            }
             _ => {}
         }
     }
@@ -832,7 +829,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -841,7 +838,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::shift(),
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -1314,7 +1311,7 @@ mod tests {
             key: Key::Space,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert!(!app.playing);
     }

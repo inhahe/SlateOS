@@ -440,6 +440,23 @@ impl OverviewState {
         self.update_search();
     }
 
+    /// Append everything one keystroke typed to the search query and refresh
+    /// results.
+    ///
+    /// Not the same as calling [`type_search_char`](Self::type_search_char) in
+    /// a loop only in that it re-filters once rather than per character; the
+    /// distinction matters because a single keystroke can produce more than one
+    /// character — a dead key whose composition failed types both the accent
+    /// and the letter — and the query must never show a half-typed state that
+    /// the user never asked for.
+    pub fn type_search_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.search_query.push_str(text);
+        self.update_search();
+    }
+
     /// Delete the last character from the search query and refresh results.
     pub fn search_backspace(&mut self) {
         self.search_query.pop();
@@ -1121,8 +1138,8 @@ pub fn on_key(state: &mut OverviewState, key: OverviewKey) -> OverviewAction {
             navigate_selection(state, key);
             OverviewAction::NavigateSelection
         }
-        OverviewKey::Char(ch) => {
-            state.type_search_char(ch);
+        OverviewKey::Text(ref text) => {
+            state.type_search_text(text);
             OverviewAction::SearchChanged
         }
         OverviewKey::Backspace => {
@@ -1265,7 +1282,11 @@ pub fn on_mouse_scroll(state: &mut OverviewState, delta: f32) -> OverviewAction 
 
 /// Simplified key representation for the overview (avoids coupling to guitk
 /// event types directly).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy`, because [`Text`](Self::Text) owns a `String`. It was `Char(char)`
+/// until a keystroke stopped being able to promise exactly one character:
+/// see [`guitk::event::KeyEvent::text`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverviewKey {
     Escape,
     Enter,
@@ -1273,7 +1294,9 @@ pub enum OverviewKey {
     ArrowDown,
     ArrowLeft,
     ArrowRight,
-    Char(char),
+    /// Everything one keystroke typed — one character usually, two when a dead
+    /// key's composition failed, and never zero (the caller drops those).
+    Text(String),
     Backspace,
     Tab,
 }
@@ -1901,9 +1924,20 @@ mod tests {
     fn test_key_char_updates_search() {
         let mut s = OverviewState::new();
         s.show(OverviewMode::AllWindows);
-        let action = on_key(&mut s, OverviewKey::Char('a'));
+        let action = on_key(&mut s, OverviewKey::Text("a".to_string()));
         assert_eq!(action, OverviewAction::SearchChanged);
         assert_eq!(s.search_query, "a");
+    }
+
+    #[test]
+    fn a_keystroke_that_typed_two_characters_puts_both_in_the_query() {
+        // `´` then `x` on a French layout composes to nothing, so both are
+        // typed. Landing only the first would leave the search box showing an
+        // accent the user did not mean to search for — and filtering by it.
+        let mut s = OverviewState::new();
+        s.show(OverviewMode::AllWindows);
+        on_key(&mut s, OverviewKey::Text("´x".to_string()));
+        assert_eq!(s.search_query, "´x");
     }
 
     #[test]

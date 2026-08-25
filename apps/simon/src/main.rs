@@ -23,7 +23,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{seed_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -1862,7 +1862,7 @@ mod tests {
             key: Key::S,
             pressed: true,
             modifiers: Modifiers::default(),
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(app.speed, Speed::Fast);

@@ -224,13 +224,15 @@ impl MemoryGame {
 
     fn dismiss_shown(&mut self) {
         if let Some(f) = self.first_pick
-            && self.states[f] == CardState::FaceUp {
-                self.states[f] = CardState::FaceDown;
-            }
+            && self.states[f] == CardState::FaceUp
+        {
+            self.states[f] = CardState::FaceDown;
+        }
         if let Some(s) = self.second_pick
-            && self.states[s] == CardState::FaceUp {
-                self.states[s] = CardState::FaceDown;
-            }
+            && self.states[s] == CardState::FaceUp
+        {
+            self.states[s] = CardState::FaceDown;
+        }
         self.first_pick = None;
         self.second_pick = None;
         self.phase = Phase::FirstPick;
@@ -254,40 +256,35 @@ impl MemoryGame {
 
     fn event(&mut self, event: &Event) {
         match event {
-            Event::Key(KeyEvent { key, modifiers, .. })
-                if *modifiers == Modifiers::NONE => {
-                    match key {
-                        Key::Up
-                            if self.cursor >= self.cols => {
-                                self.cursor -= self.cols;
-                            }
-                        Key::Down
-                            if self.cursor + self.cols < self.rows * self.cols => {
-                                self.cursor += self.cols;
-                            }
-                        Key::Left
-                            if !self.cursor.is_multiple_of(self.cols) => {
-                                self.cursor -= 1;
-                            }
-                        Key::Right
-                            if self.cursor % self.cols < self.cols - 1 => {
-                                self.cursor += 1;
-                            }
-                        Key::Enter | Key::Space => {
-                            if self.phase == Phase::Showing {
-                                self.dismiss_shown();
-                            } else {
-                                self.flip_card(self.cursor);
-                            }
-                        }
-                        Key::N => self.new_game(),
-                        Key::H => self.show_help = !self.show_help,
-                        Key::Num1 => self.set_size(4, 4),
-                        Key::Num2 => self.set_size(4, 6),
-                        Key::Num3 => self.set_size(6, 6),
-                        _ => {}
+            Event::Key(KeyEvent { key, modifiers, .. }) if *modifiers == Modifiers::NONE => {
+                match key {
+                    Key::Up if self.cursor >= self.cols => {
+                        self.cursor -= self.cols;
                     }
+                    Key::Down if self.cursor + self.cols < self.rows * self.cols => {
+                        self.cursor += self.cols;
+                    }
+                    Key::Left if !self.cursor.is_multiple_of(self.cols) => {
+                        self.cursor -= 1;
+                    }
+                    Key::Right if self.cursor % self.cols < self.cols - 1 => {
+                        self.cursor += 1;
+                    }
+                    Key::Enter | Key::Space => {
+                        if self.phase == Phase::Showing {
+                            self.dismiss_shown();
+                        } else {
+                            self.flip_card(self.cursor);
+                        }
+                    }
+                    Key::N => self.new_game(),
+                    Key::H => self.show_help = !self.show_help,
+                    Key::Num1 => self.set_size(4, 4),
+                    Key::Num2 => self.set_size(4, 6),
+                    Key::Num3 => self.set_size(6, 6),
+                    _ => {}
                 }
+            }
             Event::Mouse(MouseEvent { x, y, kind }) => {
                 if matches!(kind, MouseEventKind::Press(MouseButton::Left)) {
                     self.handle_mouse(*x, *y);
@@ -777,7 +774,7 @@ mod tests {
             key: Key::Right,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&right);
         assert_eq!(app.cursor, 6);
@@ -790,7 +787,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.states[0], CardState::FaceUp);
@@ -804,7 +801,7 @@ mod tests {
             key: Key::N,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.moves, 0);

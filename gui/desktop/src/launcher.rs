@@ -484,18 +484,18 @@ impl LauncherState {
             _ => {}
         }
 
-        if let Some(ch) = event.text
-            && !ch.is_control()
-        {
-            self.query.insert(self.cursor.byte(), ch);
-            // Typing lands the caret after what was typed, which is the
-            // downstream side of the new boundary whichever way the surrounding
-            // text runs — and, now that the query contains the character, the
-            // next boundary the query itself names.
-            self.cursor = self
-                .cursor
-                .next_in(&self.query)
-                .unwrap_or_else(|| TextCursor::from(self.query.len()));
+        if event.types_text() {
+            for ch in event.typed() {
+                self.query.insert(self.cursor.byte(), ch);
+                // Typing lands the caret after what was typed, which is the
+                // downstream side of the new boundary whichever way the
+                // surrounding text runs — and, now that the query contains the
+                // character, the next boundary the query itself names.
+                self.cursor = self
+                    .cursor
+                    .next_in(&self.query)
+                    .unwrap_or_else(|| TextCursor::from(self.query.len()));
+            }
             self.selected_index = 0;
             self.update_results();
         }
@@ -1389,7 +1389,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -1398,7 +1398,7 @@ mod tests {
             key,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -1409,7 +1409,7 @@ mod tests {
             key: Key::Unknown(0),
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some(ch),
+            text: ch.to_string(),
         }
     }
 
@@ -1418,7 +1418,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -1657,7 +1657,7 @@ mod tests {
         let mut st = LauncherState::new(1920.0, 1080.0);
         st.show();
         let mut ev = type_char('\r');
-        ev.text = Some('\r');
+        ev.text = "\r".to_string();
         let _ = st.handle_key(&ev);
         // No panic, no garbage in query.
     }

@@ -5225,7 +5225,7 @@ mod tests {
             key: Key::F5,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         let result = app.handle_event(&event);
         assert_eq!(result, EventResult::Consumed);
@@ -5242,7 +5242,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert!(app.selected_host_idx.is_none());
@@ -5998,7 +5998,12 @@ mod tests {
                 }
             }
         }
-        assert_eq!(seen.len(), n, "only {} of {n} hosts were ever drawn", seen.len());
+        assert_eq!(
+            seen.len(),
+            n,
+            "only {} of {n} hosts were ever drawn",
+            seen.len()
+        );
     }
 
     /// Scrolling by one row moves the window by exactly one row.
@@ -6051,7 +6056,10 @@ mod tests {
         assert!(shown < 80, "80 rows should not fit a 780px window");
         let mut tree = RenderTree::new();
         app.render_results_view(&mut tree);
-        assert_eq!(more_note(&tree.commands), Some(format!("{} more", 80 - shown)));
+        assert_eq!(
+            more_note(&tree.commands),
+            Some(format!("{} more", 80 - shown))
+        );
     }
 
     /// The hit-test and the renderer must agree about which host is under the
@@ -6127,7 +6135,12 @@ mod tests {
                 }
             }
         }
-        assert_eq!(seen.len(), 60, "only {} of 60 ports were ever drawn", seen.len());
+        assert_eq!(
+            seen.len(),
+            60,
+            "only {} of 60 ports were ever drawn",
+            seen.len()
+        );
 
         // Drawn at the real sidebar origin, the rows must stay inside the window.
         app.detail_port_scroll = 0;
@@ -6160,7 +6173,10 @@ mod tests {
         let host = app.selected_host().expect("selected").clone();
         let mut tree = RenderTree::new();
         app.render_host_detail(&mut tree, 0.0, 0.0, &host);
-        assert_eq!(more_note(&tree.commands), Some(format!("{} more", 60 - shown)));
+        assert_eq!(
+            more_note(&tree.commands),
+            Some(format!("{} more", 60 - shown))
+        );
     }
 
     /// The topology view caps its nodes for legibility and cannot scroll, so

@@ -270,9 +270,12 @@ impl EditorState {
                 // Control characters would otherwise be appended literally: the
                 // Enter and Tab cases above are handled, but a key that reports
                 // text of '\u{8}' or '\u{1b}' must not become part of the query.
-                let ch = key.text.filter(|c| !c.is_control())?;
+                let typed: String = key.typed().collect();
+                if typed.is_empty() {
+                    return None;
+                }
                 let field = self.find_field;
-                self.find_field_mut(field).push(ch);
+                self.find_field_mut(field).push_str(&typed);
                 if field == FindField::Query {
                     self.refresh_matches();
                 }
@@ -514,10 +517,11 @@ impl EditorState {
                 // Everything else is text or nothing. Control characters are
                 // excluded because the three that have bindings are handled
                 // above, and the rest would be inserted as unprintable bytes.
-                match key.text.filter(|c| !c.is_control()) {
-                    Some(ch) => self.type_char(ch),
-                    None => EditorResponse::Idle,
+                let mut response = EditorResponse::Idle;
+                for ch in key.typed() {
+                    response = self.type_char(ch);
                 }
+                response
             }
         }
     }
@@ -776,7 +780,7 @@ mod tests {
             key,
             pressed: true,
             modifiers,
-            text: None,
+            text: String::new(),
         })
     }
 
@@ -786,7 +790,7 @@ mod tests {
             key: Key::Unknown(0),
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some(ch),
+            text: ch.to_string(),
         })
     }
 
@@ -1021,7 +1025,7 @@ mod tests {
             key: Key::Backspace,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('\u{8}'),
+            text: "\u{8}".to_string(),
         }));
         assert_eq!(editor.active_document().lines[0], "");
 
@@ -1030,7 +1034,7 @@ mod tests {
             key: Key::Unknown(0),
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('\u{1b}'),
+            text: "\u{1b}".to_string(),
         }));
         assert_eq!(editor.find.query, "");
     }
@@ -1042,7 +1046,7 @@ mod tests {
             key: Key::A,
             pressed: false,
             modifiers: Modifiers::shift(),
-            text: Some('a'),
+            text: "a".to_string(),
         });
         assert_eq!(editor.handle_event(&event), EditorResponse::Idle);
         assert_eq!(editor.active_document().lines[0], "abc");

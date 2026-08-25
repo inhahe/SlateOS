@@ -2790,7 +2790,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&event);
         assert!(app.selected.is_none());
@@ -2814,7 +2814,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&right);
         assert_eq!(app.cursor.col, 1);
@@ -2823,7 +2823,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&up);
         assert_eq!(app.cursor.row, 1);
@@ -2832,7 +2832,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&left);
         assert_eq!(app.cursor.col, 0);
@@ -2841,7 +2841,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&down);
         assert_eq!(app.cursor.row, 0);
@@ -2858,7 +2858,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&left);
         assert_eq!(app.cursor.col, 0, "Cursor should not go below 0");
@@ -2867,7 +2867,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&down);
         assert_eq!(app.cursor.row, 0, "Cursor should not go below 0");
@@ -2882,7 +2882,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&right);
         assert_eq!(app.cursor.col, 7, "Cursor should not exceed 7");
@@ -2891,7 +2891,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&up);
         assert_eq!(app.cursor.row, 7);
@@ -3002,7 +3002,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(app.cursor.col, 1, "cursor starts at a1 and steps right");
@@ -3026,7 +3026,7 @@ mod tests {
             key: Key::Right,
             pressed: false, // key released, not pressed
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&event);
         // Cursor should not have moved
@@ -3080,7 +3080,7 @@ mod tests {
             key: Key::N,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&event);
         assert_eq!(app.game_result, GameResult::Ongoing);

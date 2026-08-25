@@ -59,6 +59,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from gen_indic_tables import CATEGORIES, RUST_CATEGORY  # noqa: E402
 
+from rustfmt_out import rustfmt
+
 # ---------------------------------------------------------------------------
 # The grammar, transcribed from `hb-ot-shaper-indic-machine.rl`.
 #
@@ -388,6 +390,12 @@ def main():
             else:
                 w(f"    Some(Syllable::{RULES[rule][1]}),\n")
         w("];\n")
+    # Match what `cargo fmt -p osfont` would do to this file, so that
+    # regenerating it and formatting it are each a no-op after the other.
+    # Without this the two rewrite each other's output forever, and every
+    # unrelated diff carries a thousand lines of table churn. See
+    # rustfmt_out.py for the whole reason.
+    rustfmt(out)
 
     print(f"wrote {out}")
     print(

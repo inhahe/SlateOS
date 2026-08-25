@@ -2163,7 +2163,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&up);
         assert_eq!(app.selected_row, 3);
@@ -2172,7 +2172,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&down);
         assert_eq!(app.selected_row, 4);
@@ -2181,7 +2181,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&left);
         assert_eq!(app.selected_col, 3);
@@ -2190,7 +2190,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&right);
         assert_eq!(app.selected_col, 4);
@@ -2206,7 +2206,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&up);
         assert_eq!(app.selected_row, 0);
@@ -2215,7 +2215,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&left);
         assert_eq!(app.selected_col, 0);
@@ -2231,7 +2231,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&down);
         assert_eq!(app.selected_row, 8);
@@ -2240,7 +2240,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&right);
         assert_eq!(app.selected_col, 8);
@@ -2260,7 +2260,7 @@ mod tests {
             key: Key::Num5,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(app.cells[idx(r, c)].value, 5);
@@ -2280,7 +2280,7 @@ mod tests {
             key: Key::Num1,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(
@@ -2306,7 +2306,7 @@ mod tests {
             key: Key::Delete,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&del);
         assert_eq!(app.cells[idx(r, c)].value, 0);
@@ -2325,7 +2325,7 @@ mod tests {
             key: Key::Delete,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&del);
         assert_eq!(app.cells[idx(r, c)].value, original);
@@ -2342,7 +2342,7 @@ mod tests {
             key: Key::N,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&toggle);
         assert!(app.note_mode);
@@ -2363,7 +2363,7 @@ mod tests {
             key: Key::Num3,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert!(app.cells[idx(r, c)].has_note(3));
@@ -2646,7 +2646,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&up);
         assert_eq!(
@@ -2686,7 +2686,7 @@ mod tests {
             key: Key::F2,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&f2);
 
@@ -2759,7 +2759,7 @@ mod tests {
             key: Key::Num5,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(
@@ -3384,7 +3384,7 @@ mod tests {
             key: Key::Num5,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&release);
         assert_eq!(
@@ -3419,7 +3419,7 @@ mod tests {
             key: Key::Z,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&ctrl_z);
         assert_eq!(app.cells[idx(r, c)].value, 0);
@@ -3438,7 +3438,7 @@ mod tests {
             key: Key::Y,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&ctrl_y);
         assert_eq!(app.cells[idx(r, c)].value, 6);

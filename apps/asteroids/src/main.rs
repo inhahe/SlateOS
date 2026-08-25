@@ -2573,7 +2573,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }));
         assert!(app.input.left);
     }
@@ -2585,14 +2585,14 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }));
         assert!(app.input.left);
         app.handle_event(Event::Key(KeyEvent {
             key: Key::Left,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }));
         assert!(!app.input.left);
     }

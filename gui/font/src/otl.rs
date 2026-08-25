@@ -254,7 +254,9 @@ fn find_script(data: &[u8], script_list: usize, want: &[u8; 4]) -> Option<usize>
 fn find_lang_sys(data: &[u8], script_table: usize, want: &[u8; 4]) -> Option<usize> {
     let count = u16_at(data, script_table.checked_add(2)?)?;
     for i in 0..usize::from(count) {
-        let rec = script_table.checked_add(4)?.checked_add(i.checked_mul(6)?)?;
+        let rec = script_table
+            .checked_add(4)?
+            .checked_add(i.checked_mul(6)?)?;
         if data.get(rec..rec.checked_add(4)?)? != want.as_slice() {
             continue;
         }
@@ -269,10 +271,7 @@ fn find_lang_sys(data: &[u8], script_table: usize, want: &[u8; 4]) -> Option<usi
 /// offers up front, so that shaping a run is a binary search rather than a
 /// walk of the ScriptList.
 fn lang_sys_tags(data: &[u8], script_table: usize) -> Vec<[u8; 4]> {
-    let Some(count) = script_table
-        .checked_add(2)
-        .and_then(|at| u16_at(data, at))
-    else {
+    let Some(count) = script_table.checked_add(2).and_then(|at| u16_at(data, at)) else {
         return Vec::new();
     };
     let mut out = Vec::with_capacity(usize::from(count));
@@ -530,7 +529,12 @@ impl ByScript {
             let Some((_, default)) = lookup_indices(data, base, tags, exactly, None) else {
                 continue;
             };
-            union.extend(default.iter().map(|&(i, _)| i).filter(|&i| i < lookup_count));
+            union.extend(
+                default
+                    .iter()
+                    .map(|&(i, _)| i)
+                    .filter(|&i| i < lookup_count),
+            );
 
             // Then every language this script names, skipping the ones that
             // come out identical to the default — which is most of them, and
@@ -554,7 +558,12 @@ impl ByScript {
                 if indices == default {
                     continue;
                 }
-                union.extend(indices.iter().map(|&(i, _)| i).filter(|&i| i < lookup_count));
+                union.extend(
+                    indices
+                        .iter()
+                        .map(|&(i, _)| i)
+                        .filter(|&i| i < lookup_count),
+                );
                 selected.push(((tag, lang), indices));
             }
             selected.push(((tag, DEFAULT_LANG), default));
@@ -814,10 +823,7 @@ fn feature_indices(data: &[u8], lang_sys: Option<usize>) -> Vec<u16> {
     {
         out.push(req);
     }
-    let count = at
-        .checked_add(4)
-        .and_then(|o| u16_at(data, o))
-        .unwrap_or(0);
+    let count = at.checked_add(4).and_then(|o| u16_at(data, o)).unwrap_or(0);
     out.reserve(usize::from(count));
     for i in 0..usize::from(count) {
         // A truncated array is corruption, not a reason to abandon what was
@@ -993,7 +999,11 @@ fn read_lookup(
     } else {
         lookup
             .checked_add(6)
-            .and_then(|o| usize::from(count).checked_mul(2).and_then(|d| o.checked_add(d)))
+            .and_then(|o| {
+                usize::from(count)
+                    .checked_mul(2)
+                    .and_then(|d| o.checked_add(d))
+            })
             .and_then(|at| u16_at(data, at))
             .unwrap_or(0)
     };
@@ -1096,8 +1106,7 @@ fn coverage_digest(data: &[u8], table: usize) -> Option<Digest> {
             let first = table.checked_add(4)?;
             for i in 0..usize::from(count) {
                 let at = first.checked_add(i.checked_mul(6)?)?;
-                let (Some(start), Some(end)) =
-                    (u16_at(data, at), u16_at(data, at.checked_add(2)?))
+                let (Some(start), Some(end)) = (u16_at(data, at), u16_at(data, at.checked_add(2)?))
                 else {
                     // A truncated array: everything past here is unknown, so
                     // the digest can no longer exclude anything.
@@ -1418,9 +1427,7 @@ mod tests {
         let arr: Vec<(u16, u16)> = (0..64_u16).map(|i| (63 - i, i)).collect();
         let found: Vec<u16> = arr
             .iter()
-            .filter(|&&key| {
-                binary_search(arr.len(), |i| Some(arr.get(i)?.cmp(&key))).is_some()
-            })
+            .filter(|&&key| binary_search(arr.len(), |i| Some(arr.get(i)?.cmp(&key))).is_some())
             .map(|&(_, r)| r)
             .collect();
         // The closed interval first probes (0 + 63) / 2 = 31, so the only
@@ -1440,7 +1447,9 @@ mod tests {
         let (_, after) = tool
             .split_once("WANTED = frozenset(")
             .expect("the tool declares WANTED");
-        let (_, block) = after.split_once("\"\"\"").expect("WANTED opens a block string");
+        let (_, block) = after
+            .split_once("\"\"\"")
+            .expect("WANTED opens a block string");
         let (block, _) = block.split_once("\"\"\"").expect("WANTED closes it");
         block
             .split_whitespace()
@@ -1481,5 +1490,4 @@ mod tests {
         unconditional.sort_unstable();
         assert_eq!(positioning, unconditional);
     }
-
 }

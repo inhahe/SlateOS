@@ -59,6 +59,7 @@ Filter either with defect letters: `reintro-keylayout.py A B C`.
 
 import hashlib
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -70,11 +71,14 @@ SETTINGS = "gui/inputsettings/src/lib.rs"
 COMP_LIB = "gui/compositor/src/lib.rs"
 KEYMAP = "gui/compositor/src/keymap.rs"
 SHELL = "gui/desktop/src/input_method.rs"
+DEADKEY = "gui/compositor/src/deadkey.rs"
+OSFONT = "gui/font/src/deadkey.rs"
 
 KL = ["keylayout"]
 IS = ["inputsettings"]
 CO = ["compositor"]
 DE = ["desktop"]
+OF = ["osfont"]
 
 # ---- test names, so a rename shows up as one edit here -----------------------
 
@@ -91,7 +95,7 @@ ROW_LANDS = "a_row_string_lands_on_the_scancodes_it_is_written_against"
 # inputsettings
 BLANK = "a_blank_layout_name_is_treated_as_absent_rather_than_as_a_layout"
 UNKNOWN_KEPT = "a_layout_this_build_does_not_know_survives_a_round_trip_unchanged"
-ROUND_TRIP = "test_settings_round_trip"
+ROUND_TRIP = "a_round_trip_preserves_every_field"
 
 # compositor
 DVORAK = "a_keystroke_arrives_as_the_letter_the_chosen_layout_puts_there"
@@ -99,9 +103,37 @@ SOURCE_WINS = "a_character_the_source_supplies_beats_the_layout"
 ALTGR_TYPES = "alt_gr_types_a_character_rather_than_forming_an_alt_chord"
 ALTGR_KEEPS = "alt_gr_still_reads_as_alt_where_the_layout_has_nothing_on_that_level"
 UNNAMEABLE = "a_letter_the_key_enum_cannot_name_still_types_its_character"
-RELEASE = "a_release_carries_no_character"
+RELEASE = "a_release_carries_no_text"
 UNKNOWN_HELD = "a_layout_this_build_does_not_know_leaves_the_keyboard_working"
 UPPER_FACE = "shift_and_caps_lock_reach_the_client_as_the_upper_face"
+
+# compositor -- the space bar, which no layout describes
+SPACE_TYPES = "the_space_bar_types_a_space_even_though_no_layout_describes_it"
+SILENT = "the_keys_outside_the_block_that_type_no_text_still_type_none"
+
+# compositor -- dead keys, unit
+DK_COMPOSE = "a_dead_key_types_nothing_and_the_letter_after_it_types_the_accented_form"
+DK_SHIFT = "shift_between_the_accent_and_the_letter_capitalises_rather_than_cancelling"
+DK_BOTH = "a_composition_that_fails_types_both_characters_rather_than_dropping_one"
+DK_SPACE = "a_dead_key_then_space_types_the_bare_accent_and_no_space"
+DK_TWICE = "a_dead_key_pressed_twice_types_one_accent_and_leaves_one_waiting"
+DK_TWO = "two_different_dead_keys_do_not_compose_with_each_other"
+DK_CANCEL = "a_key_that_types_nothing_cancels_the_pending_accent"
+DK_CHORD = "a_command_chord_leaves_the_accent_waiting"
+DK_US = "a_layout_with_no_dead_keys_is_completely_unaffected"
+DK_DISARM = "cancelling_disarms_a_pending_accent"
+DK_SWEEP = "every_dead_face_in_every_builtin_layout_composes_with_something"
+
+# compositor -- dead keys, end to end through `handle_input`
+E2E_COMPOSE = "a_dead_key_composes_with_the_next_letter_end_to_end"
+E2E_BOTH = "a_failed_composition_reaches_the_client_as_both_characters"
+E2E_FOCUS = "moving_focus_disarms_a_pending_dead_key"
+E2E_KEYBOARD = "losing_the_keyboard_disarms_a_pending_dead_key"
+E2E_GRAVE = "a_us_layout_types_a_grave_accent_as_a_grave_accent"
+
+# osfont -- the accent-to-combining-mark bridge
+OF_DEGREE = "a_character_that_is_not_an_accent_composes_with_nothing"
+OF_COMPOSE = "the_five_accents_our_own_layouts_carry_all_compose"
 
 # desktop
 PREVIEW = "the_preview_draws_the_catalogues_own_characters"
@@ -149,7 +181,18 @@ DEFECTS = [
     (
         "D: AltGr+Shift produces nothing where the layout declared only a third level",
         KEYLAYOUT,
-        [("                self.altgr_shifted.or(self.altgr)", "                self.altgr_shifted")],
+        [(
+            "            if level.shift && self.altgr_shifted.is_some() {\n"
+            "                return Some(Face::AltGrShifted);\n"
+            "            }\n",
+            "            if level.shift {\n"
+            "                return if self.altgr_shifted.is_some() {\n"
+            "                    Some(Face::AltGrShifted)\n"
+            "                } else {\n"
+            "                    None\n"
+            "                };\n"
+            "            }\n",
+        )],
         KL,
         [FOURTH],
     ),
@@ -178,6 +221,7 @@ DEFECTS = [
             "                    shifted,\n"
             "                    altgr: None,\n"
             "                    altgr_shifted: None,\n"
+            "                    dead: DeadFaces::NONE,\n"
             "                });\n"
             "            }\n"
             "            let plain = self.plain.get(index).copied().unwrap_or(\"\");",
@@ -193,6 +237,7 @@ DEFECTS = [
             "                    shifted,\n"
             "                    altgr: None,\n"
             "                    altgr_shifted: None,\n"
+            "                    dead: DeadFaces::NONE,\n"
             "                });\n"
             "            }\n"
             "            if let Some(end) = row_ends.get_mut(index) {",
@@ -268,8 +313,8 @@ DEFECTS = [
         "M: a key release carries the character the key would have typed",
         COMP_LIB,
         [(
-            "                character: character.or(if pressed { laid_out } else { None }),",
-            "                character: character.or(laid_out),",
+            "            (_, false) => String::new(),",
+            "            (_, false) => laid_out.map_or_else(String::new, |c| c.to_string()),",
         )],
         CO,
         [RELEASE],
@@ -278,8 +323,8 @@ DEFECTS = [
         "N: the layout's character overrides the one the source supplied",
         COMP_LIB,
         [(
-            "                character: character.or(if pressed { laid_out } else { None }),",
-            "                character: if pressed { laid_out } else { None }.or(character),",
+            "            (Some(from_source), true) => from_source.to_string(),",
+            "            (Some(from_source), true) => laid_out.unwrap_or(from_source).to_string(),",
         )],
         CO,
         [SOURCE_WINS],
@@ -416,6 +461,199 @@ DEFECTS = [
         DE,
         [STILL_A_KEYBOARD],
     ),
+    # ---- the space bar, which is not in any layout --------------------------
+    (
+        "Y: the space bar types no text, because no layout describes it",
+        KEYMAP,
+        [(
+            "        0x39 => Some(' '),\n",
+            "",
+        )],
+        CO,
+        [SPACE_TYPES, DK_SPACE, DK_TWICE],
+    ),
+    (
+        "Z: the keypad types digits it cannot know the meaning of",
+        KEYMAP,
+        [(
+            "        0x39 => Some(' '),\n",
+            "        0x39 => Some(' '),\n"
+            "        0x4B => Some('4'),\n",
+        )],
+        CO,
+        [SILENT],
+    ),
+    # ---- the dead-key state machine -----------------------------------------
+    (
+        "AA: the pending accent is never armed, so a dead key types its accent",
+        DEADKEY,
+        [(
+            "            if dead && let Some(accent) = laid_out {\n"
+            "                self.pending = Some(accent);\n"
+            "                return String::new();\n"
+            "            }\n",
+            "",
+        )],
+        CO,
+        [DK_COMPOSE, DK_BOTH, DK_SPACE, DK_TWICE, DK_TWO, DK_CANCEL, DK_CHORD,
+         DK_DISARM, E2E_COMPOSE, E2E_BOTH, E2E_FOCUS, E2E_KEYBOARD],
+    ),
+    (
+        "AB: composition is attempted before the deadness check, so two accents make Greek",
+        DEADKEY,
+        [(
+            "        if dead {\n",
+            "        if let Some(composed) = deadkey::compose(pending, typed) {\n"
+            "            return composed.to_string();\n"
+            "        }\n"
+            "        if dead {\n",
+        )],
+        CO,
+        [DK_TWO],
+    ),
+    (
+        "AC: a failed composition drops the accent and types the base letter alone",
+        DEADKEY,
+        [(
+            "        let mut both = String::with_capacity(8);\n"
+            "        both.push(pending);\n"
+            "        both.push(typed);\n"
+            "        both",
+            "        typed.to_string()",
+        )],
+        CO,
+        [DK_BOTH, E2E_BOTH],
+    ),
+    (
+        "AD: space is an ordinary key, so there is no way to type a bare accent",
+        DEADKEY,
+        [(
+            "        if typed == ' ' {\n",
+            "        if false {\n",
+        )],
+        CO,
+        [DK_SPACE, DK_TWICE],
+    ),
+    (
+        "AE: modifier keys are not excluded, so Shift cancels the accent and `E` is untypeable",
+        DEADKEY,
+        [(
+            "        if command_chord || keymap::ModifierState::is_modifier(scancode) {\n",
+            "        if command_chord {\n",
+        )],
+        CO,
+        [DK_SHIFT],
+    ),
+    (
+        "AF: a command chord composes with the accent, so Ctrl+S eats it",
+        DEADKEY,
+        [(
+            "        if command_chord || keymap::ModifierState::is_modifier(scancode) {\n",
+            "        if keymap::ModifierState::is_modifier(scancode) {\n",
+        )],
+        CO,
+        [DK_CHORD],
+    ),
+    (
+        "AG: a key that types nothing leaves the accent armed, so Backspace cannot undo it",
+        DEADKEY,
+        [(
+            "        let Some(typed) = laid_out else {\n"
+            "            // Enter, F5, an arrow, Escape \u2014 and Backspace, which is the one\n"
+            "            // that decides this. See the module docs.\n"
+            "            self.pending = None;\n"
+            "            return String::new();\n"
+            "        };",
+            "        let Some(typed) = laid_out else {\n"
+            "            return String::new();\n"
+            "        };",
+        )],
+        CO,
+        [DK_CANCEL],
+    ),
+    (
+        "AH: deadness is taken from the character rather than the layout, so a US backtick composes",
+        DEADKEY,
+        [(
+            "        let dead = layout.is_dead(scancode, level);",
+            "        let dead = laid_out.is_some_and(|c| osfont::deadkey::combining(c).is_some());",
+        )],
+        CO,
+        [DK_US, E2E_GRAVE],
+    ),
+    # ---- the wiring into the compositor -------------------------------------
+    (
+        "AI: the machine is never consulted, so the accent key types its accent",
+        COMP_LIB,
+        [(
+            "            (None, true) => self.dead_keys.press(\n"
+            "                self.layout,\n"
+            "                scancode,\n"
+            "                level,\n"
+            "                laid_out,\n"
+            "                // After the AltGr fold above, so a German user's AltGr+Q is\n"
+            "                // text entry and not an Alt chord. Super is included because\n"
+            "                // Super+E opens a file manager on every desktop there is; a\n"
+            "                // pending accent must survive that too.\n"
+            "                modifiers.ctrl || modifiers.alt || modifiers.super_key,\n"
+            "            ),",
+            "            (None, true) => laid_out.map_or_else(String::new, String::from),",
+        )],
+        CO,
+        [E2E_COMPOSE, E2E_BOTH],
+    ),
+    (
+        "AJ: a focus change leaves the accent armed, so it completes in the next window",
+        COMP_LIB,
+        [(
+            "            self.dead_keys.cancel();\n",
+            "",
+        )],
+        CO,
+        [E2E_FOCUS],
+    ),
+    (
+        "AK: losing the keyboard leaves the accent armed across the gap",
+        COMP_LIB,
+        [(
+            "        self.modifiers.release_all();\n"
+            "        self.dead_keys.cancel();",
+            "        self.modifiers.release_all();",
+        )],
+        CO,
+        [E2E_KEYBOARD],
+    ),
+    # ---- the accent table ---------------------------------------------------
+    (
+        "AL: a layout's dead declarations are dropped, so the sweep passes by checking nothing",
+        KEYLAYOUT,
+        [(
+            "            (sc::GRAVE, DeadFaces::PLAIN),\n",
+            "",
+        )],
+        CO,
+        [DK_SWEEP, DK_TWO],
+    ),
+    (
+        "AM: the degree sign is treated as a ring above, so German `\u00b0` composes `\u00e5`",
+        OSFONT,
+        [(
+            "        '\\u{02DA}' => '\\u{030A}', // ring above",
+            "        '\\u{02DA}' | '\\u{00B0}' => '\\u{030A}', // ring above",
+        )],
+        OF,
+        [OF_DEGREE],
+    ),
+    (
+        "AN: the spacing accent is used as the combining mark, so nothing ever composes",
+        OSFONT,
+        [(
+            "    compose_canonical(base, combining(accent)?)",
+            "    compose_canonical(base, accent)",
+        )],
+        OF,
+        [OF_COMPOSE],
+    ),
 ]
 
 NO_OP: set[str] = set()
@@ -479,6 +717,34 @@ def run_tests(pkg):
     return failed, out
 
 
+def declared_tests():
+    """Every `fn <name>(` in the crates this script patches.
+
+    Used by `--check` to catch an expectation naming a test that no longer
+    exists. That failure hides unusually well: the run only says `[MISSING:]`
+    when *every* name a defect expects is absent, so a stale name inside a
+    defect whose other names still match reports as a clean catch forever. Four
+    had accumulated that way before this check existed -- two from the rename
+    of `KeyEvent::character` to `text`, two from a settings test that moved.
+
+    Scans each patched file's whole crate rather than the file itself, because
+    the test that proves a change is often in a different module from the
+    change (`keymap.rs`'s space fallback is proved from `deadkey.rs` too).
+    """
+    roots = {pathlib.PurePath(*pathlib.PurePath(f).parts[:2])
+             for f in {d[1] for d in DEFECTS}}
+    names = set()
+    for root in roots:
+        for f in (ROOT / root).rglob("*.rs"):
+            if "target" in f.parts:
+                continue
+            for m in re.finditer(r"\bfn ([a-z0-9_]+)\(", f.read_text(
+                encoding="utf-8", errors="replace"
+            )):
+                names.add(m.group(1))
+    return names
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     check_only = "--check" in sys.argv[1:]
@@ -516,6 +782,17 @@ def main():
                 bad += 1
             print(f"{name}\n    {verdict}")
         print(f"\n{len(selected) - bad}/{len(selected)} patterns apply cleanly")
+
+        known = declared_tests()
+        stale = sorted({t for _n, _p, _e, _pk, expect in selected
+                        for t in expect if t not in known})
+        if stale:
+            bad += len(stale)
+            print("\nexpectations naming a test that does not exist:")
+            for t in stale:
+                print(f"  {t}")
+        else:
+            print("every expected test resolves to a function that exists")
         sys.exit(1 if bad else 0)
 
     verdicts = []

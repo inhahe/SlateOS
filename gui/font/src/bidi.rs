@@ -559,7 +559,12 @@ pub fn resolve(text: &[char], base: Base) -> Paragraph {
     // here have, and what the conformance suite measures.
     reset_whitespace(&original, &mut levels, para);
 
-    Paragraph { level: para, levels, original, retained }
+    Paragraph {
+        level: para,
+        levels,
+        original,
+        retained,
+    }
 }
 
 /// Rules X1 through X8: the embedding and isolate stack.
@@ -598,7 +603,11 @@ fn explicit(original: &[Class], classes: &mut [Class], levels: &mut [Level], par
                     _ => None,
                 };
                 if next <= MAX_DEPTH && overflow_isolate == 0 && overflow_embedding == 0 {
-                    stack.push(Status { level: next, overridden, isolate: false });
+                    stack.push(Status {
+                        level: next,
+                        overridden,
+                        isolate: false,
+                    });
                 } else if overflow_isolate == 0 {
                     overflow_embedding = overflow_embedding.saturating_add(1);
                 }
@@ -627,7 +636,11 @@ fn explicit(original: &[Class], classes: &mut [Class], levels: &mut [Level], par
                 let next = next_level(top.level, rtl);
                 if next <= MAX_DEPTH && overflow_isolate == 0 && overflow_embedding == 0 {
                     valid_isolate = valid_isolate.saturating_add(1);
-                    stack.push(Status { level: next, overridden: None, isolate: true });
+                    stack.push(Status {
+                        level: next,
+                        overridden: None,
+                        isolate: true,
+                    });
                 } else {
                     overflow_isolate = overflow_isolate.saturating_add(1);
                 }
@@ -739,8 +752,7 @@ fn isolating_run_sequences(
     while at < retained.len() {
         let level = retained.get(at).and_then(|&i| levels.get(i)).copied();
         let start = at;
-        while at < retained.len()
-            && retained.get(at).and_then(|&i| levels.get(i)).copied() == level
+        while at < retained.len() && retained.get(at).and_then(|&i| levels.get(i)).copied() == level
         {
             at = at.saturating_add(1);
         }
@@ -764,9 +776,9 @@ fn isolating_run_sequences(
         // is a continuation, not a start; it will be picked up by the sequence
         // that reaches it.
         let first = runs.get(r).and_then(|&(s, _)| retained.get(s)).copied();
-        if first.is_some_and(|i| {
-            original.get(i) == Some(&Class::Pdi) && matched_initiator(original, i)
-        }) {
+        if first
+            .is_some_and(|i| original.get(i) == Some(&Class::Pdi) && matched_initiator(original, i))
+        {
             continue;
         }
 
@@ -776,16 +788,24 @@ fn isolating_run_sequences(
             if let Some(flag) = used.get_mut(current) {
                 *flag = true;
             }
-            let Some(&(s, e)) = runs.get(current) else { break };
+            let Some(&(s, e)) = runs.get(current) else {
+                break;
+            };
             indices.extend(retained.get(s..e).unwrap_or(&[]).iter().copied());
             // Chain on, if this run ends with a matched isolate initiator.
             let Some(&last) = indices.last() else { break };
-            let Some(&kind) = original.get(last) else { break };
+            let Some(&kind) = original.get(last) else {
+                break;
+            };
             if !kind.is_isolate_initiator() {
                 break;
             }
-            let Some(pdi) = matching_pdi(original, last) else { break };
-            let Some(next) = run_starting_at(pdi) else { break };
+            let Some(pdi) = matching_pdi(original, last) else {
+                break;
+            };
+            let Some(next) = run_starting_at(pdi) else {
+                break;
+            };
             if used.get(next).copied().unwrap_or(true) {
                 break;
             }
@@ -1025,7 +1045,11 @@ fn neutral(text: &[char], seq: &Sequence, cls: &mut [Class], orig: &[Class], lev
     };
     let mut i = 0;
     while i < cls.len() {
-        if !cls.get(i).copied().is_some_and(Class::is_neutral_or_isolate) {
+        if !cls
+            .get(i)
+            .copied()
+            .is_some_and(Class::is_neutral_or_isolate)
+        {
             i = i.saturating_add(1);
             continue;
         }
@@ -1043,11 +1067,7 @@ fn neutral(text: &[char], seq: &Sequence, cls: &mut [Class], orig: &[Class], lev
             .copied()
             .and_then(strength)
             .unwrap_or(seq.sos);
-        let after = cls
-            .get(i)
-            .copied()
-            .and_then(strength)
-            .unwrap_or(seq.eos);
+        let after = cls.get(i).copied().and_then(strength).unwrap_or(seq.eos);
         // N2 is the else branch: neutrals with strong types of *different*
         // directions on either side take the embedding direction.
         let to = if before == after { before } else { e };
@@ -1206,7 +1226,9 @@ fn reset_whitespace(original: &[Class], levels: &mut [Level], para: Level) {
     // resettable, and re-arm at every separator.
     let mut resetting = true;
     for i in (0..levels.len()).rev() {
-        let Some(&kind) = original.get(i) else { continue };
+        let Some(&kind) = original.get(i) else {
+            continue;
+        };
         match kind {
             Class::B | Class::S => {
                 if let Some(l) = levels.get_mut(i) {
@@ -1305,7 +1327,9 @@ mod tests {
         // Every mirroring is its own inverse, which is what lets rule L4 be a
         // single lookup rather than a direction-dependent pair of them.
         for &(cp, _) in &super::MIRRORED {
-            let Some(ch) = char::from_u32(cp) else { continue };
+            let Some(ch) = char::from_u32(cp) else {
+                continue;
+            };
             let m = mirror(ch).expect("a table entry must mirror");
             assert_eq!(mirror(m), Some(ch), "{ch:?} -> {m:?} does not come back");
         }

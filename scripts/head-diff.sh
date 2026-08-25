@@ -6,57 +6,65 @@
 # implementation most had to get right: that a final line with no terminator is
 # copied *without* one being added, and that `-z` changes what a terminator is.
 #
-# ## Why the reference is glibc, and only glibc
+# ## Why both sides run inside WSL
 #
-# The host's `head` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll`
-# rather than glibc, whose `getopt` words every option diagnostic differently
-# (`unknown option -- x` against `invalid option -- 'x'`). A harness pointed at
-# it would certify sentences no GNU/Linux system prints. See `known-issues.md`
-# → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, and the identical
-# note at the top of `wc-diff.sh`.
+# `scripts/diff-wsl.sh` gives the general reasons. This harness's *reference*
+# was never the problem — it already ran `wsl -e env LC_ALL=C.UTF-8 head`, so
+# the sentences it certified were glibc's, not MSYS2's. (That distinction
+# matters elsewhere: the harnesses that referenced `$(command -v head)`-style
+# MSYS2 binaries were certifying `getopt` wordings no GNU/Linux system prints —
+# `known-issues.md` → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`.)
 #
-# The locale is `C.UTF-8` throughout. Nothing `head` does is locale-dependent —
-# it never decodes a byte — and the quote marks gnulib puts round a bad number
-# agree here too: since §351 ours are U+2018/U+2019 in every locale, which is
-# what GNU prints under any UTF-8 one. The number diagnostics used to be
-# referenced under `LC_ALL=C`, back when ours stayed ASCII
+# What the move buys here is four other things.
+#
+# The subject stops being a Windows build. This file used to carry an expected
+# difference for `head -n1 .`: on Windows `File::open` of a directory fails
+# outright, where on SlateOS and every POSIX host the open succeeds and the
+# *read* fails, so GNU says `error reading '.': Is a directory` and so do we.
+# The recorded reason was true and the behaviour it described was the host's,
+# not the program's — which is the worst kind of expected difference, because
+# it hides the case rather than testing it. Under Linux it is an ordinary case
+# and passes. The same move is what puts the real `coreutils::stdfd` under test
+# at all: its closed-descriptor and raw-`write` machinery is `#[cfg(target_os =
+# "linux")]`, and the build the harness used to compare got the stub `imp` that
+# returns `Unsupported` — so every `head` invocation with a closed stdout was
+# being certified against code SlateOS will never run.
+#
+# `argv[0]` matches. Both sides are reached through a symlink named `head` in a
+# directory that is the whole of `PATH` for that one invocation, so neither
+# side can prefix a diagnostic with a path where the other prints a bare word.
+#
+# One `wsl` process per run, not one per case. The old reference spawned a
+# fresh WSL session for every single comparison; there are 167 of them.
+#
+# And nothing depends on the Windows working directory happening to map to the
+# same bytes under `/mnt/...`. The `.probe` file the old harness created and
+# looked for from the other side existed only to check that assumption; with
+# both sides inside WSL there is no assumption to check.
+#
+# The locale is `C.UTF-8`, fixed by the preamble. Nothing `head` does is
+# locale-dependent — it never decodes a byte — and the quote marks gnulib puts
+# round a bad number agree here too: since §351 ours are U+2018/U+2019 in every
+# locale, which is what GNU prints under any UTF-8 one. The number diagnostics
+# used to be referenced under `LC_ALL=C`, back when ours stayed ASCII
 # (`open-questions.md` → B-Q2, since answered); `C` is now the setting in which
 # the reference would be wrong.
+#
+# Run `OURS=/usr/bin/head ./scripts/head-diff.sh` to confirm the harness still
+# discriminates: it should report every xfail as XPASS and nothing else.
 set -u
 
-# Our head is a native Windows binary, so MSYS would rewrite an argument that
-# looks like a path.
-export MSYS2_ARG_CONV_EXCL='*'
-
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils head "${OURS:-}") || exit 1
-GNU=${GNU:-"wsl -e env LC_ALL=C.UTF-8 head"}
-export LC_ALL=${LC_ALL:-C.UTF-8}
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `head` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+DIFF_PROG=head
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d)
-trap 'rm -rf "$fixtures"' EXIT
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
 cd "$fixtures" >/dev/null || exit 1
-OURS_ABS=$OURS
-case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$OLDPWD/$OURS" ;; esac
-
-# WSL is invoked with the Windows cwd, which for an MSYS temp directory lands
-# on the same bytes under `/mnt/c/...`. Verified rather than assumed, because a
-# reference that silently ran somewhere else would report every file operand as
-# missing and still "agree" on the ones fed through stdin.
-printf 'probe\n' > .probe
-if [ "$($GNU -n1 .probe 2>/dev/null)" = "probe" ]; then
-  HAVE_GNU=yes
-else
-  HAVE_GNU=no
-  echo "head-diff: glibc head not reachable in this directory (tried: $GNU); skipping"
-fi
-rm -f .probe
 
 # --- fixtures ----------------------------------------------------------------
 printf 'l1\nl2\nl3\nl4\nl5\n'                   > five.txt
@@ -70,20 +78,29 @@ printf 'r1\0r2\0r3\0'                           > nul.txt
 printf 'r1\0r2\0r3'                             > nul-unterminated.txt
 printf 'q\n'                                    > w1.txt
 
+# One invocation of one side. `$1` is `ours` or `gnu`.
+#
+# Each side is reached through a symlink named `head` in a directory that is
+# the whole of `PATH` for that one invocation, so `argv[0]` is the bare word on
+# both sides and the `head: ` prefix on every diagnostic matches.
+run_side() {
+  local side=$1 stdin=$2 out=$3 err=$4; shift 4
+  if [ "$stdin" = "-" ]; then
+    env PATH="$bindir/$side" head "$@" </dev/null >"$out" 2>"$err"
+  else
+    printf '%b' "$stdin" | env PATH="$bindir/$side" head "$@" >"$out" 2>"$err"
+  fi
+}
+
 compare() {
-  local o_out g_out o_err g_err o_rc g_rc stdin=$1 ref=$2; shift 2
+  local o_out g_out o_err g_err o_rc g_rc stdin=$1; shift
   o_err=$(mktemp); g_err=$(mktemp)
   # stdout through a file, not a pipe: in `x=$(head | od)` the recorded status
   # is od's, and `PIPESTATUS` is set in the substitution's subshell where it
   # cannot be read. See the same note in cat-diff.sh.
   local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
-  if [ "$stdin" = "-" ]; then
-    "$OURS_ABS" "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    $ref "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
-  else
-    printf '%b' "$stdin" | "$OURS_ABS" "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
-    printf '%b' "$stdin" | $ref "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
-  fi
+  run_side ours "$stdin" "$o_bin" "$o_err" "$@"; o_rc=$?
+  run_side gnu  "$stdin" "$g_bin" "$g_err" "$@"; g_rc=$?
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   rm -f "$o_bin" "$g_bin"
 
@@ -92,7 +109,10 @@ compare() {
 
   # stderr is compared in full, not merely for emptiness: the whole point of
   # the getopt module is that the sentences match, so a harness that only asked
-  # "did it complain?" would pass on every wording this exists to fix.
+  # "did it complain?" would pass on every wording this exists to fix. That is
+  # only sound because the reference is glibc's — our `errmsg` prints POSIX's
+  # strerror strings, which agree with glibc and did not agree with the MSYS2
+  # reference this harness used to compare against.
   if [ "$o_out" = "$g_out" ] && [ "$o_rc" = "$g_rc" ] && [ "$o_msg" = "$g_msg" ]; then
     AGREED=yes
   else
@@ -116,18 +136,16 @@ report() {
   return 0
 }
 
-run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU" "$@"; report "head $*"; }
+run_case()  { compare - "$@"; report "head $*"; }
 run_stdin() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
-  compare "$input" "$GNU" "$@"
+  compare "$input" "$@"
   report "printf '$input' | head $*"
 }
 
 xfail_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local reason="$1"; shift
-  compare - "$GNU" "$@"
+  compare - "$@"
   if [ "$AGREED" = no ]; then
     xfail=$((xfail+1))
     [ -n "${VERBOSE:-}" ] && printf 'XFAIL head %s  (%s)\n' "$*" "$reason"
@@ -145,8 +163,8 @@ xfail_case() {
 selfsame() {
   local a="$1" b="$2" x y xr yr
   # shellcheck disable=SC2086  # both are single options by construction
-  x=$("$OURS_ABS" $a </dev/null 2>&1); xr=$?
-  y=$("$OURS_ABS" $b </dev/null 2>&1); yr=$?
+  x=$(env PATH="$bindir/ours" head $a </dev/null 2>&1); xr=$?
+  y=$(env PATH="$bindir/ours" head $b </dev/null 2>&1); yr=$?
   if [ "$x" = "$y" ] && [ "$xr" = "$yr" ]; then
     pass=$((pass+1))
     [ -n "${VERBOSE:-}" ] && printf 'OK   head %s == head %s\n' "$a" "$b"
@@ -158,6 +176,10 @@ selfsame() {
   fi
   return 0
 }
+
+echo "head-diff:"
+echo "  ours: $OURS"
+echo "  gnu:  $gnu_real"
 
 # --- the default: ten lines --------------------------------------------------
 run_case five.txt
@@ -362,16 +384,18 @@ run_case -n 0005 five.txt
 run_case -n 1E five.txt
 run_case -c 1E five.txt
 
-# --- differ on purpose -------------------------------------------------------
-D=directory-operand-cannot-be-opened-on-a-windows-host
-# On SlateOS, and on any POSIX host, opening a directory succeeds and the
-# *read* fails, so GNU says `error reading '.': Is a directory` and so do we.
-# This harness runs a Windows build, where `File::open` of a directory fails
-# outright and we say `cannot open '.' for reading: …` instead. The difference
-# is the host's, not the code's — see the same trap in `wc.rs`'s `Stat`, where
-# a Windows `is_file()` calls a pipe a regular file.
-xfail_case "$D" -n1 .
+# --- a directory operand -----------------------------------------------------
+# Opening a directory succeeds and the *read* fails, so GNU says `error reading
+# '.': Is a directory` and so must we. This was an expected difference for as
+# long as the subject was a Windows build, where `File::open` of a directory
+# fails outright and we said `cannot open '.' for reading: …` instead — a
+# difference that belonged to the host and not to the code, and that hid the
+# case rather than testing it. It is an ordinary case now.
+run_case -n1 .
+run_case -c1 .
+run_case -n1 . five.txt
 
+# --- differ on purpose -------------------------------------------------------
 # `--help`'s body matches GNU's byte for byte; what follows it does not, and
 # must not. GNU closes every `--help` with `emit_ancillary_info` — links to
 # gnu.org, the Translation Project and `info '(coreutils) head invocation'` —
@@ -387,10 +411,6 @@ selfsame --vers --version
 selfsame --hel --help
 
 # --- summary -----------------------------------------------------------------
-if [ "$HAVE_GNU" != yes ]; then
-  echo "head-diff: skipped (no glibc head)"
-  exit 0
-fi
 printf '\n%d passed, %d differed' "$pass" "$fail"
 [ "$xfail" -gt 0 ] && printf ', %d differ on purpose' "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d XPASS' "$xpass"

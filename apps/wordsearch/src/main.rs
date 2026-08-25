@@ -1961,7 +1961,7 @@ mod tests {
             key: Key::Right,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&release);
         assert_eq!(app.cursor_col, 0);
@@ -1974,7 +1974,7 @@ mod tests {
             key: Key::Num1,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&ev);
         assert_eq!(app.difficulty, Difficulty::Easy);
@@ -1989,7 +1989,7 @@ mod tests {
             key: Key::Num2,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&ev);
         assert_eq!(app.difficulty, Difficulty::Medium);
@@ -2002,7 +2002,7 @@ mod tests {
             key: Key::Num3,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&ev);
         assert_eq!(app.difficulty, Difficulty::Hard);
@@ -2277,7 +2277,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         })
     }
 }

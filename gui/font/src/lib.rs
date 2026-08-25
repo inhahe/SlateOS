@@ -42,6 +42,7 @@ pub mod bidi;
 mod bidi_tables;
 pub mod cff;
 mod context;
+pub mod deadkey;
 mod device;
 mod digest;
 mod fallback;

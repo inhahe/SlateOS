@@ -54,6 +54,8 @@ import os
 
 from fontTools import unicodedata as fu
 
+from rustfmt_out import rustfmt
+
 # Scripts that never select a script of their own. `Zyyy` is Common, `Zinh`
 # is Inherited, `Zzzz` is Unknown.
 NEUTRAL = ("Zyyy", "Zinh", "Zzzz")
@@ -242,6 +244,12 @@ def main():
         for i in range(0, len(flat), 16):
             w("    " + " ".join(f"{v}," for v in flat[i : i + 16]) + "\n")
         w("];\n")
+    # Match what `cargo fmt -p osfont` would do to this file, so that
+    # regenerating it and formatting it are each a no-op after the other.
+    # Without this the two rewrite each other's output forever, and every
+    # unrelated diff carries a thousand lines of table churn. See
+    # rustfmt_out.py for the whole reason.
+    rustfmt(out)
 
     print(f"wrote {out}")
     print(f"  Unicode {fu.unidata_version}")

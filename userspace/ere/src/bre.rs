@@ -47,6 +47,8 @@
 //! they need a matcher feature (word boundaries) that the engine does not have,
 //! and there is no spelling that would quietly do the wrong thing.
 
+use alloc::vec::Vec;
+
 use crate::ch::{BStr, Ch, Str, chars};
 use crate::engine::{EreError, RegCode, Regex};
 
@@ -375,6 +377,7 @@ fn copy_class(cs: &[Ch], j: usize, delim: char, out: &mut Str) -> Option<usize> 
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use alloc::string::String;
 
     fn t(bre: &str) -> String {
         String::from_utf8(to_ere(bre.as_bytes()).unwrap()).unwrap()

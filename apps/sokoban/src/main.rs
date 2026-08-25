@@ -229,22 +229,11 @@ fn builtin_levels() -> Vec<&'static str> {
         ),
         // Level 2: Two boxes in a line
         concat!(
-            "######\n",
-            "#----#\n",
-            "#-$$-#\n",
-            "#-..-#\n",
-            "#--@-#\n",
-            "######\n",
+            "######\n", "#----#\n", "#-$$-#\n", "#-..-#\n", "#--@-#\n", "######\n",
         ),
         // Level 3: L-shaped puzzle
         concat!(
-            "#####\n",
-            "#---##\n",
-            "#-$--#\n",
-            "##-$-#\n",
-            "-#-.-#\n",
-            "-#-.-#\n",
-            "-#-@-#\n",
+            "#####\n", "#---##\n", "#-$--#\n", "##-$-#\n", "-#-.-#\n", "-#-.-#\n", "-#-@-#\n",
             "-#####\n",
         ),
         // Level 4: Corridor push
@@ -631,14 +620,12 @@ impl SokobanApp {
 
     fn handle_key_select(&mut self, event: &KeyEvent) {
         match event.key {
-            Key::Up
-                if self.select_cursor > 0 => {
-                    self.select_cursor -= 1;
-                }
-            Key::Down
-                if self.select_cursor + 1 < self.level_count() => {
-                    self.select_cursor += 1;
-                }
+            Key::Up if self.select_cursor > 0 => {
+                self.select_cursor -= 1;
+            }
+            Key::Down if self.select_cursor + 1 < self.level_count() => {
+                self.select_cursor += 1;
+            }
             Key::Enter | Key::Space => {
                 self.start_level(self.select_cursor);
             }
@@ -703,7 +690,9 @@ impl SokobanApp {
     }
 
     fn handle_event(&mut self, event: &Event) {
-        if let Event::Key(ke) = event { self.handle_key(ke) }
+        if let Event::Key(ke) = event {
+            self.handle_key(ke)
+        }
     }
 
     // -- Layout helpers -----------------------------------------------------
@@ -756,10 +745,7 @@ impl SokobanApp {
 
         let panel_width: f32 = 400.0;
         let row_height: f32 = 36.0;
-        let total_h = PADDING * 2.0
-            + 60.0
-            + self.level_count() as f32 * row_height
-            + 40.0;
+        let total_h = PADDING * 2.0 + 60.0 + self.level_count() as f32 * row_height + 40.0;
 
         // Background.
         cmds.push(RenderCommand::FillRect {
@@ -965,11 +951,7 @@ impl SokobanApp {
         });
 
         // Boxes on targets indicator.
-        let target_text = format!(
-            "{}/{}",
-            self.boxes_on_targets(),
-            self.target_count()
-        );
+        let target_text = format!("{}/{}", self.boxes_on_targets(), self.target_count());
         cmds.push(RenderCommand::Text {
             x: PADDING + 350.0,
             y: PADDING + 12.0,
@@ -1179,10 +1161,7 @@ impl SokobanApp {
         });
 
         // Stats.
-        let stats_text = format!(
-            "Moves: {}  Pushes: {}",
-            self.move_count, self.push_count
-        );
+        let stats_text = format!("Moves: {}  Pushes: {}", self.move_count, self.push_count);
         cmds.push(RenderCommand::Text {
             x: bx + 20.0,
             y: by + 58.0,
@@ -1263,7 +1242,7 @@ mod tests {
                 shift: false,
                 super_key: false,
             },
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -1277,18 +1256,13 @@ mod tests {
                 shift: false,
                 super_key: false,
             },
-            text: None,
+            text: String::new(),
         }
     }
 
     // -- Helper: minimal 3x3 level string -----------------------------------
     fn tiny_level_str() -> &'static str {
-        concat!(
-            "####\n",
-            "#.@#\n",
-            "#$-#\n",
-            "####\n",
-        )
+        concat!("####\n", "#.@#\n", "#$-#\n", "####\n",)
     }
 
     fn make_tiny_app() -> SokobanApp {
@@ -1480,12 +1454,7 @@ mod tests {
     #[test]
     fn not_solved_partial() {
         // Two targets, one box on target, one not.
-        let level = parse_level(concat!(
-            "#####\n",
-            "#.$.#\n",
-            "#.@-#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#.$.#\n", "#.@-#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -1541,11 +1510,7 @@ mod tests {
     fn move_to_empty_floor() {
         // Use a level where the player can move freely.
         let level = parse_level(concat!(
-            "#####\n",
-            "#---#\n",
-            "#-@-#\n",
-            "#---#\n",
-            "#####\n",
+            "#####\n", "#---#\n", "#-@-#\n", "#---#\n", "#####\n",
         ));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
@@ -1572,12 +1537,7 @@ mod tests {
 
     #[test]
     fn move_down_increments_count() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#-@-#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#-@-#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -1597,11 +1557,7 @@ mod tests {
     #[test]
     fn push_box_forward() {
         let level = parse_level(concat!(
-            "#####\n",
-            "#---#\n",
-            "#@$-#\n",
-            "#---#\n",
-            "#####\n",
+            "#####\n", "#---#\n", "#@$-#\n", "#---#\n", "#####\n",
         ));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
@@ -1618,12 +1574,7 @@ mod tests {
 
     #[test]
     fn push_box_into_wall_fails() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#-@-#\n",
-            "#-$-#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#-@-#\n", "#-$-#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -1639,11 +1590,7 @@ mod tests {
     #[test]
     fn push_box_into_another_box_fails() {
         let level = parse_level(concat!(
-            "######\n",
-            "#-@--#\n",
-            "#-$$-#\n",
-            "#----#\n",
-            "######\n",
+            "######\n", "#-@--#\n", "#-$$-#\n", "#----#\n", "######\n",
         ));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
@@ -1664,12 +1611,7 @@ mod tests {
 
     #[test]
     fn push_box_onto_target() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#@$.#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#@$.#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -1687,12 +1629,7 @@ mod tests {
 
     #[test]
     fn push_box_off_target() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#@*-#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#@*-#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -1708,12 +1645,7 @@ mod tests {
 
     #[test]
     fn push_increments_both_counters() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#@$-#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#@$-#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -1727,12 +1659,7 @@ mod tests {
 
     #[test]
     fn walk_does_not_increment_push_count() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#-@-#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#-@-#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -1750,12 +1677,7 @@ mod tests {
 
     #[test]
     fn undo_single_walk() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#-@-#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#-@-#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -1773,12 +1695,7 @@ mod tests {
 
     #[test]
     fn undo_push() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#@$-#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#@$-#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -1809,11 +1726,7 @@ mod tests {
     #[test]
     fn undo_multiple_steps() {
         let level = parse_level(concat!(
-            "#####\n",
-            "#---#\n",
-            "#-@-#\n",
-            "#---#\n",
-            "#####\n",
+            "#####\n", "#---#\n", "#-@-#\n", "#---#\n", "#####\n",
         ));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
@@ -1837,12 +1750,7 @@ mod tests {
 
     #[test]
     fn undo_restores_move_count() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#-@-#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#-@-#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -1858,11 +1766,7 @@ mod tests {
     #[test]
     fn undo_stack_limited() {
         let level = parse_level(concat!(
-            "#####\n",
-            "#---#\n",
-            "#-@-#\n",
-            "#---#\n",
-            "#####\n",
+            "#####\n", "#---#\n", "#-@-#\n", "#---#\n", "#####\n",
         ));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
@@ -1921,12 +1825,7 @@ mod tests {
 
     #[test]
     fn reset_clears_push_count() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#@$-#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#@$-#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -1945,12 +1844,7 @@ mod tests {
 
     #[test]
     fn key_up_moves_player() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#---#\n",
-            "#-@-#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#---#\n", "#-@-#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -1963,12 +1857,7 @@ mod tests {
 
     #[test]
     fn key_down_moves_player() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#-@-#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#-@-#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -1981,12 +1870,7 @@ mod tests {
 
     #[test]
     fn key_left_moves_player() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#-@-#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#-@-#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -1999,12 +1883,7 @@ mod tests {
 
     #[test]
     fn key_right_moves_player() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#-@-#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#-@-#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -2017,12 +1896,7 @@ mod tests {
 
     #[test]
     fn key_z_undoes() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#-@-#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#-@-#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -2037,12 +1911,7 @@ mod tests {
 
     #[test]
     fn key_r_resets() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#-@-#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#-@-#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -2314,7 +2183,9 @@ mod tests {
         let mut app = SokobanApp::new();
         app.start_level(0);
         let cmds = app.render();
-        let has_bg = cmds.iter().any(|c| matches!(c, RenderCommand::FillRect { x, y, .. } if *x == 0.0 && *y == 0.0));
+        let has_bg = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { x, y, .. } if *x == 0.0 && *y == 0.0));
         assert!(has_bg);
     }
 
@@ -2331,9 +2202,9 @@ mod tests {
     fn render_select_has_level_text() {
         let app = SokobanApp::new();
         let cmds = app.render();
-        let has_level_text = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text.contains("Level"))
-        });
+        let has_level_text = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Level")));
         assert!(has_level_text);
     }
 
@@ -2343,9 +2214,9 @@ mod tests {
         app.start_level(0);
         app.screen = Screen::Won;
         let cmds = app.render();
-        let has_complete = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text.contains("Complete"))
-        });
+        let has_complete = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Complete")));
         assert!(has_complete);
     }
 
@@ -2355,9 +2226,9 @@ mod tests {
         app.start_level(0);
         app.move_count = 42;
         let cmds = app.render();
-        let has_moves = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text.contains("42"))
-        });
+        let has_moves = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("42")));
         assert!(has_moves);
     }
 
@@ -2367,12 +2238,7 @@ mod tests {
 
     #[test]
     fn handle_event_key() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#-@-#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#-@-#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -2447,12 +2313,7 @@ mod tests {
 
     #[test]
     fn completion_set_on_solve() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#@$.#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#@$.#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -2465,12 +2326,7 @@ mod tests {
 
     #[test]
     fn screen_transitions_to_won_on_solve() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#@$.#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#@$.#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];
@@ -2519,11 +2375,7 @@ mod tests {
     #[test]
     fn multiple_undos_then_redo_via_move() {
         let level = parse_level(concat!(
-            "#####\n",
-            "#---#\n",
-            "#-@-#\n",
-            "#---#\n",
-            "#####\n",
+            "#####\n", "#---#\n", "#-@-#\n", "#---#\n", "#####\n",
         ));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
@@ -2542,11 +2394,7 @@ mod tests {
     #[test]
     fn push_box_upward() {
         let level = parse_level(concat!(
-            "#####\n",
-            "#---#\n",
-            "#-$-#\n",
-            "#-@-#\n",
-            "#####\n",
+            "#####\n", "#---#\n", "#-$-#\n", "#-@-#\n", "#####\n",
         ));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
@@ -2561,12 +2409,7 @@ mod tests {
 
     #[test]
     fn push_box_leftward() {
-        let level = parse_level(concat!(
-            "#####\n",
-            "#-$@#\n",
-            "#---#\n",
-            "#####\n",
-        ));
+        let level = parse_level(concat!("#####\n", "#-$@#\n", "#---#\n", "#####\n",));
         let mut app = SokobanApp::new();
         app.levels = vec![level];
         app.completed = vec![false];

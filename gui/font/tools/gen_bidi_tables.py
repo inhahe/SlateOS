@@ -58,6 +58,8 @@ of such a family list the same normalized pair, and a plain equality test in
 """
 
 import os
+
+from rustfmt_out import rustfmt
 import unicodedata
 import urllib.request
 
@@ -271,6 +273,12 @@ def main():
         for cp, mirror in mirrored:
             w(f"    (0x{cp:04X}, 0x{mirror:04X}),\n")
         w("];\n")
+    # Match what `cargo fmt -p osfont` would do to this file, so that
+    # regenerating it and formatting it are each a no-op after the other.
+    # Without this the two rewrite each other's output forever, and every
+    # unrelated diff carries a thousand lines of table churn. See
+    # rustfmt_out.py for the whole reason.
+    rustfmt(out)
 
     print(f"wrote {out}")
     print(f"  Unicode {version}")

@@ -1,31 +1,35 @@
 #!/usr/bin/env bash
 # Differential test: our `seq` against GNU's.
 #
-# ## Why the reference is inside WSL
+# ## Why both sides run inside WSL
 #
-# The host's `/usr/bin` is MSYS2, a Cygwin derivative. Its `seq` *is* GNU
-# coreutils' seq, so pointing this harness at it is a useful positive control
-# (`OURS=/usr/bin/seq ./scripts/seq-diff.sh` should report almost nothing) --
-# but it is not a reference, because seq's answers are printed by the C
-# library's `printf`, and Cygwin's is not glibc's. The two agree on most of
-# what seq prints, which is worse than disagreeing on all of it: it would look
-# like a passing test while diverging on exactly the 80-bit corners that
-# `coreutils::extfloat` exists for. So the reference is run in WSL.
+# `scripts/diff-wsl.sh` gives the general reasons; the one that decided it here
+# is the reference. The host's `/usr/bin` is MSYS2, a Cygwin derivative. Its
+# `seq` *is* GNU coreutils' seq, so pointing this harness at it is a useful
+# positive control (`OURS=/usr/bin/seq ./scripts/seq-diff.sh` should report
+# almost nothing) -- but it is not a reference, because seq's answers are
+# printed by the C library's `printf`, and Cygwin's is not glibc's. The two
+# agree on most of what seq prints, which is worse than disagreeing on all of
+# it: it would look like a passing test while diverging on exactly the 80-bit
+# corners that `coreutils::extfloat` exists for.
 #
-# ## Why the cases are a file and not a list of shell lines
-#
-# Both sides have to receive byte-identical argv, and they run under different
-# operating systems -- ours natively on Windows, GNU's under WSL. Anything
-# quoted into a `wsl -e bash -c '...'` command line passes through two shells
-# and a Win32 command-line encoder, and an argument like `%\303\251` or a
-# separator that is a single newline does not survive that intact. Writing the
-# cases to a file, copying the file, and having an identical probe script read
-# it on both sides removes every layer that could rewrite an argument.
+# The subject moved into WSL with it, which is what this file gained by being
+# migrated. It used to be a `x86_64-pc-windows-gnu` build driven from the host
+# while the reference ran under `wsl -e bash -c`, and that split cost three
+# things: `MSYS2_ARG_CONV_EXCL='*'` had to be exported so MSYS would not rewrite
+# the format `[%05.2f]` or the operand `-1` into something with a drive letter
+# in it; the case file had to be *copied* into WSL through `cat` because a
+# `wsl -e bash -c '...'` command line passes through two shells and a Win32
+# command-line encoder that an argument like `%\303\251` does not survive; and
+# `seq` itself was linked against a Windows `libc` on one side and glibc on the
+# other, so any difference could always be blamed on the host. Both sides are
+# now the same kind of binary on the same kernel, and the case file is simply
+# read twice from where it was written.
 #
 # ## Why `LC_ALL=C.UTF-8`
 #
-# Two of seq's answers could move with the locale, and only one of them
-# actually does.
+# Fixed by the preamble, and two of seq's answers could move with it -- but
+# only one of them actually does.
 #
 # The decimal point is the one that does not. GNU seq takes it from
 # `LC_NUMERIC`, so under a comma-decimal locale it prints `1,5` -- but
@@ -58,7 +62,16 @@
 
 set -u
 
-cd "$(dirname "$0")/.." || exit 1
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one name
+# `seq` so `argv[0]` matches. See `scripts/diff-wsl.sh`. `timeout` is named as a
+# requirement because `seq-probe.sh` bounds every case with it -- `seq 1 inf` is
+# one keystroke away from every case in the generator.
+DIFF_PROG=seq
+DIFF_NEED="timeout python3"
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
+
+cd "$root" || exit 1
 
 RANDOM_CASES=400
 SEED=20260817
@@ -74,37 +87,27 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-TARGET=x86_64-pc-windows-gnu
-# Built here, from the package named, rather than picked up out of `target/`.
-# See `scripts/diff-subject.sh` for the two ways the old "just run the path"
-# form got the answer wrong.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(DIFF_TARGET=$TARGET subject_binary coreutils seq "${OURS:-}") || exit 1
-GNU=${GNU:-seq}
+# `--keep` works by replacing the cleanup function rather than by setting a
+# second `EXIT` trap, which would replace the preamble's one instead of adding
+# to it. The whole scratch directory then survives, symlinked binaries and all,
+# which is what makes a kept case reproducible by hand.
+WORK=$DIFF_TMP/work
+mkdir -p "$WORK"
+if [ "$KEEP" = 1 ]; then
+  diff_cleanup() { echo "kept: $DIFF_TMP (cases and records in work/)"; }
+fi
 
-# Our seq is a native Windows binary, so MSYS would helpfully rewrite any
-# argument that looks like a path -- turning the format `[%05.2f]` or the
-# operand `-1` into something with a drive letter in it.
-export MSYS2_ARG_CONV_EXCL='*'
-export LC_ALL=C.UTF-8
+echo "ours: $OURS"
+echo "gnu:  $gnu_real"
 
-WORK=$(mktemp -d)
-cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }
-trap cleanup EXIT
-[ "$KEEP" = 1 ] && echo "working files in $WORK"
-
-python scripts/seq-cases.py "$RANDOM_CASES" "$SEED" > "$WORK/cases" || exit 1
+python3 scripts/seq-cases.py "$RANDOM_CASES" "$SEED" > "$WORK/cases" || exit 1
 echo "$(wc -l < "$WORK/cases") cases"
 
 echo "running ours..."
-bash scripts/seq-probe.sh "$OURS" "$WORK/cases" > "$WORK/ours" || exit 1
+bash scripts/seq-probe.sh "$bindir/ours" "$WORK/cases" > "$WORK/ours" || exit 1
 
-echo "running GNU's, in WSL..."
-wsl -e bash -c 'mkdir -p /tmp/seqdiff && cat > /tmp/seqdiff/probe.sh' \
-  < scripts/seq-probe.sh || exit 1
-wsl -e bash -c 'cat > /tmp/seqdiff/cases' < "$WORK/cases" || exit 1
-wsl -e bash -c "cd /tmp/seqdiff && LC_ALL=C.UTF-8 bash probe.sh '$GNU' cases" \
-  > "$WORK/theirs" || exit 1
+echo "running GNU's..."
+bash scripts/seq-probe.sh "$bindir/gnu" "$WORK/cases" > "$WORK/theirs" || exit 1
 
 if [ "$FLIP" = 1 ]; then
   # Drop the reference's first record, so every case is compared against its

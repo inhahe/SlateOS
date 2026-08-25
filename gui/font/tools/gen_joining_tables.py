@@ -57,6 +57,8 @@ import os
 import unicodedata
 import urllib.request
 
+from rustfmt_out import rustfmt
+
 # The order here is the discriminant order in the generated Rust enum, so it
 # must match `joining.rs`. `U` is absent on purpose: it is the default and is
 # never written to the table.
@@ -155,6 +157,12 @@ def main():
         for lo, hi, kind in runs:
             w(f"    (0x{lo:04X}, 0x{hi:04X}, JoiningType::{names[kind]}),\n")
         w("];\n")
+    # Match what `cargo fmt -p osfont` would do to this file, so that
+    # regenerating it and formatting it are each a no-op after the other.
+    # Without this the two rewrite each other's output forever, and every
+    # unrelated diff carries a thousand lines of table churn. See
+    # rustfmt_out.py for the whole reason.
+    rustfmt(out)
 
     print(f"wrote {out}")
     print(f"  Unicode {version}")

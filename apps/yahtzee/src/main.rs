@@ -1291,7 +1291,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         game.handle_event(&event);
     }
@@ -2459,7 +2459,7 @@ mod tests {
             key: Key::R,
             pressed: false, // Release, not press.
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         g.handle_event(&event);
         assert_eq!(g.roll_number, 0);

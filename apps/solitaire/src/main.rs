@@ -2642,7 +2642,7 @@ mod tests {
                 super_key: false,
             },
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.state.focus, FocusArea::Waste);
     }
@@ -2659,7 +2659,7 @@ mod tests {
                 super_key: false,
             },
             pressed: false,
-            text: None,
+            text: String::new(),
         }));
         // Focus should not change on key release.
         assert_eq!(app.state.focus, FocusArea::Stock);

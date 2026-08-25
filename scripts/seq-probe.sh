@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
 # One side of the `seq` differential test.
 #
-#   seq-probe.sh SEQ-COMMAND CASE-FILE
+#   seq-probe.sh BIN-DIR CASE-FILE
 #
-# Runs SEQ-COMMAND once per case and writes a four-line record for each:
+# Runs the `seq` in BIN-DIR once per case and writes a four-line record for
+# each:
 #
 #   CASE <name>
 #   RC <exit status>
 #   OUT <stdout>
 #   ERR <stderr>
 #
-# `scripts/seq-diff.sh` runs this script twice -- once on the host against our
-# `seq.exe`, once inside WSL against GNU's -- and compares the two record
-# files. Both sides run the *same* script for the same reason both sides read
-# the same case file: a difference in how the two sides were driven would show
-# up as a difference in `seq`, which is the one thing this test must not do.
+# `scripts/seq-diff.sh` runs this script twice, once per side, and compares the
+# two record files. Both sides run the *same* script for the same reason both
+# sides read the same case file: a difference in how the two sides were driven
+# would show up as a difference in `seq`, which is the one thing this test must
+# not do.
+#
+# BIN-DIR is a directory rather than a path to a binary, and it becomes the
+# whole of `PATH` for the invocation, so `argv[0]` is the bare word `seq` on
+# both sides. Ours writes a literal `seq: ` prefix and GNU takes the basename,
+# so today they would agree even given a path; passing a directory means they
+# still agree the day ours starts reading `argv[0]` like GNU does.
 #
 # The streams are recorded through `od -An -v -c` rather than verbatim. seq's
 # output is text and would mostly survive being pasted into a line, but not
@@ -30,11 +37,11 @@
 set -u
 
 if [ $# -ne 2 ]; then
-  echo "usage: seq-probe.sh SEQ-COMMAND CASE-FILE" >&2
+  echo "usage: seq-probe.sh BIN-DIR CASE-FILE" >&2
   exit 2
 fi
 
-cmd=$1
+bin=$1
 casefile=$2
 
 out=$(mktemp)
@@ -62,7 +69,10 @@ while IFS=$'\x1f' read -r -a field; do
   # stdin is closed off: seq never reads it, but `timeout` and the shell share
   # a descriptor with the loop, and a child that read from it would eat the
   # rest of the case file.
-  timeout 10 "$cmd" ${args[@]+"${args[@]}"} >"$out" 2>"$err" </dev/null
+  # `timeout` outside the `env` and not inside it: `env PATH=... timeout` would
+  # look for `timeout` in the *new* PATH, which holds nothing but `seq`.
+  timeout 10 env PATH="$bin" seq ${args[@]+"${args[@]}"} \
+    >"$out" 2>"$err" </dev/null
   rc=$?
 
   printf 'CASE %s\nRC %s\nOUT%s\nERR%s\n' "$name" "$rc" \

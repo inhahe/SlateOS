@@ -154,7 +154,6 @@ impl MarkPositioning {
             .chain(self.mkmk.iter())
             .any(|&sub| in_mark_coverage(data, sub, glyph))
     }
-
 }
 
 /// What the mark side of a mark-attachment subtable says, once read.
@@ -231,7 +230,12 @@ fn marked(data: &[u8], sub: usize, mark: u16, corr: Corrections<'_>) -> Option<M
         classes,
         to_array,
         class,
-        at: anchor(data, mark_array, u16_at(data, record.checked_add(2)?)?, corr)?,
+        at: anchor(
+            data,
+            mark_array,
+            u16_at(data, record.checked_add(2)?)?,
+            corr,
+        )?,
     })
 }
 
@@ -332,7 +336,12 @@ pub(crate) fn lig_attachment(
 /// Format 3 adds a device table per axis, and those *are* read; see
 /// [`device`](crate::device). At [`Corrections::NONE`] they read as no correction, so
 /// a caller with no size still gets the design-unit anchor.
-pub(crate) fn anchor(data: &[u8], from: usize, offset: u16, corr: Corrections<'_>) -> Option<(i16, i16)> {
+pub(crate) fn anchor(
+    data: &[u8],
+    from: usize,
+    offset: u16,
+    corr: Corrections<'_>,
+) -> Option<(i16, i16)> {
     if offset == 0 {
         return None;
     }
@@ -503,7 +512,10 @@ mod tests {
         t.extend_from_slice(&700i16.to_be_bytes());
         t.extend_from_slice(&be16(14)); // contour point
         let data = reached_at_sixteen(&t);
-        assert_eq!(anchor(&data, 0, 16, Corrections::at(Ppem::new(10.0, 1000))), Some((500, 700)));
+        assert_eq!(
+            anchor(&data, 0, 16, Corrections::at(Ppem::new(10.0, 1000))),
+            Some((500, 700))
+        );
     }
 
     /// An attachment point, `(x, y)` in font units.
@@ -610,8 +622,9 @@ mod tests {
         let mut attachments = Vec::new();
         let attach_base = 2 + ligs.len() * 2;
         for (_, rows) in ligs {
-            lig_array
-                .extend_from_slice(&be16(u16::try_from(attach_base + attachments.len()).unwrap()));
+            lig_array.extend_from_slice(&be16(
+                u16::try_from(attach_base + attachments.len()).unwrap(),
+            ));
             attachments.extend_from_slice(&be16(u16::try_from(rows.len()).unwrap()));
             attachments.extend_from_slice(&anchor_grid(classes, rows, 2));
         }
@@ -654,14 +667,23 @@ mod tests {
     #[test]
     fn a_mark_lands_on_the_component_it_belongs_to() {
         let data = lam_alef();
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 1, Corrections::NONE), Some((100, 700)));
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 2, Corrections::NONE), Some((700, 700)));
+        assert_eq!(
+            lig_attachment(&data, 0, 1, 2, 1, Corrections::NONE),
+            Some((100, 700))
+        );
+        assert_eq!(
+            lig_attachment(&data, 0, 1, 2, 2, Corrections::NONE),
+            Some((700, 700))
+        );
     }
 
     #[test]
     fn an_unknown_component_falls_back_to_the_last() {
         let data = lam_alef();
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 0, Corrections::NONE), Some((700, 700)));
+        assert_eq!(
+            lig_attachment(&data, 0, 1, 2, 0, Corrections::NONE),
+            Some((700, 700))
+        );
     }
 
     #[test]
@@ -670,7 +692,10 @@ mod tests {
         // font's `componentCount` and the substitution disagreeing — must not
         // read a neighbouring table.
         let data = lam_alef();
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 9, Corrections::NONE), Some((700, 700)));
+        assert_eq!(
+            lig_attachment(&data, 0, 1, 2, 9, Corrections::NONE),
+            Some((700, 700))
+        );
     }
 
     #[test]
@@ -681,7 +706,10 @@ mod tests {
             &[(1, vec![vec![None], vec![Some((800, 700))]])],
         );
         assert_eq!(lig_attachment(&data, 0, 1, 2, 1, Corrections::NONE), None);
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 2, Corrections::NONE), Some((700, 700)));
+        assert_eq!(
+            lig_attachment(&data, 0, 1, 2, 2, Corrections::NONE),
+            Some((700, 700))
+        );
     }
 
     #[test]
@@ -706,10 +734,22 @@ mod tests {
                 ],
             )],
         );
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 1, Corrections::NONE), Some((200, 700)));
-        assert_eq!(lig_attachment(&data, 0, 1, 3, 1, Corrections::NONE), Some((200, -100)));
-        assert_eq!(lig_attachment(&data, 0, 1, 2, 2, Corrections::NONE), Some((800, 700)));
-        assert_eq!(lig_attachment(&data, 0, 1, 3, 2, Corrections::NONE), Some((800, -100)));
+        assert_eq!(
+            lig_attachment(&data, 0, 1, 2, 1, Corrections::NONE),
+            Some((200, 700))
+        );
+        assert_eq!(
+            lig_attachment(&data, 0, 1, 3, 1, Corrections::NONE),
+            Some((200, -100))
+        );
+        assert_eq!(
+            lig_attachment(&data, 0, 1, 2, 2, Corrections::NONE),
+            Some((800, 700))
+        );
+        assert_eq!(
+            lig_attachment(&data, 0, 1, 3, 2, Corrections::NONE),
+            Some((800, -100))
+        );
     }
 
     #[test]

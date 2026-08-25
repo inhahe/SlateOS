@@ -3107,8 +3107,8 @@ fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             true
         }
         _ => {
-            if let Some(ch) = key.text {
-                app.input_buffer.push(ch);
+            if key.types_text() {
+                app.input_buffer.extend(key.typed());
                 return true;
             }
             false
@@ -4255,7 +4255,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -4500,7 +4500,7 @@ mod tests {
             key,
             pressed: true,
             modifiers,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -4509,7 +4509,7 @@ mod tests {
             key: Key::Unknown(ch as u32),
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some(ch),
+            text: ch.to_string(),
         }
     }
 
@@ -4798,7 +4798,7 @@ mod tests {
             key: Key::N,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let handled = handle_key_event(&mut app, &key);
         assert!(!handled);

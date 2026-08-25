@@ -52,15 +52,27 @@
 //! right of `0` is `ß` unshifted and `?` shifted, and a Caps Lock that treated
 //! that as a case pair would type a question mark for every `ß`.
 //!
+//! ## Dead keys
+//!
+//! A dead key (`´` then `e` → `é`) types nothing on its own and combines with
+//! whatever is pressed next. That needs state carried between two key events,
+//! and this crate is a pure lookup — so the split is: the layouts *declare*
+//! which faces are dead ([`KeyDef::dead`]), the compositor holds the pending
+//! accent, and `osfont` does the combining, since it already carries the exact
+//! Unicode composition tables and adding a second hand-written accent table
+//! beside them would be two answers to one question.
+//!
+//! [`KeyDef::character`] still reports the accent a dead key is labelled with
+//! rather than nothing, because this crate answers "what is printed on that
+//! key". A caller that does not consult [`KeyDef::is_dead`] therefore gets the
+//! old behaviour — the bare accent — rather than silence, which is the safer
+//! of the two ways to be wrong.
+//!
 //! ## What is deliberately not here yet
 //!
-//! Dead keys (`´` then `e` → `é`) and compose sequences. Both need state
-//! carried between two key events, and this crate is a pure lookup. The
-//! layouts that use them — German, French, Spanish — currently emit the
-//! accent character itself, which is what a dead key produces when you press
-//! it twice, so the behaviour is wrong in a way that at least produces the
-//! character the key is labelled with rather than nothing. Tracked as steps
-//! (3) and (4) of `TD-ONLY-ONE-KEYBOARD-LAYOUT`.
+//! Compose sequences (`Compose` `o` `c` → `©`), which are a *sequence* table
+//! rather than a per-key flag and share nothing with the above but the word
+//! "compose". Tracked as step (4) of `TD-ONLY-ONE-KEYBOARD-LAYOUT`.
 
 use std::sync::OnceLock;
 
@@ -280,6 +292,111 @@ pub struct KeyDef {
     pub altgr: Option<char>,
     /// The character with AltGr and Shift held, if the layout puts one there.
     pub altgr_shifted: Option<char>,
+    /// Which of this key's four faces are dead keys — accents that type
+    /// nothing on their own and combine with whatever is pressed next.
+    ///
+    /// Per *face*, not per character, and that is the whole reason this is a
+    /// four-flag struct rather than a "is this character an accent?" table
+    /// somewhere: on French AZERTY `^` appears twice. Plain on the key right
+    /// of `P` it is dead and makes `ê`; on AltGr+9 it is the ordinary ASCII
+    /// circumflex a programmer types into a shell. One character, two
+    /// behaviours, decided by which face of which key produced it.
+    pub dead: DeadFaces,
+}
+
+/// Which face of a key the held modifiers select.
+///
+/// The four levels of [`KeyDef`], as a value, so that "which character does
+/// this produce" and "is that character dead" cannot answer from different
+/// faces. [`KeyDef::face`] decides once and both read its answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Face {
+    /// No modifier — [`KeyDef::plain`].
+    Plain,
+    /// Shift, or the Caps Lock latch on a letter — [`KeyDef::shifted`].
+    Shifted,
+    /// AltGr — [`KeyDef::altgr`].
+    AltGr,
+    /// AltGr and Shift together — [`KeyDef::altgr_shifted`].
+    AltGrShifted,
+}
+
+/// Which of a key's four faces are dead keys.
+///
+/// Almost every key is [`NONE`](Self::NONE); the layouts that have dead keys
+/// have two or three of them. See [`KeyDef::dead`] for why deadness is a
+/// property of the face and not of the character.
+///
+/// The named constants cover the combinations the built-in layouts actually
+/// use. Any other combination is written out in full —
+/// `DeadFaces { altgr_shifted: true, ..DeadFaces::NONE }` — rather than
+/// growing a constant per subset of a four-element set.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeadFaces {
+    /// [`KeyDef::plain`] is a dead key.
+    pub plain: bool,
+    /// [`KeyDef::shifted`] is a dead key.
+    pub shifted: bool,
+    /// [`KeyDef::altgr`] is a dead key.
+    pub altgr: bool,
+    /// [`KeyDef::altgr_shifted`] is a dead key.
+    pub altgr_shifted: bool,
+}
+
+impl DeadFaces {
+    /// An ordinary key: nothing on it is dead.
+    pub const NONE: Self = Self {
+        plain: false,
+        shifted: false,
+        altgr: false,
+        altgr_shifted: false,
+    };
+
+    /// Dead unshifted only — German's `^`, whose shifted face `°` is a
+    /// perfectly ordinary degree sign.
+    pub const PLAIN: Self = Self {
+        plain: true,
+        ..Self::NONE
+    };
+
+    /// Dead shifted only.
+    pub const SHIFTED: Self = Self {
+        shifted: true,
+        ..Self::NONE
+    };
+
+    /// Dead on both of the first two faces — the usual shape for an accent
+    /// key, which carries one accent unshifted and another shifted (German's
+    /// `´`/`` ` ``, Spanish's `´`/`¨`).
+    pub const PLAIN_AND_SHIFTED: Self = Self {
+        plain: true,
+        shifted: true,
+        ..Self::NONE
+    };
+
+    /// Dead on the AltGr face only — French, which reaches its tilde and
+    /// grave through AltGr.
+    pub const ALT_GR: Self = Self {
+        altgr: true,
+        ..Self::NONE
+    };
+
+    /// Whether the named face is a dead key.
+    #[must_use]
+    pub const fn has(self, face: Face) -> bool {
+        match face {
+            Face::Plain => self.plain,
+            Face::Shifted => self.shifted,
+            Face::AltGr => self.altgr,
+            Face::AltGrShifted => self.altgr_shifted,
+        }
+    }
+
+    /// Whether any face is dead.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.plain || self.shifted || self.altgr || self.altgr_shifted
+    }
 }
 
 impl KeyDef {
@@ -298,17 +415,30 @@ impl KeyDef {
         self.plain.is_alphabetic() && self.shifted.is_alphabetic()
     }
 
-    /// The character this key produces with the given modifiers held.
+    /// Which face the given modifiers select, or `None` if this key has
+    /// nothing on that level.
+    ///
+    /// The single place the level rules live. [`character`](Self::character)
+    /// and [`is_dead`](Self::is_dead) both go through it rather than each
+    /// deciding for itself, because the interesting case is the one where they
+    /// could disagree: AltGr+Shift on a key with no fourth-level character
+    /// falls back to the AltGr face, so its *deadness* has to fall back to the
+    /// AltGr face too. Two copies of that rule would eventually be one copy of
+    /// it and one bug — a key that typed a plain `~` while behaving as though
+    /// it were waiting for a vowel.
     #[must_use]
-    pub fn character(&self, level: Level) -> Option<char> {
+    pub fn face(&self, level: Level) -> Option<Face> {
         if level.alt_gr {
             // No Caps Lock involvement: the latch selects between the first two
             // levels, and a layout that wanted a capital on the AltGr level
             // spells it out in `altgr_shifted`.
-            return if level.shift {
-                self.altgr_shifted.or(self.altgr)
+            if level.shift && self.altgr_shifted.is_some() {
+                return Some(Face::AltGrShifted);
+            }
+            return if self.altgr.is_some() {
+                Some(Face::AltGr)
             } else {
-                self.altgr
+                None
             };
         }
         let upper = if self.caps_applies() {
@@ -316,7 +446,32 @@ impl KeyDef {
         } else {
             level.shift
         };
-        Some(if upper { self.shifted } else { self.plain })
+        Some(if upper { Face::Shifted } else { Face::Plain })
+    }
+
+    /// The character this key produces with the given modifiers held.
+    ///
+    /// A dead key answers with the accent it is labelled with — `´`, not
+    /// nothing. This crate is a lookup table and reports what is printed on
+    /// the key; deciding that pressing it should type nothing *yet* is the
+    /// compositor's job, and it asks [`is_dead`](Self::is_dead) to find out.
+    #[must_use]
+    pub fn character(&self, level: Level) -> Option<char> {
+        match self.face(level)? {
+            Face::Plain => Some(self.plain),
+            Face::Shifted => Some(self.shifted),
+            Face::AltGr => self.altgr,
+            Face::AltGrShifted => self.altgr_shifted,
+        }
+    }
+
+    /// Whether this key, at this level, is a dead key.
+    ///
+    /// `false` for a level this key has no character on: a key that produces
+    /// nothing cannot be waiting to combine with anything.
+    #[must_use]
+    pub fn is_dead(&self, level: Level) -> bool {
+        self.face(level).is_some_and(|face| self.dead.has(face))
     }
 }
 
@@ -415,6 +570,26 @@ impl Layout {
         self.key(scancode)?.character(level)
     }
 
+    /// Whether this scancode at this level is a dead key.
+    ///
+    /// `false` for a scancode this layout does not define, which is the right
+    /// answer for the same reason [`character`](Self::character) says `None`:
+    /// the caller falls back to its physical table, and nothing in that table
+    /// is dead.
+    #[must_use]
+    pub fn is_dead(&self, scancode: u32, level: Level) -> bool {
+        self.key(scancode).is_some_and(|key| key.is_dead(level))
+    }
+
+    /// Whether this layout has any dead keys at all.
+    ///
+    /// The compositor's fast path: a layout that answers `false` needs no
+    /// pending-accent state, which is every English layout.
+    #[must_use]
+    pub fn uses_dead_keys(&self) -> bool {
+        self.keys.iter().any(|k| k.dead.any())
+    }
+
     /// One row of the block, left to right, for drawing a picture of the
     /// keyboard. Rows are numbered 0 (digits) to 3 (bottom).
     #[must_use]
@@ -480,6 +655,17 @@ pub struct LayoutSpec {
     /// use it on eight or ten keys out of forty-eight, and forty rows of
     /// padding would hide the ten that matter.
     pub altgr: &'static [(u16, char, Option<char>)],
+    /// Which faces are dead keys, listed sparsely as `(scancode, faces)`.
+    ///
+    /// Sparse for the same reason as [`altgr`](Self::altgr), and more so: no
+    /// layout here has dead keys on more than three of its forty-eight keys.
+    ///
+    /// This cannot be derived from the row strings, which is why it is a list
+    /// and not a rule. The rows say *which character* a face carries; whether
+    /// that character is dead is a separate fact about the layout, and French
+    /// proves the two are independent by putting a dead `^` and a live `^` on
+    /// the same keyboard. See [`KeyDef::dead`].
+    pub dead: &'static [(u16, DeadFaces)],
 }
 
 impl LayoutSpec {
@@ -509,6 +695,7 @@ impl LayoutSpec {
                     shifted,
                     altgr: None,
                     altgr_shifted: None,
+                    dead: DeadFaces::NONE,
                 });
             }
             let plain = self.plain.get(index).copied().unwrap_or("");
@@ -522,6 +709,7 @@ impl LayoutSpec {
                     shifted,
                     altgr: None,
                     altgr_shifted: None,
+                    dead: DeadFaces::NONE,
                 });
             }
             // `rows` and `row_ends` are both four long, so this always finds
@@ -536,6 +724,14 @@ impl LayoutSpec {
             if let Some(key) = keys.iter_mut().find(|k| k.scancode == scancode) {
                 key.altgr = Some(plain);
                 key.altgr_shifted = shifted;
+            }
+        }
+        // After the AltGr pass, so that a layout may declare its AltGr face
+        // dead: before it, the face does not exist yet and
+        // `every_dead_face_has_a_character` would reject the declaration.
+        for &(scancode, faces) in self.dead {
+            if let Some(key) = keys.iter_mut().find(|k| k.scancode == scancode) {
+                key.dead = faces;
             }
         }
         Layout {
@@ -598,6 +794,7 @@ pub fn default_layout() -> &'static Layout {
                     shifted: ["", "", "", ""],
                     iso_extra: None,
                     altgr: &[],
+                    dead: &[],
                 }
                 .build()
             })
@@ -631,6 +828,7 @@ static SPECS: &[LayoutSpec] = &[
         // ANSI: no key between left Shift and Z.
         iso_extra: None,
         altgr: &[],
+        dead: &[],
     },
     LayoutSpec {
         id: "uk-qwerty",
@@ -653,6 +851,7 @@ static SPECS: &[LayoutSpec] = &[
         // the key beside left Shift; `#` takes its place.
         iso_extra: Some(('\\', '|')),
         altgr: &[(sc::NUM4, '€', None)],
+        dead: &[],
     },
     LayoutSpec {
         id: "dvorak",
@@ -673,6 +872,7 @@ static SPECS: &[LayoutSpec] = &[
         ],
         iso_extra: None,
         altgr: &[],
+        dead: &[],
     },
     LayoutSpec {
         id: "colemak",
@@ -693,6 +893,7 @@ static SPECS: &[LayoutSpec] = &[
         ],
         iso_extra: None,
         altgr: &[],
+        dead: &[],
     },
     LayoutSpec {
         id: "workman",
@@ -713,6 +914,7 @@ static SPECS: &[LayoutSpec] = &[
         ],
         iso_extra: None,
         altgr: &[],
+        dead: &[],
     },
     // -- National ----------------------------------------------------------
     LayoutSpec {
@@ -747,6 +949,13 @@ static SPECS: &[LayoutSpec] = &[
             (sc::M, 'µ', None),
             (sc::ISO_EXTRA, '|', None),
         ],
+        dead: &[
+            // The key left of `1`: `^` dead, `°` live. A degree sign combines
+            // with nothing, so only half this key waits.
+            (sc::GRAVE, DeadFaces::PLAIN),
+            // The key right of `ß`, the accent key: `´` and `` ` ``, both dead.
+            (sc::EQUALS, DeadFaces::PLAIN_AND_SHIFTED),
+        ],
     },
     LayoutSpec {
         id: "fr-azerty",
@@ -780,6 +989,20 @@ static SPECS: &[LayoutSpec] = &[
             (sc::EQUALS, '}', None),
             (sc::E, '€', None),
         ],
+        dead: &[
+            // The key right of `P`: `^` and `¨`, both dead. This is the one
+            // French uses constantly — `ê`, `ï`, `û`.
+            (sc::LEFT_BRACKET, DeadFaces::PLAIN_AND_SHIFTED),
+            // AltGr+2 and AltGr+7 give a dead tilde and a dead grave, for `ñ`
+            // and `à`. Their plain faces (`é` and `è`) are finished letters
+            // and are not dead.
+            (sc::NUM2, DeadFaces::ALT_GR),
+            (sc::NUM7, DeadFaces::ALT_GR),
+            // AltGr+9 is deliberately absent. It carries `^` — the same
+            // character as the dead key above — but live, because it is the
+            // circumflex a programmer types into a shell. This is the pair
+            // that makes deadness a property of the face; see [`KeyDef::dead`].
+        ],
     },
     LayoutSpec {
         id: "es-qwerty",
@@ -811,6 +1034,13 @@ static SPECS: &[LayoutSpec] = &[
             (sc::RIGHT_BRACKET, ']', None),
             (sc::SEMICOLON, '{', None),
             (sc::APOSTROPHE, '}', None),
+        ],
+        dead: &[
+            // The key right of `P`: `` ` `` and `^`, both dead.
+            (sc::LEFT_BRACKET, DeadFaces::PLAIN_AND_SHIFTED),
+            // The key right of `Ñ`: `´` and `¨`, both dead — the acute that
+            // spells `á é í ó ú` and the diaeresis for `ü` in `pingüino`.
+            (sc::APOSTROPHE, DeadFaces::PLAIN_AND_SHIFTED),
         ],
     },
 ];

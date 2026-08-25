@@ -168,9 +168,7 @@ fn cubic_segments(p0: Point, c1: Point, c2: Point, p1: Point) -> u32 {
     let d1y = p0.y - 2.0 * c1.y + c2.y;
     let d2x = c1.x - 2.0 * c2.x + p1.x;
     let d2y = c1.y - 2.0 * c2.y + p1.y;
-    let dev_sq = d1x
-        .mul_add(d1x, d1y * d1y)
-        .max(d2x.mul_add(d2x, d2y * d2y));
+    let dev_sq = d1x.mul_add(d1x, d1y * d1y).max(d2x.mul_add(d2x, d2y * d2y));
     // Below this the formula yields less than one segment anyway.
     if dev_sq < 1.0 / 27.0 {
         return 1;
@@ -759,8 +757,14 @@ mod tests {
         )
         .unwrap();
         let (a, b) = (ink(&straight), ink(&curved));
-        assert!((a - 800.0).abs() < 2.0, "the oracle is not the triangle: {a}");
-        assert!((a - b).abs() < 1.0, "a flat cubic drew {b}, not the triangle's {a}");
+        assert!(
+            (a - 800.0).abs() < 2.0,
+            "the oracle is not the triangle: {a}"
+        );
+        assert!(
+            (a - b).abs() < 1.0,
+            "a flat cubic drew {b}, not the triangle's {a}"
+        );
     }
 
     #[test]
@@ -769,7 +773,10 @@ mod tests {
         let p1 = Point::new(100.0, 0.0);
         let gentle = cubic_segments(p0, Point::new(33.0, 1.0), Point::new(66.0, 1.0), p1);
         let tight = cubic_segments(p0, Point::new(33.0, 300.0), Point::new(66.0, 300.0), p1);
-        assert!(gentle < tight, "gentle {gentle} was not cheaper than tight {tight}");
+        assert!(
+            gentle < tight,
+            "gentle {gentle} was not cheaper than tight {tight}"
+        );
         assert!(tight <= 256, "segment count is unbounded: {tight}");
         // Same deviation, more curvature to resolve: a cubic must not be
         // flattened as coarsely as a quadratic.

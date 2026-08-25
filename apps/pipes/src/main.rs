@@ -18,7 +18,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{seed_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
 
 // ---------------------------------------------------------------------------
@@ -556,22 +556,18 @@ impl PipesApp {
         }
 
         match event.key {
-            Key::Up
-                if self.cursor_r > 0 => {
-                    self.cursor_r -= 1;
-                }
-            Key::Down
-                if self.cursor_r + 1 < self.board.rows => {
-                    self.cursor_r += 1;
-                }
-            Key::Left
-                if self.cursor_c > 0 => {
-                    self.cursor_c -= 1;
-                }
-            Key::Right
-                if self.cursor_c + 1 < self.board.cols => {
-                    self.cursor_c += 1;
-                }
+            Key::Up if self.cursor_r > 0 => {
+                self.cursor_r -= 1;
+            }
+            Key::Down if self.cursor_r + 1 < self.board.rows => {
+                self.cursor_r += 1;
+            }
+            Key::Left if self.cursor_c > 0 => {
+                self.cursor_c -= 1;
+            }
+            Key::Right if self.cursor_c + 1 < self.board.cols => {
+                self.cursor_c += 1;
+            }
             Key::Space | Key::Enter => {
                 self.rotate_current_cw();
             }
@@ -1149,7 +1145,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_r, 1);
     }
@@ -1161,7 +1157,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_c, 1);
     }
@@ -1173,7 +1169,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_r, 0);
     }
@@ -1185,7 +1181,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_c, 0);
     }
@@ -1197,7 +1193,7 @@ mod tests {
             key: Key::Space,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.moves, 1);
     }
@@ -1228,7 +1224,7 @@ mod tests {
             key: Key::N,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.moves, 0);
     }
@@ -1240,7 +1236,7 @@ mod tests {
             key: Key::Num2,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.difficulty, Difficulty::Medium);
     }
@@ -1252,7 +1248,7 @@ mod tests {
             key: Key::Space,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.moves, 0);
     }
@@ -1273,7 +1269,7 @@ mod tests {
             key: Key::F,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert!(!app.show_flow);
     }
@@ -1285,7 +1281,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.cursor_r, 1);
     }

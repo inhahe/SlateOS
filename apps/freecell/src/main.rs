@@ -2689,7 +2689,7 @@ mod tests {
                 super_key: false,
             },
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.state.focus, FocusArea::Tableau(1));
     }
@@ -2707,7 +2707,7 @@ mod tests {
                 super_key: false,
             },
             pressed: false,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.state.focus, FocusArea::Tableau(0));
     }

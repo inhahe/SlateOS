@@ -1079,7 +1079,7 @@ fn escape_closes_a_popup_and_is_otherwise_left_alone() {
         key: Key::Escape,
         pressed: true,
         modifiers: Modifiers::default(),
-        text: None,
+        text: String::new(),
     };
 
     let mut shell = shell();
@@ -1657,7 +1657,7 @@ fn zone_key() -> KeyEvent {
             super_key: true,
             ..Modifiers::default()
         },
-        text: None,
+        text: String::new(),
     }
 }
 
@@ -1781,7 +1781,7 @@ fn the_chooser_closes_the_ways_a_popup_closes() {
         key: Key::Escape,
         pressed: true,
         modifiers: Modifiers::default(),
-        text: None,
+        text: String::new(),
     };
     assert!(shell.handle_hotkey(&escape).consumed);
     assert!(!shell.snap.is_overlay_visible(), "Escape did not close it");

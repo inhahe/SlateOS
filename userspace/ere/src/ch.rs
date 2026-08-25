@@ -15,6 +15,8 @@
 //! definition of what a character is and the shell and the utilities cannot
 //! drift apart about it.
 
+use alloc::vec;
+use alloc::vec::Vec;
 use bstr::ByteSlice;
 
 /// An owned byte string: an arbitrary byte sequence, no encoding implied.

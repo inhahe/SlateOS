@@ -103,7 +103,11 @@ impl PongApp {
         self.ball_y = FIELD_H / 2.0;
         let dir = if go_right { 1.0 } else { -1.0 };
         self.ball_dx = INITIAL_BALL_SPEED * dir;
-        self.ball_dy = if self.rally_count.is_multiple_of(2) { 1.5 } else { -1.5 };
+        self.ball_dy = if self.rally_count.is_multiple_of(2) {
+            1.5
+        } else {
+            -1.5
+        };
         self.speed_mult = 1.0;
         self.rally_count = 0;
     }
@@ -125,11 +129,15 @@ impl PongApp {
         // Player paddle movement
         if self.up_held && self.left_y > 0.0 {
             self.left_y -= PADDLE_SPEED;
-            if self.left_y < 0.0 { self.left_y = 0.0; }
+            if self.left_y < 0.0 {
+                self.left_y = 0.0;
+            }
         }
         if self.down_held && self.left_y + PADDLE_H < FIELD_H {
             self.left_y += PADDLE_SPEED;
-            if self.left_y + PADDLE_H > FIELD_H { self.left_y = FIELD_H - PADDLE_H; }
+            if self.left_y + PADDLE_H > FIELD_H {
+                self.left_y = FIELD_H - PADDLE_H;
+            }
         }
 
         // AI paddle movement (tracks ball with slight lag)
@@ -212,29 +220,27 @@ impl PongApp {
         match event {
             Event::Tick { .. } => self.update(),
             Event::Key(KeyEvent { key, modifiers, .. }) => {
-                if modifiers.ctrl { return; }
+                if modifiers.ctrl {
+                    return;
+                }
                 match self.state {
                     GameState::Menu => {
                         if matches!(key, Key::Enter | Key::Space) {
                             self.new_game();
                         }
                     }
-                    GameState::Playing => {
-                        match key {
-                            Key::Up => self.up_held = true,
-                            Key::Down => self.down_held = true,
-                            Key::P => self.state = GameState::Paused,
-                            Key::Escape => self.state = GameState::Paused,
-                            _ => {}
-                        }
-                    }
-                    GameState::Paused => {
-                        match key {
-                            Key::P | Key::Escape | Key::Space => self.state = GameState::Playing,
-                            Key::N => self.new_game(),
-                            _ => {}
-                        }
-                    }
+                    GameState::Playing => match key {
+                        Key::Up => self.up_held = true,
+                        Key::Down => self.down_held = true,
+                        Key::P => self.state = GameState::Paused,
+                        Key::Escape => self.state = GameState::Paused,
+                        _ => {}
+                    },
+                    GameState::Paused => match key {
+                        Key::P | Key::Escape | Key::Space => self.state = GameState::Playing,
+                        Key::N => self.new_game(),
+                        _ => {}
+                    },
                     GameState::GameOver => {
                         if matches!(key, Key::Enter | Key::Space | Key::N) {
                             self.new_game();
@@ -250,8 +256,12 @@ impl PongApp {
         // Actually, we'll use a simpler approach: release on opposing key
         if let Event::Key(KeyEvent { key, .. }) = event {
             match key {
-                Key::Up => { self.down_held = false; }
-                Key::Down => { self.up_held = false; }
+                Key::Up => {
+                    self.down_held = false;
+                }
+                Key::Down => {
+                    self.up_held = false;
+                }
                 _ => {}
             }
         }
@@ -262,14 +272,20 @@ impl PongApp {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: COL_BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Field
         cmds.push(RenderCommand::FillRect {
-            x: FIELD_X, y: FIELD_Y, width: FIELD_W, height: FIELD_H,
+            x: FIELD_X,
+            y: FIELD_Y,
+            width: FIELD_W,
+            height: FIELD_H,
             color: COL_MANTLE,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -279,8 +295,10 @@ impl PongApp {
         let mut dash_y = FIELD_Y;
         while dash_y < FIELD_Y + FIELD_H {
             cmds.push(RenderCommand::FillRect {
-                x: center_x, y: dash_y,
-                width: 2.0, height: 12.0,
+                x: center_x,
+                y: dash_y,
+                width: 2.0,
+                height: 12.0,
                 color: COL_SURFACE0,
                 corner_radii: CornerRadii::ZERO,
             });
@@ -289,7 +307,8 @@ impl PongApp {
 
         // Scores
         cmds.push(RenderCommand::Text {
-            x: FIELD_X + FIELD_W / 2.0 - 60.0, y: 15.0,
+            x: FIELD_X + FIELD_W / 2.0 - 60.0,
+            y: 15.0,
             text: format!("{}", self.left_score),
             font_size: 28.0,
             color: COL_BLUE,
@@ -298,7 +317,8 @@ impl PongApp {
             overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
-            x: FIELD_X + FIELD_W / 2.0 + 40.0, y: 15.0,
+            x: FIELD_X + FIELD_W / 2.0 + 40.0,
+            y: 15.0,
             text: format!("{}", self.right_score),
             font_size: 28.0,
             color: COL_RED,
@@ -309,7 +329,8 @@ impl PongApp {
 
         // Labels
         cmds.push(RenderCommand::Text {
-            x: FIELD_X + FIELD_W / 2.0 - 80.0, y: 18.0,
+            x: FIELD_X + FIELD_W / 2.0 - 80.0,
+            y: 18.0,
             text: "You".to_string(),
             font_size: 12.0,
             color: COL_SUBTEXT0,
@@ -318,7 +339,8 @@ impl PongApp {
             overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
-            x: FIELD_X + FIELD_W / 2.0 + 55.0, y: 18.0,
+            x: FIELD_X + FIELD_W / 2.0 + 55.0,
+            y: 18.0,
             text: "AI".to_string(),
             font_size: 12.0,
             color: COL_SUBTEXT0,
@@ -385,7 +407,10 @@ impl PongApp {
             }
             GameState::Paused => {
                 cmds.push(RenderCommand::FillRect {
-                    x: FIELD_X, y: FIELD_Y, width: FIELD_W, height: FIELD_H,
+                    x: FIELD_X,
+                    y: FIELD_Y,
+                    width: FIELD_W,
+                    height: FIELD_H,
                     color: Color::rgba(0, 0, 0, 140),
                     corner_radii: CornerRadii::ZERO,
                 });
@@ -402,12 +427,23 @@ impl PongApp {
             }
             GameState::GameOver => {
                 cmds.push(RenderCommand::FillRect {
-                    x: FIELD_X, y: FIELD_Y, width: FIELD_W, height: FIELD_H,
+                    x: FIELD_X,
+                    y: FIELD_Y,
+                    width: FIELD_W,
+                    height: FIELD_H,
                     color: Color::rgba(0, 0, 0, 160),
                     corner_radii: CornerRadii::ZERO,
                 });
-                let msg = if self.left_score >= WIN_SCORE { "You Win!" } else { "AI Wins!" };
-                let msg_color = if self.left_score >= WIN_SCORE { COL_GREEN } else { COL_RED };
+                let msg = if self.left_score >= WIN_SCORE {
+                    "You Win!"
+                } else {
+                    "AI Wins!"
+                };
+                let msg_color = if self.left_score >= WIN_SCORE {
+                    COL_GREEN
+                } else {
+                    COL_RED
+                };
                 cmds.push(RenderCommand::Text {
                     x: FIELD_X + FIELD_W / 2.0 - 60.0,
                     y: FIELD_Y + FIELD_H / 2.0 - 20.0,
@@ -434,7 +470,8 @@ impl PongApp {
 
         // Help
         cmds.push(RenderCommand::Text {
-            x: 20.0, y: height - 20.0,
+            x: 20.0,
+            y: height - 20.0,
             text: "Up/Down=Move  P=Pause  N=New Game  First to 11 wins".to_string(),
             font_size: 11.0,
             color: COL_OVERLAY0,
@@ -497,7 +534,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.state, GameState::Playing);
     }
@@ -510,7 +547,7 @@ mod tests {
             key: Key::P,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.state, GameState::Paused);
     }
@@ -524,7 +561,7 @@ mod tests {
             key: Key::P,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.state, GameState::Playing);
     }
@@ -649,7 +686,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.state, GameState::Playing);
         assert_eq!(app.left_score, 0);
@@ -711,7 +748,7 @@ mod tests {
             key: Key::Escape,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.state, GameState::Paused);
     }
@@ -725,7 +762,7 @@ mod tests {
             key: Key::N,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.state, GameState::Playing);
         assert_eq!(app.left_score, 0);
@@ -768,9 +805,12 @@ mod tests {
         let mut app = PongApp::new();
         app.event(&Event::Key(KeyEvent {
             key: Key::Enter,
-            modifiers: Modifiers { ctrl: true, ..Modifiers::default() },
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.state, GameState::Menu);
     }
@@ -819,7 +859,7 @@ mod tests {
             key: Key::Space,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.state, GameState::Playing);
     }

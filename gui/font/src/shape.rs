@@ -304,7 +304,11 @@ impl ShapedRun {
     /// `levels` is one bidi embedding level per glyph, in *logical* order. It
     /// is dropped when every level is even, and kept otherwise even if the
     /// permutation was the identity — see the field.
-    pub(crate) fn reordered(glyphs: Vec<ShapedGlyph>, visual: Vec<u32>, levels: Vec<Level>) -> Self {
+    pub(crate) fn reordered(
+        glyphs: Vec<ShapedGlyph>,
+        visual: Vec<u32>,
+        levels: Vec<Level>,
+    ) -> Self {
         let identity = visual
             .iter()
             .enumerate()
@@ -401,7 +405,10 @@ impl ShapedRun {
     /// start of the last cluster of `self.glyphs[..i]`. The mirror of
     /// [`group_end`](Self::group_end), for the queries that walk backwards.
     fn group_start(&self, i: usize) -> usize {
-        let Some(cluster) = i.checked_sub(1).and_then(|j| self.glyphs.get(j)).map(|g| g.cluster)
+        let Some(cluster) = i
+            .checked_sub(1)
+            .and_then(|j| self.glyphs.get(j))
+            .map(|g| g.cluster)
         else {
             return i;
         };
@@ -455,14 +462,22 @@ impl ShapedRun {
     /// not. The caret before the cluster's first character goes here.
     fn leading_edge(&self, from: usize, to: usize) -> f32 {
         let (left, width) = self.cluster_box(from, to);
-        if self.is_rtl(from) { left + width } else { left }
+        if self.is_rtl(from) {
+            left + width
+        } else {
+            left
+        }
     }
 
     /// The mirror: where the cluster ends as a reader reads it. The caret
     /// after its last character goes here.
     fn trailing_edge(&self, from: usize, to: usize) -> f32 {
         let (left, width) = self.cluster_box(from, to);
-        if self.is_rtl(from) { left } else { left + width }
+        if self.is_rtl(from) {
+            left
+        } else {
+            left + width
+        }
     }
 
     /// The byte offset at which to cut the source string so that what remains
@@ -808,7 +823,10 @@ impl ShapedRun {
             // A cluster occupies consecutive slots whichever way it is drawn —
             // rule L2 reverses whole level runs and a cluster lies inside one —
             // so its leftmost slot orders it against every other cluster.
-            let leftmost = (i..to).filter_map(|j| slot.get(j).copied()).min().unwrap_or(0);
+            let leftmost = (i..to)
+                .filter_map(|j| slot.get(j).copied())
+                .min()
+                .unwrap_or(0);
             out.push(VisualCluster {
                 leftmost,
                 left: if rtl { trailing } else { leading },
@@ -829,10 +847,12 @@ impl ShapedRun {
     /// what picks between them. So the exact `(offset, affinity)` is tried
     /// first, and only then the offset alone.
     fn slot_of_caret(clusters: &[VisualCluster], at: Hit) -> Option<usize> {
-        let exact = clusters
-            .iter()
-            .position(|c| c.left == at)
-            .or_else(|| clusters.iter().position(|c| c.right == at).map(|k| k.saturating_add(1)));
+        let exact = clusters.iter().position(|c| c.left == at).or_else(|| {
+            clusters
+                .iter()
+                .position(|c| c.right == at)
+                .map(|k| k.saturating_add(1))
+        });
         if let Some(slot) = exact {
             return Some(slot);
         }
@@ -1115,20 +1135,49 @@ mod tests {
     fn a_ligature_is_never_split() {
         // "office": o, ffi (one glyph, three chars), c, e.
         let r = ShapedRun::new(alloc::vec![
-            ShapedGlyph { key: GlyphKey::bitmap('o'), cluster: 0, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
-            ShapedGlyph { key: GlyphKey::bitmap('\u{FB03}'), cluster: 1, advance: 20.0, kern_next: 0.0, offset: (0.0, 0.0) },
-            ShapedGlyph { key: GlyphKey::bitmap('c'), cluster: 4, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
-            ShapedGlyph { key: GlyphKey::bitmap('e'), cluster: 5, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('o'),
+                cluster: 0,
+                advance: 10.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('\u{FB03}'),
+                cluster: 1,
+                advance: 20.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('c'),
+                cluster: 4,
+                advance: 10.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('e'),
+                cluster: 5,
+                advance: 10.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
         ]);
         assert!((r.width() - 50.0).abs() < f32::EPSILON);
 
         let inside = [2, 3];
         for width in 0..60 {
             let cut = r.fit(f32::from(u16::try_from(width).unwrap()), 6);
-            assert!(!inside.contains(&cut), "fit({width}) cut inside the ligature");
+            assert!(
+                !inside.contains(&cut),
+                "fit({width}) cut inside the ligature"
+            );
         }
         for offset in 0..60 {
-            let at = r.offset_at(f32::from(u16::try_from(offset).unwrap()), 6).offset;
+            let at = r
+                .offset_at(f32::from(u16::try_from(offset).unwrap()), 6)
+                .offset;
             assert!(
                 !inside.contains(&at),
                 "offset_at({offset}) landed inside the ligature"
@@ -1154,10 +1203,34 @@ mod tests {
         // "aXb", where X is one character drawn as two 10 px glyphs — say a
         // precomposed vowel the font renders as a base plus a sign.
         let r = ShapedRun::new(alloc::vec![
-            ShapedGlyph { key: GlyphKey::bitmap('a'), cluster: 0, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
-            ShapedGlyph { key: GlyphKey::bitmap('X'), cluster: 1, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
-            ShapedGlyph { key: GlyphKey::bitmap('\u{0301}'), cluster: 1, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
-            ShapedGlyph { key: GlyphKey::bitmap('b'), cluster: 2, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('a'),
+                cluster: 0,
+                advance: 10.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('X'),
+                cluster: 1,
+                advance: 10.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('\u{0301}'),
+                cluster: 1,
+                advance: 10.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('b'),
+                cluster: 2,
+                advance: 10.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
         ]);
         assert!((r.width() - 40.0).abs() < f32::EPSILON);
 
@@ -1210,10 +1283,34 @@ mod tests {
     #[test]
     fn a_suffix_is_never_wider_than_the_budget_it_was_cut_to() {
         let r = ShapedRun::new(alloc::vec![
-            ShapedGlyph { key: GlyphKey::bitmap('a'), cluster: 0, advance: 7.0, kern_next: 0.0, offset: (0.0, 0.0) },
-            ShapedGlyph { key: GlyphKey::bitmap('X'), cluster: 1, advance: 11.0, kern_next: 0.0, offset: (0.0, 0.0) },
-            ShapedGlyph { key: GlyphKey::bitmap('\u{0301}'), cluster: 1, advance: 5.0, kern_next: 0.0, offset: (0.0, 0.0) },
-            ShapedGlyph { key: GlyphKey::bitmap('b'), cluster: 2, advance: 9.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('a'),
+                cluster: 0,
+                advance: 7.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('X'),
+                cluster: 1,
+                advance: 11.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('\u{0301}'),
+                cluster: 1,
+                advance: 5.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('b'),
+                cluster: 2,
+                advance: 9.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
         ]);
         for px in 0..40 {
             let budget = f32::from(u16::try_from(px).unwrap());
@@ -1267,7 +1364,11 @@ mod tests {
         // The point of keeping both: clusters stay sorted for the queries.
         let logical: String = run.glyphs().iter().map(|g| g.key.ch()).collect();
         assert_eq!(logical, "abc");
-        assert!(run.glyphs().windows(2).all(|w| w[0].cluster <= w[1].cluster));
+        assert!(
+            run.glyphs()
+                .windows(2)
+                .all(|w| w[0].cluster <= w[1].cluster)
+        );
     }
 
     #[test]
@@ -1395,7 +1496,11 @@ mod tests {
             }) else {
                 return out;
             };
-            out.push((next.offset, next.affinity, r.x_of(next.offset, end, next.affinity)));
+            out.push((
+                next.offset,
+                next.affinity,
+                r.x_of(next.offset, end, next.affinity),
+            ));
             at = next;
         }
         panic!("caret motion did not terminate: {out:?}");
@@ -1407,8 +1512,8 @@ mod tests {
     /// with the wrong bytes.
     fn assert_xs(stops: &[(usize, Affinity, f32)], want: &[f32]) {
         let got: Vec<f32> = stops.iter().map(|s| s.2).collect();
-        let same = got.len() == want.len()
-            && got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.001);
+        let same =
+            got.len() == want.len() && got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.001);
         assert!(same, "drawn at {got:?}, want {want:?} (stops {stops:?})");
     }
 
@@ -1421,7 +1526,10 @@ mod tests {
     #[test]
     fn the_right_arrow_steps_right_across_the_screen() {
         let r = bidi_run();
-        let start = Hit { offset: 0, affinity: Affinity::Downstream };
+        let start = Hit {
+            offset: 0,
+            affinity: Affinity::Downstream,
+        };
         let stops = walk(&r, start, 6, true);
         let offsets: Vec<usize> = stops.iter().map(|s| s.0).collect();
         assert_eq!(offsets, alloc::vec![1, 2, 3, 2, 5, 6], "{stops:?}");
@@ -1435,7 +1543,10 @@ mod tests {
     #[test]
     fn the_left_arrow_steps_left_across_the_screen() {
         let r = bidi_run();
-        let start = Hit { offset: 6, affinity: Affinity::Upstream };
+        let start = Hit {
+            offset: 6,
+            affinity: Affinity::Upstream,
+        };
         let stops = walk(&r, start, 6, false);
         let offsets: Vec<usize> = stops.iter().map(|s| s.0).collect();
         assert_eq!(offsets, alloc::vec![5, 4, 3, 4, 1, 0], "{stops:?}");
@@ -1450,10 +1561,15 @@ mod tests {
     #[test]
     fn a_step_and_its_reverse_return_to_the_same_place() {
         let r = bidi_run();
-        let mut at = Hit { offset: 0, affinity: Affinity::Downstream };
+        let mut at = Hit {
+            offset: 0,
+            affinity: Affinity::Downstream,
+        };
         while let Some(next) = r.caret_right(at, 6) {
             let there = r.x_of(next.offset, 6, next.affinity);
-            let back = r.caret_left(next, 6).expect("something was crossed to get here");
+            let back = r
+                .caret_left(next, 6)
+                .expect("something was crossed to get here");
             let here = r.x_of(at.offset, 6, at.affinity);
             let returned = r.x_of(back.offset, 6, back.affinity);
             assert!(
@@ -1471,9 +1587,15 @@ mod tests {
     #[test]
     fn motion_stops_at_the_edges_and_says_so() {
         let r = bidi_run();
-        let left_edge = Hit { offset: 0, affinity: Affinity::Downstream };
+        let left_edge = Hit {
+            offset: 0,
+            affinity: Affinity::Downstream,
+        };
         assert_eq!(r.caret_left(left_edge, 6), None);
-        let right_edge = Hit { offset: 6, affinity: Affinity::Upstream };
+        let right_edge = Hit {
+            offset: 6,
+            affinity: Affinity::Upstream,
+        };
         assert_eq!(r.caret_right(right_edge, 6), None);
         // An empty run has no clusters, so neither direction goes anywhere.
         let empty = ShapedRun::new(alloc::vec![]);
@@ -1489,8 +1611,17 @@ mod tests {
     #[test]
     fn a_cursor_with_only_a_byte_offset_still_moves() {
         let r = bidi_run();
-        let end = Hit { offset: 6, affinity: Affinity::Downstream };
-        assert_eq!(r.caret_left(end, 6), Some(Hit { offset: 5, affinity: Affinity::Downstream }));
+        let end = Hit {
+            offset: 6,
+            affinity: Affinity::Downstream,
+        };
+        assert_eq!(
+            r.caret_left(end, 6),
+            Some(Hit {
+                offset: 5,
+                affinity: Affinity::Downstream
+            })
+        );
         assert_eq!(r.caret_right(end, 6), None);
     }
 
@@ -1501,7 +1632,10 @@ mod tests {
     #[test]
     fn motion_on_one_direction_text_is_the_next_character() {
         let r = run(4);
-        let mut at = Hit { offset: 0, affinity: Affinity::Downstream };
+        let mut at = Hit {
+            offset: 0,
+            affinity: Affinity::Downstream,
+        };
         for want in 1..=4 {
             at = r.caret_right(at, 4).expect("four characters, four steps");
             assert_eq!(at.offset, want);
@@ -1523,18 +1657,48 @@ mod tests {
     fn a_ligature_is_crossed_whole() {
         // "office": o, ffi (one glyph, three chars), c, e.
         let r = ShapedRun::new(alloc::vec![
-            ShapedGlyph { key: GlyphKey::bitmap('o'), cluster: 0, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
-            ShapedGlyph { key: GlyphKey::bitmap('\u{FB03}'), cluster: 1, advance: 20.0, kern_next: 0.0, offset: (0.0, 0.0) },
-            ShapedGlyph { key: GlyphKey::bitmap('c'), cluster: 4, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
-            ShapedGlyph { key: GlyphKey::bitmap('e'), cluster: 5, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('o'),
+                cluster: 0,
+                advance: 10.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('\u{FB03}'),
+                cluster: 1,
+                advance: 20.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('c'),
+                cluster: 4,
+                advance: 10.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('e'),
+                cluster: 5,
+                advance: 10.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
         ]);
-        let at = Hit { offset: 1, affinity: Affinity::Downstream };
+        let at = Hit {
+            offset: 1,
+            affinity: Affinity::Downstream,
+        };
         // One press crosses all three characters of the `ffi`.
         assert_eq!(r.caret_right(at, 6).map(|h| h.offset), Some(4));
         // From byte 2 — inside the ligature — the next stop is the same one,
         // because that cursor is drawn at byte 1 and moving is relative to
         // where it is drawn.
-        let inside = Hit { offset: 2, affinity: Affinity::Downstream };
+        let inside = Hit {
+            offset: 2,
+            affinity: Affinity::Downstream,
+        };
         assert_eq!(r.caret_right(inside, 6).map(|h| h.offset), Some(4));
         assert_eq!(r.caret_left(inside, 6).map(|h| h.offset), Some(0));
     }
@@ -1546,7 +1710,15 @@ mod tests {
     #[test]
     fn a_lone_right_to_left_letter_is_still_crossed_backwards() {
         let r = ShapedRun::reordered(spelled("aHb"), vec![0, 1, 2], vec![0, 1, 0]);
-        let stops = walk(&r, Hit { offset: 0, affinity: Affinity::Downstream }, 3, true);
+        let stops = walk(
+            &r,
+            Hit {
+                offset: 0,
+                affinity: Affinity::Downstream,
+            },
+            3,
+            true,
+        );
         let offsets: Vec<usize> = stops.iter().map(|s| s.0).collect();
         // Crossing `H` rightwards lands *before* it — byte 1 — because that is
         // the edge of it that faces right.
@@ -1645,10 +1817,34 @@ mod tests {
     fn a_selection_paints_a_ligature_whole() {
         // "office": o, ffi (one glyph, three chars), c, e.
         let r = ShapedRun::new(alloc::vec![
-            ShapedGlyph { key: GlyphKey::bitmap('o'), cluster: 0, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
-            ShapedGlyph { key: GlyphKey::bitmap('\u{FB03}'), cluster: 1, advance: 20.0, kern_next: 0.0, offset: (0.0, 0.0) },
-            ShapedGlyph { key: GlyphKey::bitmap('c'), cluster: 4, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
-            ShapedGlyph { key: GlyphKey::bitmap('e'), cluster: 5, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('o'),
+                cluster: 0,
+                advance: 10.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('\u{FB03}'),
+                cluster: 1,
+                advance: 20.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('c'),
+                cluster: 4,
+                advance: 10.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
+            ShapedGlyph {
+                key: GlyphKey::bitmap('e'),
+                cluster: 5,
+                advance: 10.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0)
+            },
         ]);
         // Selecting just the `f` of `ffi` paints all 20 px of the ligature.
         assert_boxes(&r.selection_rects(1, 2, 6), &[(10.0, 20.0)]);

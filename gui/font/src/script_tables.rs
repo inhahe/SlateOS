@@ -11,510 +11,510 @@
 /// `(first, last, tag_index)`. A character in no range has no script
 /// of its own and takes the script of the text around it.
 pub(crate) static SCRIPT_RANGES: [(u32, u32, u16); 778] = [
-    (0x0041, 0x005A, 0), // Latn
-    (0x0061, 0x007A, 0), // Latn
-    (0x00AA, 0x00AA, 0), // Latn
-    (0x00BA, 0x00BA, 0), // Latn
-    (0x00C0, 0x00D6, 0), // Latn
-    (0x00D8, 0x00F6, 0), // Latn
-    (0x00F8, 0x02B8, 0), // Latn
-    (0x02E0, 0x02E4, 0), // Latn
-    (0x02EA, 0x02EB, 1), // Bopo
-    (0x0370, 0x0373, 2), // Grek
-    (0x0375, 0x0377, 2), // Grek
-    (0x037A, 0x037D, 2), // Grek
-    (0x037F, 0x037F, 2), // Grek
-    (0x0384, 0x0384, 2), // Grek
-    (0x0386, 0x0386, 2), // Grek
-    (0x0388, 0x038A, 2), // Grek
-    (0x038C, 0x038C, 2), // Grek
-    (0x038E, 0x03A1, 2), // Grek
-    (0x03A3, 0x03E1, 2), // Grek
-    (0x03E2, 0x03EF, 3), // Copt
-    (0x03F0, 0x03FF, 2), // Grek
-    (0x0400, 0x0484, 4), // Cyrl
-    (0x0487, 0x052F, 4), // Cyrl
-    (0x0531, 0x0556, 5), // Armn
-    (0x0559, 0x058A, 5), // Armn
-    (0x058D, 0x058F, 5), // Armn
-    (0x0591, 0x05C7, 6), // Hebr
-    (0x05D0, 0x05EA, 6), // Hebr
-    (0x05EF, 0x05F4, 6), // Hebr
-    (0x0600, 0x0604, 7), // Arab
-    (0x0606, 0x060B, 7), // Arab
-    (0x060D, 0x061A, 7), // Arab
-    (0x061C, 0x061E, 7), // Arab
-    (0x0620, 0x063F, 7), // Arab
-    (0x0641, 0x064A, 7), // Arab
-    (0x0656, 0x066F, 7), // Arab
-    (0x0671, 0x06DC, 7), // Arab
-    (0x06DE, 0x06FF, 7), // Arab
-    (0x0700, 0x070D, 8), // Syrc
-    (0x070F, 0x074A, 8), // Syrc
-    (0x074D, 0x074F, 8), // Syrc
-    (0x0750, 0x077F, 7), // Arab
-    (0x0780, 0x07B1, 9), // Thaa
-    (0x07C0, 0x07FA, 10), // Nkoo
-    (0x07FD, 0x07FF, 10), // Nkoo
-    (0x0800, 0x082D, 11), // Samr
-    (0x0830, 0x083E, 11), // Samr
-    (0x0840, 0x085B, 12), // Mand
-    (0x085E, 0x085E, 12), // Mand
-    (0x0860, 0x086A, 8), // Syrc
-    (0x0870, 0x0891, 7), // Arab
-    (0x0897, 0x08E1, 7), // Arab
-    (0x08E3, 0x08FF, 7), // Arab
-    (0x0900, 0x0950, 13), // Deva
-    (0x0955, 0x0963, 13), // Deva
-    (0x0966, 0x097F, 13), // Deva
-    (0x0980, 0x0983, 14), // Beng
-    (0x0985, 0x098C, 14), // Beng
-    (0x098F, 0x0990, 14), // Beng
-    (0x0993, 0x09A8, 14), // Beng
-    (0x09AA, 0x09B0, 14), // Beng
-    (0x09B2, 0x09B2, 14), // Beng
-    (0x09B6, 0x09B9, 14), // Beng
-    (0x09BC, 0x09C4, 14), // Beng
-    (0x09C7, 0x09C8, 14), // Beng
-    (0x09CB, 0x09CE, 14), // Beng
-    (0x09D7, 0x09D7, 14), // Beng
-    (0x09DC, 0x09DD, 14), // Beng
-    (0x09DF, 0x09E3, 14), // Beng
-    (0x09E6, 0x09FE, 14), // Beng
-    (0x0A01, 0x0A03, 15), // Guru
-    (0x0A05, 0x0A0A, 15), // Guru
-    (0x0A0F, 0x0A10, 15), // Guru
-    (0x0A13, 0x0A28, 15), // Guru
-    (0x0A2A, 0x0A30, 15), // Guru
-    (0x0A32, 0x0A33, 15), // Guru
-    (0x0A35, 0x0A36, 15), // Guru
-    (0x0A38, 0x0A39, 15), // Guru
-    (0x0A3C, 0x0A3C, 15), // Guru
-    (0x0A3E, 0x0A42, 15), // Guru
-    (0x0A47, 0x0A48, 15), // Guru
-    (0x0A4B, 0x0A4D, 15), // Guru
-    (0x0A51, 0x0A51, 15), // Guru
-    (0x0A59, 0x0A5C, 15), // Guru
-    (0x0A5E, 0x0A5E, 15), // Guru
-    (0x0A66, 0x0A76, 15), // Guru
-    (0x0A81, 0x0A83, 16), // Gujr
-    (0x0A85, 0x0A8D, 16), // Gujr
-    (0x0A8F, 0x0A91, 16), // Gujr
-    (0x0A93, 0x0AA8, 16), // Gujr
-    (0x0AAA, 0x0AB0, 16), // Gujr
-    (0x0AB2, 0x0AB3, 16), // Gujr
-    (0x0AB5, 0x0AB9, 16), // Gujr
-    (0x0ABC, 0x0AC5, 16), // Gujr
-    (0x0AC7, 0x0AC9, 16), // Gujr
-    (0x0ACB, 0x0ACD, 16), // Gujr
-    (0x0AD0, 0x0AD0, 16), // Gujr
-    (0x0AE0, 0x0AE3, 16), // Gujr
-    (0x0AE6, 0x0AF1, 16), // Gujr
-    (0x0AF9, 0x0AFF, 16), // Gujr
-    (0x0B01, 0x0B03, 17), // Orya
-    (0x0B05, 0x0B0C, 17), // Orya
-    (0x0B0F, 0x0B10, 17), // Orya
-    (0x0B13, 0x0B28, 17), // Orya
-    (0x0B2A, 0x0B30, 17), // Orya
-    (0x0B32, 0x0B33, 17), // Orya
-    (0x0B35, 0x0B39, 17), // Orya
-    (0x0B3C, 0x0B44, 17), // Orya
-    (0x0B47, 0x0B48, 17), // Orya
-    (0x0B4B, 0x0B4D, 17), // Orya
-    (0x0B55, 0x0B57, 17), // Orya
-    (0x0B5C, 0x0B5D, 17), // Orya
-    (0x0B5F, 0x0B63, 17), // Orya
-    (0x0B66, 0x0B77, 17), // Orya
-    (0x0B82, 0x0B83, 18), // Taml
-    (0x0B85, 0x0B8A, 18), // Taml
-    (0x0B8E, 0x0B90, 18), // Taml
-    (0x0B92, 0x0B95, 18), // Taml
-    (0x0B99, 0x0B9A, 18), // Taml
-    (0x0B9C, 0x0B9C, 18), // Taml
-    (0x0B9E, 0x0B9F, 18), // Taml
-    (0x0BA3, 0x0BA4, 18), // Taml
-    (0x0BA8, 0x0BAA, 18), // Taml
-    (0x0BAE, 0x0BB9, 18), // Taml
-    (0x0BBE, 0x0BC2, 18), // Taml
-    (0x0BC6, 0x0BC8, 18), // Taml
-    (0x0BCA, 0x0BCD, 18), // Taml
-    (0x0BD0, 0x0BD0, 18), // Taml
-    (0x0BD7, 0x0BD7, 18), // Taml
-    (0x0BE6, 0x0BFA, 18), // Taml
-    (0x0C00, 0x0C0C, 19), // Telu
-    (0x0C0E, 0x0C10, 19), // Telu
-    (0x0C12, 0x0C28, 19), // Telu
-    (0x0C2A, 0x0C39, 19), // Telu
-    (0x0C3C, 0x0C44, 19), // Telu
-    (0x0C46, 0x0C48, 19), // Telu
-    (0x0C4A, 0x0C4D, 19), // Telu
-    (0x0C55, 0x0C56, 19), // Telu
-    (0x0C58, 0x0C5A, 19), // Telu
-    (0x0C5C, 0x0C5D, 19), // Telu
-    (0x0C60, 0x0C63, 19), // Telu
-    (0x0C66, 0x0C6F, 19), // Telu
-    (0x0C77, 0x0C7F, 19), // Telu
-    (0x0C80, 0x0C8C, 20), // Knda
-    (0x0C8E, 0x0C90, 20), // Knda
-    (0x0C92, 0x0CA8, 20), // Knda
-    (0x0CAA, 0x0CB3, 20), // Knda
-    (0x0CB5, 0x0CB9, 20), // Knda
-    (0x0CBC, 0x0CC4, 20), // Knda
-    (0x0CC6, 0x0CC8, 20), // Knda
-    (0x0CCA, 0x0CCD, 20), // Knda
-    (0x0CD5, 0x0CD6, 20), // Knda
-    (0x0CDC, 0x0CDE, 20), // Knda
-    (0x0CE0, 0x0CE3, 20), // Knda
-    (0x0CE6, 0x0CEF, 20), // Knda
-    (0x0CF1, 0x0CF3, 20), // Knda
-    (0x0D00, 0x0D0C, 21), // Mlym
-    (0x0D0E, 0x0D10, 21), // Mlym
-    (0x0D12, 0x0D44, 21), // Mlym
-    (0x0D46, 0x0D48, 21), // Mlym
-    (0x0D4A, 0x0D4F, 21), // Mlym
-    (0x0D54, 0x0D63, 21), // Mlym
-    (0x0D66, 0x0D7F, 21), // Mlym
-    (0x0D81, 0x0D83, 22), // Sinh
-    (0x0D85, 0x0D96, 22), // Sinh
-    (0x0D9A, 0x0DB1, 22), // Sinh
-    (0x0DB3, 0x0DBB, 22), // Sinh
-    (0x0DBD, 0x0DBD, 22), // Sinh
-    (0x0DC0, 0x0DC6, 22), // Sinh
-    (0x0DCA, 0x0DCA, 22), // Sinh
-    (0x0DCF, 0x0DD4, 22), // Sinh
-    (0x0DD6, 0x0DD6, 22), // Sinh
-    (0x0DD8, 0x0DDF, 22), // Sinh
-    (0x0DE6, 0x0DEF, 22), // Sinh
-    (0x0DF2, 0x0DF4, 22), // Sinh
-    (0x0E01, 0x0E3A, 23), // Thai
-    (0x0E40, 0x0E5B, 23), // Thai
-    (0x0E81, 0x0E82, 24), // Laoo
-    (0x0E84, 0x0E84, 24), // Laoo
-    (0x0E86, 0x0E8A, 24), // Laoo
-    (0x0E8C, 0x0EA3, 24), // Laoo
-    (0x0EA5, 0x0EA5, 24), // Laoo
-    (0x0EA7, 0x0EBD, 24), // Laoo
-    (0x0EC0, 0x0EC4, 24), // Laoo
-    (0x0EC6, 0x0EC6, 24), // Laoo
-    (0x0EC8, 0x0ECE, 24), // Laoo
-    (0x0ED0, 0x0ED9, 24), // Laoo
-    (0x0EDC, 0x0EDF, 24), // Laoo
-    (0x0F00, 0x0F47, 25), // Tibt
-    (0x0F49, 0x0F6C, 25), // Tibt
-    (0x0F71, 0x0F97, 25), // Tibt
-    (0x0F99, 0x0FBC, 25), // Tibt
-    (0x0FBE, 0x0FCC, 25), // Tibt
-    (0x0FCE, 0x0FD4, 25), // Tibt
-    (0x0FD9, 0x0FDA, 25), // Tibt
-    (0x1000, 0x109F, 26), // Mymr
-    (0x10A0, 0x10C5, 27), // Geor
-    (0x10C7, 0x10C7, 27), // Geor
-    (0x10CD, 0x10CD, 27), // Geor
-    (0x10D0, 0x10FA, 27), // Geor
-    (0x10FC, 0x10FF, 27), // Geor
-    (0x1100, 0x11FF, 28), // Hang
-    (0x1200, 0x1248, 29), // Ethi
-    (0x124A, 0x124D, 29), // Ethi
-    (0x1250, 0x1256, 29), // Ethi
-    (0x1258, 0x1258, 29), // Ethi
-    (0x125A, 0x125D, 29), // Ethi
-    (0x1260, 0x1288, 29), // Ethi
-    (0x128A, 0x128D, 29), // Ethi
-    (0x1290, 0x12B0, 29), // Ethi
-    (0x12B2, 0x12B5, 29), // Ethi
-    (0x12B8, 0x12BE, 29), // Ethi
-    (0x12C0, 0x12C0, 29), // Ethi
-    (0x12C2, 0x12C5, 29), // Ethi
-    (0x12C8, 0x12D6, 29), // Ethi
-    (0x12D8, 0x1310, 29), // Ethi
-    (0x1312, 0x1315, 29), // Ethi
-    (0x1318, 0x135A, 29), // Ethi
-    (0x135D, 0x137C, 29), // Ethi
-    (0x1380, 0x1399, 29), // Ethi
-    (0x13A0, 0x13F5, 30), // Cher
-    (0x13F8, 0x13FD, 30), // Cher
-    (0x1400, 0x167F, 31), // Cans
-    (0x1680, 0x169C, 32), // Ogam
-    (0x16A0, 0x16EA, 33), // Runr
-    (0x16EE, 0x16F8, 33), // Runr
-    (0x1700, 0x1715, 34), // Tglg
-    (0x171F, 0x171F, 34), // Tglg
-    (0x1720, 0x1734, 35), // Hano
-    (0x1740, 0x1753, 36), // Buhd
-    (0x1760, 0x176C, 37), // Tagb
-    (0x176E, 0x1770, 37), // Tagb
-    (0x1772, 0x1773, 37), // Tagb
-    (0x1780, 0x17DD, 38), // Khmr
-    (0x17E0, 0x17E9, 38), // Khmr
-    (0x17F0, 0x17F9, 38), // Khmr
-    (0x1800, 0x1801, 39), // Mong
-    (0x1804, 0x1804, 39), // Mong
-    (0x1806, 0x1819, 39), // Mong
-    (0x1820, 0x1878, 39), // Mong
-    (0x1880, 0x18AA, 39), // Mong
-    (0x18B0, 0x18F5, 31), // Cans
-    (0x1900, 0x191E, 40), // Limb
-    (0x1920, 0x192B, 40), // Limb
-    (0x1930, 0x193B, 40), // Limb
-    (0x1940, 0x1940, 40), // Limb
-    (0x1944, 0x194F, 40), // Limb
-    (0x1950, 0x196D, 41), // Tale
-    (0x1970, 0x1974, 41), // Tale
-    (0x1980, 0x19AB, 42), // Talu
-    (0x19B0, 0x19C9, 42), // Talu
-    (0x19D0, 0x19DA, 42), // Talu
-    (0x19DE, 0x19DF, 42), // Talu
-    (0x19E0, 0x19FF, 38), // Khmr
-    (0x1A00, 0x1A1B, 43), // Bugi
-    (0x1A1E, 0x1A1F, 43), // Bugi
-    (0x1A20, 0x1A5E, 44), // Lana
-    (0x1A60, 0x1A7C, 44), // Lana
-    (0x1A7F, 0x1A89, 44), // Lana
-    (0x1A90, 0x1A99, 44), // Lana
-    (0x1AA0, 0x1AAD, 44), // Lana
-    (0x1B00, 0x1B4C, 45), // Bali
-    (0x1B4E, 0x1B7F, 45), // Bali
-    (0x1B80, 0x1BBF, 46), // Sund
-    (0x1BC0, 0x1BF3, 47), // Batk
-    (0x1BFC, 0x1BFF, 47), // Batk
-    (0x1C00, 0x1C37, 48), // Lepc
-    (0x1C3B, 0x1C49, 48), // Lepc
-    (0x1C4D, 0x1C4F, 48), // Lepc
-    (0x1C50, 0x1C7F, 49), // Olck
-    (0x1C80, 0x1C8A, 4), // Cyrl
-    (0x1C90, 0x1CBA, 27), // Geor
-    (0x1CBD, 0x1CBF, 27), // Geor
-    (0x1CC0, 0x1CC7, 46), // Sund
-    (0x1D00, 0x1D25, 0), // Latn
-    (0x1D26, 0x1D2A, 2), // Grek
-    (0x1D2B, 0x1D2B, 4), // Cyrl
-    (0x1D2C, 0x1D5C, 0), // Latn
-    (0x1D5D, 0x1D61, 2), // Grek
-    (0x1D62, 0x1D65, 0), // Latn
-    (0x1D66, 0x1D6A, 2), // Grek
-    (0x1D6B, 0x1D77, 0), // Latn
-    (0x1D78, 0x1D78, 4), // Cyrl
-    (0x1D79, 0x1DBE, 0), // Latn
-    (0x1DBF, 0x1DBF, 2), // Grek
-    (0x1E00, 0x1EFF, 0), // Latn
-    (0x1F00, 0x1F15, 2), // Grek
-    (0x1F18, 0x1F1D, 2), // Grek
-    (0x1F20, 0x1F45, 2), // Grek
-    (0x1F48, 0x1F4D, 2), // Grek
-    (0x1F50, 0x1F57, 2), // Grek
-    (0x1F59, 0x1F59, 2), // Grek
-    (0x1F5B, 0x1F5B, 2), // Grek
-    (0x1F5D, 0x1F5D, 2), // Grek
-    (0x1F5F, 0x1F7D, 2), // Grek
-    (0x1F80, 0x1FB4, 2), // Grek
-    (0x1FB6, 0x1FC4, 2), // Grek
-    (0x1FC6, 0x1FD3, 2), // Grek
-    (0x1FD6, 0x1FDB, 2), // Grek
-    (0x1FDD, 0x1FEF, 2), // Grek
-    (0x1FF2, 0x1FF4, 2), // Grek
-    (0x1FF6, 0x1FFE, 2), // Grek
-    (0x2071, 0x2071, 0), // Latn
-    (0x207F, 0x207F, 0), // Latn
-    (0x2090, 0x209C, 0), // Latn
-    (0x2126, 0x2126, 2), // Grek
-    (0x212A, 0x212B, 0), // Latn
-    (0x2132, 0x2132, 0), // Latn
-    (0x214E, 0x214E, 0), // Latn
-    (0x2160, 0x2188, 0), // Latn
-    (0x2800, 0x28FF, 50), // Brai
-    (0x2C00, 0x2C5F, 51), // Glag
-    (0x2C60, 0x2C7F, 0), // Latn
-    (0x2C80, 0x2CF3, 3), // Copt
-    (0x2CF9, 0x2CFF, 3), // Copt
-    (0x2D00, 0x2D25, 27), // Geor
-    (0x2D27, 0x2D27, 27), // Geor
-    (0x2D2D, 0x2D2D, 27), // Geor
-    (0x2D30, 0x2D67, 52), // Tfng
-    (0x2D6F, 0x2D70, 52), // Tfng
-    (0x2D7F, 0x2D7F, 52), // Tfng
-    (0x2D80, 0x2D96, 29), // Ethi
-    (0x2DA0, 0x2DA6, 29), // Ethi
-    (0x2DA8, 0x2DAE, 29), // Ethi
-    (0x2DB0, 0x2DB6, 29), // Ethi
-    (0x2DB8, 0x2DBE, 29), // Ethi
-    (0x2DC0, 0x2DC6, 29), // Ethi
-    (0x2DC8, 0x2DCE, 29), // Ethi
-    (0x2DD0, 0x2DD6, 29), // Ethi
-    (0x2DD8, 0x2DDE, 29), // Ethi
-    (0x2DE0, 0x2DFF, 4), // Cyrl
-    (0x2E80, 0x2E99, 53), // Hani
-    (0x2E9B, 0x2EF3, 53), // Hani
-    (0x2F00, 0x2FD5, 53), // Hani
-    (0x3005, 0x3005, 53), // Hani
-    (0x3007, 0x3007, 53), // Hani
-    (0x3021, 0x3029, 53), // Hani
-    (0x302E, 0x302F, 28), // Hang
-    (0x3038, 0x303B, 53), // Hani
-    (0x3041, 0x3096, 54), // Hira
-    (0x309D, 0x309F, 54), // Hira
-    (0x30A1, 0x30FA, 54), // Kana
-    (0x30FD, 0x30FF, 54), // Kana
-    (0x3105, 0x312F, 1), // Bopo
-    (0x3131, 0x318E, 28), // Hang
-    (0x31A0, 0x31BF, 1), // Bopo
-    (0x31F0, 0x31FF, 54), // Kana
-    (0x3200, 0x321E, 28), // Hang
-    (0x3260, 0x327E, 28), // Hang
-    (0x32D0, 0x32FE, 54), // Kana
-    (0x3300, 0x3357, 54), // Kana
-    (0x3400, 0x4DBF, 53), // Hani
-    (0x4E00, 0x9FFF, 53), // Hani
-    (0xA000, 0xA48C, 55), // Yiii
-    (0xA490, 0xA4C6, 55), // Yiii
-    (0xA4D0, 0xA4FF, 56), // Lisu
-    (0xA500, 0xA62B, 57), // Vaii
-    (0xA640, 0xA69F, 4), // Cyrl
-    (0xA6A0, 0xA6F7, 58), // Bamu
-    (0xA722, 0xA787, 0), // Latn
-    (0xA78B, 0xA7DC, 0), // Latn
-    (0xA7F1, 0xA7FF, 0), // Latn
-    (0xA800, 0xA82C, 59), // Sylo
-    (0xA840, 0xA877, 60), // Phag
-    (0xA880, 0xA8C5, 61), // Saur
-    (0xA8CE, 0xA8D9, 61), // Saur
-    (0xA8E0, 0xA8FF, 13), // Deva
-    (0xA900, 0xA92D, 62), // Kali
-    (0xA92F, 0xA92F, 62), // Kali
-    (0xA930, 0xA953, 63), // Rjng
-    (0xA95F, 0xA95F, 63), // Rjng
-    (0xA960, 0xA97C, 28), // Hang
-    (0xA980, 0xA9CD, 64), // Java
-    (0xA9D0, 0xA9D9, 64), // Java
-    (0xA9DE, 0xA9DF, 64), // Java
-    (0xA9E0, 0xA9FE, 26), // Mymr
-    (0xAA00, 0xAA36, 65), // Cham
-    (0xAA40, 0xAA4D, 65), // Cham
-    (0xAA50, 0xAA59, 65), // Cham
-    (0xAA5C, 0xAA5F, 65), // Cham
-    (0xAA60, 0xAA7F, 26), // Mymr
-    (0xAA80, 0xAAC2, 66), // Tavt
-    (0xAADB, 0xAADF, 66), // Tavt
-    (0xAAE0, 0xAAF6, 67), // Mtei
-    (0xAB01, 0xAB06, 29), // Ethi
-    (0xAB09, 0xAB0E, 29), // Ethi
-    (0xAB11, 0xAB16, 29), // Ethi
-    (0xAB20, 0xAB26, 29), // Ethi
-    (0xAB28, 0xAB2E, 29), // Ethi
-    (0xAB30, 0xAB5A, 0), // Latn
-    (0xAB5C, 0xAB64, 0), // Latn
-    (0xAB65, 0xAB65, 2), // Grek
-    (0xAB66, 0xAB69, 0), // Latn
-    (0xAB70, 0xABBF, 30), // Cher
-    (0xABC0, 0xABED, 67), // Mtei
-    (0xABF0, 0xABF9, 67), // Mtei
-    (0xAC00, 0xD7A3, 28), // Hang
-    (0xD7B0, 0xD7C6, 28), // Hang
-    (0xD7CB, 0xD7FB, 28), // Hang
-    (0xF900, 0xFA6D, 53), // Hani
-    (0xFA70, 0xFAD9, 53), // Hani
-    (0xFB00, 0xFB06, 0), // Latn
-    (0xFB13, 0xFB17, 5), // Armn
-    (0xFB1D, 0xFB36, 6), // Hebr
-    (0xFB38, 0xFB3C, 6), // Hebr
-    (0xFB3E, 0xFB3E, 6), // Hebr
-    (0xFB40, 0xFB41, 6), // Hebr
-    (0xFB43, 0xFB44, 6), // Hebr
-    (0xFB46, 0xFB4F, 6), // Hebr
-    (0xFB50, 0xFD3D, 7), // Arab
-    (0xFD40, 0xFDCF, 7), // Arab
-    (0xFDF0, 0xFDFF, 7), // Arab
-    (0xFE2E, 0xFE2F, 4), // Cyrl
-    (0xFE70, 0xFE74, 7), // Arab
-    (0xFE76, 0xFEFC, 7), // Arab
-    (0xFF21, 0xFF3A, 0), // Latn
-    (0xFF41, 0xFF5A, 0), // Latn
-    (0xFF66, 0xFF6F, 54), // Kana
-    (0xFF71, 0xFF9D, 54), // Kana
-    (0xFFA0, 0xFFBE, 28), // Hang
-    (0xFFC2, 0xFFC7, 28), // Hang
-    (0xFFCA, 0xFFCF, 28), // Hang
-    (0xFFD2, 0xFFD7, 28), // Hang
-    (0xFFDA, 0xFFDC, 28), // Hang
-    (0x10000, 0x1000B, 68), // Linb
-    (0x1000D, 0x10026, 68), // Linb
-    (0x10028, 0x1003A, 68), // Linb
-    (0x1003C, 0x1003D, 68), // Linb
-    (0x1003F, 0x1004D, 68), // Linb
-    (0x10050, 0x1005D, 68), // Linb
-    (0x10080, 0x100FA, 68), // Linb
-    (0x10140, 0x1018E, 2), // Grek
-    (0x101A0, 0x101A0, 2), // Grek
-    (0x10280, 0x1029C, 69), // Lyci
-    (0x102A0, 0x102D0, 70), // Cari
-    (0x10300, 0x10323, 71), // Ital
-    (0x1032D, 0x1032F, 71), // Ital
-    (0x10330, 0x1034A, 72), // Goth
-    (0x10350, 0x1037A, 73), // Perm
-    (0x10380, 0x1039D, 74), // Ugar
-    (0x1039F, 0x1039F, 74), // Ugar
-    (0x103A0, 0x103C3, 75), // Xpeo
-    (0x103C8, 0x103D5, 75), // Xpeo
-    (0x10400, 0x1044F, 76), // Dsrt
-    (0x10450, 0x1047F, 77), // Shaw
-    (0x10480, 0x1049D, 78), // Osma
-    (0x104A0, 0x104A9, 78), // Osma
-    (0x104B0, 0x104D3, 79), // Osge
-    (0x104D8, 0x104FB, 79), // Osge
-    (0x10500, 0x10527, 80), // Elba
-    (0x10530, 0x10563, 81), // Aghb
-    (0x1056F, 0x1056F, 81), // Aghb
-    (0x10570, 0x1057A, 82), // Vith
-    (0x1057C, 0x1058A, 82), // Vith
-    (0x1058C, 0x10592, 82), // Vith
-    (0x10594, 0x10595, 82), // Vith
-    (0x10597, 0x105A1, 82), // Vith
-    (0x105A3, 0x105B1, 82), // Vith
-    (0x105B3, 0x105B9, 82), // Vith
-    (0x105BB, 0x105BC, 82), // Vith
-    (0x105C0, 0x105F3, 83), // Todr
-    (0x10600, 0x10736, 84), // Lina
-    (0x10740, 0x10755, 84), // Lina
-    (0x10760, 0x10767, 84), // Lina
-    (0x10780, 0x10785, 0), // Latn
-    (0x10787, 0x107B0, 0), // Latn
-    (0x107B2, 0x107BA, 0), // Latn
-    (0x10800, 0x10805, 85), // Cprt
-    (0x10808, 0x10808, 85), // Cprt
-    (0x1080A, 0x10835, 85), // Cprt
-    (0x10837, 0x10838, 85), // Cprt
-    (0x1083C, 0x1083C, 85), // Cprt
-    (0x1083F, 0x1083F, 85), // Cprt
-    (0x10840, 0x10855, 86), // Armi
-    (0x10857, 0x1085F, 86), // Armi
-    (0x10860, 0x1087F, 87), // Palm
-    (0x10880, 0x1089E, 88), // Nbat
-    (0x108A7, 0x108AF, 88), // Nbat
-    (0x108E0, 0x108F2, 89), // Hatr
-    (0x108F4, 0x108F5, 89), // Hatr
-    (0x108FB, 0x108FF, 89), // Hatr
-    (0x10900, 0x1091B, 90), // Phnx
-    (0x1091F, 0x1091F, 90), // Phnx
-    (0x10920, 0x10939, 91), // Lydi
-    (0x1093F, 0x1093F, 91), // Lydi
-    (0x10940, 0x10959, 92), // Sidt
-    (0x10980, 0x1099F, 93), // Mero
-    (0x109A0, 0x109B7, 94), // Merc
-    (0x109BC, 0x109CF, 94), // Merc
-    (0x109D2, 0x109FF, 94), // Merc
-    (0x10A00, 0x10A03, 95), // Khar
-    (0x10A05, 0x10A06, 95), // Khar
-    (0x10A0C, 0x10A13, 95), // Khar
-    (0x10A15, 0x10A17, 95), // Khar
-    (0x10A19, 0x10A35, 95), // Khar
-    (0x10A38, 0x10A3A, 95), // Khar
-    (0x10A3F, 0x10A48, 95), // Khar
-    (0x10A50, 0x10A58, 95), // Khar
-    (0x10A60, 0x10A7F, 96), // Sarb
-    (0x10A80, 0x10A9F, 97), // Narb
-    (0x10AC0, 0x10AE6, 98), // Mani
-    (0x10AEB, 0x10AF6, 98), // Mani
-    (0x10B00, 0x10B35, 99), // Avst
-    (0x10B39, 0x10B3F, 99), // Avst
+    (0x0041, 0x005A, 0),     // Latn
+    (0x0061, 0x007A, 0),     // Latn
+    (0x00AA, 0x00AA, 0),     // Latn
+    (0x00BA, 0x00BA, 0),     // Latn
+    (0x00C0, 0x00D6, 0),     // Latn
+    (0x00D8, 0x00F6, 0),     // Latn
+    (0x00F8, 0x02B8, 0),     // Latn
+    (0x02E0, 0x02E4, 0),     // Latn
+    (0x02EA, 0x02EB, 1),     // Bopo
+    (0x0370, 0x0373, 2),     // Grek
+    (0x0375, 0x0377, 2),     // Grek
+    (0x037A, 0x037D, 2),     // Grek
+    (0x037F, 0x037F, 2),     // Grek
+    (0x0384, 0x0384, 2),     // Grek
+    (0x0386, 0x0386, 2),     // Grek
+    (0x0388, 0x038A, 2),     // Grek
+    (0x038C, 0x038C, 2),     // Grek
+    (0x038E, 0x03A1, 2),     // Grek
+    (0x03A3, 0x03E1, 2),     // Grek
+    (0x03E2, 0x03EF, 3),     // Copt
+    (0x03F0, 0x03FF, 2),     // Grek
+    (0x0400, 0x0484, 4),     // Cyrl
+    (0x0487, 0x052F, 4),     // Cyrl
+    (0x0531, 0x0556, 5),     // Armn
+    (0x0559, 0x058A, 5),     // Armn
+    (0x058D, 0x058F, 5),     // Armn
+    (0x0591, 0x05C7, 6),     // Hebr
+    (0x05D0, 0x05EA, 6),     // Hebr
+    (0x05EF, 0x05F4, 6),     // Hebr
+    (0x0600, 0x0604, 7),     // Arab
+    (0x0606, 0x060B, 7),     // Arab
+    (0x060D, 0x061A, 7),     // Arab
+    (0x061C, 0x061E, 7),     // Arab
+    (0x0620, 0x063F, 7),     // Arab
+    (0x0641, 0x064A, 7),     // Arab
+    (0x0656, 0x066F, 7),     // Arab
+    (0x0671, 0x06DC, 7),     // Arab
+    (0x06DE, 0x06FF, 7),     // Arab
+    (0x0700, 0x070D, 8),     // Syrc
+    (0x070F, 0x074A, 8),     // Syrc
+    (0x074D, 0x074F, 8),     // Syrc
+    (0x0750, 0x077F, 7),     // Arab
+    (0x0780, 0x07B1, 9),     // Thaa
+    (0x07C0, 0x07FA, 10),    // Nkoo
+    (0x07FD, 0x07FF, 10),    // Nkoo
+    (0x0800, 0x082D, 11),    // Samr
+    (0x0830, 0x083E, 11),    // Samr
+    (0x0840, 0x085B, 12),    // Mand
+    (0x085E, 0x085E, 12),    // Mand
+    (0x0860, 0x086A, 8),     // Syrc
+    (0x0870, 0x0891, 7),     // Arab
+    (0x0897, 0x08E1, 7),     // Arab
+    (0x08E3, 0x08FF, 7),     // Arab
+    (0x0900, 0x0950, 13),    // Deva
+    (0x0955, 0x0963, 13),    // Deva
+    (0x0966, 0x097F, 13),    // Deva
+    (0x0980, 0x0983, 14),    // Beng
+    (0x0985, 0x098C, 14),    // Beng
+    (0x098F, 0x0990, 14),    // Beng
+    (0x0993, 0x09A8, 14),    // Beng
+    (0x09AA, 0x09B0, 14),    // Beng
+    (0x09B2, 0x09B2, 14),    // Beng
+    (0x09B6, 0x09B9, 14),    // Beng
+    (0x09BC, 0x09C4, 14),    // Beng
+    (0x09C7, 0x09C8, 14),    // Beng
+    (0x09CB, 0x09CE, 14),    // Beng
+    (0x09D7, 0x09D7, 14),    // Beng
+    (0x09DC, 0x09DD, 14),    // Beng
+    (0x09DF, 0x09E3, 14),    // Beng
+    (0x09E6, 0x09FE, 14),    // Beng
+    (0x0A01, 0x0A03, 15),    // Guru
+    (0x0A05, 0x0A0A, 15),    // Guru
+    (0x0A0F, 0x0A10, 15),    // Guru
+    (0x0A13, 0x0A28, 15),    // Guru
+    (0x0A2A, 0x0A30, 15),    // Guru
+    (0x0A32, 0x0A33, 15),    // Guru
+    (0x0A35, 0x0A36, 15),    // Guru
+    (0x0A38, 0x0A39, 15),    // Guru
+    (0x0A3C, 0x0A3C, 15),    // Guru
+    (0x0A3E, 0x0A42, 15),    // Guru
+    (0x0A47, 0x0A48, 15),    // Guru
+    (0x0A4B, 0x0A4D, 15),    // Guru
+    (0x0A51, 0x0A51, 15),    // Guru
+    (0x0A59, 0x0A5C, 15),    // Guru
+    (0x0A5E, 0x0A5E, 15),    // Guru
+    (0x0A66, 0x0A76, 15),    // Guru
+    (0x0A81, 0x0A83, 16),    // Gujr
+    (0x0A85, 0x0A8D, 16),    // Gujr
+    (0x0A8F, 0x0A91, 16),    // Gujr
+    (0x0A93, 0x0AA8, 16),    // Gujr
+    (0x0AAA, 0x0AB0, 16),    // Gujr
+    (0x0AB2, 0x0AB3, 16),    // Gujr
+    (0x0AB5, 0x0AB9, 16),    // Gujr
+    (0x0ABC, 0x0AC5, 16),    // Gujr
+    (0x0AC7, 0x0AC9, 16),    // Gujr
+    (0x0ACB, 0x0ACD, 16),    // Gujr
+    (0x0AD0, 0x0AD0, 16),    // Gujr
+    (0x0AE0, 0x0AE3, 16),    // Gujr
+    (0x0AE6, 0x0AF1, 16),    // Gujr
+    (0x0AF9, 0x0AFF, 16),    // Gujr
+    (0x0B01, 0x0B03, 17),    // Orya
+    (0x0B05, 0x0B0C, 17),    // Orya
+    (0x0B0F, 0x0B10, 17),    // Orya
+    (0x0B13, 0x0B28, 17),    // Orya
+    (0x0B2A, 0x0B30, 17),    // Orya
+    (0x0B32, 0x0B33, 17),    // Orya
+    (0x0B35, 0x0B39, 17),    // Orya
+    (0x0B3C, 0x0B44, 17),    // Orya
+    (0x0B47, 0x0B48, 17),    // Orya
+    (0x0B4B, 0x0B4D, 17),    // Orya
+    (0x0B55, 0x0B57, 17),    // Orya
+    (0x0B5C, 0x0B5D, 17),    // Orya
+    (0x0B5F, 0x0B63, 17),    // Orya
+    (0x0B66, 0x0B77, 17),    // Orya
+    (0x0B82, 0x0B83, 18),    // Taml
+    (0x0B85, 0x0B8A, 18),    // Taml
+    (0x0B8E, 0x0B90, 18),    // Taml
+    (0x0B92, 0x0B95, 18),    // Taml
+    (0x0B99, 0x0B9A, 18),    // Taml
+    (0x0B9C, 0x0B9C, 18),    // Taml
+    (0x0B9E, 0x0B9F, 18),    // Taml
+    (0x0BA3, 0x0BA4, 18),    // Taml
+    (0x0BA8, 0x0BAA, 18),    // Taml
+    (0x0BAE, 0x0BB9, 18),    // Taml
+    (0x0BBE, 0x0BC2, 18),    // Taml
+    (0x0BC6, 0x0BC8, 18),    // Taml
+    (0x0BCA, 0x0BCD, 18),    // Taml
+    (0x0BD0, 0x0BD0, 18),    // Taml
+    (0x0BD7, 0x0BD7, 18),    // Taml
+    (0x0BE6, 0x0BFA, 18),    // Taml
+    (0x0C00, 0x0C0C, 19),    // Telu
+    (0x0C0E, 0x0C10, 19),    // Telu
+    (0x0C12, 0x0C28, 19),    // Telu
+    (0x0C2A, 0x0C39, 19),    // Telu
+    (0x0C3C, 0x0C44, 19),    // Telu
+    (0x0C46, 0x0C48, 19),    // Telu
+    (0x0C4A, 0x0C4D, 19),    // Telu
+    (0x0C55, 0x0C56, 19),    // Telu
+    (0x0C58, 0x0C5A, 19),    // Telu
+    (0x0C5C, 0x0C5D, 19),    // Telu
+    (0x0C60, 0x0C63, 19),    // Telu
+    (0x0C66, 0x0C6F, 19),    // Telu
+    (0x0C77, 0x0C7F, 19),    // Telu
+    (0x0C80, 0x0C8C, 20),    // Knda
+    (0x0C8E, 0x0C90, 20),    // Knda
+    (0x0C92, 0x0CA8, 20),    // Knda
+    (0x0CAA, 0x0CB3, 20),    // Knda
+    (0x0CB5, 0x0CB9, 20),    // Knda
+    (0x0CBC, 0x0CC4, 20),    // Knda
+    (0x0CC6, 0x0CC8, 20),    // Knda
+    (0x0CCA, 0x0CCD, 20),    // Knda
+    (0x0CD5, 0x0CD6, 20),    // Knda
+    (0x0CDC, 0x0CDE, 20),    // Knda
+    (0x0CE0, 0x0CE3, 20),    // Knda
+    (0x0CE6, 0x0CEF, 20),    // Knda
+    (0x0CF1, 0x0CF3, 20),    // Knda
+    (0x0D00, 0x0D0C, 21),    // Mlym
+    (0x0D0E, 0x0D10, 21),    // Mlym
+    (0x0D12, 0x0D44, 21),    // Mlym
+    (0x0D46, 0x0D48, 21),    // Mlym
+    (0x0D4A, 0x0D4F, 21),    // Mlym
+    (0x0D54, 0x0D63, 21),    // Mlym
+    (0x0D66, 0x0D7F, 21),    // Mlym
+    (0x0D81, 0x0D83, 22),    // Sinh
+    (0x0D85, 0x0D96, 22),    // Sinh
+    (0x0D9A, 0x0DB1, 22),    // Sinh
+    (0x0DB3, 0x0DBB, 22),    // Sinh
+    (0x0DBD, 0x0DBD, 22),    // Sinh
+    (0x0DC0, 0x0DC6, 22),    // Sinh
+    (0x0DCA, 0x0DCA, 22),    // Sinh
+    (0x0DCF, 0x0DD4, 22),    // Sinh
+    (0x0DD6, 0x0DD6, 22),    // Sinh
+    (0x0DD8, 0x0DDF, 22),    // Sinh
+    (0x0DE6, 0x0DEF, 22),    // Sinh
+    (0x0DF2, 0x0DF4, 22),    // Sinh
+    (0x0E01, 0x0E3A, 23),    // Thai
+    (0x0E40, 0x0E5B, 23),    // Thai
+    (0x0E81, 0x0E82, 24),    // Laoo
+    (0x0E84, 0x0E84, 24),    // Laoo
+    (0x0E86, 0x0E8A, 24),    // Laoo
+    (0x0E8C, 0x0EA3, 24),    // Laoo
+    (0x0EA5, 0x0EA5, 24),    // Laoo
+    (0x0EA7, 0x0EBD, 24),    // Laoo
+    (0x0EC0, 0x0EC4, 24),    // Laoo
+    (0x0EC6, 0x0EC6, 24),    // Laoo
+    (0x0EC8, 0x0ECE, 24),    // Laoo
+    (0x0ED0, 0x0ED9, 24),    // Laoo
+    (0x0EDC, 0x0EDF, 24),    // Laoo
+    (0x0F00, 0x0F47, 25),    // Tibt
+    (0x0F49, 0x0F6C, 25),    // Tibt
+    (0x0F71, 0x0F97, 25),    // Tibt
+    (0x0F99, 0x0FBC, 25),    // Tibt
+    (0x0FBE, 0x0FCC, 25),    // Tibt
+    (0x0FCE, 0x0FD4, 25),    // Tibt
+    (0x0FD9, 0x0FDA, 25),    // Tibt
+    (0x1000, 0x109F, 26),    // Mymr
+    (0x10A0, 0x10C5, 27),    // Geor
+    (0x10C7, 0x10C7, 27),    // Geor
+    (0x10CD, 0x10CD, 27),    // Geor
+    (0x10D0, 0x10FA, 27),    // Geor
+    (0x10FC, 0x10FF, 27),    // Geor
+    (0x1100, 0x11FF, 28),    // Hang
+    (0x1200, 0x1248, 29),    // Ethi
+    (0x124A, 0x124D, 29),    // Ethi
+    (0x1250, 0x1256, 29),    // Ethi
+    (0x1258, 0x1258, 29),    // Ethi
+    (0x125A, 0x125D, 29),    // Ethi
+    (0x1260, 0x1288, 29),    // Ethi
+    (0x128A, 0x128D, 29),    // Ethi
+    (0x1290, 0x12B0, 29),    // Ethi
+    (0x12B2, 0x12B5, 29),    // Ethi
+    (0x12B8, 0x12BE, 29),    // Ethi
+    (0x12C0, 0x12C0, 29),    // Ethi
+    (0x12C2, 0x12C5, 29),    // Ethi
+    (0x12C8, 0x12D6, 29),    // Ethi
+    (0x12D8, 0x1310, 29),    // Ethi
+    (0x1312, 0x1315, 29),    // Ethi
+    (0x1318, 0x135A, 29),    // Ethi
+    (0x135D, 0x137C, 29),    // Ethi
+    (0x1380, 0x1399, 29),    // Ethi
+    (0x13A0, 0x13F5, 30),    // Cher
+    (0x13F8, 0x13FD, 30),    // Cher
+    (0x1400, 0x167F, 31),    // Cans
+    (0x1680, 0x169C, 32),    // Ogam
+    (0x16A0, 0x16EA, 33),    // Runr
+    (0x16EE, 0x16F8, 33),    // Runr
+    (0x1700, 0x1715, 34),    // Tglg
+    (0x171F, 0x171F, 34),    // Tglg
+    (0x1720, 0x1734, 35),    // Hano
+    (0x1740, 0x1753, 36),    // Buhd
+    (0x1760, 0x176C, 37),    // Tagb
+    (0x176E, 0x1770, 37),    // Tagb
+    (0x1772, 0x1773, 37),    // Tagb
+    (0x1780, 0x17DD, 38),    // Khmr
+    (0x17E0, 0x17E9, 38),    // Khmr
+    (0x17F0, 0x17F9, 38),    // Khmr
+    (0x1800, 0x1801, 39),    // Mong
+    (0x1804, 0x1804, 39),    // Mong
+    (0x1806, 0x1819, 39),    // Mong
+    (0x1820, 0x1878, 39),    // Mong
+    (0x1880, 0x18AA, 39),    // Mong
+    (0x18B0, 0x18F5, 31),    // Cans
+    (0x1900, 0x191E, 40),    // Limb
+    (0x1920, 0x192B, 40),    // Limb
+    (0x1930, 0x193B, 40),    // Limb
+    (0x1940, 0x1940, 40),    // Limb
+    (0x1944, 0x194F, 40),    // Limb
+    (0x1950, 0x196D, 41),    // Tale
+    (0x1970, 0x1974, 41),    // Tale
+    (0x1980, 0x19AB, 42),    // Talu
+    (0x19B0, 0x19C9, 42),    // Talu
+    (0x19D0, 0x19DA, 42),    // Talu
+    (0x19DE, 0x19DF, 42),    // Talu
+    (0x19E0, 0x19FF, 38),    // Khmr
+    (0x1A00, 0x1A1B, 43),    // Bugi
+    (0x1A1E, 0x1A1F, 43),    // Bugi
+    (0x1A20, 0x1A5E, 44),    // Lana
+    (0x1A60, 0x1A7C, 44),    // Lana
+    (0x1A7F, 0x1A89, 44),    // Lana
+    (0x1A90, 0x1A99, 44),    // Lana
+    (0x1AA0, 0x1AAD, 44),    // Lana
+    (0x1B00, 0x1B4C, 45),    // Bali
+    (0x1B4E, 0x1B7F, 45),    // Bali
+    (0x1B80, 0x1BBF, 46),    // Sund
+    (0x1BC0, 0x1BF3, 47),    // Batk
+    (0x1BFC, 0x1BFF, 47),    // Batk
+    (0x1C00, 0x1C37, 48),    // Lepc
+    (0x1C3B, 0x1C49, 48),    // Lepc
+    (0x1C4D, 0x1C4F, 48),    // Lepc
+    (0x1C50, 0x1C7F, 49),    // Olck
+    (0x1C80, 0x1C8A, 4),     // Cyrl
+    (0x1C90, 0x1CBA, 27),    // Geor
+    (0x1CBD, 0x1CBF, 27),    // Geor
+    (0x1CC0, 0x1CC7, 46),    // Sund
+    (0x1D00, 0x1D25, 0),     // Latn
+    (0x1D26, 0x1D2A, 2),     // Grek
+    (0x1D2B, 0x1D2B, 4),     // Cyrl
+    (0x1D2C, 0x1D5C, 0),     // Latn
+    (0x1D5D, 0x1D61, 2),     // Grek
+    (0x1D62, 0x1D65, 0),     // Latn
+    (0x1D66, 0x1D6A, 2),     // Grek
+    (0x1D6B, 0x1D77, 0),     // Latn
+    (0x1D78, 0x1D78, 4),     // Cyrl
+    (0x1D79, 0x1DBE, 0),     // Latn
+    (0x1DBF, 0x1DBF, 2),     // Grek
+    (0x1E00, 0x1EFF, 0),     // Latn
+    (0x1F00, 0x1F15, 2),     // Grek
+    (0x1F18, 0x1F1D, 2),     // Grek
+    (0x1F20, 0x1F45, 2),     // Grek
+    (0x1F48, 0x1F4D, 2),     // Grek
+    (0x1F50, 0x1F57, 2),     // Grek
+    (0x1F59, 0x1F59, 2),     // Grek
+    (0x1F5B, 0x1F5B, 2),     // Grek
+    (0x1F5D, 0x1F5D, 2),     // Grek
+    (0x1F5F, 0x1F7D, 2),     // Grek
+    (0x1F80, 0x1FB4, 2),     // Grek
+    (0x1FB6, 0x1FC4, 2),     // Grek
+    (0x1FC6, 0x1FD3, 2),     // Grek
+    (0x1FD6, 0x1FDB, 2),     // Grek
+    (0x1FDD, 0x1FEF, 2),     // Grek
+    (0x1FF2, 0x1FF4, 2),     // Grek
+    (0x1FF6, 0x1FFE, 2),     // Grek
+    (0x2071, 0x2071, 0),     // Latn
+    (0x207F, 0x207F, 0),     // Latn
+    (0x2090, 0x209C, 0),     // Latn
+    (0x2126, 0x2126, 2),     // Grek
+    (0x212A, 0x212B, 0),     // Latn
+    (0x2132, 0x2132, 0),     // Latn
+    (0x214E, 0x214E, 0),     // Latn
+    (0x2160, 0x2188, 0),     // Latn
+    (0x2800, 0x28FF, 50),    // Brai
+    (0x2C00, 0x2C5F, 51),    // Glag
+    (0x2C60, 0x2C7F, 0),     // Latn
+    (0x2C80, 0x2CF3, 3),     // Copt
+    (0x2CF9, 0x2CFF, 3),     // Copt
+    (0x2D00, 0x2D25, 27),    // Geor
+    (0x2D27, 0x2D27, 27),    // Geor
+    (0x2D2D, 0x2D2D, 27),    // Geor
+    (0x2D30, 0x2D67, 52),    // Tfng
+    (0x2D6F, 0x2D70, 52),    // Tfng
+    (0x2D7F, 0x2D7F, 52),    // Tfng
+    (0x2D80, 0x2D96, 29),    // Ethi
+    (0x2DA0, 0x2DA6, 29),    // Ethi
+    (0x2DA8, 0x2DAE, 29),    // Ethi
+    (0x2DB0, 0x2DB6, 29),    // Ethi
+    (0x2DB8, 0x2DBE, 29),    // Ethi
+    (0x2DC0, 0x2DC6, 29),    // Ethi
+    (0x2DC8, 0x2DCE, 29),    // Ethi
+    (0x2DD0, 0x2DD6, 29),    // Ethi
+    (0x2DD8, 0x2DDE, 29),    // Ethi
+    (0x2DE0, 0x2DFF, 4),     // Cyrl
+    (0x2E80, 0x2E99, 53),    // Hani
+    (0x2E9B, 0x2EF3, 53),    // Hani
+    (0x2F00, 0x2FD5, 53),    // Hani
+    (0x3005, 0x3005, 53),    // Hani
+    (0x3007, 0x3007, 53),    // Hani
+    (0x3021, 0x3029, 53),    // Hani
+    (0x302E, 0x302F, 28),    // Hang
+    (0x3038, 0x303B, 53),    // Hani
+    (0x3041, 0x3096, 54),    // Hira
+    (0x309D, 0x309F, 54),    // Hira
+    (0x30A1, 0x30FA, 54),    // Kana
+    (0x30FD, 0x30FF, 54),    // Kana
+    (0x3105, 0x312F, 1),     // Bopo
+    (0x3131, 0x318E, 28),    // Hang
+    (0x31A0, 0x31BF, 1),     // Bopo
+    (0x31F0, 0x31FF, 54),    // Kana
+    (0x3200, 0x321E, 28),    // Hang
+    (0x3260, 0x327E, 28),    // Hang
+    (0x32D0, 0x32FE, 54),    // Kana
+    (0x3300, 0x3357, 54),    // Kana
+    (0x3400, 0x4DBF, 53),    // Hani
+    (0x4E00, 0x9FFF, 53),    // Hani
+    (0xA000, 0xA48C, 55),    // Yiii
+    (0xA490, 0xA4C6, 55),    // Yiii
+    (0xA4D0, 0xA4FF, 56),    // Lisu
+    (0xA500, 0xA62B, 57),    // Vaii
+    (0xA640, 0xA69F, 4),     // Cyrl
+    (0xA6A0, 0xA6F7, 58),    // Bamu
+    (0xA722, 0xA787, 0),     // Latn
+    (0xA78B, 0xA7DC, 0),     // Latn
+    (0xA7F1, 0xA7FF, 0),     // Latn
+    (0xA800, 0xA82C, 59),    // Sylo
+    (0xA840, 0xA877, 60),    // Phag
+    (0xA880, 0xA8C5, 61),    // Saur
+    (0xA8CE, 0xA8D9, 61),    // Saur
+    (0xA8E0, 0xA8FF, 13),    // Deva
+    (0xA900, 0xA92D, 62),    // Kali
+    (0xA92F, 0xA92F, 62),    // Kali
+    (0xA930, 0xA953, 63),    // Rjng
+    (0xA95F, 0xA95F, 63),    // Rjng
+    (0xA960, 0xA97C, 28),    // Hang
+    (0xA980, 0xA9CD, 64),    // Java
+    (0xA9D0, 0xA9D9, 64),    // Java
+    (0xA9DE, 0xA9DF, 64),    // Java
+    (0xA9E0, 0xA9FE, 26),    // Mymr
+    (0xAA00, 0xAA36, 65),    // Cham
+    (0xAA40, 0xAA4D, 65),    // Cham
+    (0xAA50, 0xAA59, 65),    // Cham
+    (0xAA5C, 0xAA5F, 65),    // Cham
+    (0xAA60, 0xAA7F, 26),    // Mymr
+    (0xAA80, 0xAAC2, 66),    // Tavt
+    (0xAADB, 0xAADF, 66),    // Tavt
+    (0xAAE0, 0xAAF6, 67),    // Mtei
+    (0xAB01, 0xAB06, 29),    // Ethi
+    (0xAB09, 0xAB0E, 29),    // Ethi
+    (0xAB11, 0xAB16, 29),    // Ethi
+    (0xAB20, 0xAB26, 29),    // Ethi
+    (0xAB28, 0xAB2E, 29),    // Ethi
+    (0xAB30, 0xAB5A, 0),     // Latn
+    (0xAB5C, 0xAB64, 0),     // Latn
+    (0xAB65, 0xAB65, 2),     // Grek
+    (0xAB66, 0xAB69, 0),     // Latn
+    (0xAB70, 0xABBF, 30),    // Cher
+    (0xABC0, 0xABED, 67),    // Mtei
+    (0xABF0, 0xABF9, 67),    // Mtei
+    (0xAC00, 0xD7A3, 28),    // Hang
+    (0xD7B0, 0xD7C6, 28),    // Hang
+    (0xD7CB, 0xD7FB, 28),    // Hang
+    (0xF900, 0xFA6D, 53),    // Hani
+    (0xFA70, 0xFAD9, 53),    // Hani
+    (0xFB00, 0xFB06, 0),     // Latn
+    (0xFB13, 0xFB17, 5),     // Armn
+    (0xFB1D, 0xFB36, 6),     // Hebr
+    (0xFB38, 0xFB3C, 6),     // Hebr
+    (0xFB3E, 0xFB3E, 6),     // Hebr
+    (0xFB40, 0xFB41, 6),     // Hebr
+    (0xFB43, 0xFB44, 6),     // Hebr
+    (0xFB46, 0xFB4F, 6),     // Hebr
+    (0xFB50, 0xFD3D, 7),     // Arab
+    (0xFD40, 0xFDCF, 7),     // Arab
+    (0xFDF0, 0xFDFF, 7),     // Arab
+    (0xFE2E, 0xFE2F, 4),     // Cyrl
+    (0xFE70, 0xFE74, 7),     // Arab
+    (0xFE76, 0xFEFC, 7),     // Arab
+    (0xFF21, 0xFF3A, 0),     // Latn
+    (0xFF41, 0xFF5A, 0),     // Latn
+    (0xFF66, 0xFF6F, 54),    // Kana
+    (0xFF71, 0xFF9D, 54),    // Kana
+    (0xFFA0, 0xFFBE, 28),    // Hang
+    (0xFFC2, 0xFFC7, 28),    // Hang
+    (0xFFCA, 0xFFCF, 28),    // Hang
+    (0xFFD2, 0xFFD7, 28),    // Hang
+    (0xFFDA, 0xFFDC, 28),    // Hang
+    (0x10000, 0x1000B, 68),  // Linb
+    (0x1000D, 0x10026, 68),  // Linb
+    (0x10028, 0x1003A, 68),  // Linb
+    (0x1003C, 0x1003D, 68),  // Linb
+    (0x1003F, 0x1004D, 68),  // Linb
+    (0x10050, 0x1005D, 68),  // Linb
+    (0x10080, 0x100FA, 68),  // Linb
+    (0x10140, 0x1018E, 2),   // Grek
+    (0x101A0, 0x101A0, 2),   // Grek
+    (0x10280, 0x1029C, 69),  // Lyci
+    (0x102A0, 0x102D0, 70),  // Cari
+    (0x10300, 0x10323, 71),  // Ital
+    (0x1032D, 0x1032F, 71),  // Ital
+    (0x10330, 0x1034A, 72),  // Goth
+    (0x10350, 0x1037A, 73),  // Perm
+    (0x10380, 0x1039D, 74),  // Ugar
+    (0x1039F, 0x1039F, 74),  // Ugar
+    (0x103A0, 0x103C3, 75),  // Xpeo
+    (0x103C8, 0x103D5, 75),  // Xpeo
+    (0x10400, 0x1044F, 76),  // Dsrt
+    (0x10450, 0x1047F, 77),  // Shaw
+    (0x10480, 0x1049D, 78),  // Osma
+    (0x104A0, 0x104A9, 78),  // Osma
+    (0x104B0, 0x104D3, 79),  // Osge
+    (0x104D8, 0x104FB, 79),  // Osge
+    (0x10500, 0x10527, 80),  // Elba
+    (0x10530, 0x10563, 81),  // Aghb
+    (0x1056F, 0x1056F, 81),  // Aghb
+    (0x10570, 0x1057A, 82),  // Vith
+    (0x1057C, 0x1058A, 82),  // Vith
+    (0x1058C, 0x10592, 82),  // Vith
+    (0x10594, 0x10595, 82),  // Vith
+    (0x10597, 0x105A1, 82),  // Vith
+    (0x105A3, 0x105B1, 82),  // Vith
+    (0x105B3, 0x105B9, 82),  // Vith
+    (0x105BB, 0x105BC, 82),  // Vith
+    (0x105C0, 0x105F3, 83),  // Todr
+    (0x10600, 0x10736, 84),  // Lina
+    (0x10740, 0x10755, 84),  // Lina
+    (0x10760, 0x10767, 84),  // Lina
+    (0x10780, 0x10785, 0),   // Latn
+    (0x10787, 0x107B0, 0),   // Latn
+    (0x107B2, 0x107BA, 0),   // Latn
+    (0x10800, 0x10805, 85),  // Cprt
+    (0x10808, 0x10808, 85),  // Cprt
+    (0x1080A, 0x10835, 85),  // Cprt
+    (0x10837, 0x10838, 85),  // Cprt
+    (0x1083C, 0x1083C, 85),  // Cprt
+    (0x1083F, 0x1083F, 85),  // Cprt
+    (0x10840, 0x10855, 86),  // Armi
+    (0x10857, 0x1085F, 86),  // Armi
+    (0x10860, 0x1087F, 87),  // Palm
+    (0x10880, 0x1089E, 88),  // Nbat
+    (0x108A7, 0x108AF, 88),  // Nbat
+    (0x108E0, 0x108F2, 89),  // Hatr
+    (0x108F4, 0x108F5, 89),  // Hatr
+    (0x108FB, 0x108FF, 89),  // Hatr
+    (0x10900, 0x1091B, 90),  // Phnx
+    (0x1091F, 0x1091F, 90),  // Phnx
+    (0x10920, 0x10939, 91),  // Lydi
+    (0x1093F, 0x1093F, 91),  // Lydi
+    (0x10940, 0x10959, 92),  // Sidt
+    (0x10980, 0x1099F, 93),  // Mero
+    (0x109A0, 0x109B7, 94),  // Merc
+    (0x109BC, 0x109CF, 94),  // Merc
+    (0x109D2, 0x109FF, 94),  // Merc
+    (0x10A00, 0x10A03, 95),  // Khar
+    (0x10A05, 0x10A06, 95),  // Khar
+    (0x10A0C, 0x10A13, 95),  // Khar
+    (0x10A15, 0x10A17, 95),  // Khar
+    (0x10A19, 0x10A35, 95),  // Khar
+    (0x10A38, 0x10A3A, 95),  // Khar
+    (0x10A3F, 0x10A48, 95),  // Khar
+    (0x10A50, 0x10A58, 95),  // Khar
+    (0x10A60, 0x10A7F, 96),  // Sarb
+    (0x10A80, 0x10A9F, 97),  // Narb
+    (0x10AC0, 0x10AE6, 98),  // Mani
+    (0x10AEB, 0x10AF6, 98),  // Mani
+    (0x10B00, 0x10B35, 99),  // Avst
+    (0x10B39, 0x10B3F, 99),  // Avst
     (0x10B40, 0x10B55, 100), // Prti
     (0x10B58, 0x10B5F, 100), // Prti
     (0x10B60, 0x10B72, 101), // Phli
@@ -531,13 +531,13 @@ pub(crate) static SCRIPT_RANGES: [(u32, u32, u16); 778] = [
     (0x10D40, 0x10D65, 106), // Gara
     (0x10D69, 0x10D85, 106), // Gara
     (0x10D8E, 0x10D8F, 106), // Gara
-    (0x10E60, 0x10E7E, 7), // Arab
+    (0x10E60, 0x10E7E, 7),   // Arab
     (0x10E80, 0x10EA9, 107), // Yezi
     (0x10EAB, 0x10EAD, 107), // Yezi
     (0x10EB0, 0x10EB1, 107), // Yezi
-    (0x10EC2, 0x10EC7, 7), // Arab
-    (0x10ED0, 0x10ED8, 7), // Arab
-    (0x10EFA, 0x10EFF, 7), // Arab
+    (0x10EC2, 0x10EC7, 7),   // Arab
+    (0x10ED0, 0x10ED8, 7),   // Arab
+    (0x10EFA, 0x10EFF, 7),   // Arab
     (0x10F00, 0x10F27, 108), // Sogo
     (0x10F30, 0x10F59, 109), // Sogd
     (0x10F70, 0x10F89, 110), // Ougr
@@ -554,7 +554,7 @@ pub(crate) static SCRIPT_RANGES: [(u32, u32, u16); 778] = [
     (0x11136, 0x11147, 116), // Cakm
     (0x11150, 0x11176, 117), // Mahj
     (0x11180, 0x111DF, 118), // Shrd
-    (0x111E1, 0x111F4, 22), // Sinh
+    (0x111E1, 0x111F4, 22),  // Sinh
     (0x11200, 0x11211, 119), // Khoj
     (0x11213, 0x11241, 119), // Khoj
     (0x11280, 0x11286, 120), // Mult
@@ -598,10 +598,10 @@ pub(crate) static SCRIPT_RANGES: [(u32, u32, u16); 778] = [
     (0x115B8, 0x115DD, 126), // Sidd
     (0x11600, 0x11644, 127), // Modi
     (0x11650, 0x11659, 127), // Modi
-    (0x11660, 0x1166C, 39), // Mong
+    (0x11660, 0x1166C, 39),  // Mong
     (0x11680, 0x116B9, 128), // Takr
     (0x116C0, 0x116C9, 128), // Takr
-    (0x116D0, 0x116E3, 26), // Mymr
+    (0x116D0, 0x116E3, 26),  // Mymr
     (0x11700, 0x1171A, 129), // Ahom
     (0x1171D, 0x1172B, 129), // Ahom
     (0x11730, 0x11746, 129), // Ahom
@@ -621,9 +621,9 @@ pub(crate) static SCRIPT_RANGES: [(u32, u32, u16); 778] = [
     (0x119DA, 0x119E4, 133), // Nand
     (0x11A00, 0x11A47, 134), // Zanb
     (0x11A50, 0x11AA2, 135), // Soyo
-    (0x11AB0, 0x11ABF, 31), // Cans
+    (0x11AB0, 0x11ABF, 31),  // Cans
     (0x11AC0, 0x11AF8, 136), // Pauc
-    (0x11B00, 0x11B09, 13), // Deva
+    (0x11B00, 0x11B09, 13),  // Deva
     (0x11B60, 0x11B67, 118), // Shrd
     (0x11BC0, 0x11BE1, 137), // Sunu
     (0x11BF0, 0x11BF9, 137), // Sunu
@@ -653,9 +653,9 @@ pub(crate) static SCRIPT_RANGES: [(u32, u32, u16); 778] = [
     (0x11F00, 0x11F10, 144), // Kawi
     (0x11F12, 0x11F3A, 144), // Kawi
     (0x11F3E, 0x11F5A, 144), // Kawi
-    (0x11FB0, 0x11FB0, 56), // Lisu
-    (0x11FC0, 0x11FF1, 18), // Taml
-    (0x11FFF, 0x11FFF, 18), // Taml
+    (0x11FB0, 0x11FB0, 56),  // Lisu
+    (0x11FC0, 0x11FF1, 18),  // Taml
+    (0x11FFF, 0x11FFF, 18),  // Taml
     (0x12000, 0x12399, 145), // Xsux
     (0x12400, 0x1246E, 145), // Xsux
     (0x12470, 0x12474, 145), // Xsux
@@ -665,7 +665,7 @@ pub(crate) static SCRIPT_RANGES: [(u32, u32, u16); 778] = [
     (0x13460, 0x143FA, 147), // Egyp
     (0x14400, 0x14646, 148), // Hluw
     (0x16100, 0x16139, 149), // Gukh
-    (0x16800, 0x16A38, 58), // Bamu
+    (0x16800, 0x16A38, 58),  // Bamu
     (0x16A40, 0x16A5E, 150), // Mroo
     (0x16A60, 0x16A69, 150), // Mroo
     (0x16A6E, 0x16A6F, 150), // Mroo
@@ -687,43 +687,43 @@ pub(crate) static SCRIPT_RANGES: [(u32, u32, u16); 778] = [
     (0x16F8F, 0x16F9F, 157), // Plrd
     (0x16FE0, 0x16FE0, 158), // Tang
     (0x16FE1, 0x16FE1, 159), // Nshu
-    (0x16FE2, 0x16FE3, 53), // Hani
+    (0x16FE2, 0x16FE3, 53),  // Hani
     (0x16FE4, 0x16FE4, 160), // Kits
-    (0x16FF0, 0x16FF6, 53), // Hani
+    (0x16FF0, 0x16FF6, 53),  // Hani
     (0x17000, 0x18AFF, 158), // Tang
     (0x18B00, 0x18CD5, 160), // Kits
     (0x18CFF, 0x18CFF, 160), // Kits
     (0x18D00, 0x18D1E, 158), // Tang
     (0x18D80, 0x18DF2, 158), // Tang
-    (0x1AFF0, 0x1AFF3, 54), // Kana
-    (0x1AFF5, 0x1AFFB, 54), // Kana
-    (0x1AFFD, 0x1AFFE, 54), // Kana
-    (0x1B000, 0x1B000, 54), // Kana
-    (0x1B001, 0x1B11F, 54), // Hira
-    (0x1B120, 0x1B122, 54), // Kana
-    (0x1B132, 0x1B132, 54), // Hira
-    (0x1B150, 0x1B152, 54), // Hira
-    (0x1B155, 0x1B155, 54), // Kana
-    (0x1B164, 0x1B167, 54), // Kana
+    (0x1AFF0, 0x1AFF3, 54),  // Kana
+    (0x1AFF5, 0x1AFFB, 54),  // Kana
+    (0x1AFFD, 0x1AFFE, 54),  // Kana
+    (0x1B000, 0x1B000, 54),  // Kana
+    (0x1B001, 0x1B11F, 54),  // Hira
+    (0x1B120, 0x1B122, 54),  // Kana
+    (0x1B132, 0x1B132, 54),  // Hira
+    (0x1B150, 0x1B152, 54),  // Hira
+    (0x1B155, 0x1B155, 54),  // Kana
+    (0x1B164, 0x1B167, 54),  // Kana
     (0x1B170, 0x1B2FB, 159), // Nshu
     (0x1BC00, 0x1BC6A, 161), // Dupl
     (0x1BC70, 0x1BC7C, 161), // Dupl
     (0x1BC80, 0x1BC88, 161), // Dupl
     (0x1BC90, 0x1BC99, 161), // Dupl
     (0x1BC9C, 0x1BC9F, 161), // Dupl
-    (0x1D200, 0x1D245, 2), // Grek
+    (0x1D200, 0x1D245, 2),   // Grek
     (0x1D800, 0x1DA8B, 162), // Sgnw
     (0x1DA9B, 0x1DA9F, 162), // Sgnw
     (0x1DAA1, 0x1DAAF, 162), // Sgnw
-    (0x1DF00, 0x1DF1E, 0), // Latn
-    (0x1DF25, 0x1DF2A, 0), // Latn
-    (0x1E000, 0x1E006, 51), // Glag
-    (0x1E008, 0x1E018, 51), // Glag
-    (0x1E01B, 0x1E021, 51), // Glag
-    (0x1E023, 0x1E024, 51), // Glag
-    (0x1E026, 0x1E02A, 51), // Glag
-    (0x1E030, 0x1E06D, 4), // Cyrl
-    (0x1E08F, 0x1E08F, 4), // Cyrl
+    (0x1DF00, 0x1DF1E, 0),   // Latn
+    (0x1DF25, 0x1DF2A, 0),   // Latn
+    (0x1E000, 0x1E006, 51),  // Glag
+    (0x1E008, 0x1E018, 51),  // Glag
+    (0x1E01B, 0x1E021, 51),  // Glag
+    (0x1E023, 0x1E024, 51),  // Glag
+    (0x1E026, 0x1E02A, 51),  // Glag
+    (0x1E030, 0x1E06D, 4),   // Cyrl
+    (0x1E08F, 0x1E08F, 4),   // Cyrl
     (0x1E100, 0x1E12C, 163), // Hmnp
     (0x1E130, 0x1E13D, 163), // Hmnp
     (0x1E140, 0x1E149, 163), // Hmnp
@@ -737,58 +737,58 @@ pub(crate) static SCRIPT_RANGES: [(u32, u32, u16); 778] = [
     (0x1E6C0, 0x1E6DE, 168), // Tayo
     (0x1E6E0, 0x1E6F5, 168), // Tayo
     (0x1E6FE, 0x1E6FF, 168), // Tayo
-    (0x1E7E0, 0x1E7E6, 29), // Ethi
-    (0x1E7E8, 0x1E7EB, 29), // Ethi
-    (0x1E7ED, 0x1E7EE, 29), // Ethi
-    (0x1E7F0, 0x1E7FE, 29), // Ethi
+    (0x1E7E0, 0x1E7E6, 29),  // Ethi
+    (0x1E7E8, 0x1E7EB, 29),  // Ethi
+    (0x1E7ED, 0x1E7EE, 29),  // Ethi
+    (0x1E7F0, 0x1E7FE, 29),  // Ethi
     (0x1E800, 0x1E8C4, 169), // Mend
     (0x1E8C7, 0x1E8D6, 169), // Mend
     (0x1E900, 0x1E94B, 170), // Adlm
     (0x1E950, 0x1E959, 170), // Adlm
     (0x1E95E, 0x1E95F, 170), // Adlm
-    (0x1EE00, 0x1EE03, 7), // Arab
-    (0x1EE05, 0x1EE1F, 7), // Arab
-    (0x1EE21, 0x1EE22, 7), // Arab
-    (0x1EE24, 0x1EE24, 7), // Arab
-    (0x1EE27, 0x1EE27, 7), // Arab
-    (0x1EE29, 0x1EE32, 7), // Arab
-    (0x1EE34, 0x1EE37, 7), // Arab
-    (0x1EE39, 0x1EE39, 7), // Arab
-    (0x1EE3B, 0x1EE3B, 7), // Arab
-    (0x1EE42, 0x1EE42, 7), // Arab
-    (0x1EE47, 0x1EE47, 7), // Arab
-    (0x1EE49, 0x1EE49, 7), // Arab
-    (0x1EE4B, 0x1EE4B, 7), // Arab
-    (0x1EE4D, 0x1EE4F, 7), // Arab
-    (0x1EE51, 0x1EE52, 7), // Arab
-    (0x1EE54, 0x1EE54, 7), // Arab
-    (0x1EE57, 0x1EE57, 7), // Arab
-    (0x1EE59, 0x1EE59, 7), // Arab
-    (0x1EE5B, 0x1EE5B, 7), // Arab
-    (0x1EE5D, 0x1EE5D, 7), // Arab
-    (0x1EE5F, 0x1EE5F, 7), // Arab
-    (0x1EE61, 0x1EE62, 7), // Arab
-    (0x1EE64, 0x1EE64, 7), // Arab
-    (0x1EE67, 0x1EE6A, 7), // Arab
-    (0x1EE6C, 0x1EE72, 7), // Arab
-    (0x1EE74, 0x1EE77, 7), // Arab
-    (0x1EE79, 0x1EE7C, 7), // Arab
-    (0x1EE7E, 0x1EE7E, 7), // Arab
-    (0x1EE80, 0x1EE89, 7), // Arab
-    (0x1EE8B, 0x1EE9B, 7), // Arab
-    (0x1EEA1, 0x1EEA3, 7), // Arab
-    (0x1EEA5, 0x1EEA9, 7), // Arab
-    (0x1EEAB, 0x1EEBB, 7), // Arab
-    (0x1EEF0, 0x1EEF1, 7), // Arab
-    (0x1F200, 0x1F200, 54), // Hira
-    (0x20000, 0x2A6DF, 53), // Hani
-    (0x2A700, 0x2B81D, 53), // Hani
-    (0x2B820, 0x2CEAD, 53), // Hani
-    (0x2CEB0, 0x2EBE0, 53), // Hani
-    (0x2EBF0, 0x2EE5D, 53), // Hani
-    (0x2F800, 0x2FA1D, 53), // Hani
-    (0x30000, 0x3134A, 53), // Hani
-    (0x31350, 0x33479, 53), // Hani
+    (0x1EE00, 0x1EE03, 7),   // Arab
+    (0x1EE05, 0x1EE1F, 7),   // Arab
+    (0x1EE21, 0x1EE22, 7),   // Arab
+    (0x1EE24, 0x1EE24, 7),   // Arab
+    (0x1EE27, 0x1EE27, 7),   // Arab
+    (0x1EE29, 0x1EE32, 7),   // Arab
+    (0x1EE34, 0x1EE37, 7),   // Arab
+    (0x1EE39, 0x1EE39, 7),   // Arab
+    (0x1EE3B, 0x1EE3B, 7),   // Arab
+    (0x1EE42, 0x1EE42, 7),   // Arab
+    (0x1EE47, 0x1EE47, 7),   // Arab
+    (0x1EE49, 0x1EE49, 7),   // Arab
+    (0x1EE4B, 0x1EE4B, 7),   // Arab
+    (0x1EE4D, 0x1EE4F, 7),   // Arab
+    (0x1EE51, 0x1EE52, 7),   // Arab
+    (0x1EE54, 0x1EE54, 7),   // Arab
+    (0x1EE57, 0x1EE57, 7),   // Arab
+    (0x1EE59, 0x1EE59, 7),   // Arab
+    (0x1EE5B, 0x1EE5B, 7),   // Arab
+    (0x1EE5D, 0x1EE5D, 7),   // Arab
+    (0x1EE5F, 0x1EE5F, 7),   // Arab
+    (0x1EE61, 0x1EE62, 7),   // Arab
+    (0x1EE64, 0x1EE64, 7),   // Arab
+    (0x1EE67, 0x1EE6A, 7),   // Arab
+    (0x1EE6C, 0x1EE72, 7),   // Arab
+    (0x1EE74, 0x1EE77, 7),   // Arab
+    (0x1EE79, 0x1EE7C, 7),   // Arab
+    (0x1EE7E, 0x1EE7E, 7),   // Arab
+    (0x1EE80, 0x1EE89, 7),   // Arab
+    (0x1EE8B, 0x1EE9B, 7),   // Arab
+    (0x1EEA1, 0x1EEA3, 7),   // Arab
+    (0x1EEA5, 0x1EEA9, 7),   // Arab
+    (0x1EEAB, 0x1EEBB, 7),   // Arab
+    (0x1EEF0, 0x1EEF1, 7),   // Arab
+    (0x1F200, 0x1F200, 54),  // Hira
+    (0x20000, 0x2A6DF, 53),  // Hani
+    (0x2A700, 0x2B81D, 53),  // Hani
+    (0x2B820, 0x2CEAD, 53),  // Hani
+    (0x2CEB0, 0x2EBE0, 53),  // Hani
+    (0x2EBF0, 0x2EE5D, 53),  // Hani
+    (0x2F800, 0x2FA1D, 53),  // Hani
+    (0x30000, 0x3134A, 53),  // Hani
+    (0x31350, 0x33479, 53),  // Hani
 ];
 
 /// The OpenType script tags for each script, preferred first.
@@ -1020,12 +1020,12 @@ pub(crate) static SCRIPT_EXT_RANGES: [(u32, u32, u16, u16); 177] = [
     (0x032E, 0x032E, 232, 2), // Latn Syrc
     (0x0330, 0x0330, 259, 3), // Latn Syrc Cher
     (0x0331, 0x0331, 232, 7), // Latn Syrc Thai Cher Goth Aghb Sunu
-    (0x0342, 0x0342, 45, 1), // Grek
-    (0x0345, 0x0345, 45, 1), // Grek
+    (0x0342, 0x0342, 45, 1),  // Grek
+    (0x0345, 0x0345, 45, 1),  // Grek
     (0x0358, 0x0358, 415, 2), // Latn Osge
     (0x035E, 0x035E, 364, 3), // Latn Aghb Todr
-    (0x0363, 0x036F, 44, 1), // Latn
-    (0x0374, 0x0375, 45, 2), // Grek Copt
+    (0x0363, 0x036F, 44, 1),  // Latn
+    (0x0374, 0x0375, 45, 2),  // Grek Copt
     (0x0483, 0x0483, 425, 2), // Cyrl Perm
     (0x0484, 0x0484, 423, 2), // Cyrl Glag
     (0x0485, 0x0486, 225, 2), // Latn Cyrl
@@ -1057,34 +1057,34 @@ pub(crate) static SCRIPT_EXT_RANGES: [(u32, u32, u16, u16); 177] = [
     (0x1802, 0x1803, 362, 2), // Mong Phag
     (0x1805, 0x1805, 362, 2), // Mong Phag
     (0x1CD0, 0x1CD0, 317, 4), // Deva Beng Knda Gran
-    (0x1CD1, 0x1CD1, 0, 1), // Deva
+    (0x1CD1, 0x1CD1, 0, 1),  // Deva
     (0x1CD2, 0x1CD2, 317, 4), // Deva Beng Knda Gran
     (0x1CD3, 0x1CD3, 325, 3), // Deva Knda Gran
-    (0x1CD4, 0x1CD4, 0, 1), // Deva
+    (0x1CD4, 0x1CD4, 0, 1),  // Deva
     (0x1CD5, 0x1CD5, 292, 5), // Deva Beng Telu Newa Tirh
     (0x1CD6, 0x1CD6, 292, 3), // Deva Beng Telu
     (0x1CD7, 0x1CD7, 379, 3), // Deva Shrd Newa
     (0x1CD8, 0x1CD8, 292, 4), // Deva Beng Telu Newa
     (0x1CD9, 0x1CD9, 379, 2), // Deva Shrd
     (0x1CDA, 0x1CDA, 265, 6), // Deva Orya Taml Telu Knda Mlym
-    (0x1CDB, 0x1CDB, 0, 1), // Deva
+    (0x1CDB, 0x1CDB, 0, 1),  // Deva
     (0x1CDC, 0x1CDD, 379, 2), // Deva Shrd
-    (0x1CDE, 0x1CDF, 0, 1), // Deva
+    (0x1CDE, 0x1CDF, 0, 1),  // Deva
     (0x1CE0, 0x1CE0, 379, 2), // Deva Shrd
-    (0x1CE1, 0x1CE1, 0, 2), // Deva Beng
+    (0x1CE1, 0x1CE1, 0, 2),  // Deva Beng
     (0x1CE2, 0x1CE2, 382, 3), // Deva Newa Tirh
-    (0x1CE3, 0x1CE8, 0, 1), // Deva
+    (0x1CE3, 0x1CE8, 0, 1),  // Deva
     (0x1CE9, 0x1CE9, 385, 3), // Deva Newa Nand
     (0x1CEA, 0x1CEA, 321, 3), // Deva Beng Shrd
     (0x1CEB, 0x1CEB, 382, 2), // Deva Newa
-    (0x1CEC, 0x1CEC, 0, 1), // Deva
+    (0x1CEC, 0x1CEC, 0, 1),  // Deva
     (0x1CED, 0x1CED, 321, 4), // Deva Beng Shrd Newa
-    (0x1CEE, 0x1CF1, 0, 1), // Deva
+    (0x1CEE, 0x1CF1, 0, 1),  // Deva
     (0x1CF2, 0x1CF2, 153, 11), // Deva Beng Orya Telu Knda Mlym Sinh Gran Tutg Tirh Nand
     (0x1CF3, 0x1CF3, 350, 2), // Deva Gran
     (0x1CF4, 0x1CF4, 325, 4), // Deva Knda Gran Tutg
-    (0x1CF5, 0x1CF6, 0, 2), // Deva Beng
-    (0x1CF7, 0x1CF7, 1, 1), // Beng
+    (0x1CF5, 0x1CF6, 0, 2),  // Deva Beng
+    (0x1CF7, 0x1CF7, 1, 1),  // Beng
     (0x1CF8, 0x1CF9, 350, 2), // Deva Gran
     (0x1CFA, 0x1CFA, 18, 1), // Nand
     (0x1DC0, 0x1DC1, 45, 1), // Grek
@@ -1172,33 +1172,24 @@ pub(crate) static SCRIPT_EXT_RANGES: [(u32, u32, u16, u16); 177] = [
 /// One set that appears verbatim inside another is stored once, so
 /// the pool is smaller than the sum of the sets in it.
 pub(crate) static SCRIPT_EXT_POOL: [u16; 452] = [
-    13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 40, 59, 117, 121, 122, 125,
-    128, 130, 133, 140, 141, 149, 167, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-    22, 59, 117, 121, 122, 125, 128, 130, 133, 140, 141, 167, 0, 2, 3, 27,
-    51, 53, 70, 72, 73, 77, 80, 91, 99, 117, 141, 161, 13, 15, 16, 20,
-    21, 114, 117, 118, 119, 121, 123, 125, 127, 128, 130, 133, 0, 13, 14, 15,
-    16, 17, 18, 19, 20, 21, 118, 122, 124, 125, 133, 13, 15, 16, 20, 114,
-    117, 118, 119, 121, 123, 125, 127, 128, 130, 133, 0, 13, 14, 15, 16, 17,
-    18, 19, 20, 21, 122, 124, 125, 13, 15, 16, 114, 117, 118, 119, 121, 125,
-    127, 128, 130, 0, 2, 3, 4, 8, 30, 52, 72, 79, 81, 83, 0, 2,
-    4, 5, 6, 8, 41, 52, 72, 73, 161, 13, 14, 17, 19, 20, 21, 22,
-    122, 123, 125, 133, 13, 15, 16, 114, 117, 119, 121, 125, 127, 128, 130, 0,
-    3, 6, 8, 41, 52, 73, 83, 161, 7, 8, 12, 98, 102, 105, 109, 110,
-    170, 0, 2, 3, 4, 30, 41, 73, 137, 0, 2, 4, 30, 41, 79, 83,
-    137, 1, 25, 28, 39, 53, 54, 55, 56, 7, 8, 9, 10, 105, 106, 107,
-    170, 0, 4, 13, 14, 23, 56, 164, 0, 8, 23, 30, 72, 81, 137, 1,
-    28, 39, 53, 54, 55, 60, 11, 27, 70, 91, 99, 104, 114, 0, 3, 51,
-    54, 72, 80, 0, 8, 30, 52, 54, 161, 13, 17, 18, 19, 20, 21, 27,
-    51, 69, 70, 103, 104, 0, 2, 4, 52, 73, 0, 8, 23, 51, 137, 1,
-    28, 53, 54, 55, 13, 14, 19, 124, 125, 0, 2, 73, 83, 0, 4, 30,
-    52, 0, 4, 30, 79, 0, 8, 30, 161, 2, 70, 93, 104, 13, 14, 20,
-    122, 13, 14, 118, 124, 13, 20, 122, 123, 13, 114, 117, 130, 34, 35, 36,
-    37, 0, 4, 8, 0, 4, 83, 0, 8, 137, 0, 8, 161, 0, 13, 122,
-    0, 26, 62, 0, 27, 51, 0, 30, 41, 0, 39, 60, 0, 81, 83, 5,
-    27, 51, 7, 9, 107, 7, 104, 170, 13, 14, 123, 13, 118, 124, 13, 124,
-    125, 13, 124, 133, 14, 59, 116, 20, 123, 133, 26, 41, 116, 68, 84, 85,
-    68, 85, 146, 0, 1, 0, 23, 0, 29, 0, 52, 0, 53, 0, 56, 0,
-    79, 0, 137, 1, 53, 3, 7, 4, 51, 4, 73, 7, 10, 7, 105, 7,
-    170, 13, 18, 15, 120, 16, 119, 18, 122, 43, 64, 53, 158, 98, 110, 99,
-    103, 122, 18, 33,
+    13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 40, 59, 117, 121, 122, 125, 128, 130, 133, 140, 141,
+    149, 167, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 59, 117, 121, 122, 125, 128, 130, 133, 140,
+    141, 167, 0, 2, 3, 27, 51, 53, 70, 72, 73, 77, 80, 91, 99, 117, 141, 161, 13, 15, 16, 20, 21,
+    114, 117, 118, 119, 121, 123, 125, 127, 128, 130, 133, 0, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+    118, 122, 124, 125, 133, 13, 15, 16, 20, 114, 117, 118, 119, 121, 123, 125, 127, 128, 130, 133,
+    0, 13, 14, 15, 16, 17, 18, 19, 20, 21, 122, 124, 125, 13, 15, 16, 114, 117, 118, 119, 121, 125,
+    127, 128, 130, 0, 2, 3, 4, 8, 30, 52, 72, 79, 81, 83, 0, 2, 4, 5, 6, 8, 41, 52, 72, 73, 161,
+    13, 14, 17, 19, 20, 21, 22, 122, 123, 125, 133, 13, 15, 16, 114, 117, 119, 121, 125, 127, 128,
+    130, 0, 3, 6, 8, 41, 52, 73, 83, 161, 7, 8, 12, 98, 102, 105, 109, 110, 170, 0, 2, 3, 4, 30,
+    41, 73, 137, 0, 2, 4, 30, 41, 79, 83, 137, 1, 25, 28, 39, 53, 54, 55, 56, 7, 8, 9, 10, 105,
+    106, 107, 170, 0, 4, 13, 14, 23, 56, 164, 0, 8, 23, 30, 72, 81, 137, 1, 28, 39, 53, 54, 55, 60,
+    11, 27, 70, 91, 99, 104, 114, 0, 3, 51, 54, 72, 80, 0, 8, 30, 52, 54, 161, 13, 17, 18, 19, 20,
+    21, 27, 51, 69, 70, 103, 104, 0, 2, 4, 52, 73, 0, 8, 23, 51, 137, 1, 28, 53, 54, 55, 13, 14,
+    19, 124, 125, 0, 2, 73, 83, 0, 4, 30, 52, 0, 4, 30, 79, 0, 8, 30, 161, 2, 70, 93, 104, 13, 14,
+    20, 122, 13, 14, 118, 124, 13, 20, 122, 123, 13, 114, 117, 130, 34, 35, 36, 37, 0, 4, 8, 0, 4,
+    83, 0, 8, 137, 0, 8, 161, 0, 13, 122, 0, 26, 62, 0, 27, 51, 0, 30, 41, 0, 39, 60, 0, 81, 83, 5,
+    27, 51, 7, 9, 107, 7, 104, 170, 13, 14, 123, 13, 118, 124, 13, 124, 125, 13, 124, 133, 14, 59,
+    116, 20, 123, 133, 26, 41, 116, 68, 84, 85, 68, 85, 146, 0, 1, 0, 23, 0, 29, 0, 52, 0, 53, 0,
+    56, 0, 79, 0, 137, 1, 53, 3, 7, 4, 51, 4, 73, 7, 10, 7, 105, 7, 170, 13, 18, 15, 120, 16, 119,
+    18, 122, 43, 64, 53, 158, 98, 110, 99, 103, 122, 18, 33,
 ];

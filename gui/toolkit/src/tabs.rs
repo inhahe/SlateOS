@@ -826,7 +826,7 @@ mod tests {
                 alt: false,
                 super_key: false,
             },
-            text: None,
+            text: String::new(),
         };
         let event = tv.handle_key(&key);
         assert_eq!(event, Some(TabEvent::Selected(2)));
@@ -843,7 +843,7 @@ mod tests {
                 alt: false,
                 super_key: false,
             },
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -923,7 +923,7 @@ mod tests {
                 alt: false,
                 super_key: false,
             },
-            text: None,
+            text: String::new(),
         };
         let event = tv.handle_key(&key);
         assert_eq!(event, Some(TabEvent::Selected(3)));

@@ -971,7 +971,7 @@ mod tests {
                 key: k,
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: None,
+                text: String::new(),
             },
             0x1E,
         )])

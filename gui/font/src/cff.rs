@@ -101,7 +101,11 @@ fn u8_at(d: &[u8], off: usize) -> Result<u8, SfntError> {
 }
 
 fn u16_at(d: &[u8], off: usize) -> Result<u16, SfntError> {
-    let b: [u8; 2] = d.get(off..add(off, 2)?).ok_or(ERR)?.try_into().map_err(|_| ERR)?;
+    let b: [u8; 2] = d
+        .get(off..add(off, 2)?)
+        .ok_or(ERR)?
+        .try_into()
+        .map_err(|_| ERR)?;
     Ok(u16::from_be_bytes(b))
 }
 
@@ -264,10 +268,13 @@ fn parse_dict(
 fn dict_operand(d: &[u8], at: usize) -> Result<(f64, usize), SfntError> {
     let b0 = u8_at(d, at)?;
     match b0 {
-        28 => Ok((f64::from(i16::from_be_bytes([
-            u8_at(d, add(at, 1)?)?,
-            u8_at(d, add(at, 2)?)?,
-        ])), 3)),
+        28 => Ok((
+            f64::from(i16::from_be_bytes([
+                u8_at(d, add(at, 1)?)?,
+                u8_at(d, add(at, 2)?)?,
+            ])),
+            3,
+        )),
         29 => {
             let v = i32::from_be_bytes([
                 u8_at(d, add(at, 1)?)?,
@@ -342,7 +349,9 @@ fn real_operand(d: &[u8], at: usize) -> Result<(f64, usize), SfntError> {
                 0..=9 => {
                     let digit = f64::from(u32::from(nibble));
                     if in_exponent {
-                        exponent = exponent.saturating_mul(10).saturating_add(i32::from(nibble));
+                        exponent = exponent
+                            .saturating_mul(10)
+                            .saturating_add(i32::from(nibble));
                     } else {
                         mantissa = mantissa * 10.0 + digit;
                         if in_fraction {
@@ -359,8 +368,11 @@ fn real_operand(d: &[u8], at: usize) -> Result<(f64, usize), SfntError> {
                 0x0e => negative = true,
                 0x0f => {
                     let sign = if negative { -1.0 } else { 1.0 };
-                    let scale =
-                        pow10(exp_sign.saturating_mul(exponent).saturating_sub(frac_digits));
+                    let scale = pow10(
+                        exp_sign
+                            .saturating_mul(exponent)
+                            .saturating_sub(frac_digits),
+                    );
                     return Ok((sign * mantissa * scale, i.checked_sub(at).ok_or(ERR)?));
                 }
                 // 0x0d is reserved.
@@ -573,7 +585,9 @@ impl Cff {
                     let off = dict_u32(args.get(1))?;
                     private = Some((off, size));
                 }
-                esc if esc == self::esc(6) => charstring_type = args.first().copied().unwrap_or(2.0),
+                esc if esc == self::esc(6) => {
+                    charstring_type = args.first().copied().unwrap_or(2.0);
+                }
                 esc if esc == self::esc(7) => {
                     let mut m = [0.0; 6];
                     for (slot, v) in m.iter_mut().zip(args.iter()) {
@@ -1429,7 +1443,10 @@ mod tests {
         let plain = run_bare(&cs(&[&int(100), &int(200), &[21], &[14]]));
         let with_width = run_bare(&cs(&[&int(555), &int(100), &int(200), &[21], &[14]]));
         assert_eq!(with_width.commands, plain.commands);
-        assert_eq!(plain.commands.first(), Some(&PathCmd::MoveTo(pt(100.0, 200.0))));
+        assert_eq!(
+            plain.commands.first(),
+            Some(&PathCmd::MoveTo(pt(100.0, 200.0)))
+        );
     }
 
     #[test]
@@ -1607,7 +1624,10 @@ mod tests {
             &[14],
         ]);
         let o = run_bare(&code);
-        assert_eq!(o.commands.iter().filter(|c| **c == PathCmd::Close).count(), 2);
+        assert_eq!(
+            o.commands.iter().filter(|c| **c == PathCmd::Close).count(),
+            2
+        );
         assert_eq!(o.commands[2], PathCmd::Close);
     }
 

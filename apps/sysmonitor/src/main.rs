@@ -1022,10 +1022,12 @@ impl SysMonitorState {
                 EventResult::Consumed
             }
             _ => {
-                if let Some(ch) = key.text
-                    && (ch.is_ascii_graphic() || ch == ' ')
-                {
-                    self.filter_text.push(ch);
+                let allowed: String = key
+                    .typed()
+                    .filter(|ch| ch.is_ascii_graphic() || *ch == ' ')
+                    .collect();
+                if !allowed.is_empty() {
+                    self.filter_text.push_str(&allowed);
                     self.rebuild_visible_list();
                 }
                 EventResult::Consumed
@@ -4039,7 +4041,7 @@ mod tests {
             key: Key::Num3,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         s.handle_key(&key);
         assert_eq!(s.active_tab, Tab::Cpu);
@@ -4052,7 +4054,7 @@ mod tests {
             key: Key::F,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         };
         s.handle_key(&key);
         assert!(s.filter_focused);
@@ -4067,7 +4069,7 @@ mod tests {
             key: Key::A,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('a'),
+            text: "a".to_string(),
         };
         s.handle_filter_key(&key);
         assert_eq!(s.filter_text, "a");
@@ -4083,7 +4085,7 @@ mod tests {
             key: Key::Backspace,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         s.handle_filter_key(&key);
         assert_eq!(s.filter_text, "ab");
@@ -4097,7 +4099,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         s.handle_filter_key(&key);
         assert!(!s.filter_focused);

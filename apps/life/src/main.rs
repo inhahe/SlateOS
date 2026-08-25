@@ -240,17 +240,21 @@ impl Grid {
     }
 
     fn set(&mut self, row: usize, col: usize, alive: bool) {
-        if row < self.height && col < self.width
-            && let Some(cell) = self.cells.get_mut(row * self.width + col) {
-                *cell = alive;
-            }
+        if row < self.height
+            && col < self.width
+            && let Some(cell) = self.cells.get_mut(row * self.width + col)
+        {
+            *cell = alive;
+        }
     }
 
     fn toggle(&mut self, row: usize, col: usize) {
-        if row < self.height && col < self.width
-            && let Some(cell) = self.cells.get_mut(row * self.width + col) {
-                *cell = !*cell;
-            }
+        if row < self.height
+            && col < self.width
+            && let Some(cell) = self.cells.get_mut(row * self.width + col)
+        {
+            *cell = !*cell;
+        }
     }
 
     fn clear(&mut self) {
@@ -421,15 +425,14 @@ impl LifeApp {
 
     fn handle_main_event(&mut self, event: &Event) {
         match event {
-            Event::Tick { elapsed_ms }
-                if self.running => {
-                    self.tick_accum += elapsed_ms;
-                    let interval = self.speed_ms();
-                    while self.tick_accum >= interval {
-                        self.tick_accum -= interval;
-                        self.step();
-                    }
+            Event::Tick { elapsed_ms } if self.running => {
+                self.tick_accum += elapsed_ms;
+                let interval = self.speed_ms();
+                while self.tick_accum >= interval {
+                    self.tick_accum -= interval;
+                    self.step();
                 }
+            }
             Event::Key(KeyEvent { key, modifiers, .. }) => {
                 if modifiers.ctrl {
                     return;
@@ -439,10 +442,9 @@ impl LifeApp {
                         self.running = !self.running;
                         self.tick_accum = 0;
                     }
-                    Key::S
-                        if !self.running => {
-                            self.step();
-                        }
+                    Key::S if !self.running => {
+                        self.step();
+                    }
                     Key::C => {
                         self.grid.clear();
                         self.generation = 0;
@@ -520,26 +522,26 @@ impl LifeApp {
     }
 
     fn handle_pattern_event(&mut self, event: &Event) {
-        if let Event::Key(KeyEvent { key, .. }) = event { match key {
-            Key::Up
-                if self.selected_pattern > 0 => {
+        if let Event::Key(KeyEvent { key, .. }) = event {
+            match key {
+                Key::Up if self.selected_pattern > 0 => {
                     self.selected_pattern -= 1;
                 }
-            Key::Down
-                if self.selected_pattern + 1 < Pattern::ALL.len() => {
+                Key::Down if self.selected_pattern + 1 < Pattern::ALL.len() => {
                     self.selected_pattern += 1;
                 }
-            Key::Enter => {
-                let pat = Pattern::ALL[self.selected_pattern];
-                self.grid
-                    .place_pattern(pat, self.cursor_row, self.cursor_col);
-                self.view = View::Main;
+                Key::Enter => {
+                    let pat = Pattern::ALL[self.selected_pattern];
+                    self.grid
+                        .place_pattern(pat, self.cursor_row, self.cursor_col);
+                    self.view = View::Main;
+                }
+                Key::Escape => {
+                    self.view = View::Main;
+                }
+                _ => {}
             }
-            Key::Escape => {
-                self.view = View::Main;
-            }
-            _ => {}
-        } }
+        }
     }
 
     fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
@@ -1216,14 +1218,14 @@ mod tests {
             key: Key::Space,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(app.running);
         app.event(&Event::Key(KeyEvent {
             key: Key::Space,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(!app.running);
     }
@@ -1235,7 +1237,7 @@ mod tests {
             key: Key::C,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.grid.population(), 0);
         assert_eq!(app.generation, 0);
@@ -1250,7 +1252,7 @@ mod tests {
             key: Key::R,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(app.grid.population() > 0);
     }
@@ -1262,7 +1264,7 @@ mod tests {
             key: Key::S,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.generation, 1);
     }
@@ -1276,7 +1278,7 @@ mod tests {
             key: Key::S,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.generation, gen_before);
     }
@@ -1288,14 +1290,14 @@ mod tests {
             key: Key::Num1,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.speed, 1);
         app.event(&Event::Key(KeyEvent {
             key: Key::Num9,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.speed, 9);
     }
@@ -1308,7 +1310,7 @@ mod tests {
             key: Key::Up,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.cursor_row, start_row - 1);
     }
@@ -1321,7 +1323,7 @@ mod tests {
             key: Key::Up,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.cursor_row, app.grid.height - 1);
     }
@@ -1334,7 +1336,7 @@ mod tests {
             key: Key::Down,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.cursor_row, 0);
     }
@@ -1347,7 +1349,7 @@ mod tests {
             key: Key::Left,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.cursor_col, app.grid.width - 1);
     }
@@ -1360,7 +1362,7 @@ mod tests {
             key: Key::Right,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.cursor_col, 0);
     }
@@ -1375,7 +1377,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(app.grid.get(r, c));
     }
@@ -1388,7 +1390,7 @@ mod tests {
             key: Key::G,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(!app.show_grid);
     }
@@ -1400,7 +1402,7 @@ mod tests {
             key: Key::P,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.view, View::PatternSelect);
         assert!(!app.running);
@@ -1415,7 +1417,7 @@ mod tests {
             key: Key::Down,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.selected_pattern, 1);
     }
@@ -1429,7 +1431,7 @@ mod tests {
             key: Key::Up,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.selected_pattern, 0);
     }
@@ -1444,7 +1446,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.view, View::Main);
         assert!(app.grid.population() > 0);
@@ -1458,7 +1460,7 @@ mod tests {
             key: Key::Escape,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.view, View::Main);
     }
@@ -1471,7 +1473,7 @@ mod tests {
             key: Key::F1,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(app.show_help);
     }
@@ -1588,7 +1590,7 @@ mod tests {
                 ..Modifiers::default()
             },
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         // C with Ctrl should NOT clear — Ctrl events are ignored
         assert_eq!(app.grid.population(), pop);

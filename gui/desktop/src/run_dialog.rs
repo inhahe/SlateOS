@@ -619,15 +619,19 @@ impl RunDialog {
 
             // Text input (character typed)
             _ => {
-                if let Some(ch) = event.text {
-                    if !ch.is_control() {
-                        self.input.insert_char(ch);
-                        self.update_suggestions();
-                        self.error_message = None;
-                    }
-                } else {
+                // One test, not two. A keystroke that typed only a control
+                // character is as much "not for this dialog" as one that typed
+                // nothing at all, and both must reach `Ignored` — falling
+                // through to the `Consumed` below would swallow a keystroke the
+                // desktop behind us still wants to see.
+                if !event.types_text() {
                     return EventResult::Ignored;
                 }
+                for ch in event.typed() {
+                    self.input.insert_char(ch);
+                }
+                self.update_suggestions();
+                self.error_message = None;
             }
         }
 
@@ -1297,7 +1301,7 @@ mod tests {
                 alt: false,
                 super_key: false,
             },
-            text,
+            text: text.map_or_else(String::new, |c| c.to_string()),
         }
     }
 

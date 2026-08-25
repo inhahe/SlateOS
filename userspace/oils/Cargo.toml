@@ -13,7 +13,18 @@ name = "osh"
 path = "src/lib.rs"
 
 [dependencies]
-bstr = { version = "1.13.0", default-features = false, features = ["std"] }
+# `alloc` and not `std`, though the shell is unambiguously a `std` program.
+# `bstr/std` buys `io`-shaped helpers (`BufRead::byte_lines`, `io::Error` impls)
+# that nothing here calls; what the shell actually uses — `find`, `replace`,
+# `split_str`, `lines`, `chars`, `char_indices` — needs `alloc` at most.
+#
+# Asking for the smaller set matters because of a crate that is not this one.
+# `ere` links into `kernel`, which is `no_std`, and Cargo unions a dependency's
+# features across a build graph: one `bstr/std` anywhere in the kernel's graph
+# would be `bstr/std` in the kernel too, however carefully `ere/Cargo.toml` was
+# written. The two crates are in separate graphs today, so this is belt as well
+# as braces — but it is a one-word belt.
+bstr = { version = "1.13.0", default-features = false, features = ["alloc"] }
 
 # The POSIX regex engine, shared with the coreutils. It was `src/ere.rs` here
 # until `grep`, `sed`, `awk` and `expr` were each found to be matching regular

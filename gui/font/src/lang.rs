@@ -147,7 +147,9 @@ impl Lang {
     /// first-choice one it also registers.
     #[must_use]
     pub fn tags(&self) -> &[[u8; 4]] {
-        self.tags.get(..usize::from(self.count)).unwrap_or(&self.tags)
+        self.tags
+            .get(..usize::from(self.count))
+            .unwrap_or(&self.tags)
     }
 
     /// A single tag read out of a font's LangSysRecord.
@@ -158,7 +160,10 @@ impl Lang {
     /// needs to key its selections by whatever the face actually wrote, which
     /// is why it may build one this way.
     pub(crate) fn from_tag(tag: [u8; 4]) -> Self {
-        Self { tags: [tag; MAX_TAGS], count: 1 }
+        Self {
+            tags: [tag; MAX_TAGS],
+            count: 1,
+        }
     }
 
     /// A registry entry's candidate list, copied into the fixed array.
@@ -182,7 +187,10 @@ impl Lang {
         }
         // Anything past `count` repeats the last real tag, so equality is
         // equality of the list and nothing else.
-        let last = out.get(usize::from(count).saturating_sub(1)).copied().unwrap_or(first);
+        let last = out
+            .get(usize::from(count).saturating_sub(1))
+            .copied()
+            .unwrap_or(first);
         for slot in out.iter_mut().skip(usize::from(count)) {
             *slot = last;
         }
@@ -228,16 +236,16 @@ fn primary(s: &[u8]) -> (usize, usize) {
         && let Some(dash) = s.iter().position(|&b| norm(b) == b'-')
     {
         let rest = dash.saturating_add(1);
-        let extlang = s
-            .get(rest..)
-            .map_or(0, |t| t.iter().position(|&b| norm(b) == b'-').unwrap_or(t.len()));
+        let extlang = s.get(rest..).map_or(0, |t| {
+            t.iter().position(|&b| norm(b) == b'-').unwrap_or(t.len())
+        });
         if extlang == 3 && s.get(rest).is_some_and(u8::is_ascii_alphabetic) {
             at = rest;
         }
     }
-    let len = s
-        .get(at..)
-        .map_or(0, |t| t.iter().position(|&b| norm(b) == b'-').unwrap_or(t.len()));
+    let len = s.get(at..).map_or(0, |t| {
+        t.iter().position(|&b| norm(b) == b'-').unwrap_or(t.len())
+    });
     (at, len)
 }
 
@@ -256,7 +264,10 @@ fn padded(sub: &[u8]) -> [u8; 4] {
 }
 
 /// The tags `sub` selects in a sorted subtag-to-tags table.
-fn search(table: &'static [([u8; 4], &'static [[u8; 4]])], sub: &[u8]) -> Option<&'static [[u8; 4]]> {
+fn search(
+    table: &'static [([u8; 4], &'static [[u8; 4]])],
+    sub: &[u8],
+) -> Option<&'static [[u8; 4]]> {
     let key = padded(sub);
     table
         .binary_search_by_key(&key, |&(k, _)| k)
@@ -338,9 +349,10 @@ fn has_subtag(s: &[u8], sub: &str) -> bool {
         return false;
     };
     (0..=last).any(|i| {
-        s.get(i..)
-            .and_then(|t| prefix_of(t, sub))
-            .is_some_and(|_| s.get(i.saturating_add(n)).is_none_or(|b| !b.is_ascii_alphanumeric()))
+        s.get(i..).and_then(|t| prefix_of(t, sub)).is_some_and(|_| {
+            s.get(i.saturating_add(n))
+                .is_none_or(|b| !b.is_ascii_alphanumeric())
+        })
     })
 }
 
@@ -428,7 +440,11 @@ mod tests {
     fn an_unregistered_three_letter_code_is_uppercased() {
         // Not in HarfBuzz's tables, so the ISO 639-3 fallback applies. If the
         // registry ever gains it this test is the thing that notices.
-        assert!(LANGUAGES_3.binary_search_by_key(b"zzz ", |&(k, _)| k).is_err());
+        assert!(
+            LANGUAGES_3
+                .binary_search_by_key(b"zzz ", |&(k, _)| k)
+                .is_err()
+        );
         assert_eq!(tag("zzz"), Some(*b"ZZZ "));
     }
 
@@ -482,7 +498,10 @@ mod tests {
             .chain(COMPLEX.iter().map(|&(_, t)| t));
         for tags in all {
             assert!(!tags.is_empty(), "an entry names no tag");
-            assert!(tags.len() <= MAX_TAGS, "entry {tags:?} is longer than {MAX_TAGS}");
+            assert!(
+                tags.len() <= MAX_TAGS,
+                "entry {tags:?} is longer than {MAX_TAGS}"
+            );
         }
     }
 

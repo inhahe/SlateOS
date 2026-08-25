@@ -165,10 +165,11 @@ impl TowersOfHanoi {
             return;
         }
         if let Some((from_peg, to_peg)) = self.undo_stack.pop()
-            && let Some(disk) = self.pegs[to_peg].pop() {
-                self.pegs[from_peg].push(disk);
-                self.moves = self.moves.saturating_sub(1);
-            }
+            && let Some(disk) = self.pegs[to_peg].pop()
+        {
+            self.pegs[from_peg].push(disk);
+            self.moves = self.moves.saturating_sub(1);
+        }
     }
 
     fn check_win(&mut self) {
@@ -190,46 +191,43 @@ impl TowersOfHanoi {
 
     fn event(&mut self, event: &Event) {
         match event {
-            Event::Key(KeyEvent { key, modifiers, .. })
-                if *modifiers == Modifiers::NONE => {
-                    match key {
-                        Key::Left
-                            if self.selected_peg > 0 => {
-                                self.selected_peg -= 1;
-                            }
-                        Key::Right
-                            if self.selected_peg < NUM_PEGS - 1 => {
-                                self.selected_peg += 1;
-                            }
-                        Key::Num1 => self.selected_peg = 0,
-                        Key::Num2 => self.selected_peg = 1,
-                        Key::Num3 => self.selected_peg = 2,
-                        Key::Enter | Key::Space => {
-                            if self.held_disk.is_some() {
-                                self.try_place();
-                            } else {
-                                self.try_pickup();
-                            }
-                        }
-                        Key::Escape => self.cancel_held(),
-                        Key::Z => self.undo(),
-                        Key::N => self.reset_pegs(),
-                        Key::H => self.show_help = !self.show_help,
-                        Key::Up
-                            if (self.num_disks < MAX_DISKS && self.state != GameState::Playing
-                                || (self.moves == 0 && self.held_disk.is_none()))
-                            => {
-                                self.set_disks(self.num_disks + 1);
-                            }
-                        Key::Down
-                            if (self.num_disks > 3 && self.state != GameState::Playing
-                                || (self.moves == 0 && self.held_disk.is_none()))
-                            => {
-                                self.set_disks(self.num_disks - 1);
-                            }
-                        _ => {}
+            Event::Key(KeyEvent { key, modifiers, .. }) if *modifiers == Modifiers::NONE => {
+                match key {
+                    Key::Left if self.selected_peg > 0 => {
+                        self.selected_peg -= 1;
                     }
+                    Key::Right if self.selected_peg < NUM_PEGS - 1 => {
+                        self.selected_peg += 1;
+                    }
+                    Key::Num1 => self.selected_peg = 0,
+                    Key::Num2 => self.selected_peg = 1,
+                    Key::Num3 => self.selected_peg = 2,
+                    Key::Enter | Key::Space => {
+                        if self.held_disk.is_some() {
+                            self.try_place();
+                        } else {
+                            self.try_pickup();
+                        }
+                    }
+                    Key::Escape => self.cancel_held(),
+                    Key::Z => self.undo(),
+                    Key::N => self.reset_pegs(),
+                    Key::H => self.show_help = !self.show_help,
+                    Key::Up
+                        if (self.num_disks < MAX_DISKS && self.state != GameState::Playing
+                            || (self.moves == 0 && self.held_disk.is_none())) =>
+                    {
+                        self.set_disks(self.num_disks + 1);
+                    }
+                    Key::Down
+                        if (self.num_disks > 3 && self.state != GameState::Playing
+                            || (self.moves == 0 && self.held_disk.is_none())) =>
+                    {
+                        self.set_disks(self.num_disks - 1);
+                    }
+                    _ => {}
                 }
+            }
             Event::Mouse(MouseEvent { x, kind, .. }) => {
                 if matches!(kind, MouseEventKind::Press(MouseButton::Left)) {
                     // Determine which peg was clicked
@@ -987,7 +985,7 @@ mod tests {
             key: Key::Left,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.selected_peg, 0);
@@ -1001,7 +999,7 @@ mod tests {
             key: Key::Left,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.selected_peg, 0);
@@ -1015,7 +1013,7 @@ mod tests {
             key: Key::Right,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.selected_peg, 1);
@@ -1029,7 +1027,7 @@ mod tests {
             key: Key::Right,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.selected_peg, 2);
@@ -1042,7 +1040,7 @@ mod tests {
             key: Key::Num2,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.selected_peg, 1);
@@ -1057,7 +1055,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert!(app.held_disk.is_some());
@@ -1076,7 +1074,7 @@ mod tests {
             key: Key::N,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.moves, 0);
@@ -1093,7 +1091,7 @@ mod tests {
             key: Key::Z,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.moves, 0);
@@ -1107,7 +1105,7 @@ mod tests {
             key: Key::Escape,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert!(app.held_disk.is_none());
@@ -1121,7 +1119,7 @@ mod tests {
             key: Key::H,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert!(app.show_help);

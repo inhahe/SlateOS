@@ -1121,7 +1121,7 @@ mod tests {
             key: Key::N,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.moves, 0);
@@ -1134,7 +1134,7 @@ mod tests {
             key: Key::Num3,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.size, 3);
@@ -1147,7 +1147,7 @@ mod tests {
             key: Key::Num5,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.size, 5);
@@ -1161,7 +1161,7 @@ mod tests {
             key: Key::H,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert!(app.show_help);
@@ -1177,7 +1177,7 @@ mod tests {
             key: Key::T,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert!(!app.show_numbers);

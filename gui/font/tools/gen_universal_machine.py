@@ -50,6 +50,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from gen_indic_machine import a, compile_rules, minimise, opt, s, star  # noqa: E402
 from gen_universal_table import CATEGORIES, RUST_CATEGORY  # noqa: E402
 
+from rustfmt_out import rustfmt
+
 # The column order: HarfBuzz's numeric order, packed dense. `CATEGORIES` is
 # written in that order and Python keeps it.
 COLUMNS = list(CATEGORIES)
@@ -259,6 +261,12 @@ def main():
             else:
                 w(f"    Some(Cluster::{RULES[rule][1]}),\n")
         w("];\n")
+    # Match what `cargo fmt -p osfont` would do to this file, so that
+    # regenerating it and formatting it are each a no-op after the other.
+    # Without this the two rewrite each other's output forever, and every
+    # unrelated diff carries a thousand lines of table churn. See
+    # rustfmt_out.py for the whole reason.
+    rustfmt(out)
 
     print(f"wrote {out}")
     print(

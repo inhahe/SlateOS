@@ -1327,7 +1327,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         })
     }
 
@@ -1336,7 +1336,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::shift(),
-            text: None,
+            text: String::new(),
         })
     }
 
@@ -2996,7 +2996,7 @@ mod tests {
             key: Key::Tab,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&release);
         assert_eq!(app.selected, orig);

@@ -6878,6 +6878,10 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         // Encoding data that is *not* text is base64's whole purpose, so its
         // input was never text to begin with, and its decoded output is bytes.
         "base64" => cmd_base64_input(args, input),
+        // `awk`'s records and fields are byte slices of the input, and `print`
+        // writes them back unchanged. The *program* is still `&str` -- it came
+        // from the command line, which is -- but the data never is.
+        "awk" => cmd_awk_input(args, input),
         "cat" if args.is_empty() => {
             // `cat` with no args reads from pipe.
             shell_write_bytes(input);
@@ -6890,13 +6894,13 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         // arm up into the block above.
         //
         // `grep`, `cut` and `tr` are `char`-oriented (character classes, field
-        // indices, display width); `sed` and `awk` are real text interpreters;
+        // indices, display width); `sed` is a real text interpreter;
         // `xargs` and `column` re-parse into words and measure display width.
         // `mapfile` is blocked on something else rather than on itself — it
         // stores its lines as `String`s in the shell environment, which is
         // still a `String` map, so converting it here would only move the
         // decode one call deeper.
-        "grep" | "mapfile" | "readarray" | "cut" | "tr" | "xargs" | "column" | "sed" | "awk" => {
+        "grep" | "mapfile" | "readarray" | "cut" | "tr" | "xargs" | "column" | "sed" => {
             let Some(text) = shell_bytes_as_str(input, cmd) else {
                 set_exit(1);
                 return;
@@ -6909,7 +6913,6 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
                 "xargs" => cmd_xargs_input(args, text),
                 "column" => cmd_column_input(args, text),
                 "sed" => cmd_sed_input(args, text),
-                "awk" => cmd_awk_input(args, text),
                 // Unreachable: the outer arm lists exactly these names.
                 _ => dispatch(line),
             }
@@ -10068,8 +10071,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // awk — a string literal and the comma splitter, both byte-indexed
         // over ASCII delimiters.
-        assert_eq!(awk_eval_expr("\"café\"", "", &[], 1, 0), "café");
-        assert_eq!(awk_eval_expr("\"a\\tcafé\"", "", &[], 1, 0), "a\tcafé");
+        assert_eq!(awk_eval_expr("\"café\"", b"", &[], 1, 0), b"caf\xc3\xa9");
+        assert_eq!(
+            awk_eval_expr("\"a\\tcafé\"", b"", &[], 1, 0),
+            b"a\tcaf\xc3\xa9"
+        );
         assert_eq!(
             awk_split_print_args("\"café\",\"→\""),
             alloc::vec![
@@ -12704,6 +12710,171 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         let _ = crate::fs::Vfs::remove(bin);
         let _ = crate::fs::Vfs::remove(b64);
+    }
+
+    serial_println!("  kshell::self_test 41: awk runs BEGIN without a file, and reads bytes");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+        fn plain(cmd: &str) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch(cmd);
+            capture.finish()
+        }
+
+        // The bug this rung exists for. A program made only of BEGIN blocks
+        // needs no input at all, and POSIX says so; ours demanded a file and
+        // exited 1 before BEGIN ever ran, so the single most common one-liner
+        // in awk -- using it as a calculator or a here-string -- was refused.
+        let out = plain("awk 'BEGIN{print \"hi\"}'");
+        assert_eq!(
+            out.as_slice(),
+            b"hi\n",
+            "a BEGIN-only program runs with no input and prints exactly its output"
+        );
+        assert_eq!(last_exit(), 0, "and it is a success");
+
+        // END is the other half of the same rule: it *does* need input, because
+        // it reports the final NR.
+        let out = piped("awk 'END{print NR}'", b"a\nb\nc\n");
+        assert_eq!(out.as_slice(), b"3\n", "END still reads input, to count it");
+
+        // Input that is not valid UTF-8. This used to be
+        // `from_utf8(&data).unwrap_or("")`, so the whole file became the empty
+        // string: `awk '{print}' some.png` printed nothing and exited 0, which
+        // is what an empty file looks like.
+        let bad = "/tmp/zz_awk_bin";
+        assert!(
+            crate::fs::Vfs::write_file(bad, b"\xff\xfe ok\n\xc3\x28 two\n").is_ok(),
+            "writing the undecodable awk fixture must succeed"
+        );
+        let out = plain(&alloc::format!("awk '{{print}}' {bad}"));
+        assert_eq!(
+            out.as_slice(),
+            b"\xff\xfe ok\n\xc3\x28 two\n",
+            "an undecodable file passes through byte for byte"
+        );
+        assert_eq!(last_exit(), 0, "and reading it is a success");
+        let out = plain(&alloc::format!("awk '{{print $2}}' {bad}"));
+        assert_eq!(
+            out.as_slice(),
+            b"ok\ntwo\n",
+            "and its fields split around the bytes that do not decode"
+        );
+
+        // `-F` used to keep the quotes the shell left on it, so `-F':'` was a
+        // three-character separator, which the splitter answered by returning
+        // the whole record as field 1 -- and exiting 0.
+        let csv = "/tmp/zz_awk_csv";
+        assert!(
+            crate::fs::Vfs::write_file(csv, b"a:b:c\n").is_ok(),
+            "writing the awk -F fixture must succeed"
+        );
+        let out = plain(&alloc::format!("awk -F':' '{{print $2}}' {csv}"));
+        assert_eq!(
+            out.as_slice(),
+            b"b\n",
+            "a quoted single-character -F splits"
+        );
+
+        // A multi-character separator is a regular expression in POSIX. Where
+        // the literal and regex readings agree -- no metacharacter -- the
+        // literal split is used; where they differ, the split is refused
+        // rather than guessed at.
+        let csv2 = "/tmp/zz_awk_csv2";
+        assert!(
+            crate::fs::Vfs::write_file(csv2, b"a, b, c\n").is_ok(),
+            "writing the multi-character -F fixture must succeed"
+        );
+        let out = plain(&alloc::format!("awk -F', ' '{{print $2}}' {csv2}"));
+        assert_eq!(
+            out.as_slice(),
+            b"b\n",
+            "`-F', '` has no metacharacter, so literal and regex agree"
+        );
+        let out = plain(&alloc::format!("awk -F'[,;]' '{{print $2}}' {csv2}"));
+        assert_output_contains(
+            "a separator that only a regex could read is refused, not guessed",
+            &out,
+            b"regular expression",
+        );
+        assert_eq!(last_exit(), 2, "and refusing is a distinct status");
+
+        // `-F` with nothing after it.
+        let out = plain("awk -F");
+        assert_output_contains(
+            "a bare -F is reported rather than treated as the program",
+            &out,
+            b"option requires an argument",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        // `-` names the pipe, so both sources can be read, in order.
+        let f = "/tmp/zz_awk_op";
+        assert!(
+            crate::fs::Vfs::write_file(f, b"zz_from_file\n").is_ok(),
+            "writing the awk operand fixture must succeed"
+        );
+        let out = piped(&alloc::format!("awk '{{print}}' - {f}"), b"zz_from_pipe\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_from_pipe\nzz_from_file\n",
+            "`-` reads the pipe, in the position it was written"
+        );
+
+        // Every operand is attempted, and the worst status is what is reported:
+        // a readable second file must not erase an unreadable first one.
+        let out = plain(&alloc::format!("awk '{{print}}' /tmp/zz_awk_missing {f}"));
+        assert_output_contains(
+            "the later readable file is still read",
+            &out,
+            b"zz_from_file",
+        );
+        assert_eq!(last_exit(), 1, "but the missing one sets the status");
+
+        // A carriage return is data to awk, and part of the last field. The
+        // old splitter went through `str::lines` (which strips a `\r` before
+        // the `\n`) and `split_whitespace` (which breaks on one), so a CRLF
+        // file's last field silently lost its `\r` and `$NF == "ok"` was true
+        // where awk says it is false.
+        let out = piped("awk '{print $NF}'", b"a ok\r\n");
+        assert_eq!(
+            out.as_slice(),
+            b"ok\r\n",
+            "the carriage return stays in the field it was written in"
+        );
+
+        // An empty record has no fields, whatever FS is.
+        let out = piped("awk '{print NF}'", b"\n\na\n");
+        assert_eq!(out.as_slice(), b"0\n0\n1\n", "NF is 0 for an empty record");
+
+        // The argument line is split with `split_words`, which honours quotes,
+        // rather than by `split_whitespace` and a rejoin with single spaces --
+        // which silently collapsed runs of spaces *inside a string literal*.
+        let out = plain("awk 'BEGIN{print \"a   b\"}'");
+        assert_eq!(
+            out.as_slice(),
+            b"a   b\n",
+            "spaces inside a string literal are not collapsed"
+        );
+
+        // Nothing to read at all is still an error -- but now it is one only
+        // when a rule actually wanted input.
+        let out = plain("awk '{print}'");
+        assert_output_contains(
+            "a program that needs input and has none says so",
+            &out,
+            b"no input to read",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        let _ = crate::fs::Vfs::remove(bad);
+        let _ = crate::fs::Vfs::remove(csv);
+        let _ = crate::fs::Vfs::remove(csv2);
+        let _ = crate::fs::Vfs::remove(f);
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -121947,157 +122118,381 @@ fn sed_replace_all(text: &str, pattern: &str, replacement: &str) -> alloc::strin
 // awk — pattern scanning and text processing (subset)
 // ---------------------------------------------------------------------------
 
+/// What `awk` was asked to do, as parsed from its argument line.
+///
+/// Modelled on [`FoldSpec`] and [`Base64Spec`]: the parse produces a value or
+/// an error, and a single `awk_run` then does the work for both the file and
+/// the pipe form. `cmd_awk` and `cmd_awk_input` used to carry a copy each of
+/// the whole BEGIN/record/END driver, which is the duplication class recorded
+/// as `TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP` — two copies of a loop
+/// drift, and these two already had: only the file copy honoured a named
+/// operand's read error, and only the pipe copy could reach `END` on empty
+/// input.
+struct AwkSpec {
+    /// The field separator exactly as written, before escape processing.
+    fs: alloc::string::String,
+    /// The awk program text.
+    program: alloc::string::String,
+    /// Operands. `-` names the pipe.
+    files: alloc::vec::Vec<alloc::string::String>,
+}
+
+/// A field separator, resolved from `-F` into the thing the splitter needs.
+enum AwkFs {
+    /// The default: runs of space, tab or newline, with leading and trailing
+    /// runs ignored. This is what POSIX gives `FS == " "`, and it is *not* the
+    /// same as splitting on a literal space.
+    Whitespace,
+    /// A literal byte sequence.
+    Literal(alloc::vec::Vec<u8>),
+}
+
+/// Why an `awk` argument line could not be turned into an [`AwkSpec`].
+enum AwkParseError {
+    /// `-F` with nothing after it.
+    MissingFs,
+    /// No program text at all.
+    MissingProgram,
+    /// A multi-character `-F` that POSIX reads as a regular expression, and
+    /// whose literal reading would differ. See [`awk_field_sep`].
+    RegexFs(alloc::string::String),
+}
+
+impl AwkParseError {
+    /// Print the diagnostic, in gawk's wording where gawk has one.
+    fn report(&self) {
+        match self {
+            Self::MissingFs => {
+                shell_println!("awk: option requires an argument -- 'F'");
+                shell_println!("Usage: awk [-F sep] 'program' [file ...]");
+            }
+            Self::MissingProgram => {
+                shell_println!("awk: no program specified");
+                shell_println!("Usage: awk [-F sep] 'program' [file ...]");
+            }
+            Self::RegexFs(fs) => {
+                shell_println!("awk: -F '{}': a multi-character separator is a", fs);
+                shell_println!(
+                    "     regular expression, and the kernel shell has no regex engine."
+                );
+                shell_println!("     Use a single-character separator.");
+            }
+        }
+    }
+}
+
+/// Parse `awk`'s argument line.
+///
+/// Uses [`split_words`], which honours quotes, rather than the previous
+/// `split_whitespace` plus a hand-rolled search for a closing `'`. That scan
+/// was lossy in two ways that both exited 0:
+///
+/// - It rejoined the program's words with a *single* space, so
+///   `awk '{print "a   b"}'` printed `a b` — three spaces inside a string
+///   literal silently became one.
+/// - `-F'|'` kept its quotes, giving a three-character separator, which
+///   `awk_split_fields` then answered by returning the whole record as one
+///   field. `$1` was the entire line and nothing said so.
+fn parse_awk_args(args: &str) -> Result<AwkSpec, AwkParseError> {
+    let words = split_words(args);
+    let mut fs = alloc::string::String::from(" ");
+    let mut program: Option<alloc::string::String> = None;
+    let mut files: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    let mut end_of_options = false;
+
+    let mut i = 0usize;
+    while let Some(word) = words.get(i) {
+        i = i.saturating_add(1);
+
+        if !end_of_options && program.is_none() {
+            if word == "--" {
+                end_of_options = true;
+                continue;
+            }
+            if word == "-F" {
+                let Some(next) = words.get(i) else {
+                    return Err(AwkParseError::MissingFs);
+                };
+                fs = next.clone();
+                i = i.saturating_add(1);
+                continue;
+            }
+            if let Some(rest) = word.strip_prefix("-F") {
+                fs = alloc::string::String::from(rest);
+                continue;
+            }
+        }
+
+        if program.is_none() {
+            program = Some(word.clone());
+        } else {
+            files.push(word.clone());
+        }
+    }
+
+    let Some(program) = program else {
+        return Err(AwkParseError::MissingProgram);
+    };
+    if program.trim().is_empty() {
+        return Err(AwkParseError::MissingProgram);
+    }
+
+    Ok(AwkSpec { fs, program, files })
+}
+
+/// Resolve a `-F` argument into an [`AwkFs`].
+///
+/// Escape sequences are processed as awk processes them (`\t`, `\n`, `\\`),
+/// so `-F'\t'` separates on a tab rather than on the two characters `\` `t`.
+///
+/// The multi-character case is the interesting one. POSIX says an `FS` longer
+/// than one character is an *extended regular expression*; a single character
+/// is always literal, even if it is a metacharacter, which is why `-F.` splits
+/// on dots. The kernel shell has no regex engine (see
+/// `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`), so for
+/// a multi-character separator there are two possible readings and this used
+/// to pick neither — `awk_split_fields` returned the whole record as a single
+/// field and exited 0.
+///
+/// Where the two readings *agree* — a separator with no metacharacter in it,
+/// such as the extremely common `-F', '` — the literal split is used, because
+/// that is also what the regex would produce. Where they disagree, the split
+/// is refused rather than guessed.
+fn awk_field_sep(fs: &str) -> Result<AwkFs, AwkParseError> {
+    let mut resolved: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let bytes = fs.as_bytes();
+    let mut i = 0usize;
+    while let Some(&b) = bytes.get(i) {
+        if b == b'\\' {
+            match bytes.get(i.saturating_add(1)) {
+                Some(b't') => resolved.push(b'\t'),
+                Some(b'n') => resolved.push(b'\n'),
+                Some(b'r') => resolved.push(b'\r'),
+                Some(b'\\') => resolved.push(b'\\'),
+                // An unrecognised escape keeps both characters, as awk does.
+                Some(&other) => {
+                    resolved.push(b'\\');
+                    resolved.push(other);
+                }
+                None => resolved.push(b'\\'),
+            }
+            i = i.saturating_add(2);
+            continue;
+        }
+        resolved.push(b);
+        i = i.saturating_add(1);
+    }
+
+    if resolved.as_slice() == b" " {
+        return Ok(AwkFs::Whitespace);
+    }
+    if resolved.is_empty() {
+        // `-F ''` splits every character into its own field in gawk. Nothing
+        // here needs that, and a zero-length separator would loop the splitter,
+        // so it is refused rather than silently treated as the default.
+        return Err(AwkParseError::RegexFs(alloc::string::String::from(fs)));
+    }
+
+    // How many *characters* is that? A single character is literal however it
+    // is spelled, including a multi-byte one.
+    let chars = core::str::from_utf8(&resolved).map(|s| s.chars().count());
+    if chars == Ok(1) || resolved.len() == 1 {
+        return Ok(AwkFs::Literal(resolved));
+    }
+
+    // Multi-character: literal only where the regex reading cannot differ.
+    // A backslash has already been consumed above, so any that remain stand
+    // for themselves in both readings.
+    const META: &[u8] = b".[]()*+?{}|^$";
+    if resolved.iter().any(|b| META.contains(b)) {
+        return Err(AwkParseError::RegexFs(alloc::string::String::from(fs)));
+    }
+    Ok(AwkFs::Literal(resolved))
+}
+
+/// Split input into awk records: `\n`-terminated, with the terminator removed.
+///
+/// Not `str::lines`, for the reason recorded against `fold`: `lines` strips a
+/// `\r` that precedes the `\n`, which awk treats as ordinary data — so
+/// `$NF` of a CRLF file silently lost its last character. A final record with
+/// no trailing newline still counts, as it does in gawk, but a trailing
+/// newline does not invent an extra empty one.
+fn awk_records(data: &[u8]) -> alloc::vec::Vec<&[u8]> {
+    if data.is_empty() {
+        return alloc::vec::Vec::new();
+    }
+    let body = data.strip_suffix(b"\n").unwrap_or(data);
+    body.split(|&b| b == b'\n').collect()
+}
+
+/// Run every rule over one source's records, advancing `nr` across sources.
+///
+/// `nr` is threaded rather than reset per file because awk's `NR` counts
+/// records over the whole run; `FNR` (per-file) is not implemented.
+fn awk_feed(data: &[u8], rules: &[AwkRule], fs: &AwkFs, nr: &mut usize) {
+    for record in awk_records(data) {
+        *nr = nr.saturating_add(1);
+        let fields = awk_split_fields(record, fs);
+        let nf = fields.len();
+        for rule in rules {
+            if rule.is_begin || rule.is_end {
+                continue;
+            }
+            if awk_pattern_matches(&rule.pattern, record, *nr, nf) {
+                awk_exec_action(&rule.action, record, &fields, *nr, nf);
+            }
+        }
+    }
+}
+
+/// The one `awk` driver, shared by the file and pipe forms.
+///
+/// Two faults lived in the two copies this replaces:
+///
+/// - **A program made only of `BEGIN` blocks demanded a file.**
+///   `awk 'BEGIN{print "hi"}'` printed `awk: no input file specified` and
+///   exited 1, where every awk prints `hi` and exits 0. POSIX is explicit:
+///   input is read only if the program has a rule that needs it — a main rule
+///   or an `END` — because `END` must see the final `NR`.
+/// - **An undecodable file became an empty one.** The read was
+///   `from_utf8(&data).unwrap_or("")`, so `awk '{print}' some.png` printed
+///   nothing and exited 0, indistinguishable from a genuinely empty file.
+///   Records are now bytes end to end.
+fn awk_run(spec: &AwkSpec, stdin: Option<&[u8]>) {
+    let fs = match awk_field_sep(&spec.fs) {
+        Ok(fs) => fs,
+        Err(e) => {
+            e.report();
+            set_exit(2);
+            return;
+        }
+    };
+
+    let rules = parse_awk_program(&spec.program);
+    let mut nr: usize = 0;
+
+    for rule in &rules {
+        if rule.is_begin {
+            awk_exec_action(&rule.action, b"", &[], nr, 0);
+        }
+    }
+
+    // Read input only if some rule can still use it. A BEGIN-only program is
+    // finished; an END-only program is not, because END reports NR.
+    let needs_input = rules.iter().any(|r| !r.is_begin);
+    let mut worst: u8 = 0;
+
+    if needs_input {
+        if spec.files.is_empty() {
+            match stdin {
+                Some(data) => awk_feed(data, &rules, &fs, &mut nr),
+                None => {
+                    shell_println!("awk: no file operand and no input to read");
+                    worst = worst.max(1);
+                }
+            }
+        } else {
+            for path in &spec.files {
+                if path == "-" {
+                    match stdin {
+                        Some(data) => awk_feed(data, &rules, &fs, &mut nr),
+                        None => {
+                            shell_println!("awk: -: no input to read");
+                            worst = worst.max(1);
+                        }
+                    }
+                    continue;
+                }
+                let resolved = resolve_path(path);
+                match crate::fs::Vfs::read_file(&resolved) {
+                    // Straight from the VFS, undecoded.
+                    Ok(data) => awk_feed(&data, &rules, &fs, &mut nr),
+                    Err(e) => {
+                        // Every operand is attempted and the worst status
+                        // reported: a later readable file must not erase an
+                        // earlier missing one.
+                        shell_println!("awk: {}: {:?}", path, e);
+                        worst = worst.max(1);
+                    }
+                }
+            }
+        }
+    }
+
+    for rule in &rules {
+        if rule.is_end {
+            awk_exec_action(&rule.action, b"", &[], nr, 0);
+        }
+    }
+
+    set_exit(worst);
+}
+
+/// Print `awk`'s usage. Shared so the two entry points cannot disagree.
+fn awk_usage(piped: bool) {
+    if piped {
+        shell_println!("Usage: cmd | awk [-F sep] 'program' [file ...]");
+    } else {
+        shell_println!("Usage: awk [-F sep] 'program' [file ...]");
+    }
+    shell_println!("  Fields: $0 (line), $1..$N, $NF (last)");
+    shell_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
+    shell_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
+    shell_println!("  `-` as an operand names the pipe.");
+}
+
 /// `awk` command — pattern-action text processing.
 ///
 /// Supported features:
 ///   - Field splitting: `$0` (whole line), `$1`, `$2`, ... `$NF`
 ///   - `-F SEP` field separator (default: whitespace)
 ///   - `{ print }`, `{ print $1, $3 }`
-///   - `/pattern/ { action }` — pattern matching
+///   - `/pattern/ { action }` — see the caveat below
 ///   - `BEGIN { ... }` and `END { ... }` blocks
-///   - `NR` (record number), `NF` (field count), `FS` (separator)
-///   - Pipe input support
+///   - `NR` (record number), `NF` (field count)
+///   - Pipe input support; `-` as an operand names the pipe
+///
+/// **`/pattern/` is a substring match, not a regular expression.** The kernel
+/// shell has no regex engine, so `/^err/` matches the literal `^err`. This is
+/// tracked as `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`
+/// and is blocked on the `ere` crate gaining a `no_std` build.
 ///
 /// Examples:
 ///   awk '{ print $1 }' file.txt            First field of each line
 ///   awk -F: '{ print $1, $3 }' /etc/passwd User and UID
-///   awk '/error/ { print NR, $0 }' log     Matching lines with number
 ///   awk 'NR > 5 { print }' file            Skip first 5 lines
 ///   awk 'BEGIN { print "header" } { print $1 } END { print NR, "lines" }' file
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 fn cmd_awk(args: &str) {
     if args.trim().is_empty() {
-        shell_println!("Usage: awk [-F sep] 'program' [file ...]");
-        shell_println!("  Fields: $0 (line), $1..$N, $NF (last)");
-        shell_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
-        shell_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
+        awk_usage(false);
         set_exit(1);
         return;
     }
-
-    // Parse -F flag and program.
-    let (fs_char, program, files) = parse_awk_args(args);
-
-    if program.is_empty() {
-        shell_println!("awk: no program specified");
-        set_exit(1);
-        return;
-    }
-
-    let rules = parse_awk_program(&program);
-
-    // Process files.
-    if files.is_empty() {
-        shell_println!("awk: no input file specified");
-        set_exit(1);
-        return;
-    }
-
-    let mut nr: usize = 0;
-
-    // Run BEGIN blocks.
-    for rule in &rules {
-        if rule.is_begin {
-            awk_exec_action(&rule.action, "", &[], nr, 0, &fs_char);
-        }
-    }
-
-    for file in &files {
-        let path = resolve_path(file);
-        let data = match crate::fs::Vfs::read_file(&path) {
-            Ok(d) => d,
-            Err(e) => {
-                shell_println!("awk: '{}': {:?}", path.display(), e);
-                set_exit(1);
-                continue;
-            }
-        };
-
-        let text = core::str::from_utf8(&data).unwrap_or("");
-        for line in text.lines() {
-            nr = nr.wrapping_add(1);
-            let fields = awk_split_fields(line, &fs_char);
-            let nf = fields.len();
-
-            for rule in &rules {
-                if rule.is_begin || rule.is_end {
-                    continue;
-                }
-                if awk_pattern_matches(&rule.pattern, line, nr, nf) {
-                    awk_exec_action(&rule.action, line, &fields, nr, nf, &fs_char);
-                }
-            }
-        }
-    }
-
-    // Run END blocks.
-    for rule in &rules {
-        if rule.is_end {
-            awk_exec_action(&rule.action, "", &[], nr, 0, &fs_char);
+    match parse_awk_args(args) {
+        Ok(spec) => awk_run(&spec, None),
+        Err(e) => {
+            e.report();
+            set_exit(1);
         }
     }
 }
 
-/// `awk` pipe-input variant.
+/// `awk` on piped input.
 ///
-/// Rejects a missing program with the same status [`cmd_awk`] does. As with
-/// `cmd_sed_input`, this form used to print the input verbatim and exit 0, so
-/// `cat log | awk` was a silent `cat` that claimed to have run a program.
-#[allow(clippy::arithmetic_side_effects)]
-fn cmd_awk_input(args: &str, input: &str) {
+/// A named file wins over the pipe, as in GNU and as in every other paired
+/// command here; a `-` operand names the pipe, so `cat a | awk '{print}' - b`
+/// reads both, in that order.
+fn cmd_awk_input(args: &str, input: &[u8]) {
     if args.trim().is_empty() {
-        shell_println!("Usage: cmd | awk [-F sep] 'program'");
-        shell_println!("  Fields: $0 (line), $1..$N, $NF (last)");
-        shell_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
-        shell_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
+        awk_usage(true);
         set_exit(1);
         return;
     }
-
-    let (fs_char, program, files) = parse_awk_args(args);
-
-    // Named files win over the pipe, as in GNU. This used to bind them to
-    // `_files` and drop them, so `cat a | awk '{print}' b` printed `a`.
-    if !files.is_empty() {
-        cmd_awk(args);
-        return;
-    }
-
-    if program.is_empty() {
-        shell_println!("awk: no program specified");
-        set_exit(1);
-        return;
-    }
-
-    let rules = parse_awk_program(&program);
-    let mut nr: usize = 0;
-
-    // BEGIN blocks.
-    for rule in &rules {
-        if rule.is_begin {
-            awk_exec_action(&rule.action, "", &[], nr, 0, &fs_char);
-        }
-    }
-
-    for line in input.lines() {
-        nr = nr.wrapping_add(1);
-        let fields = awk_split_fields(line, &fs_char);
-        let nf = fields.len();
-
-        for rule in &rules {
-            if rule.is_begin || rule.is_end {
-                continue;
-            }
-            if awk_pattern_matches(&rule.pattern, line, nr, nf) {
-                awk_exec_action(&rule.action, line, &fields, nr, nf, &fs_char);
-            }
-        }
-    }
-
-    // END blocks.
-    for rule in &rules {
-        if rule.is_end {
-            awk_exec_action(&rule.action, "", &[], nr, 0, &fs_char);
+    match parse_awk_args(args) {
+        Ok(spec) => awk_run(&spec, Some(input)),
+        Err(e) => {
+            e.report();
+            set_exit(1);
         }
     }
 }
@@ -122108,70 +122503,6 @@ struct AwkRule {
     action: alloc::string::String,
     is_begin: bool,
     is_end: bool,
-}
-
-/// Parse awk command-line arguments: -F, program, files.
-fn parse_awk_args(
-    args: &str,
-) -> (
-    alloc::string::String,
-    alloc::string::String,
-    alloc::vec::Vec<alloc::string::String>,
-) {
-    let mut fs = alloc::string::String::from(" ");
-    let mut program = alloc::string::String::new();
-    let mut files: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
-
-    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
-    let mut i = 0;
-    let mut got_program = false;
-
-    while i < parts.len() {
-        if parts[i] == "-F" && i + 1 < parts.len() {
-            fs = alloc::string::String::from(parts[i + 1]);
-            i += 2;
-            continue;
-        }
-        if parts[i].starts_with("-F") {
-            fs = alloc::string::String::from(&parts[i][2..]);
-            i += 1;
-            continue;
-        }
-
-        if !got_program {
-            // The program may be quoted — find matching quote.
-            let part = parts[i];
-            if let Some(rest) = part.strip_prefix('\'') {
-                // Collect until closing quote.
-                let mut prog = alloc::string::String::from(rest);
-                if prog.ends_with('\'') {
-                    prog.pop();
-                    program = prog;
-                } else {
-                    i += 1;
-                    while i < parts.len() {
-                        prog.push(' ');
-                        let p = parts[i];
-                        if let Some(stripped) = p.strip_suffix('\'') {
-                            prog.push_str(stripped);
-                            break;
-                        }
-                        prog.push_str(p);
-                        i += 1;
-                    }
-                    program = prog;
-                }
-            } else {
-                program = alloc::string::String::from(part);
-            }
-            got_program = true;
-        } else {
-            files.push(alloc::string::String::from(parts[i]));
-        }
-        i += 1;
-    }
-
-    (fs, program, files)
 }
 
 /// Parse an awk program into rules.
@@ -122288,21 +122619,70 @@ fn extract_brace_block(program: &str, pos: &mut usize) -> alloc::string::String 
     alloc::string::String::from(program[start..end].trim())
 }
 
-/// Split a line into fields using the given separator.
-fn awk_split_fields<'a>(line: &'a str, fs: &str) -> alloc::vec::Vec<&'a str> {
-    if fs == " " {
-        // Whitespace splitting (default): split on runs of whitespace.
-        line.split_whitespace().collect()
-    } else if fs.len() == 1 {
-        line.split(fs.as_bytes()[0] as char).collect()
-    } else {
-        alloc::vec![line]
+/// Whether `hay` contains `needle` anywhere. Byte-exact; no decode.
+fn awk_bytes_contain(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    needle.len() <= hay.len() && hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Split a record into fields on a literal byte sequence, keeping empty fields.
+///
+/// `sep` is never empty — [`awk_field_sep`] refuses a zero-length separator,
+/// which would otherwise make this loop forever.
+fn awk_split_literal<'a>(record: &'a [u8], sep: &[u8]) -> alloc::vec::Vec<&'a [u8]> {
+    let mut out: alloc::vec::Vec<&[u8]> = alloc::vec::Vec::new();
+    if sep.is_empty() {
+        out.push(record);
+        return out;
+    }
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i.saturating_add(sep.len()) <= record.len() {
+        if record.get(i..i.saturating_add(sep.len())) == Some(sep) {
+            out.push(record.get(start..i).unwrap_or(&[]));
+            i = i.saturating_add(sep.len());
+            start = i;
+        } else {
+            i = i.saturating_add(1);
+        }
+    }
+    out.push(record.get(start..).unwrap_or(&[]));
+    out
+}
+
+/// Split a record into fields using the resolved separator.
+///
+/// An empty record has no fields at all — `NF` is 0 whatever `FS` is — which
+/// is POSIX and is why the literal split is not simply allowed to yield one
+/// empty field.
+///
+/// The default split is on space, tab and newline only. It used to be
+/// `str::split_whitespace`, which also splits on `\r`, `\x0b`, `\x0c` and
+/// every Unicode space; the visible consequence was that a CRLF file's last
+/// field silently lost its `\r`, so `$NF == "ok"` was true where awk says
+/// false.
+fn awk_split_fields<'a>(record: &'a [u8], fs: &AwkFs) -> alloc::vec::Vec<&'a [u8]> {
+    if record.is_empty() {
+        return alloc::vec::Vec::new();
+    }
+    match fs {
+        AwkFs::Whitespace => record
+            .split(|&b| b == b' ' || b == b'\t' || b == b'\n')
+            .filter(|f| !f.is_empty())
+            .collect(),
+        AwkFs::Literal(sep) => awk_split_literal(record, sep),
     }
 }
 
-/// Check if a pattern matches the current line.
+/// Check if a pattern matches the current record.
+///
+/// The `/.../` arm is a **substring** match, not a regular expression; see
+/// `cmd_awk`'s doc comment and
+/// `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`.
 #[allow(clippy::arithmetic_side_effects)]
-fn awk_pattern_matches(pattern: &str, line: &str, nr: usize, nf: usize) -> bool {
+fn awk_pattern_matches(pattern: &str, line: &[u8], nr: usize, nf: usize) -> bool {
     if pattern.is_empty() {
         return true; // No pattern — match all.
     }
@@ -122310,7 +122690,7 @@ fn awk_pattern_matches(pattern: &str, line: &str, nr: usize, nf: usize) -> bool 
     // /regex/ pattern — literal string match.
     if pattern.starts_with('/') && pattern.ends_with('/') && pattern.len() >= 2 {
         let pat = &pattern[1..pattern.len() - 1];
-        return line.contains(pat);
+        return awk_bytes_contain(line, pat.as_bytes());
     }
 
     // NR comparisons: NR > N, NR < N, NR == N, NR >= N, NR <= N, NR != N
@@ -122369,12 +122749,16 @@ fn awk_pattern_matches(pattern: &str, line: &str, nr: usize, nf: usize) -> bool 
     }
 
     // Fallback: treat as a literal substring match.
-    line.contains(pattern)
+    awk_bytes_contain(line, pattern.as_bytes())
 }
 
-/// Execute an awk action for a line.
+/// Execute an awk action for a record.
+///
+/// Output goes through [`shell_write_bytes`] rather than `shell_println!`,
+/// because `$0` and the fields are now bytes: a record that is not valid UTF-8
+/// is printed as it was read instead of being replaced or dropped.
 #[allow(clippy::arithmetic_side_effects)]
-fn awk_exec_action(action: &str, line: &str, fields: &[&str], nr: usize, nf: usize, _fs: &str) {
+fn awk_exec_action(action: &str, line: &[u8], fields: &[&[u8]], nr: usize, nf: usize) {
     // Split action by `;` for multiple statements.
     for stmt in action.split(';') {
         let stmt = stmt.trim();
@@ -122383,13 +122767,18 @@ fn awk_exec_action(action: &str, line: &str, fields: &[&str], nr: usize, nf: usi
         }
 
         if stmt == "print" || stmt == "print $0" {
-            shell_println!("{}", line);
-        } else if stmt.starts_with("print ") || stmt.starts_with("print\t") {
-            let expr = stmt[6..].trim();
-            let output = awk_format_print(expr, line, fields, nr, nf);
-            shell_println!("{}", output);
+            shell_write_bytes(line);
+            shell_write_bytes(b"\n");
+        } else if let Some(expr) = stmt
+            .strip_prefix("print ")
+            .or_else(|| stmt.strip_prefix("print\t"))
+        {
+            let output = awk_format_print(expr.trim(), line, fields, nr, nf);
+            shell_write_bytes(&output);
+            shell_write_bytes(b"\n");
         } else {
-            // Unknown statement — ignore.
+            // Unknown statement — ignore. Tracked as
+            // `TD-A-AWK-IGNORES-EVERY-STATEMENT-IT-CANNOT-RUN`.
         }
     }
 }
@@ -122398,20 +122787,19 @@ fn awk_exec_action(action: &str, line: &str, fields: &[&str], nr: usize, nf: usi
 #[allow(clippy::arithmetic_side_effects)]
 fn awk_format_print(
     expr: &str,
-    line: &str,
-    fields: &[&str],
+    line: &[u8],
+    fields: &[&[u8]],
     nr: usize,
     nf: usize,
-) -> alloc::string::String {
-    let mut result = alloc::string::String::new();
+) -> alloc::vec::Vec<u8> {
+    let mut result: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let parts = awk_split_print_args(expr);
 
     for (i, part) in parts.iter().enumerate() {
         if i > 0 {
-            result.push(' ');
+            result.push(b' ');
         }
-        let val = awk_eval_expr(part.trim(), line, fields, nr, nf);
-        result.push_str(&val);
+        result.extend_from_slice(&awk_eval_expr(part.trim(), line, fields, nr, nf));
     }
 
     result
@@ -122451,15 +122839,15 @@ fn awk_split_print_args(expr: &str) -> alloc::vec::Vec<alloc::string::String> {
     parts
 }
 
-/// Evaluate a single awk expression.
+/// Evaluate a single awk expression to bytes.
 #[allow(clippy::arithmetic_side_effects)]
 fn awk_eval_expr(
     expr: &str,
-    line: &str,
-    fields: &[&str],
+    line: &[u8],
+    fields: &[&[u8]],
     nr: usize,
     nf: usize,
-) -> alloc::string::String {
+) -> alloc::vec::Vec<u8> {
     let expr = expr.trim();
 
     // String literal: "..."
@@ -122493,41 +122881,42 @@ fn awk_eval_expr(
                 i += 1;
             }
         }
-        return finish_ascii_scan(result, "awk string literal");
+        // The literal came from the program, which is `&str`, so it is already
+        // valid UTF-8; it is returned as bytes only because everything else
+        // `print` concatenates is.
+        return result;
     }
 
     // Built-in variables.
     if expr == "NR" {
-        return alloc::format!("{}", nr);
+        return alloc::format!("{}", nr).into_bytes();
     }
     if expr == "NF" {
-        return alloc::format!("{}", nf);
+        return alloc::format!("{}", nf).into_bytes();
     }
     if expr == "$0" {
-        return alloc::string::String::from(line);
+        return line.to_vec();
     }
     if expr == "$NF" {
-        return fields.last().map_or(alloc::string::String::new(), |f| {
-            alloc::string::String::from(*f)
-        });
+        return fields
+            .last()
+            .map_or_else(alloc::vec::Vec::new, |f| f.to_vec());
     }
 
     // Field reference: $N
     if let Some(field_num) = expr.strip_prefix('$') {
         if let Ok(n) = field_num.parse::<usize>() {
             if n == 0 {
-                return alloc::string::String::from(line);
+                return line.to_vec();
             }
             return fields
                 .get(n.wrapping_sub(1))
-                .map_or(alloc::string::String::new(), |f| {
-                    alloc::string::String::from(*f)
-                });
+                .map_or_else(alloc::vec::Vec::new, |f| f.to_vec());
         }
     }
 
     // Bare word — treat as literal.
-    alloc::string::String::from(expr)
+    expr.as_bytes().to_vec()
 }
 
 /// `invariant` — check kernel invariants (system-wide consistency).

@@ -45,7 +45,8 @@
 # |---|---|---|
 # | `DIFF_PROG`      | *required* | the utility's name: used for messages, for finding the reference, and as the one name both binaries are reached by |
 # | `DIFF_PKG`       | `coreutils` | the cargo package(s) to build from; more than one for a harness whose subjects do not share a crate |
-# | `DIFF_BINS`      | `$DIFF_PROG` | the `--bin` names to build; more than one for a harness that compares a family |
+# | `DIFF_BINS`      | `$DIFF_PROG`, or empty if `DIFF_EXAMPLES` is set | the `--bin` names to build; more than one for a harness that compares a family |
+# | `DIFF_EXAMPLES`  | (none) | `--example` names to build, for a harness whose subject is a test instrument rather than a shipped utility. `extfloat-probe` is one: it exposes a *library* to a C reference, and a `src/bin/*.rs` would be installed into the image |
 # | `DIFF_FORWARD`   | (none) | extra environment variable names to carry across the re-exec, beyond `OURS` and `VERBOSE` |
 # | `DIFF_REF`       | (none) | candidate paths for the reference, tried in order, instead of looking on `PATH`. `echo` needs this: `command -v echo` finds the shell builtin, which is not what is being compared. Single-binary harnesses only |
 # | `DIFF_NEED`      | (none) | other commands that must exist inside WSL, or the run is skipped rather than run without them |
@@ -58,12 +59,13 @@
 # |---|---|
 # | `root`       | the repository root |
 # | `target_dir` | the shared Linux target directory |
-# | `OURS`       | our binary, absolute (single `DIFF_BINS` only) |
+# | `OURS`       | our binary, absolute (a single `DIFF_BINS`, or a single `DIFF_EXAMPLES` and no `DIFF_BINS`) |
 # | `gnu_real`   | the reference binary, absolute (single `DIFF_BINS`, unless `DIFF_NO_REF`) |
 # | `DIFF_TMP`   | a scratch directory, removed on exit |
 # | `bindir`     | `$DIFF_TMP/bin`, holding `ours/NAME` and `gnu/NAME` for each of `DIFF_BINS` |
 # | `DIFF_SKIPPED` | the `DIFF_BINS` entries with no reference on this host (multi-binary only) |
 # | `diff_ours`  | `diff_ours NAME` -> the path of another built binary |
+# | `diff_ours_example` | the same for a `DIFF_EXAMPLES` name |
 #
 # A harness's own fixtures belong under `$DIFF_TMP`, so that the one `EXIT`
 # trap set here cleans up everything. Setting a second `trap ... EXIT` would
@@ -79,7 +81,16 @@ if [ -z "${DIFF_PROG:-}" ]; then
   exit 1
 fi
 : "${DIFF_PKG:=coreutils}"
-: "${DIFF_BINS:=$DIFF_PROG}"
+: "${DIFF_EXAMPLES:=}"
+# A harness whose subject is an example need build no binary at all, so
+# `DIFF_BINS` only falls back to the utility's name when there is nothing else
+# to build. Defaulting it unconditionally would ask cargo for a `--bin
+# extfloat` that does not exist.
+if [ -n "$DIFF_EXAMPLES" ]; then
+  : "${DIFF_BINS:=}"
+else
+  : "${DIFF_BINS:=$DIFF_PROG}"
+fi
 : "${DIFF_FORWARD:=}"
 : "${DIFF_REF:=}"
 : "${DIFF_NEED:=}"
@@ -172,6 +183,11 @@ diff_ours() {
   printf '%s/x86_64-unknown-linux-gnu/debug/%s' "$target_dir" "$1"
 }
 
+# The same, for a `--example`, which cargo puts one directory deeper.
+diff_ours_example() {
+  printf '%s/x86_64-unknown-linux-gnu/debug/examples/%s' "$target_dir" "$1"
+}
+
 # Did the build above actually rebuild what changed?
 #
 # `cargo build` exiting 0 is not that promise. On 2026-08-24 this target
@@ -226,6 +242,19 @@ diff_lib_artifacts() {
   done
 }
 
+# Print `ARTIFACT|NEWER-FILE` and succeed if $1 is stale; fail silently if not.
+diff_stale_one() {
+  local diff_late
+  if [ ! -f "$1" ]; then
+    printf '%s|<the build left nothing here>\n' "$1"
+    return 0
+  fi
+  diff_late=$(diff_newer_than "$1")
+  [ -z "$diff_late" ] && return 1
+  printf '%s|%s\n' "$1" "$diff_late"
+  return 0
+}
+
 # `BINARY|NEWER-FILE` for the first stale artifact, or nothing.
 # An artifact the build did not produce at all counts as stale.
 #
@@ -256,15 +285,11 @@ diff_first_stale() {
   done
   for diff_b in $DIFF_BINS; do
     diff_bin=$(diff_ours "$diff_b")
-    if [ ! -f "$diff_bin" ]; then
-      printf '%s|<the build left nothing here>\n' "$diff_bin"
-      return 0
-    fi
-    diff_late=$(diff_newer_than "$diff_bin")
-    if [ -n "$diff_late" ]; then
-      printf '%s|%s\n' "$diff_bin" "$diff_late"
-      return 0
-    fi
+    diff_stale_one "$diff_bin" && return 0
+  done
+  for diff_b in $DIFF_EXAMPLES; do
+    diff_bin=$(diff_ours_example "$diff_b")
+    diff_stale_one "$diff_bin" && return 0
   done
   return 0
 }
@@ -309,14 +334,23 @@ if [ -z "$OURS" ]; then
   diff_args=
   for diff_p in $DIFF_PKG; do diff_args="$diff_args -p $diff_p"; done
   for diff_b in $DIFF_BINS; do diff_args="$diff_args --bin $diff_b"; done
+  for diff_b in $DIFF_EXAMPLES; do diff_args="$diff_args --example $diff_b"; done
   # shellcheck disable=SC2086
   ( cd "$root" && cargo build $diff_args \
       --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || exit 1
   diff_assert_fresh || exit 1
+  # One subject gets named in `OURS`; a family does not, and its harness picks
+  # what it needs with `diff_ours` / `diff_ours_example`.
   case $DIFF_BINS in
-    *' '*) ;;   # a family: the harness picks binaries with `diff_ours`
+    ''|*' '*) ;;
     *) OURS=$(diff_ours "$DIFF_BINS") ;;
   esac
+  if [ -z "$OURS" ] && [ -z "$DIFF_BINS" ]; then
+    case $DIFF_EXAMPLES in
+      *' '*) ;;
+      *) OURS=$(diff_ours_example "$DIFF_EXAMPLES") ;;
+    esac
+  fi
 fi
 if [ -n "$OURS" ]; then
   if [ ! -x "$OURS" ]; then
@@ -379,6 +413,14 @@ if [ -z "${DIFF_NO_BINDIR:-}" ]; then
   # matches.
   mkdir -p "$bindir/ours" "$bindir/gnu"
   case $DIFF_BINS in
+    '')
+      # Only reachable from a harness whose subject is an example, since that
+      # is the one case `DIFF_BINS` is allowed to be empty -- and such a
+      # subject has no same-named reference to be symlinked beside.
+      echo "diff-wsl.sh: DIFF_BINS is empty, so there is nothing to put on PATH" >&2
+      echo "  (set DIFF_NO_BINDIR=1: an example has no counterpart in /usr/bin)" >&2
+      exit 1
+      ;;
     *' '*|*'	'*|*'
 '*)
       # A family, or a harness whose subjects live in different crates. Each

@@ -11,14 +11,24 @@
 # which gives each side its own scratch name and compares the two *files*
 # afterwards rather than stdout.
 #
-# ## Why the reference is glibc, and only glibc
+# ## Why both sides run inside WSL
 #
-# The host's `uniq` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll`
-# rather than glibc, whose `getopt` words every option diagnostic differently
-# (`unknown option -- x` against `invalid option -- 'x'`). A harness pointed at
-# it would certify sentences no GNU/Linux system prints. See `known-issues.md`
-# → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, and the identical
-# note at the top of `head-diff.sh`, `wc-diff.sh` and `cut-diff.sh`.
+# `scripts/diff-wsl.sh` gives the reasons. The reference has to be glibc's: the
+# host's `uniq` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll` rather
+# than glibc, whose `getopt` words every option diagnostic differently
+# (`unknown option -- x` against `invalid option -- 'x'`), so a harness pointed
+# at it certifies sentences no GNU/Linux system prints (`known-issues.md` →
+# `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`). This file already
+# avoided that by reaching for `wsl -e env LC_ALL=C.UTF-8 uniq`, at the cost of
+# a WSL process per case and a probe to check that `wsl`'s inherited Windows cwd
+# landed on the same bytes under `/mnt/...`.
+#
+# The subject moving with it is the part that changed an answer — see the
+# directory-operand case at the foot of this file, which was an expected
+# difference only because a Windows `File::open` refuses a directory outright.
+#
+# Run `OURS=/usr/bin/uniq ./scripts/uniq-diff.sh` to confirm the harness still
+# discriminates: every expected difference should turn into an XPASS.
 #
 # stdout is compared byte for byte with `od -An -c`, which is not optional here:
 # `--group` and `--all-repeated` differ from each other only in where blank
@@ -34,25 +44,17 @@
 # reference would be wrong.
 set -u
 
-# Our uniq is a native Windows binary, so MSYS would rewrite an argument that
-# looks like a path.
-export MSYS2_ARG_CONV_EXCL='*'
-
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils uniq "${OURS:-}") || exit 1
-export LC_ALL=${LC_ALL:-C.UTF-8}
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `uniq` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+DIFF_PROG=uniq
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d)
-trap 'rm -rf "$fixtures"' EXIT
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
 cd "$fixtures" >/dev/null || exit 1
-OURS_ABS=$OURS
-case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$OLDPWD/$OURS" ;; esac
 
 # Environment variables to set on *both* sides. `uniq` is the only utility here
 # whose parsing depends on the environment, and both variables it reads change
@@ -60,21 +62,11 @@ case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$OLDPWD/$OURS" ;; esac
 # be part of the comparison rather than fixed once at the top.
 ENVV=()
 
-run_ours() { env "${ENVV[@]}" "$OURS_ABS" "$@"; }
-run_gnu()  { local loc=$1; shift; wsl -e env "LC_ALL=$loc" "${ENVV[@]}" uniq "$@"; }
-
-# WSL is invoked with the Windows cwd, which for an MSYS temp directory lands
-# on the same bytes under `/mnt/c/...`. Verified rather than assumed, because a
-# reference that silently ran somewhere else would report every file operand as
-# missing and still "agree" on the ones fed through stdin.
-printf 'probe\nprobe\n' > .probe
-if [ "$(run_gnu C.UTF-8 .probe 2>/dev/null)" = "probe" ]; then
-  HAVE_GNU=yes
-else
-  HAVE_GNU=no
-  echo "uniq-diff: glibc uniq not reachable in this directory; skipping"
-fi
-rm -f .probe
+# One invocation of one side. `$1` is `ours` or `gnu`; each is reached through a
+# symlink named `uniq` in a directory that is the whole of `PATH` for that one
+# invocation, so `argv[0]` is the bare word on both sides. `$ENVV` rides on the
+# same `env`, which is why it must come before `PATH` sets the search path.
+run_side() { local side=$1; shift; env "${ENVV[@]}" PATH="$bindir/$side" uniq "$@"; }
 
 # --- fixtures ----------------------------------------------------------------
 # Runs of every shape: a pair, a singleton, a triple, and a trailing singleton.
@@ -106,18 +98,18 @@ printf 'p\nq\0p\nr\0'                   > nul-fields.txt
 printf 'a\0b'                           > nul-unterminated.txt
 
 compare() {
-  local o_out g_out o_err g_err o_rc g_rc stdin=$1 loc=$2; shift 2
+  local o_out g_out o_err g_err o_rc g_rc stdin=$1; shift
   o_err=$(mktemp); g_err=$(mktemp)
   # stdout through a file, not a pipe: in `x=$(uniq | od)` the recorded status
   # is od's, and `PIPESTATUS` is set in the substitution's subshell where it
   # cannot be read. See the same note in cat-diff.sh.
   local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
   if [ "$stdin" = "-" ]; then
-    run_ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    run_gnu "$loc" "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    run_side ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    run_side gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   else
-    printf '%b' "$stdin" | run_ours "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
-    printf '%b' "$stdin" | run_gnu "$loc" "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
+    printf '%b' "$stdin" | run_side ours "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
+    printf '%b' "$stdin" | run_side gnu  "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
   fi
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   rm -f "$o_bin" "$g_bin"
@@ -151,11 +143,10 @@ report() {
   return 0
 }
 
-run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C.UTF-8 "$@"; report "uniq $*"; }
+run_case()  { compare - "$@"; report "uniq $*"; }
 run_stdin() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
-  compare "$input" C.UTF-8 "$@"
+  compare "$input" "$@"
   report "printf '$input' | uniq $*"
 }
 
@@ -163,12 +154,11 @@ run_stdin() {
 # the two files are compared afterwards; stdout is expected to be empty on both
 # and is compared as well, since a bug that wrote to both would otherwise pass.
 run_outfile() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local o_err g_err o_rc g_rc o_out g_out
   o_err=$(mktemp); g_err=$(mktemp)
   rm -f ours.out gnu.out
-  run_ours "$@" ours.out </dev/null >/dev/null 2>"$o_err"; o_rc=$?
-  run_gnu C.UTF-8 "$@" gnu.out </dev/null >/dev/null 2>"$g_err"; g_rc=$?
+  run_side ours "$@" ours.out </dev/null >/dev/null 2>"$o_err"; o_rc=$?
+  run_side gnu  "$@" gnu.out  </dev/null >/dev/null 2>"$g_err"; g_rc=$?
   # A missing file is a distinct state from an empty one: `uniq` must not create
   # the output when the input could not be opened.
   o_out=$([ -e ours.out ] && od -An -c < ours.out || echo '<no file>')
@@ -188,9 +178,8 @@ run_outfile() {
 }
 
 xfail_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local reason="$1"; shift
-  compare - C.UTF-8 "$@"
+  compare - "$@"
   if [ "$AGREED" = no ]; then
     xfail=$((xfail+1))
     [ -n "${VERBOSE:-}" ] && printf 'XFAIL uniq %s  (%s)\n' "$*" "$reason"
@@ -208,8 +197,8 @@ xfail_case() {
 selfsame() {
   local a="$1" b="$2" x y xr yr
   # shellcheck disable=SC2086  # both are single options by construction
-  x=$("$OURS_ABS" $a </dev/null 2>&1); xr=$?
-  y=$("$OURS_ABS" $b </dev/null 2>&1); yr=$?
+  x=$(env PATH="$bindir/ours" uniq $a </dev/null 2>&1); xr=$?
+  y=$(env PATH="$bindir/ours" uniq $b </dev/null 2>&1); yr=$?
   if [ "$x" = "$y" ] && [ "$xr" = "$yr" ]; then
     pass=$((pass+1))
     [ -n "${VERBOSE:-}" ] && printf 'OK   uniq %s == uniq %s\n' "$a" "$b"
@@ -557,16 +546,17 @@ run_case --group -f1 fields.txt
 run_case --group -z nul.txt
 run_case --group -1 fields.txt
 
-# --- differ on purpose ------------------------------------------------------------
-D=directory-operand-cannot-be-opened-on-a-windows-host
-# On SlateOS, and on any POSIX host, opening a directory succeeds and the *read*
-# fails, so GNU says `error reading '.': Is a directory` and so do we. This
-# harness runs a Windows build, where `File::open` of a directory fails outright
-# and we report the open instead. The difference is the host's, not the code's —
-# see the same trap in `filekind.rs`, where a Windows `is_file()` calls a pipe a
-# regular file.
-xfail_case "$D" .
+# A directory operand, which used to be an expected difference and is not one
+# any more: opening a directory succeeds on POSIX and the *read* fails, so GNU
+# says `error reading '.': Is a directory` and so do we. It differed only while
+# the subject was a Windows build, where `File::open` refuses a directory
+# outright and we reported the open instead — see the same trap in
+# `filekind.rs`, where a Windows `is_file()` calls a pipe a regular file.
+# Moving both sides into WSL deleted it, as it did the identical case in
+# `cut-diff.sh`, `fold-diff.sh`, `expand-diff.sh` and `unexpand-diff.sh`.
+run_case .
 
+# --- differ on purpose ------------------------------------------------------------
 # `--help`'s body matches GNU's byte for byte; what follows it does not, and
 # must not. GNU closes every `--help` with `emit_ancillary_info` — links to
 # gnu.org, the Translation Project and `info '(coreutils) uniq invocation'` —
@@ -582,10 +572,6 @@ selfsame --v --version
 selfsame --vers --version
 
 # --- summary ------------------------------------------------------------------
-if [ "$HAVE_GNU" != yes ]; then
-  echo "uniq-diff: skipped (no glibc uniq)"
-  exit 0
-fi
 printf '\n%d passed, %d differed' "$pass" "$fail"
 [ "$xfail" -gt 0 ] && printf ', %d differ on purpose' "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d XPASS' "$xpass"

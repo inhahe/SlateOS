@@ -10539,7 +10539,7 @@ is the worst possible place to discover that your code can fault, and only a
 boot test finds it — this would have shipped clean under a "it compiles and
 clippy is quiet" standard.
 
-### [RESOLVED 2026-08-22] B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang at the glibc `fork()`+`execl()`+`waitpid()` self-test — a freed PML4 was still live in CR3; fixed in `0ecd5ff03`, WATCH cleared after three consecutive clean boots — 2026-07-15
+### [REOPENED as WATCH 2026-08-25 — the PML4 cause is fixed and stays fixed; the *signature* recurred on a different rung] B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang after the last thread of a just-reaped process exits — one cause (a freed PML4 still live in CR3) found and fixed in `0ecd5ff03`; a second, still-unidentified cause produced the same silence on 2026-08-25 — 2026-07-15
 
 **Symptom (1 occurrence, 2026-07-15):** During
 `self_test_linux_real_glibc_forkexec` (`spawn-test-glibc-forkexec`,
@@ -10792,6 +10792,82 @@ rather than something the caller is trusted to have arranged, and treating
 "the state that publishes an object as reclaimable" and "the last instant that
 object is in use" as one atomic step. Here they were separated by two serial
 prints.
+
+**[A] RECURRENCE 2026-08-25 — same silence, different rung, and the PML4 fix
+is definitely in the tree.** A boot went silent with the signature this entry
+was closed on, three days after it was closed.
+
+*In short:* the machine stopped dead, printing nothing further, immediately
+after a test program finished and the kernel started cleaning it up. It is the
+same *symptom* as the bug fixed on 2026-08-22, but not the same *cause* — the
+2026-08-22 fix is present and working. Something else in the few instructions
+after a process is reaped can still wedge the machine, roughly once in a few
+dozen boots. The very next boot of the identical tree was green.
+
+| | 2026-07-15 / 2026-08-22 | 2026-08-25 |
+|---|---|---|
+| Rung | `self_test_linux_real_glibc_forkexec` | Path-Z hosted-cc `inline-asm` (`spawn-test-tcc-hosted`, pid 420 / task 387) |
+| Last line printed | `[sched] Task 130 exiting` | `[sched] Task 387 exiting` |
+| Line that never came | the forkexec verdict | `hosted cc (inline-asm) — /hosted-prog is a 4026-byte dynamic ELF` |
+| Serial position | — | line 38 775 of an expected ~46 860 |
+| Diagnostics | none | none: 0 `!!` lines, no panic, no `#PF`, no stall report |
+| Timeout | 480 s | QEMU's 900 s fired; harness ran 1174 s |
+
+**The fixed path is present and is not the explanation.**
+`sched::detach_address_space` exists at `sched/mod.rs:1789` with both call
+sites live — `proc/thread.rs:708` (immediately after `on_thread_exit_hook`)
+and `sched/mod.rs:1837` (the idempotent backstop in `task_exit`). Per this
+entry's own instruction, the page-table path was *not* re-derived. This is a
+second cause wearing the first one's symptom.
+
+**What the new rung narrows.** `spawn_hosted_cc` (`proc/spawn.rs:28525`) has a
+different, shorter tail than the forkexec harness, and the missing line places
+the wedge inside it precisely. After the bounded poll loop breaks with
+`reaped = true`, the surviving steps are, in order:
+
+1. `pcb::state(pid)` / `pcb::exit_code(pid)`
+2. `thread::on_thread_exit(cc_result.task_id)`
+3. `pcb::destroy(cc_result.pid)`
+4. — return Ok — then the caller's `Vfs::read_file("/hosted-prog")`
+5. `assert_dynamic_elf`, whose **first statement prints the missing line**
+
+Step 5 printing nothing means the wedge is in steps 1–4. Steps 1 and 5 are
+cheap and lock-light; the weight is in 2–4. That is exactly where this entry
+said to start ("the remaining post-loop suspects … are `Vfs::read_file`/
+`Vfs::remove` on the capture file"), and the new rung sharpens it: **the file
+being read is the compiler's own output**, a ~4 KiB file that tcc created and
+wrote through the VFS and that was closed by the exiting process's fd
+teardown, read back on the very next line after that process was destroyed.
+"Read a file the dying process just wrote, immediately after destroying it" is
+the shape shared by both occurrences — the forkexec harness read a capture
+file with the same timing.
+
+**One concrete lead worth checking first.** Step 2 calls
+`thread::on_thread_exit(task_id)` on a task that has *already* run
+`on_thread_exit` itself — the log proves it, because `[thread] Process 420 has
+no threads left — now zombie` is printed from inside that very function and
+appears two lines before the freeze. So the function runs twice per hosted-cc
+rung. It takes `THREAD_JOIN_WAITERS`, `THREAD_OWNERS` and the pcb lock, and
+calls `thread_clone::on_thread_exit_hook`, which touches user memory —
+against an address space the first call already detached. A second pass that
+is not fully idempotent (a double removal, a double wake, or a hook that
+faults on a detached address space with no working mapping to report it) fits
+every property of the symptom: silent, intermittent, and located between those
+two prints. Audit `on_thread_exit` and `on_thread_exit_hook` for
+re-entry-with-already-detached-state before looking anywhere else.
+
+**Repro status: intermittent, ~1 in a few dozen.** The immediately-following
+boot of the *identical* tree, run with `--hard-lockup-watchdog` specifically to
+capture the wedged guest RIP, reached `BOOT_OK` in 395 s with the `inline-asm`
+rung green — so **no RIP was captured** and the watchdog hint remains the right
+first move on the next occurrence. `bench/boot-history.jsonl` now records 425
+boots, 110 not clean.
+
+**Not caused by the change it surfaced under.** The tree under test was the
+kshell option-refusal sweep (`68d5483e6`), which touches only shell command
+parsers and a self-test rung that runs at serial line ~40 940 — some 2 000
+lines *after* the freeze point, and in a subsystem with no relationship to
+process teardown. As in 2026-07-15, the change only perturbed timing.
 
 ### D-SHM-MAP-NOCAP. `SYS_SHM_MAP`/`SYS_SHM_SIZE`/`SYS_SHM_CLOSE` do not verify the caller owns the handle — RESOLVED 2026-07-14
 

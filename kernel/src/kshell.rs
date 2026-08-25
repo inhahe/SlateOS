@@ -408,6 +408,10 @@ fn assert_output_lacks(what: &str, out: &[u8], forbidden: &[u8]) {
 /// of the constant: raising the cap leaves the fixture shallower than the limit
 /// it is supposed to trip, and the rung then asserts nothing while still
 /// passing. Deriving it from the constant is what keeps the two from drifting.
+///
+/// The result is built with `Vfs::mkdir_all`, which caps the whole path at
+/// [`crate::fs::vfs::MAX_MKDIR_ALL_COMPONENTS`]; the `const` assertion beside
+/// [`WALK_DEPTH_CAP`] is what holds that.
 fn deep_fixture_path(root: &str) -> String {
     let mut path = String::from(root);
     for level in 1..=WALK_DEPTH_CAP.saturating_add(2) {
@@ -12488,26 +12492,53 @@ fn cmd_ls(args: &str) {
 /// `llvm-objdump` on the debug build — the profile the boot test runs, and the
 /// expensive one, since debug frames here are ~6x release:
 ///
-/// | walker                  | bytes/level (debug) | at cap 64 |
+/// | walker                  | bytes/level (debug) | at cap 48 |
 /// |-------------------------|--------------------:|----------:|
-/// | `ls_list_dir`           |                3712 |    232 KiB |
-/// | `find_recurse_filtered` |                1232 |     77 KiB |
-/// | `grep_recursive`        |                 960 |     60 KiB |
+/// | `ls_list_dir`           |                3712 |    174 KiB |
+/// | `find_recurse_filtered` |                1232 |     58 KiB |
+/// | `grep_recursive`        |                 960 |     45 KiB |
 ///
-/// The cap is sized for the worst walker, so 64 costs at most 232 KiB — 12% of
-/// the usable boot stack — leaving the rest for the non-recursive call chain
-/// beneath the innermost level (VFS, ext4), which is a constant, not multiplied
-/// by depth. Uniform rather than per-walker on purpose: "the shell descends at
-/// most 64 levels" is one fact to learn instead of three, and the worst case is
-/// the one that has to fit anyway.
+/// The cap is sized for the worst walker, so 48 costs at most 174 KiB — under
+/// 9% of the usable boot stack — leaving the rest for the non-recursive call
+/// chain beneath the innermost level (VFS, ext4), which is a constant, not
+/// multiplied by depth. Uniform rather than per-walker on purpose: "the shell
+/// descends at most 48 levels" is one fact to learn instead of three, and the
+/// worst case is the one that has to fit anyway.
 ///
-/// 64 is far past any real tree (a kernel source tree is ~12 deep, a
-/// pathological `node_modules` ~40) while still being a hard stop for a symlink
-/// loop, which is unbounded and so is caught by any finite cap.
+/// # The second ceiling, which the stack measurement could not see
+///
+/// Stack headroom alone would allow several hundred levels, and the first
+/// version of this constant was 64 for that reason. It failed the boot test:
+/// **`Vfs::mkdir_all` refuses a path of more than 64 components** ("to prevent
+/// abuse", `fs/vfs.rs`), so the self-test fixture — which must build a tree
+/// *deeper* than the cap in order to trip it — could not be created at all, and
+/// rung 27 died with `InvalidArgument` before the walk under test ever ran.
+///
+/// The two limits are unrelated in kind: one is how deep this shell can safely
+/// *recurse*, the other is how deep the VFS will *create*. The cap belongs below
+/// both, with room for the fixture's own prefix: at 48, the deepest tree the
+/// rungs build is `/tmp/<name>/d1..d50` = 52 components, comfortably inside the
+/// VFS's 64.
+///
+/// 48 is still far past any real tree (a kernel source tree is ~12 deep, a
+/// pathological `node_modules` ~40) and is still a hard stop for a symlink loop,
+/// which is unbounded and so is caught by any finite cap.
 ///
 /// If a walker's frame grows, re-measure rather than guessing: the old numbers
 /// looked deliberate and were arithmetic against the wrong stack.
-const WALK_DEPTH_CAP: u32 = 64;
+const WALK_DEPTH_CAP: u32 = 48;
+
+// The fixture in `deep_fixture_path` is `WALK_DEPTH_CAP + 2` levels under a
+// two-component prefix (`/tmp/<name>`), and it is built with `Vfs::mkdir_all`,
+// which refuses more than `MAX_MKDIR_ALL_COMPONENTS`. Raising the cap past that
+// leaves the fixture uncreatable, which is not a test failure but an
+// `InvalidArgument` from the fixture itself -- the rung dies before reaching the
+// walk it exists to check. That is exactly how this was found, so it is a build
+// error now rather than a boot-test one.
+const _: () = assert!(
+    (WALK_DEPTH_CAP as usize) + 4 <= crate::fs::vfs::MAX_MKDIR_ALL_COMPONENTS,
+    "WALK_DEPTH_CAP is too deep for the self-test fixture to build with Vfs::mkdir_all"
+);
 
 /// Internal helper for ls: list one directory and optionally recurse.
 ///

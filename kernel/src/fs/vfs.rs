@@ -2384,7 +2384,7 @@ impl Vfs {
     ///
     /// ## Depth limit
     ///
-    /// Limited to 64 path components to prevent abuse.
+    /// Limited to [`MAX_MKDIR_ALL_COMPONENTS`] path components to prevent abuse.
     pub fn mkdir_all(path: impl AsRef<Path>) -> KernelResult<()> {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
@@ -2393,7 +2393,7 @@ impl Vfs {
 
         let components: Vec<&Path> = norm.components().collect();
 
-        if components.len() > 64 {
+        if components.len() > MAX_MKDIR_ALL_COMPONENTS {
             return Err(KernelError::InvalidArgument);
         }
 
@@ -4172,6 +4172,19 @@ pub fn lock_table_dump() -> Vec<(PathBuf, LockType, u64)> {
 /// Linux ext4 limit and is generous enough for any reasonable name while
 /// preventing denial-of-service via absurdly long names.
 const MAX_COMPONENT_LEN: usize = 255;
+
+/// Maximum number of path components [`Vfs::mkdir_all`] will create in one call.
+///
+/// A denial-of-service bound: `mkdir_all` walks the path creating each missing
+/// component, so an arbitrarily deep path is an arbitrarily long operation.
+///
+/// Named rather than inlined because it is a ceiling that callers have to
+/// respect and cannot discover by reading their own code. `kshell`'s
+/// `WALK_DEPTH_CAP` is bounded by it — the shell's recursive walkers cap their
+/// *descent*, and the self-test fixtures that prove the cap bites must build a
+/// tree deeper than it, which is a `mkdir_all` deep enough to hit this. That
+/// collision cost a boot test before either limit was named.
+pub(crate) const MAX_MKDIR_ALL_COMPONENTS: usize = 64;
 
 /// Validate a VFS path.
 ///

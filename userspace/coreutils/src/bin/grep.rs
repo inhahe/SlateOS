@@ -792,7 +792,7 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
                 'A' => opts.after_context = Some(context_len(&take_arg('A')?)?),
                 'B' => opts.before_context = Some(context_len(&take_arg('B')?)?),
                 'C' => opts.default_context = Some(context_len(&take_arg('C')?)?),
-                'e' => patterns.push(take_arg('e')?.into_bytes()),
+                'e' => patterns.extend(split_arg_patterns(take_arg('e')?.as_bytes())),
                 'f' => pattern_files.push(take_arg('f')?),
                 'm' => {
                     let v = take_arg('m')?;
@@ -814,7 +814,7 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
         if files.is_empty() {
             return Err("missing PATTERN".to_string());
         }
-        patterns.push(files.remove(0).into_bytes());
+        patterns.extend(split_arg_patterns(files.remove(0).as_bytes()));
     }
 
     // Recursion with no operand walks the working directory, as GNU does;
@@ -937,7 +937,7 @@ fn parse_long(
         // --color foo file` means `auto` and leaves `foo` as the pattern.
         "color" | "colour" => opts.color_when = color_when(value)?,
         "text" | "binary-files" => {}
-        "regexp" => patterns.push(need(value)?.into_bytes()),
+        "regexp" => patterns.extend(split_arg_patterns(need(value)?.as_bytes())),
         "file" => pattern_files.push(need(value)?),
         "max-count" => {
             let v = need(value)?;
@@ -1069,7 +1069,7 @@ fn context_len(value: &str) -> Result<usize, String> {
         .map_err(|_| format!("{value}: invalid context length argument"))
 }
 
-/// The patterns held in the text of a `-f` file, or of a `-e` argument.
+/// The patterns held in the text of a `-f` file.
 ///
 /// Each line is its own pattern. A trailing newline ends the last pattern
 /// rather than starting an empty one — the distinction matters, because an
@@ -1081,6 +1081,27 @@ fn split_patterns(raw: &[u8]) -> Vec<Vec<u8>> {
         return vec![Vec::new()];
     }
     body.split(|&b| b == b'\n').map(<[u8]>::to_vec).collect()
+}
+
+/// The patterns held in one `-e` argument or in the positional pattern.
+///
+/// A newline separates patterns here too — `grep 'aaa
+/// ccc' f` searches for either, which is how a pattern list gets into a script
+/// without a temporary file — but a *trailing* one does not terminate the last
+/// pattern the way [`split_patterns`] has it. It starts an empty one, and an
+/// empty pattern matches every line: measured, `grep -E -e 'aaa'$'\n' f` prints
+/// all of `f`.
+///
+/// The asymmetry is not an inconsistency in GNU, it is the same rule seen from
+/// two sides. grep accumulates every pattern into one buffer and appends a `\n`
+/// after each `-e`, then splits the buffer on newlines; `-f` contributes the
+/// file's bytes and only adds the separator if the file did not end with one.
+/// So `-e 'aaa'$'\n'` contributes `aaa\n\n` and a file holding `aaa\n`
+/// contributes `aaa\n`. Splitting per argument rather than accumulating gives
+/// the same answer for every combination — `-e a$'\n' -e b` is `a`, ``, `b`
+/// either way — and keeps each pattern's origin available for a diagnostic.
+fn split_arg_patterns(raw: &[u8]) -> Vec<Vec<u8>> {
+    raw.split(|&b| b == b'\n').map(<[u8]>::to_vec).collect()
 }
 
 /// Quote a literal so the regex engine matches it as text (`-F`).
@@ -3834,6 +3855,61 @@ mod tests {
             split_patterns(b"a\n\nb\n").len(),
             3,
             "a blank line is the empty pattern"
+        );
+    }
+
+    /// A newline in `-e` or in the positional pattern separates patterns.
+    ///
+    /// Every row measured against grep 3.11 by searching a file of `aaa`/`bbb`
+    /// and comparing which lines came back.
+    #[test]
+    fn a_newline_in_a_pattern_argument_separates_patterns() {
+        assert_eq!(
+            split_arg_patterns(b"aaa\nccc"),
+            vec![b"aaa".to_vec(), b"ccc".to_vec()]
+        );
+        // Unlike a `-f` file, a trailing newline here begins an empty pattern
+        // rather than ending the last one — and the empty pattern matches every
+        // line, so this really does turn the search into `cat`. Measured:
+        // `grep -E -e 'aaa'$'\n' f` prints all of `f`.
+        assert_eq!(
+            split_arg_patterns(b"aaa\n"),
+            vec![b"aaa".to_vec(), Vec::new()]
+        );
+        assert_eq!(
+            split_arg_patterns(b"\naaa"),
+            vec![Vec::new(), b"aaa".to_vec()]
+        );
+        // One argument with no newline is one pattern, and the empty argument
+        // is the empty pattern — not zero patterns, which would make `grep -e
+        // '' f` read its pattern from the operand instead.
+        assert_eq!(split_arg_patterns(b"aaa"), vec![b"aaa".to_vec()]);
+        assert_eq!(split_arg_patterns(b""), vec![Vec::<u8>::new()]);
+    }
+
+    #[test]
+    fn a_multiline_pattern_argument_reaches_the_pattern_list() {
+        assert_eq!(
+            parse_args(&s(&["-e", "aaa\nccc", "f"])).unwrap().patterns,
+            vec![b"aaa".to_vec(), b"ccc".to_vec()]
+        );
+        assert_eq!(
+            parse_args(&s(&["--regexp=aaa\nccc", "f"])).unwrap().patterns,
+            vec![b"aaa".to_vec(), b"ccc".to_vec()]
+        );
+        assert_eq!(
+            parse_args(&s(&["aaa\nccc", "f"])).unwrap().patterns,
+            vec![b"aaa".to_vec(), b"ccc".to_vec()]
+        );
+        // Splitting the operand must not consume it twice: the file list is
+        // what is left after the pattern, however many patterns it held.
+        assert_eq!(parse_args(&s(&["aaa\nccc", "f"])).unwrap().files, vec!["f"]);
+        // Several `-e` accumulate exactly as one argument holding both would.
+        assert_eq!(
+            parse_args(&s(&["-e", "a\n", "-e", "b", "f"]))
+                .unwrap()
+                .patterns,
+            parse_args(&s(&["-e", "a\n\nb", "f"])).unwrap().patterns
         );
     }
 

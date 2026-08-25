@@ -2553,8 +2553,25 @@ static LIVENESS_LAST_OUTPUT: AtomicU64 = AtomicU64::new(0);
 /// went on to reach `BOOT_OK` ~600 s later).
 ///
 /// This counter closes that hole with the work such a stretch *does* leave a
-/// trace of: page faults resolved and block-I/O operations completed. Loading a
-/// 3.5 MB ELF off ext4 moves both by thousands while printing nothing.
+/// trace of: page faults resolved, block-I/O operations completed, and heap
+/// allocations served. Loading a 3.5 MB ELF off ext4 moves the first two by
+/// thousands while printing nothing.
+///
+/// **Why allocations had to be added too** (2026-08-25). Faults and block I/O
+/// are the trace left by work that touches *memory mappings or a disk*. A
+/// kernel-side computation over data that is already mapped and already in RAM
+/// leaves neither. The shell self-test's `find` rung is precisely that shape —
+/// it walks a 50-component tmpfs tree into a capture buffer — and it went 15 s
+/// without faulting, without reading a block, and without a byte on the wire,
+/// so this counter stood still and the boot was reported as a `SYSTEM HANG`
+/// while it was working as hard as it ever does. Allocation is the trace that
+/// kind of work *does* leave: a directory walk allocates a path per component
+/// per level. A hang spinning on a lock allocates nothing, so nothing the
+/// branch exists to catch is hidden by counting them.
+///
+/// Note what this is not: it is not a longer timeout. Raising the threshold
+/// would dull a gate whose entire job is noticing that a boot stopped; this
+/// reports a signal that was there all along.
 ///
 /// **Only the total-hang branch consults it, deliberately.** That branch claims
 /// "no task-level forward progress, all CPUs idle-ticking"; a resolved page
@@ -2568,9 +2585,9 @@ static LIVENESS_LAST_KWORK: AtomicU64 = AtomicU64::new(0);
 
 /// Sum the kernel-side forward-progress counters backing [`LIVENESS_LAST_KWORK`].
 ///
-/// Both sources are plain relaxed atomic loads with no lock, which matters: this
-/// runs from the timer tick, and a watchdog that took the `SCHED` lock could
-/// deadlock against precisely the hang it exists to report.
+/// Every source is a plain relaxed load with no lock, which matters: this runs
+/// from the timer tick, and a watchdog that took the `SCHED` lock could deadlock
+/// against precisely the hang it exists to report.
 fn kernel_progress_count() -> u64 {
     let f = crate::mm::fault::fault_stats();
     let io = crate::blkdev::io_stats();
@@ -2578,6 +2595,7 @@ fn kernel_progress_count() -> u64 {
         .wrapping_add(f.user_resolved)
         .wrapping_add(io.total_reads)
         .wrapping_add(io.total_writes)
+        .wrapping_add(crate::mm::heap::alloc_progress_count())
 }
 
 /// Maximum number of `SYSTEM HANG` reports emitted per armed window.
@@ -2844,12 +2862,29 @@ fn armed_relative_deadline_ns(budget_ns: u64, arm_ns: u64) -> Option<u64> {
 /// asserting the invariant directly rather than hoping a drill stumbles on it.
 static LIVENESS_SELF_OUTPUT: AtomicU64 = AtomicU64::new(0);
 
-/// Serial output count with the watchdog's own writes discounted.
+/// Output-progress count with the watchdog's own writes discounted.
 ///
 /// The only value [`liveness_check`] and [`liveness_arm`] may use for the
 /// silence test. See [`LIVENESS_SELF_OUTPUT`].
+///
+/// Counts shell output that went into a *capture buffer* as well as bytes that
+/// reached the port, because a captured command is producing output by any
+/// reading of the word — `capture_command` merely changes where it lands. Left
+/// out, this detector had a blind spot exactly the width of `$(…)`
+/// substitution, every pipeline stage, and every command served over SSH or
+/// telnet: those all run captured, so a slow one is silent on the wire while
+/// being anything but stalled. It cost two false `SYSTEM HANG` reports on boots
+/// whose self-tests all passed
+/// (`TD-A-LIVENESS-WATCHDOG-FALSE-FIRES-ON-CAPTURED-SELF-TEST-WORK`), and would
+/// have cost a remote user the same verdict for a long pipeline.
+///
+/// This adds no way for a genuine hang to hide: a captured command that writes
+/// once and then blocks advances the sum once, after which the silence resumes
+/// and the report follows on schedule. See [`crate::kshell::captured_output_count`].
 fn kernel_output_count() -> u64 {
-    crate::serial::output_count().wrapping_sub(LIVENESS_SELF_OUTPUT.load(Ordering::Relaxed))
+    crate::serial::output_count()
+        .wrapping_add(crate::kshell::captured_output_count())
+        .wrapping_sub(LIVENESS_SELF_OUTPUT.load(Ordering::Relaxed))
 }
 
 /// Emit watchdog diagnostics without letting them register as kernel progress.
@@ -8116,68 +8151,189 @@ fn test_liveness_watchdog() -> KernelResult<()> {
     // backstop: if a future edit ever does cross the threshold here, the report
     // it emits must be marked a drill rather than failing the boot as a real one.
     LIVENESS_SELFTEST_ACTIVE.store(true, Ordering::Relaxed);
+
+    /// Run one `liveness_check` over an interval pinned to be free of *kernel
+    /// work*, reporting whether the pin actually held.
+    ///
+    /// Every phase of the drill below is a statement about the **output**
+    /// discount, so each needs the other discount — `kernel_progress_count()`,
+    /// the faults/block-I/O/allocations branch — to be a no-op for the interval
+    /// it measures.  Storing "the count as of now" into `LIVENESS_LAST_KWORK` is
+    /// how that is arranged, and it is not airtight: `liveness_check` takes its
+    /// own fresh reading, and anything that happens in between is real work that
+    /// it will rightly treat as forward progress.  `without_interrupts` does not
+    /// close the window either — it silences *this* CPU, and another core
+    /// allocating is enough.  That became a live concern when heap allocations
+    /// joined the counter (2026-08-25); before then the sources were faults and
+    /// block I/O, which an idle AP does not generate.
+    ///
+    /// So the pin is *verified* rather than assumed.  `liveness_check` swaps its
+    /// own reading into `LIVENESS_LAST_KWORK` before it branches, so reading the
+    /// static back afterwards says exactly what it compared against — no second
+    /// sample, and therefore no second race.  `false` means the interval was
+    /// legitimately not silent and the drill must start over.
+    ///
+    /// Without this the two outcomes are indistinguishable: a breadcrumb that
+    /// wrongly counted as output and an allocation on another core both leave
+    /// the stall counter at 0, and the drill would report the first when it saw
+    /// the second.
+    fn liveness_check_over_pinned_interval() -> bool {
+        let pinned = kernel_progress_count();
+        LIVENESS_LAST_KWORK.store(pinned, Ordering::Relaxed);
+        liveness_check();
+        LIVENESS_LAST_KWORK.load(Ordering::Relaxed) == pinned
+    }
+
+    /// Account one restart of the drill, reporting whether another is allowed.
+    ///
+    /// A restart is not a failure — it is the watchdog correctly noticing that
+    /// the kernel did something during an interval the drill needed idle.  The
+    /// bound exists only so that a future change which makes *every* interval
+    /// busy (say, a `serial_println!` that allocates) fails loudly and quickly
+    /// instead of spinning inside a `cli` region for ever.
+    fn drill_may_restart(restarts: &mut u32) -> bool {
+        /// Idle intervals are the overwhelmingly common case, so this is reached
+        /// only under sustained cross-CPU work; 32 is far past coincidence.
+        const MAX_RESTARTS: u32 = 32;
+
+        *restarts = restarts.saturating_add(1);
+        if *restarts <= MAX_RESTARTS {
+            return true;
+        }
+        serial_println!(
+            "[sched]   FAIL: {MAX_RESTARTS} restarts without an interval free of \
+             kernel-side work; the drill cannot separate the output discount from \
+             the progress one"
+        );
+        false
+    }
+
     let breadcrumb_ok = crate::cpu::without_interrupts(|| {
-        liveness_arm(); // also zeroes LIVENESS_STALL_COUNT and LIVENESS_HANG_REPORTS
+        let mut restarts = 0u32;
 
-        // One genuinely silent interval accrues.
-        LIVENESS_LAST_KWORK.store(kernel_progress_count(), Ordering::Relaxed);
-        liveness_check();
-        let before = LIVENESS_STALL_COUNT.load(Ordering::Relaxed);
-        if before != 1 {
-            serial_println!("[sched]   FAIL: expected 1 accrued stall interval, got {before}");
-            return false;
-        }
+        'attempt: loop {
+            liveness_arm(); // also zeroes LIVENESS_STALL_COUNT and LIVENESS_HANG_REPORTS
 
-        // Now the watchdog speaks, exactly as the breadcrumb does on a real boot.
-        watchdog_diagnostic(|| {
+            // One genuinely silent interval accrues.
+            let pinned = liveness_check_over_pinned_interval();
+            let before = LIVENESS_STALL_COUNT.load(Ordering::Relaxed);
+            if !pinned {
+                if drill_may_restart(&mut restarts) {
+                    continue 'attempt;
+                }
+                return false;
+            }
+            if before != 1 {
+                serial_println!("[sched]   FAIL: expected 1 accrued stall interval, got {before}");
+                return false;
+            }
+
+            // Now the watchdog speaks, exactly as the breadcrumb does on a real
+            // boot.
+            watchdog_diagnostic(|| {
+                serial_println!(
+                    "[sched]   (self-test) simulated watchdog breadcrumb; the interval \
+                     that follows must still count as silent:"
+                );
+            });
+
+            // ...and the next interval must still be silent, so the count keeps
+            // climbing rather than resetting to 0.
+            let pinned = liveness_check_over_pinned_interval();
+            let after = LIVENESS_STALL_COUNT.load(Ordering::Relaxed);
+            if !pinned {
+                if drill_may_restart(&mut restarts) {
+                    continue 'attempt;
+                }
+                return false;
+            }
+            if after != 2 {
+                serial_println!(
+                    "[sched]   FAIL: the watchdog's own output reset the stall counter \
+                     ({before} -> {after}); every LIVENESS_ALERT_COUNT above 6 is then \
+                     unreachable and the detector is dead"
+                );
+                return false;
+            }
+
+            // Ordinary kernel output must still count as progress — the discount
+            // is meant to be surgical, not to blind the silence test altogether.
+            // Without this half the test would pass just as well if
+            // `kernel_output_count()` returned a constant.
+            //
+            // The pin matters here for a different reason than above: this phase
+            // asserts a reset to 0, and kernel work would produce that reset on
+            // its own.  Unpinned, the phase would pass vacuously on exactly the
+            // boots where it was needed most.
             serial_println!(
-                "[sched]   (self-test) simulated watchdog breadcrumb; the interval \
-                 that follows must still count as silent:"
+                "[sched]   (self-test) ordinary kernel output; must reset the counter:"
             );
-        });
+            let pinned = liveness_check_over_pinned_interval();
+            let reset = LIVENESS_STALL_COUNT.load(Ordering::Relaxed);
+            if !pinned {
+                if drill_may_restart(&mut restarts) {
+                    continue 'attempt;
+                }
+                return false;
+            }
+            if reset != 0 {
+                serial_println!(
+                    "[sched]   FAIL: ordinary serial output did not reset the stall \
+                     counter (still {reset}) — the silence test is blind"
+                );
+                return false;
+            }
 
-        // ...and the next interval must still be silent, so the count keeps
-        // climbing rather than resetting to 0.
-        LIVENESS_LAST_KWORK.store(kernel_progress_count(), Ordering::Relaxed);
-        liveness_check();
-        let after = LIVENESS_STALL_COUNT.load(Ordering::Relaxed);
-        if after != 2 {
-            serial_println!(
-                "[sched]   FAIL: the watchdog's own output reset the stall counter \
-                 ({before} -> {after}); every LIVENESS_ALERT_COUNT above 6 is then \
-                 unreachable and the detector is dead"
-            );
-            return false;
-        }
+            // Shell output written into a *capture buffer* must count too.  This
+            // is the half that was missing: `capture_command` redirects the
+            // shell's bytes into a `Vec` instead of the port, so a captured
+            // command is silent on the wire while being anything but stalled.
+            // Every `$(…)` substitution, every pipeline stage and every command
+            // served over SSH or telnet runs that way, and so does self-test rung
+            // 27 — which spent two boots being reported as a `SYSTEM HANG` while
+            // its own assertions all passed.
+            //
+            // Driven through `shell_write_bytes` rather than by poking the
+            // counter, so the drill fails if a future edit moves the increment
+            // off the capture path or drops it.  Nothing is captured here, so the
+            // bytes would go to the console; `capture_start`/`finish` is what
+            // puts the write on the branch under test and swallows the output.
+            //
+            // The counter is 0 coming in, so this is not vacuous: had the
+            // captured write not counted, the interval would have been silent and
+            // the counter would read 1.
+            crate::kshell::write_captured_for_liveness_drill(b"(self-test) captured output\n");
+            let pinned = liveness_check_over_pinned_interval();
+            let captured_reset = LIVENESS_STALL_COUNT.load(Ordering::Relaxed);
+            if !pinned {
+                if drill_may_restart(&mut restarts) {
+                    continue 'attempt;
+                }
+                return false;
+            }
+            if captured_reset != 0 {
+                serial_println!(
+                    "[sched]   FAIL: captured shell output did not reset the stall \
+                     counter (still {captured_reset}) — every $(…), pipeline stage \
+                     and remote command is invisible to the silence test"
+                );
+                return false;
+            }
 
-        // Ordinary kernel output must still count as progress — the discount is
-        // meant to be surgical, not to blind the silence test altogether.  Without
-        // this half the test would pass just as well if `kernel_output_count()`
-        // returned a constant.
-        serial_println!("[sched]   (self-test) ordinary kernel output; must reset the counter:");
-        LIVENESS_LAST_KWORK.store(kernel_progress_count(), Ordering::Relaxed);
-        liveness_check();
-        let reset = LIVENESS_STALL_COUNT.load(Ordering::Relaxed);
-        if reset != 0 {
-            serial_println!(
-                "[sched]   FAIL: ordinary serial output did not reset the stall \
-                 counter (still {reset}) — the silence test is blind"
-            );
-            return false;
+            // The drill is meant to stay under the alert threshold.  If it ever
+            // fires a report it is measuring the report path's own counter reset
+            // instead of the property it names, which is exactly how its first
+            // version failed.
+            let reports = LIVENESS_HANG_REPORTS.load(Ordering::Relaxed);
+            if reports != 0 {
+                serial_println!(
+                    "[sched]   FAIL: breadcrumb drill crossed LIVENESS_ALERT_COUNT \
+                     ({reports} report(s)); it no longer tests what it claims"
+                );
+                return false;
+            }
+            return true;
         }
-
-        // The drill is meant to stay under the alert threshold.  If it ever fires
-        // a report it is measuring the report path's own counter reset instead of
-        // the property it names, which is exactly how its first version failed.
-        let reports = LIVENESS_HANG_REPORTS.load(Ordering::Relaxed);
-        if reports != 0 {
-            serial_println!(
-                "[sched]   FAIL: breadcrumb drill crossed LIVENESS_ALERT_COUNT \
-                 ({reports} report(s)); it no longer tests what it claims"
-            );
-            return false;
-        }
-        true
     });
     liveness_disarm();
     LIVENESS_SELFTEST_ACTIVE.store(false, Ordering::Relaxed);
@@ -8185,7 +8341,8 @@ fn test_liveness_watchdog() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!(
-        "[sched]   liveness: watchdog breadcrumbs do not certify liveness, ordinary output does: OK"
+        "[sched]   liveness: breadcrumbs do not certify liveness, output does \
+         (console and captured): OK"
     );
 
     // Boot-deadline derivation (see LIVENESS_BOOT_DEADLINE_NS): the cmdline

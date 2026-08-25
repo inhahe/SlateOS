@@ -2326,7 +2326,7 @@ mod tests {
             key: Key::Right,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(game.selected_index, 1);
     }
@@ -2339,7 +2339,7 @@ mod tests {
             key: Key::Left,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(game.selected_index, 4);
     }
@@ -2352,7 +2352,7 @@ mod tests {
             key: Key::Left,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(game.selected_index, 0);
     }
@@ -2366,7 +2366,7 @@ mod tests {
             key: Key::Right,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(game.selected_index, max);
     }
@@ -2379,7 +2379,7 @@ mod tests {
             key: Key::N,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(game.scores, [0; 4]);
         assert_eq!(game.phase, GamePhase::Passing);
@@ -2393,7 +2393,7 @@ mod tests {
             key: Key::Right,
             modifiers: Modifiers::NONE,
             pressed: false,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(game.selected_index, 5); // Unchanged
     }
@@ -2408,7 +2408,7 @@ mod tests {
             key: Key::Escape,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         assert!(game.pass_selections.is_empty());
     }
@@ -2423,7 +2423,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         // Should have started a new round
         assert!(game.phase == GamePhase::Passing || game.phase == GamePhase::Playing);
@@ -2438,7 +2438,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(game.scores, [0; 4]);
     }
@@ -2453,7 +2453,7 @@ mod tests {
             key: Key::Right,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         game.handle_event(&event);
         assert_eq!(game.selected_index, 1);

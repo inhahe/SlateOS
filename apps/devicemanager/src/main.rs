@@ -3066,10 +3066,8 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
                 return EventResult::Consumed;
             }
             _ => {
-                if let Some(ch) = key.text
-                    && !ch.is_control()
-                {
-                    state.search_query.push(ch);
+                if key.types_text() {
+                    state.search_query.extend(key.typed());
                     state.apply_search_filter();
                     return EventResult::Consumed;
                 }
@@ -4361,7 +4359,7 @@ mod tests {
                 key: Key::Down,
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: None,
+                text: String::new(),
             }),
         );
         assert_eq!(result, EventResult::Consumed);
@@ -4377,7 +4375,7 @@ mod tests {
                 key: Key::Up,
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: None,
+                text: String::new(),
             }),
         );
         assert_eq!(result, EventResult::Consumed);
@@ -4393,7 +4391,7 @@ mod tests {
                 key: Key::Tab,
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: None,
+                text: String::new(),
             }),
         );
         assert_eq!(state.active_tab, PropertiesTab::Driver);
@@ -4408,7 +4406,7 @@ mod tests {
                 key: Key::F5,
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: None,
+                text: String::new(),
             }),
         );
         assert_eq!(result, EventResult::Consumed);
@@ -4424,7 +4422,7 @@ mod tests {
                 key: Key::F,
                 pressed: true,
                 modifiers: Modifiers::ctrl(),
-                text: None,
+                text: String::new(),
             }),
         );
         assert!(state.search_focused);
@@ -4440,7 +4438,7 @@ mod tests {
                 key: Key::A,
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: Some('a'),
+                text: "a".to_string(),
             }),
         );
         assert_eq!(state.search_query, "a");
@@ -4457,7 +4455,7 @@ mod tests {
                 key: Key::Backspace,
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: None,
+                text: String::new(),
             }),
         );
         assert_eq!(state.search_query, "ab");
@@ -4473,7 +4471,7 @@ mod tests {
                 key: Key::Escape,
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: None,
+                text: String::new(),
             }),
         );
         assert!(!state.search_focused);
@@ -4495,7 +4493,7 @@ mod tests {
                 key: Key::Left,
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: None,
+                text: String::new(),
             }),
         );
         assert!(!state.tree_nodes[cat_idx].expanded);
@@ -4517,7 +4515,7 @@ mod tests {
                 key: Key::Right,
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: None,
+                text: String::new(),
             }),
         );
         assert!(state.tree_nodes[cat_idx].expanded);
@@ -4532,7 +4530,7 @@ mod tests {
                 key: Key::A,
                 pressed: false,
                 modifiers: Modifiers::NONE,
-                text: None,
+                text: String::new(),
             }),
         );
         assert_eq!(result, EventResult::Ignored);

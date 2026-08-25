@@ -428,7 +428,13 @@ pub(crate) fn attach_class(ch: char) -> u8 {
 /// of the base the next glyph is on.
 ///
 /// [`Face::mark_on_base`]: crate::sfnt::Face::mark_on_base
-pub(crate) fn place(base: &mut Extents, mark: &Extents, klass: u8, gap: i32, rtl: bool) -> (i32, i32) {
+pub(crate) fn place(
+    base: &mut Extents,
+    mark: &Extents,
+    klass: u8,
+    gap: i32,
+    rtl: bool,
+) -> (i32, i32) {
     // Horizontal. Note that every arm subtracts the mark's own left bearing:
     // the offset moves the mark's *origin*, and what has to land in the right
     // place is its ink.
@@ -441,7 +447,8 @@ pub(crate) fn place(base: &mut Extents, mark: &Extents, klass: u8, gap: i32, rtl
             } else {
                 base.x_bearing.saturating_add(base.width)
             };
-            edge.saturating_sub(mark.width / 2).saturating_sub(mark.x_bearing)
+            edge.saturating_sub(mark.width / 2)
+                .saturating_sub(mark.x_bearing)
         }
         ATTACHED_BELOW_LEFT | BELOW_LEFT | ABOVE_LEFT => {
             base.x_bearing.saturating_sub(mark.x_bearing)
@@ -518,7 +525,10 @@ mod tests {
     /// in a four-byte literal is otherwise invisible.
     #[test]
     fn the_excluded_scripts_are_sorted() {
-        assert!(COMPLEX_SCRIPTS.is_sorted(), "COMPLEX_SCRIPTS is out of order");
+        assert!(
+            COMPLEX_SCRIPTS.is_sorted(),
+            "COMPLEX_SCRIPTS is out of order"
+        );
     }
 
     /// The scripts whose marks are a stack of accents on one base get the
@@ -526,7 +536,9 @@ mod tests {
     /// crate does not have do not.
     #[test]
     fn only_the_simple_scripts_get_their_marks_placed() {
-        for tag in [*b"latn", *b"grek", *b"cyrl", *b"hebr", *b"arab", *b"syrc", *b"hang"] {
+        for tag in [
+            *b"latn", *b"grek", *b"cyrl", *b"hebr", *b"arab", *b"syrc", *b"hang",
+        ] {
             assert!(
                 positions_marks(Some(ScriptTags::exactly(tag)), false),
                 "{:?} should be placed",
@@ -535,7 +547,9 @@ mod tests {
         }
         // Indic (both spellings of the *preferred* tag are the `2` ones),
         // Khmer, Myanmar, Thai and a USE script.
-        for tag in [*b"dev2", *b"bng2", *b"khmr", *b"mym2", *b"thai", *b"lao ", *b"tibt"] {
+        for tag in [
+            *b"dev2", *b"bng2", *b"khmr", *b"mym2", *b"thai", *b"lao ", *b"tibt",
+        ] {
             assert!(
                 !positions_marks(Some(ScriptTags::exactly(tag)), false),
                 "{:?} should be left alone",
@@ -841,7 +855,13 @@ mod tests {
         let mut base = Extents::new(82, 0, 748, 1010);
         base.x_bearing = 0;
         base.width = 831;
-        let (_, y) = place(&mut base, &agency_notdef(), ATTACHED_BELOW, 2048 / 16, false);
+        let (_, y) = place(
+            &mut base,
+            &agency_notdef(),
+            ATTACHED_BELOW,
+            2048 / 16,
+            false,
+        );
         assert_eq!(y, -1633);
     }
 

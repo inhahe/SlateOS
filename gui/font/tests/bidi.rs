@@ -51,7 +51,9 @@ struct Case {
 }
 
 fn data_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("data")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("data")
 }
 
 /// Parse the suite's five semicolon-separated fields.

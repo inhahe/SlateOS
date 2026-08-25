@@ -471,12 +471,7 @@ mod tests {
         let mut pieces = run(text);
         let mut jamo = Vec::new();
         let has: Vec<char> = covers.chars().collect();
-        preprocess(
-            &mut pieces,
-            &mut jamo,
-            |ch| has.contains(&ch),
-            |_| false,
-        );
+        preprocess(&mut pieces, &mut jamo, |ch| has.contains(&ch), |_| false);
         (pieces, jamo)
     }
 
@@ -526,11 +521,10 @@ mod tests {
     fn jamo_a_face_can_draw_neither_way_stay_as_typed() {
         let (pieces, jamo) = shape("\u{1100}\u{1161}\u{11A8}", "");
         assert_eq!(chars(&pieces), "\u{1100}\u{1161}\u{11A8}");
-        assert_eq!(jamo, [
-            Some(Jamo::Leading),
-            Some(Jamo::Vowel),
-            Some(Jamo::Trailing)
-        ]);
+        assert_eq!(
+            jamo,
+            [Some(Jamo::Leading), Some(Jamo::Vowel), Some(Jamo::Trailing)]
+        );
     }
 
     /// A face that draws jamo but has no precomposed syllable keeps them and
@@ -539,11 +533,10 @@ mod tests {
     fn a_jamo_face_keeps_the_jamo_and_names_their_slots() {
         let (pieces, jamo) = shape("\u{1100}\u{1161}\u{11A8}", "\u{1100}\u{1161}\u{11A8}");
         assert_eq!(chars(&pieces), "\u{1100}\u{1161}\u{11A8}");
-        assert_eq!(jamo, [
-            Some(Jamo::Leading),
-            Some(Jamo::Vowel),
-            Some(Jamo::Trailing)
-        ]);
+        assert_eq!(
+            jamo,
+            [Some(Jamo::Leading), Some(Jamo::Vowel), Some(Jamo::Trailing)]
+        );
     }
 
     /// An Old Korean block has no precomposed character at all, so it stays
@@ -562,11 +555,10 @@ mod tests {
     fn a_syllable_the_face_lacks_comes_apart_into_jamo_it_has() {
         let (pieces, jamo) = shape("\u{AC01}", "\u{1100}\u{1161}\u{11A8}");
         assert_eq!(chars(&pieces), "\u{1100}\u{1161}\u{11A8}");
-        assert_eq!(jamo, [
-            Some(Jamo::Leading),
-            Some(Jamo::Vowel),
-            Some(Jamo::Trailing)
-        ]);
+        assert_eq!(
+            jamo,
+            [Some(Jamo::Leading), Some(Jamo::Vowel), Some(Jamo::Trailing)]
+        );
         // One character was typed, so there is one caret stop.
         assert_eq!(clusters(&pieces), [0, 0, 0]);
     }
@@ -595,11 +587,10 @@ mod tests {
     fn an_unabsorbable_trailing_jamo_splits_the_block_it_follows() {
         let (pieces, jamo) = shape("\u{AC00}\u{11A8}", "\u{AC00}\u{1100}\u{1161}\u{11A8}");
         assert_eq!(chars(&pieces), "\u{1100}\u{1161}\u{11A8}");
-        assert_eq!(jamo, [
-            Some(Jamo::Leading),
-            Some(Jamo::Vowel),
-            Some(Jamo::Trailing)
-        ]);
+        assert_eq!(
+            jamo,
+            [Some(Jamo::Leading), Some(Jamo::Vowel), Some(Jamo::Trailing)]
+        );
     }
 
     /// A tone mark is written after its syllable and drawn before it.
@@ -621,12 +612,15 @@ mod tests {
             "\u{1100}\u{1161}\u{11A8}\u{302E}",
         );
         assert_eq!(chars(&pieces), "\u{302E}\u{1100}\u{1161}\u{11A8}");
-        assert_eq!(jamo, [
-            None,
-            Some(Jamo::Leading),
-            Some(Jamo::Vowel),
-            Some(Jamo::Trailing)
-        ]);
+        assert_eq!(
+            jamo,
+            [
+                None,
+                Some(Jamo::Leading),
+                Some(Jamo::Vowel),
+                Some(Jamo::Trailing)
+            ]
+        );
     }
 
     /// A face that draws the tone mark zero-width has said it overstrikes, so

@@ -4967,10 +4967,8 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) {
                 state.unlock_failed = false;
             }
             _ => {
-                if let Some(ch) = key.text
-                    && !ch.is_control()
-                {
-                    state.master_input.push(ch);
+                if key.types_text() {
+                    state.master_input.extend(key.typed());
                     state.unlock_failed = false;
                 }
             }
@@ -5010,10 +5008,8 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) {
         }
         _ => {
             // Text input for search
-            if let Some(ch) = key.text
-                && !ch.is_control()
-            {
-                state.search_query.push(ch);
+            if key.types_text() {
+                state.search_query.extend(key.typed());
                 state.refresh_filter();
             }
             if key.key == Key::Backspace && !state.search_query.is_empty() {

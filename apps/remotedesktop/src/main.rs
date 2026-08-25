@@ -2939,7 +2939,11 @@ impl RemoteDesktopApp {
                 format!("{:.1} fps", self.perf_metrics.frame_rate),
                 fps_color(self.perf_metrics.frame_rate),
             ),
-            ("Sent", format_link_bytes(self.perf_metrics.bytes_sent), SUBTEXT0),
+            (
+                "Sent",
+                format_link_bytes(self.perf_metrics.bytes_sent),
+                SUBTEXT0,
+            ),
             (
                 "Received",
                 format_link_bytes(self.perf_metrics.bytes_received),
@@ -3131,7 +3135,7 @@ fn main() {
         key: Key::F11,
         pressed: true,
         modifiers: Modifiers::NONE,
-        text: None,
+        text: String::new(),
     });
     let _result = app.handle_event(&test_event);
 }
@@ -3758,7 +3762,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(app.selected_profile, Some(1));
@@ -3773,7 +3777,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(app.selected_profile, Some(1));
@@ -3788,7 +3792,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(app.selected_profile, Some(0));
@@ -3802,7 +3806,7 @@ mod tests {
             key: Key::N,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(app.profiles.len(), initial + 1);
@@ -4009,7 +4013,7 @@ mod tests {
             key: Key::F11,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         let result = app.handle_event(&event);
         assert_eq!(result, EventResult::Consumed);
@@ -4113,7 +4117,7 @@ mod tests {
                 key: *key,
                 pressed: true,
                 modifiers: Modifiers::ctrl(),
-                text: None,
+                text: String::new(),
             });
             app.handle_event(&event);
             assert_eq!(app.current_view, *expected_view);
@@ -4129,7 +4133,7 @@ mod tests {
             key: Key::Delete,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(app.confirm_delete, Some(1));

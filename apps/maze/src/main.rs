@@ -26,7 +26,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -507,20 +507,27 @@ impl MazeApp {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: COL_BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Top bar
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height: 40.0,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: 40.0,
             color: COL_MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
         cmds.push(RenderCommand::Text {
-            x: 12.0, y: 10.0,
+            x: 12.0,
+            y: 10.0,
             text: "Maze".to_string(),
             font_size: 18.0,
             color: COL_TEXT,
@@ -531,7 +538,8 @@ impl MazeApp {
 
         // Difficulty
         cmds.push(RenderCommand::Text {
-            x: 80.0, y: 12.0,
+            x: 80.0,
+            y: 12.0,
             text: self.difficulty.name().to_string(),
             font_size: 14.0,
             color: COL_SUBTEXT0,
@@ -542,7 +550,8 @@ impl MazeApp {
 
         // Moves
         cmds.push(RenderCommand::Text {
-            x: 260.0, y: 12.0,
+            x: 260.0,
+            y: 12.0,
             text: format!("Moves: {}", self.moves),
             font_size: 14.0,
             color: COL_SUBTEXT0,
@@ -554,7 +563,8 @@ impl MazeApp {
         // Optimal
         if !self.solution.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: 380.0, y: 12.0,
+                x: 380.0,
+                y: 12.0,
                 text: format!("Optimal: {}", self.solution.len().saturating_sub(1)),
                 font_size: 14.0,
                 color: COL_OVERLAY0,
@@ -566,7 +576,8 @@ impl MazeApp {
 
         // Stats
         cmds.push(RenderCommand::Text {
-            x: 530.0, y: 12.0,
+            x: 530.0,
+            y: 12.0,
             text: format!("Won: {}", self.games_won),
             font_size: 14.0,
             color: COL_GREEN,
@@ -589,8 +600,8 @@ impl MazeApp {
                 let on_trail = self.trail.get(idx).copied().unwrap_or(false);
                 let is_player = row == self.player_row && col == self.player_col;
                 let is_goal = row == self.goal_row && col == self.goal_col;
-                let on_solution = self.show_solution
-                    && self.solution.iter().any(|&(r, c)| r == row && c == col);
+                let on_solution =
+                    self.show_solution && self.solution.iter().any(|&(r, c)| r == row && c == col);
 
                 // Cell background
                 let bg = if is_player {
@@ -606,8 +617,10 @@ impl MazeApp {
                 };
 
                 cmds.push(RenderCommand::FillRect {
-                    x: cx + 0.5, y: cy + 0.5,
-                    width: cs - 1.0, height: cs - 1.0,
+                    x: cx + 0.5,
+                    y: cy + 0.5,
+                    width: cs - 1.0,
+                    height: cs - 1.0,
                     color: bg,
                     corner_radii: CornerRadii::ZERO,
                 });
@@ -618,32 +631,40 @@ impl MazeApp {
 
                 if self.maze.has_wall(row, col, Dir::North) {
                     cmds.push(RenderCommand::Line {
-                        x1: cx, y1: cy,
-                        x2: cx + cs, y2: cy,
+                        x1: cx,
+                        y1: cy,
+                        x2: cx + cs,
+                        y2: cy,
                         color: wall_color,
                         width: wall_w,
                     });
                 }
                 if self.maze.has_wall(row, col, Dir::South) {
                     cmds.push(RenderCommand::Line {
-                        x1: cx, y1: cy + cs,
-                        x2: cx + cs, y2: cy + cs,
+                        x1: cx,
+                        y1: cy + cs,
+                        x2: cx + cs,
+                        y2: cy + cs,
                         color: wall_color,
                         width: wall_w,
                     });
                 }
                 if self.maze.has_wall(row, col, Dir::West) {
                     cmds.push(RenderCommand::Line {
-                        x1: cx, y1: cy,
-                        x2: cx, y2: cy + cs,
+                        x1: cx,
+                        y1: cy,
+                        x2: cx,
+                        y2: cy + cs,
                         color: wall_color,
                         width: wall_w,
                     });
                 }
                 if self.maze.has_wall(row, col, Dir::East) {
                     cmds.push(RenderCommand::Line {
-                        x1: cx + cs, y1: cy,
-                        x2: cx + cs, y2: cy + cs,
+                        x1: cx + cs,
+                        y1: cy,
+                        x2: cx + cs,
+                        y2: cy + cs,
                         color: wall_color,
                         width: wall_w,
                     });
@@ -653,8 +674,10 @@ impl MazeApp {
                 if is_player {
                     let margin = cs * 0.2;
                     cmds.push(RenderCommand::FillRect {
-                        x: cx + margin, y: cy + margin,
-                        width: cs - margin * 2.0, height: cs - margin * 2.0,
+                        x: cx + margin,
+                        y: cy + margin,
+                        width: cs - margin * 2.0,
+                        height: cs - margin * 2.0,
                         color: COL_MAUVE,
                         corner_radii: CornerRadii::all(cs * 0.3),
                     });
@@ -664,8 +687,10 @@ impl MazeApp {
                 if is_goal && !is_player {
                     let margin = cs * 0.25;
                     cmds.push(RenderCommand::StrokeRect {
-                        x: cx + margin, y: cy + margin,
-                        width: cs - margin * 2.0, height: cs - margin * 2.0,
+                        x: cx + margin,
+                        y: cy + margin,
+                        width: cs - margin * 2.0,
+                        height: cs - margin * 2.0,
                         color: COL_GREEN,
                         line_width: 2.0,
                         corner_radii: CornerRadii::all(cs * 0.3),
@@ -676,7 +701,8 @@ impl MazeApp {
 
         // Help bar
         cmds.push(RenderCommand::Text {
-            x: 12.0, y: height - 20.0,
+            x: 12.0,
+            y: height - 20.0,
             text: "Arrows=Move  N=New Maze  H=Show/Hide Solution  D=Difficulty".to_string(),
             font_size: 11.0,
             color: COL_OVERLAY0,
@@ -695,7 +721,10 @@ impl MazeApp {
 
     fn render_won(&self, cmds: &mut Vec<RenderCommand>, width: f32, height: f32) {
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: Color::rgba(0, 0, 0, 160),
             corner_radii: CornerRadii::ZERO,
         });
@@ -706,13 +735,17 @@ impl MazeApp {
         let bh = 160.0;
 
         cmds.push(RenderCommand::FillRect {
-            x: bx, y: by, width: bw, height: bh,
+            x: bx,
+            y: by,
+            width: bw,
+            height: bh,
             color: COL_MANTLE,
             corner_radii: CornerRadii::all(12.0),
         });
 
         cmds.push(RenderCommand::Text {
-            x: bx + bw / 2.0 - 60.0, y: by + 20.0,
+            x: bx + bw / 2.0 - 60.0,
+            y: by + 20.0,
             text: "Maze Solved!".to_string(),
             font_size: 22.0,
             color: COL_GREEN,
@@ -722,9 +755,13 @@ impl MazeApp {
         });
 
         cmds.push(RenderCommand::Text {
-            x: bx + 30.0, y: by + 55.0,
-            text: format!("Moves: {}  (Optimal: {})", self.moves,
-                self.solution.len().saturating_sub(1)),
+            x: bx + 30.0,
+            y: by + 55.0,
+            text: format!(
+                "Moves: {}  (Optimal: {})",
+                self.moves,
+                self.solution.len().saturating_sub(1)
+            ),
             font_size: 14.0,
             color: COL_TEXT,
             font_weight: FontWeightHint::Regular,
@@ -734,7 +771,8 @@ impl MazeApp {
 
         if let Some(best) = self.best_moves {
             cmds.push(RenderCommand::Text {
-                x: bx + 30.0, y: by + 80.0,
+                x: bx + 30.0,
+                y: by + 80.0,
                 text: format!("Best: {best} moves"),
                 font_size: 14.0,
                 color: COL_YELLOW,
@@ -745,7 +783,8 @@ impl MazeApp {
         }
 
         cmds.push(RenderCommand::Text {
-            x: bx + 30.0, y: by + bh - 30.0,
+            x: bx + 30.0,
+            y: by + bh - 30.0,
             text: "Enter/N=New Maze  D=Change Difficulty".to_string(),
             font_size: 12.0,
             color: COL_OVERLAY0,
@@ -907,7 +946,7 @@ mod tests {
     fn test_dir_wall_bits_unique() {
         let bits: Vec<u8> = Dir::ALL.iter().map(|d| d.wall_bit()).collect();
         for i in 0..bits.len() {
-            for j in i+1..bits.len() {
+            for j in i + 1..bits.len() {
                 assert_ne!(bits[i], bits[j]);
             }
         }
@@ -1157,14 +1196,14 @@ mod tests {
             key: Key::H,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(app.show_solution);
         app.event(&Event::Key(KeyEvent {
             key: Key::H,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(!app.show_solution);
     }
@@ -1177,7 +1216,7 @@ mod tests {
             key: Key::N,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.moves, 0);
     }
@@ -1190,7 +1229,7 @@ mod tests {
             key: Key::D,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.difficulty, Difficulty::Medium);
         assert_eq!(app.maze.rows, 20);
@@ -1203,7 +1242,7 @@ mod tests {
             key: Key::Down,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         // May or may not have moved depending on maze layout
     }
@@ -1239,7 +1278,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.view, View::Playing);
     }
@@ -1252,7 +1291,7 @@ mod tests {
             key: Key::N,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.view, View::Playing);
     }
@@ -1350,9 +1389,12 @@ mod tests {
         let moves = app.moves;
         app.event(&Event::Key(KeyEvent {
             key: Key::N,
-            modifiers: Modifiers { ctrl: true, ..Modifiers::default() },
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         // Should not create new maze
         assert_eq!(app.moves, moves);
@@ -1383,16 +1425,20 @@ mod tests {
         for r in 1..5 {
             for c in 0..5 {
                 if !maze.has_wall(r, c, Dir::North) {
-                    assert!(!maze.has_wall(r - 1, c, Dir::South),
-                        "Inconsistent walls at ({r},{c}) north");
+                    assert!(
+                        !maze.has_wall(r - 1, c, Dir::South),
+                        "Inconsistent walls at ({r},{c}) north"
+                    );
                 }
             }
         }
         for r in 0..5 {
             for c in 1..5 {
                 if !maze.has_wall(r, c, Dir::West) {
-                    assert!(!maze.has_wall(r, c - 1, Dir::East),
-                        "Inconsistent walls at ({r},{c}) west");
+                    assert!(
+                        !maze.has_wall(r, c - 1, Dir::East),
+                        "Inconsistent walls at ({r},{c}) west"
+                    );
                 }
             }
         }

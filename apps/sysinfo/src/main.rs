@@ -2223,11 +2223,7 @@ impl SysInfoState {
                 EventResult::Consumed
             }
             _ => {
-                if let Some(ch) = key.text
-                    && !ch.is_control()
-                {
-                    self.search_text.push(ch);
-                }
+                self.search_text.extend(key.typed());
                 EventResult::Consumed
             }
         }
@@ -3031,7 +3027,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         })
     }
 

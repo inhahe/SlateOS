@@ -525,6 +525,23 @@ fn compose_pair(a: char, b: char, hangul: Hangul, split: SplitVowels) -> Option<
     char::from_u32(c)
 }
 
+/// The single character `base` and the combining mark `mark` make together
+/// under NFC, if Unicode says they make one.
+///
+/// The one-pair entry point for callers outside the shaping pipeline — the
+/// dead-key composer in [`crate::deadkey`] is the only one — expressed in
+/// terms of [`compose_pair`] so that there is exactly one composition table in
+/// this crate and it is the generated one. A second, hand-written table of
+/// "accent plus letter equals" would be a second answer to a question UAX #15
+/// has already answered for 1050 pairs.
+///
+/// [`Hangul::Normalize`] and [`SplitVowels::Rejoin`] are the plain-NFC
+/// settings; the two knobs exist for the shaper, which sometimes wants a pair
+/// left apart so it can move the halves. Nothing on the keyboard path does.
+pub(crate) fn compose_canonical(base: char, mark: char) -> Option<char> {
+    compose_pair(base, mark, Hangul::Normalize, SplitVowels::Rejoin)
+}
+
 /// L+V or LV+T, composed arithmetically.
 fn hangul_compose(a: u32, b: u32) -> Option<char> {
     if let (Some(l), Some(v)) = (a.checked_sub(L_BASE), b.checked_sub(V_BASE))

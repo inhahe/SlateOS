@@ -949,7 +949,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let event = tree.handle_key(&key);
         assert_eq!(event, Some(TreeEvent::Selected(1)));
@@ -964,7 +964,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -1061,7 +1061,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let event = tree.handle_key(&key);
         assert_eq!(event, Some(TreeEvent::Expanded(1)));

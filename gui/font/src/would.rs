@@ -174,7 +174,9 @@ fn context(data: &[u8], sub: usize, glyphs: &[u16]) -> Option<bool> {
             let Some(set) = set_at(data, sub, sub.checked_add(8)?, count, class) else {
                 return Some(false);
             };
-            any_of(data, set, |rule| seq_rule(data, rule, By::Class(classes), glyphs))
+            any_of(data, set, |rule| {
+                seq_rule(data, rule, By::Class(classes), glyphs)
+            })
         }
         3 => {
             let count = usize::from(u16_at(data, sub.checked_add(2)?)?);
@@ -351,7 +353,11 @@ fn set_at(data: &[u8], sub: usize, at: usize, count: u16, index: u16) -> Option<
     if index >= count {
         return None;
     }
-    offset(data, sub, at.checked_add(usize::from(index).checked_mul(2)?)?)
+    offset(
+        data,
+        sub,
+        at.checked_add(usize::from(index).checked_mul(2)?)?,
+    )
 }
 
 /// Follow an offset stored at `field` and measured from `sub`, refusing a null

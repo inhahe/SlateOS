@@ -202,9 +202,7 @@ impl Value {
             }
             at.checked_add(value_size(format & bit.wrapping_sub(1)))
         };
-        let coord = |bit: u16| -> i16 {
-            field_at(bit).and_then(|o| i16_at(data, o)).unwrap_or(0)
-        };
+        let coord = |bit: u16| -> i16 { field_at(bit).and_then(|o| i16_at(data, o)).unwrap_or(0) };
         let correction = |bit: u16| -> i16 {
             field_at(bit)
                 .and_then(|o| u16_at(data, o))
@@ -676,7 +674,8 @@ fn single(
         }
         _ => return None,
     };
-    out.get_mut(i)?.add(Value::read(data, sub, at, format, corr));
+    out.get_mut(i)?
+        .add(Value::read(data, sub, at, format, corr));
     i.checked_add(1)
 }
 
@@ -851,7 +850,12 @@ fn cursive(
     };
 
     let this = record(run.glyphs.get(i)?.gid)?;
-    let exit = crate::mark::anchor(data, sub, u16_at(data, this.checked_add(2)?)?, run.corrections)?;
+    let exit = crate::mark::anchor(
+        data,
+        sub,
+        u16_at(data, this.checked_add(2)?)?,
+        run.corrections,
+    )?;
     let j = skip.next(run.glyphs, i)?;
     let next = record(run.glyphs.get(j)?.gid)?;
     let entry = crate::mark::anchor(data, sub, u16_at(data, next)?, run.corrections)?;
@@ -1221,7 +1225,14 @@ mod tests {
         // At 11px the table says -1 pixel of placement and +3 of advance, which
         // at 1000 units to the em is -90 and +272 font units.
         let mut out = alloc::vec![Adjust::plain(500)];
-        single(&data, 0, &run, 0, &mut out, Corrections::at(Ppem::new(11.0, 1000)));
+        single(
+            &data,
+            0,
+            &run,
+            0,
+            &mut out,
+            Corrections::at(Ppem::new(11.0, 1000)),
+        );
         assert_eq!(
             (out[0].x_offset, out[0].x_advance),
             (30 - 1000 / 11, 500 - 40 + 3 * 1000 / 11)
@@ -1231,7 +1242,14 @@ mod tests {
         // two different reasons for the same answer, and both must give it.
         for px in [12.0, 13.0] {
             let mut out = alloc::vec![Adjust::plain(500)];
-            single(&data, 0, &run, 0, &mut out, Corrections::at(Ppem::new(px, 1000)));
+            single(
+                &data,
+                0,
+                &run,
+                0,
+                &mut out,
+                Corrections::at(Ppem::new(px, 1000)),
+            );
             assert_eq!((out[0].x_offset, out[0].x_advance), (30, 460), "{px}px");
         }
     }
@@ -1243,7 +1261,14 @@ mod tests {
         let data = single_pos1_device(7, Value::default());
         let run = glyphs(&[7]);
         let mut out = alloc::vec![Adjust::plain(0)];
-        single(&data, 0, &run, 0, &mut out, Corrections::at(Ppem::new(11.0, 2048)));
+        single(
+            &data,
+            0,
+            &run,
+            0,
+            &mut out,
+            Corrections::at(Ppem::new(11.0, 2048)),
+        );
         assert_eq!(out[0].x_offset, -2048 / 11);
     }
 
@@ -1272,7 +1297,10 @@ mod tests {
         );
         let run = glyphs(&[7, 8]);
         let mut out = alloc::vec![Adjust::plain(500), Adjust::plain(500)];
-        assert_eq!(single(&data, 0, &run, 0, &mut out, Corrections::NONE), Some(1));
+        assert_eq!(
+            single(&data, 0, &run, 0, &mut out, Corrections::NONE),
+            Some(1)
+        );
         assert_eq!(out[0].x_offset, 30);
         assert_eq!(out[0].x_advance, 460);
         // The uncovered glyph is not touched, and reports no match.
@@ -1335,7 +1363,10 @@ mod tests {
         let defs = Definitions::default();
         let skip = Skipper::new(&data, defs, 0, 0, u64::MAX, Joiners::POSITIONING);
         // No second record, so the second glyph may still open the next pair.
-        assert_eq!(pair(&data, 0, skip, &run, 0, &mut out, Corrections::NONE), Some(1));
+        assert_eq!(
+            pair(&data, 0, skip, &run, 0, &mut out, Corrections::NONE),
+            Some(1)
+        );
         assert_eq!(out[0].x_advance, 440);
         assert_eq!(out[0].kern, -60);
         assert_eq!(out[1], Adjust::plain(500));
@@ -1354,7 +1385,10 @@ mod tests {
             u64::MAX,
             Joiners::POSITIONING,
         );
-        assert_eq!(pair(&data, 0, skip, &run, 0, &mut out, Corrections::NONE), Some(2));
+        assert_eq!(
+            pair(&data, 0, skip, &run, 0, &mut out, Corrections::NONE),
+            Some(2)
+        );
         assert_eq!(out[0].x_advance, 440);
         assert_eq!(out[1].x_advance, 490);
         // Only the first half is a gap between the pair; the second is the

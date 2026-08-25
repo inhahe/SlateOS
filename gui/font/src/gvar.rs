@@ -119,7 +119,12 @@ impl Gvar {
     /// at the wrong stride and produces deltas for regions the font never
     /// described, which draws as a glyph subtly deformed at every instance. A
     /// face that declines to vary is strictly better than that.
-    pub(crate) fn parse(data: &[u8], span: Span, axis_count: usize, num_glyphs: u16) -> Option<Self> {
+    pub(crate) fn parse(
+        data: &[u8],
+        span: Span,
+        axis_count: usize,
+        num_glyphs: u16,
+    ) -> Option<Self> {
         let base = span.off;
         let table = data.get(base..base.checked_add(span.len)?)?;
         if u16_at(table, 0)? != 1 {
@@ -283,7 +288,16 @@ impl Gvar {
                 } else {
                     shared_points.clone().unwrap_or(PointSet::All)
                 };
-                apply_tuple(g, &mut p, &tuple_points, scale, points, ends, &mut out, total)?;
+                apply_tuple(
+                    g,
+                    &mut p,
+                    &tuple_points,
+                    scale,
+                    points,
+                    ends,
+                    &mut out,
+                    total,
+                )?;
             }
             serial = tuple_end;
         }
@@ -303,9 +317,12 @@ enum PointSet {
 
 /// Read one tuple's deltas and add them into `out`, interpolating the points
 /// the tuple does not name.
-#[allow(clippy::too_many_arguments, reason = "one tuple's whole context; \
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one tuple's whole context; \
     bundling it into a struct would name the same fields once more and \
-    give the reader a second place to look")]
+    give the reader a second place to look"
+)]
 fn apply_tuple(
     g: &[u8],
     p: &mut usize,
@@ -390,7 +407,9 @@ fn infer_unreferenced(
             continue;
         }
         let len = end.saturating_sub(start).saturating_add(1);
-        let referenced = (start..=end).filter(|&i| named.get(i) == Some(&true)).count();
+        let referenced = (start..=end)
+            .filter(|&i| named.get(i) == Some(&true))
+            .count();
         if referenced == 0 || referenced == len {
             start = end_excl;
             continue;
@@ -549,7 +568,10 @@ fn read_tuple(d: &[u8], off: usize, count: usize) -> Option<Vec<i16>> {
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
         let at = off.checked_add(i.checked_mul(2)?)?;
-        #[allow(clippy::cast_possible_wrap, reason = "F2Dot14 is a signed 16-bit quantity")]
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "F2Dot14 is a signed 16-bit quantity"
+        )]
         out.push(u16_at(d, at)? as i16);
     }
     Some(out)
@@ -728,7 +750,10 @@ mod tests {
     #[test]
     fn a_zero_count_means_every_point() {
         let mut pos = 0;
-        assert_eq!(read_packed_points(&[0x00], &mut pos, 10), Some(PointSet::All));
+        assert_eq!(
+            read_packed_points(&[0x00], &mut pos, 10),
+            Some(PointSet::All)
+        );
         assert_eq!(pos, 1);
     }
 
@@ -848,12 +873,7 @@ mod tests {
     /// A square contour, points at the corners.
     fn square() -> (Vec<GlyphPoint>, Vec<usize>) {
         (
-            alloc::vec![
-                pt(0.0, 0.0),
-                pt(10.0, 0.0),
-                pt(10.0, 10.0),
-                pt(0.0, 10.0),
-            ],
+            alloc::vec![pt(0.0, 0.0), pt(10.0, 0.0), pt(10.0, 10.0), pt(0.0, 10.0),],
             alloc::vec![4],
         )
     }
@@ -862,7 +882,12 @@ mod tests {
     fn a_contour_with_every_point_named_is_left_alone() {
         let (pts, ends) = square();
         let mut delta = alloc::vec![(1.0, 2.0); 8];
-        infer_unreferenced(&pts, &ends, &[true, true, true, true, false, false, false, false], &mut delta);
+        infer_unreferenced(
+            &pts,
+            &ends,
+            &[true, true, true, true, false, false, false, false],
+            &mut delta,
+        );
         assert_eq!(&delta[..4], &[(1.0, 2.0); 4]);
     }
 

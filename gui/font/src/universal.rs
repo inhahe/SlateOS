@@ -547,7 +547,9 @@ const PREF: &[u8; 4] = b"pref";
 /// features one at a time. USE has no reason to separate them because it never
 /// asks what any of them produced; the two features it does ask about, `rphf`
 /// and `pref`, are the two that were pulled out in front.
-const BASIC: [&[u8; 4]; 7] = [b"rkrf", b"abvf", b"blwf", b"half", b"pstf", b"vatu", b"cjct"];
+const BASIC: [&[u8; 4]; 7] = [
+    b"rkrf", b"abvf", b"blwf", b"half", b"pstf", b"vatu", b"cjct",
+];
 
 /// The four positional features, in the order `joining_form_t` numbers them.
 ///
@@ -1157,7 +1159,11 @@ mod tests {
         let global = global();
         assert_eq!(global & feature_bit(RPHF), 0);
         assert_eq!(global & feature_bits(&TOPO), 0);
-        for set in [&feature_bits(&PRE), &feature_bits(&BASIC), &feature_bits(&OTHER)] {
+        for set in [
+            &feature_bits(&PRE),
+            &feature_bits(&BASIC),
+            &feature_bits(&OTHER),
+        ] {
             assert_eq!(global & set, *set);
         }
         assert_eq!(global & feature_bit(PREF), feature_bit(PREF));
@@ -1289,10 +1295,7 @@ mod tests {
         // worth of text, which is what the itemizer would have produced.
         assert_eq!(
             cut("\u{1BC0}\u{1BF2}\u{1BC0}"),
-            vec![
-                (0, 2, Cluster::ViramaTerminated),
-                (2, 3, Cluster::Standard)
-            ]
+            vec![(0, 2, Cluster::ViramaTerminated), (2, 3, Cluster::Standard)]
         );
     }
 
@@ -1496,7 +1499,11 @@ mod tests {
         setup_rphf_mask(&mut glyphs, &[(0, 2, Cluster::Standard)], 0);
         assert!(glyphs.iter().map(|g| g.mask).eq(before));
         record_rphf(&mut glyphs, 0);
-        assert!(glyphs.iter().all(|g| g.universal.category != Category::Repha));
+        assert!(
+            glyphs
+                .iter()
+                .all(|g| g.universal.category != Category::Repha)
+        );
     }
 
     /// The positional pass is one cluster behind itself: the first cluster is
@@ -1518,7 +1525,10 @@ mod tests {
         // One cluster alone stays isolated.
         let mut glyphs = run("\u{A98F}");
         setup_topographical_masks(&mut glyphs, &[(0, 1, Cluster::Standard)], masks);
-        assert_eq!(glyphs.iter().map(form).collect::<Vec<_>>(), vec![Some(ISOL)]);
+        assert_eq!(
+            glyphs.iter().map(form).collect::<Vec<_>>(),
+            vec![Some(ISOL)]
+        );
     }
 
     /// A non-cluster breaks the chain, so the cluster before it stays `isol`

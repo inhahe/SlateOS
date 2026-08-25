@@ -1517,10 +1517,8 @@ fn handle_key(state: &mut EmojiPickerState, key: &KeyEvent) -> EventResult {
             EventResult::Consumed
         }
         _ if state.search_focused => {
-            if let Some(ch) = key.text
-                && !ch.is_control()
-            {
-                state.search_query.push(ch);
+            if key.types_text() {
+                state.search_query.extend(key.typed());
                 state.active_tab = Tab::Search;
                 state.scroll_offset = 0.0;
                 return EventResult::Consumed;
@@ -2288,7 +2286,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Option::None,
+            text: String::new(),
         });
         let result = handle_event(&mut state, &event);
         assert_eq!(result, EventResult::Consumed);
@@ -2321,7 +2319,7 @@ mod tests {
             key: Key::A,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('a'),
+            text: "a".to_string(),
         });
         handle_event(&mut state, &event);
         assert_eq!(state.search_query, "a");
@@ -2337,7 +2335,7 @@ mod tests {
             key: Key::Backspace,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Option::None,
+            text: String::new(),
         });
         handle_event(&mut state, &event);
         assert_eq!(state.search_query, "a");

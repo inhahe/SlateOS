@@ -902,12 +902,12 @@ impl OperationProgress {
             reason = "measured throughput: negative and non-finite are filtered \
                       above, and a rate past u64::MAX is not physical"
         )]
-        let bytes_per_sec = if self.speed_bytes_per_sec.is_finite() && self.speed_bytes_per_sec > 0.0
-        {
-            self.speed_bytes_per_sec as u64
-        } else {
-            0
-        };
+        let bytes_per_sec =
+            if self.speed_bytes_per_sec.is_finite() && self.speed_bytes_per_sec > 0.0 {
+                self.speed_bytes_per_sec as u64
+            } else {
+                0
+            };
         guitk::bytes::iec_rate(bytes_per_sec)
     }
 
@@ -4849,7 +4849,7 @@ mod tests {
             key: Key::Num3,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&ev);
         assert_eq!(app.active_tab, MainTab::Browse);
@@ -4868,7 +4868,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&ev);
         assert_eq!(app.operation, Operation::Idle);
@@ -4881,7 +4881,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&ev);
         assert_eq!(app.selected_drive_index, Some(0));
@@ -4895,7 +4895,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&ev);
         assert_eq!(app.selected_drive_index, Some(1));

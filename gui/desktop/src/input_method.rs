@@ -560,6 +560,7 @@ mod tests {
             shifted: ["AB", "C", "", "D"],
             iso_extra: None,
             altgr: &[],
+            dead: &[],
         }
         .build()
     }
@@ -581,6 +582,7 @@ mod tests {
             shifted: ["ZZZZZZZZZZZZZ", "", "", ""],
             iso_extra: None,
             altgr: &[],
+            dead: &[],
         }
         .build()
     }

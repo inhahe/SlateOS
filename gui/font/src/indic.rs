@@ -259,10 +259,7 @@ impl Char {
             return Self::DEFAULT;
         };
         match INDIC_RANGES.get(i) {
-            Some(&(_, hi, category, position)) if cp <= hi => Self {
-                category,
-                position,
-            },
+            Some(&(_, hi, category, position)) if cp <= hi => Self { category, position },
             // Past the end of that range, or a table too short to index —
             // neither is in any range, and "in no range" is the default.
             _ => Self::DEFAULT,
@@ -481,7 +478,15 @@ mod tests {
     /// that knows about scripts.
     #[test]
     fn characters_outside_the_indic_blocks_are_not_categorised() {
-        for ch in ['a', 'Z', ' ', '\u{5d0}', '\u{628}', '\u{4e00}', '\u{10ffff}'] {
+        for ch in [
+            'a',
+            'Z',
+            ' ',
+            '\u{5d0}',
+            '\u{628}',
+            '\u{4e00}',
+            '\u{10ffff}',
+        ] {
             assert_eq!(Char::of(ch), Char::DEFAULT, "{ch:?}");
         }
     }
@@ -638,10 +643,7 @@ mod tests {
     fn an_independent_vowel_heads_a_vowel_syllable() {
         // अ, then अ with anusvara.
         assert_eq!(cut("\u{905}"), vec![(0, 1, Syllable::Vowel)]);
-        assert_eq!(
-            cut("\u{905}\u{902}"),
-            vec![(0, 2, Syllable::Vowel)]
-        );
+        assert_eq!(cut("\u{905}\u{902}"), vec![(0, 2, Syllable::Vowel)]);
     }
 
     /// A matra with nothing before it is broken, and a lone mark on a dotted
@@ -649,10 +651,7 @@ mod tests {
     #[test]
     fn malformed_text_is_still_cut_into_syllables() {
         assert_eq!(cut("\u{93f}"), vec![(0, 1, Syllable::Broken)]);
-        assert_eq!(
-            cut("\u{25cc}\u{93f}"),
-            vec![(0, 2, Syllable::Standalone)]
-        );
+        assert_eq!(cut("\u{25cc}\u{93f}"), vec![(0, 2, Syllable::Standalone)]);
     }
 
     /// Latin is one non-Indic syllable per character, which is what lets the

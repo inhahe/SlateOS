@@ -32763,6 +32763,123 @@ is a real difference from how those keyboards behave. That is the shape of the
 remaining debt: not a missing feature so much as three layouts that type a
 standalone accent where a real one would compose.
 
+**Update 2026-08-24, later — (3) is under way: the event can now describe a
+dead key, though nothing produces one yet.** This is step 1 of four, and it is
+deliberately only the shape:
+
+- `guitk::event::KeyEvent::text` is a `String` rather than an `Option<char>`.
+  That is what makes the two cases dead keys need *expressible*: a keystroke
+  that types **nothing yet** (distinct from `None`, which already meant "this
+  key produces no text at all" — F5, an arrow) and one that types **two
+  characters**, which is what a failed composition must emit. See
+  `design-decisions.md` §550, which also records the failed-composition policy:
+  `´` then `x` types `´x`, following Windows and macOS rather than X11, because
+  silently discarding a keystroke is the one failure a text field must not have.
+- `guiremote::PROTOCOL_VERSION` is 3. The old encoding (a present-flag plus one
+  codepoint) could not carry either case, and a version-2 decoder reading a
+  version-3 stream desynchronises *silently* rather than erroring.
+- Forty-odd call sites were converted. Reading the field raw is now wrong almost
+  everywhere: `KeyEvent::typed()` yields the characters minus control
+  characters, and `KeyEvent::types_text()` answers "did this keystroke belong to
+  the text field at all?". Seven sites had been missing the control filter and
+  would put `\x1b` in a search box when the user pressed Escape; those are fixed
+  as a side effect of the rule now having one home.
+
+**Still to do for (3):** layouts must be able to declare a key's face *dead*
+(step 2, in `gui/keylayout`, composing through the exact NFC tables already in
+`gui/font/src/norm.rs` rather than a second hand-written accent table), and the
+compositor must hold the pending accent between two key events (step 3, which is
+the part that turns `Layout::character` from a pure function into a machine with
+a memory). **(4) compose sequences remain untouched** and are the same shape of
+problem over longer sequences.
+
+**Update 2026-08-24, later still — step 2 is done, in both halves. Only the
+compositor's memory (step 3) is left.**
+
+*Step 2a — which faces are dead* (`38348bf9b`, `gui/keylayout`). `KeyDef` gained
+`dead: DeadFaces`, four flags, one per level. Four and not one because **deadness
+belongs to a key's face, not to a character**: French AZERTY carries `^` twice —
+plain on the key right of `P`, where it is dead and makes `ê`, and on AltGr+9,
+where it is the ordinary ASCII circumflex a programmer types into a shell. Any
+per-*character* "is this an accent" table is necessarily wrong about one of them.
+The three national layouts declare seven dead faces between them; the five
+English ones declare none, which a test asserts rather than assumes.
+
+The load-bearing part is not the flags but a refactor next to them.
+`KeyDef::face(level) -> Option<Face>` now decides *once* which of the four levels
+the modifiers select, and both `character()` and `is_dead()` read its answer, so
+they are structurally unable to disagree. The case that forces this: AltGr+Shift
+on a key with no fourth-level character falls back to the AltGr *character*, so
+its *deadness* has to fall back too — otherwise the key types a live `~` while
+the compositor sits waiting for a vowel, and the user's next letter vanishes.
+
+*Step 2b — what an accent and the next key make* (`30b0864a7`,
+`gui/font/src/deadkey.rs`). No accent table: composing `e` and an acute into `é`
+is exactly the question `norm.rs` already answers on every string it shapes, from
+generated UAX #15 tables covering ~1050 pairs. A hand-written
+`match ('e', '´') => 'é'` would be a second answer to that question — shorter,
+and therefore the one that eventually disagrees, most likely by omitting the
+letter nobody thought to list. So the module adds one thing: the map from the
+*spacing* accent a key cap carries (`´` U+00B4) to the *combining* mark the
+tables are indexed by (U+0301). Thirteen accents, through the eighteen
+characters keyboards print them as.
+
+U+00B0 DEGREE SIGN is deliberately **not** in that map, and a test pins its
+absence. It is indistinguishable from U+02DA RING ABOVE on screen, and German
+puts it on the shifted face of a key whose plain face is a dead circumflex —
+precisely the arrangement in which a mis-declared `°` would quietly compose `å`.
+
+**Still to do for (3):** the compositor must hold the pending accent between two
+key events, implement §550's failed-composition policy (type both characters),
+and decide the two conventions that are facts about keyboards rather than about
+Unicode — what a dead key pressed twice does, and what a dead key followed by a
+space does. It is also the only crate that links both `keylayout` and `osfont`,
+so it is where a test belongs asserting that every dead face in every builtin
+layout maps to a real `deadkey::combining` entry. Until that lands, the three
+national layouts still type a standalone accent where a real board would compose.
+
+**Update 2026-08-24, later still — step (3) is done; dead keys work end to
+end.** `gui/compositor/src/deadkey.rs` holds the pending accent: an
+`Option<char>` on the compositor beside `ModifierState`, consulted from
+`handle_key` on the path where the compositor did the translation, disarmed by
+`release_all_modifiers` and by a focus change. Typing `´` then `e` on
+`de-qwertz` now produces one key event carrying no text and a second carrying
+`é`.
+
+The two conventions the note above asked for — plus a third it did not
+anticipate — are decided and recorded as `design-decisions.md` §551. **Space**
+types the bare accent alone: the only way to type a `´` at all on a board where
+that key is dead, and the escape hatch that lets the third rule discard safely.
+**A second dead key** flushes the first and re-arms, checked *before* the
+composition table is consulted, because `¨` really does compose with an acute
+into U+0385 GREEK DIALYTIKA TONOS — an ordering that is invisible except in
+that one case. "Pressed twice types one accent and leaves one waiting" then
+falls out of that with no rule of its own, which is why it needed no separate
+decision. **A key that types no text** discards the accent, Backspace being the
+case that decides it, with modifier keys excluded so that `É` stays typeable.
+
+The cross-crate test the note asked for exists as
+`every_dead_face_in_every_builtin_layout_composes_with_something`, and it
+counts rather than merely sweeping: thirteen dead faces reached across the
+three national layouts, so a layout that lost its `dead` block fails here
+instead of passing by checking nothing.
+
+**Found and fixed on the way:** `key_for_layout` answered `None` for the space
+bar, because a `Layout` is the alphanumeric block and space is not in it. On
+the evdev path — every real machine — the space bar therefore typed no text at
+all and no text field could hold a space. The host backend hid it completely,
+because it supplies its own character. Fixed by
+`keymap::text_outside_the_block`; the numeric keypad is the same shape of gap
+and is now tracked as
+`TD-C-THE-NUMERIC-KEYPAD-TYPES-NOTHING-BECAUSE-NOTHING-TRACKS-NUM-LOCK`.
+
+**What remains of this entry is step (4) only:** compose sequences (`Compose`,
+`o`, `c` → `©`). Unlike a dead key, which remembers exactly one character, a
+compose sequence is a prefix tree of arbitrary depth and needs a table of its
+own rather than the pair-at-a-time composition dead keys reuse. Nothing else in
+(1)-(3) is outstanding, and the three national layouts now compose where a real
+board would.
+
 ## A-JOB-CONTROL-SELF-STOP-LOST-A-RACING-SIGCONT (lane A, 2026-08-17) - **fixed**
 
 **In short:** when a program stopped itself for job control (what a shell does
@@ -75122,6 +75239,139 @@ so the shell speaks one convention rather than two.
 
 **Severity.** Medium in scripts, invisible interactively.
 
+## TD-SHARED-PRE-PUSH-GATE-7-CHECKS-A-WHOLE-CRATE-WHEN-A-CRATE-ROOT-IS-TOUCHED (lane C, 2026-08-24) — **open; a documentation fault, not a behaviour one**
+
+**In short.** The push hook refuses a push containing a `.rs` file that
+`rustfmt` (the Rust code formatter) would reformat. Its own comment promises
+this is scoped to the files your commits touched — "this is never complaining
+about someone else's code." That promise is false for one shape of file:
+`rustfmt` follows `mod` declarations, so checking a crate's `lib.rs` checks
+*every* module the crate declares. Adding a single line to a crate root is
+therefore checked as the whole crate.
+
+Nothing here is unsafe and nothing is silently wrong; the surprise is the cost.
+An agent who adds `pub mod foo;` to a crate root expects to be told about
+`foo.rs` and is instead handed a diff over thirty files it never opened, which
+reads exactly like a broken gate — and the documented reaction to a gate that
+complains about someone else's code is to bypass it. That is the actual risk:
+a correct gate that looks broken gets `ALLOW_FMT_DRIFT=1` by habit, and then it
+protects nothing.
+
+### Where it lives
+
+`scripts/hooks/pre-push`, gate 7 — the loop that builds the path list from
+`git log --name-only … HEAD --not --remotes`, and the `fmt_check` that hands
+those paths to `rustfmt` directly. The scoping claim is in the comment block
+headed "Gate 7 — a source file rustfmt would reformat", in the paragraph
+beginning "Scope: exactly the .rs files the commits being pushed add or
+modify", and it is repeated in the refusal message printed to the pusher.
+
+The mechanism is `rustfmt`'s own, not the hook's: given a file, `rustfmt`
+parses it and recurses into every `mod name;` it finds, because that is how it
+formats a crate from its root. `cargo fmt` relies on exactly this. So the hook
+cannot get per-file scoping merely by naming one file — the file names a tree.
+
+### How it was hit
+
+2026-08-24, lane C, adding `pub mod deadkey;` (one line) to `gui/font/src/lib.rs`
+for the dead-key composer. The push was refused with a `rustfmt` diff over
+`gui/font/src/bidi.rs` and thirty-eight other files, none of them in the commit.
+`osfont` had never been through the formatter, and the gate — correctly, by its
+real behaviour — declined to let the crate root move until the crate was clean.
+
+### What the proper fix looks like
+
+Two candidates, and they are not exclusive:
+
+1. **Make the comment and the refusal message true.** Say that a crate root or
+   a `mod.rs` is checked as the subtree it declares, because `rustfmt` follows
+   `mod`, and that the fix in that case is `cargo fmt -p <crate>` rather than
+   `rustfmt <file>`. This is a few lines of prose and removes the whole
+   "the gate is broken" reading. It is the fix this entry recommends.
+
+2. **Pass `--skip-children`** so `rustfmt` checks only the named file. This
+   makes the scoping claim literally true, at the price of the gate no longer
+   noticing that a crate root's *siblings* drifted — which, on the evidence of
+   `osfont`, is drift worth noticing. Not recommended on its own; if taken, it
+   should be paired with something that does check whole crates on a slower
+   cadence, or the drift simply stops being visible anywhere.
+
+Note that `--skip-children` is also what would have let `osfont` stay
+unformatted indefinitely, so option 1 is the one that keeps the value the gate
+delivered here.
+
+### Lane
+
+`scripts/hooks/pre-push` is in no lane's `owns` list in
+`scripts/which-lane.py` and in no lane's `never writes` list — it is shared
+infrastructure, added by the lane that wrote gate 7 (`0c7d8bfa3`). Lane C is
+logging it rather than editing it. Whoever picks it up should also copy the
+result to `.git/hooks/pre-push` in each worktree, or re-run
+`scripts/install-hooks.sh`, since the tracked file is only the source.
+
+**Severity.** Low as a defect, medium as an invitation to bypass a working
+gate.
+
+### 2026-08-24 — what lane C did instead of bypassing it
+
+Made `osfont` genuinely formatted (`e0cb965d6`), which is what the gate was
+asking for. Eight of the crate's files are generated by
+`gui/font/tools/gen_*.py`, and formatting those would have fought the next
+regeneration forever — so the eleven table generators now run `rustfmt` over
+what they write, via `gui/font/tools/rustfmt_out.py`. Proven idempotent rather
+than assumed: after `cargo fmt -p osfont`, re-running `gen_norm_tables.py`
+leaves `norm_tables.rs` byte-identical (SHA-256 `434108c5…`), and
+`scripts/check-generated-tables.py` still reports all four of its tables
+matching. Any other crate that mixes generated and hand-written modules will
+hit the same wall the first time its root is touched; the same fix applies.
+
+## TD-C-THE-NUMERIC-KEYPAD-TYPES-NOTHING-BECAUSE-NOTHING-TRACKS-NUM-LOCK (lane C, 2026-08-24)
+
+**In short.** On a real SlateOS machine the number keys on the right-hand
+block of the keyboard — the calculator-style pad — type nothing at all. The
+main number row across the top works fine, so this is not "digits are broken",
+it is "one particular set of keys is". The reason is that the keypad's keys are
+double-duty (`4` or Left-arrow, `7` or Home) and which one you get depends on
+the Num Lock light, which the compositor does not currently pay any attention
+to. Rather than guess, those keys were left typing nothing.
+
+**Where.** `gui/compositor/src/keymap.rs` — `text_outside_the_block`, the
+fallback for scancodes no [`Layout`] describes. It answers `Some(' ')` for
+`0x39` and `None` for everything else, keypad included. `ModifierState`
+(same file) tracks Caps Lock as a latch but has no Num Lock equivalent, and
+`ModifierState::update` ignores `0x45` entirely.
+
+**Why not just add the digits.** The keypad reports the *same* set-1 scancodes
+whichever way the latch is set — `0x4B` is keypad-4 and keypad-Left both — so a
+table that unconditionally maps `0x4B` to `'4'` would type a `4` every time a
+user pressed keypad-Left with Num Lock off. `key_for_scancode` already maps
+those codes to `Key::Numpad*` names, and
+`the_navigation_cluster_is_not_conflated_with_the_keypad` guards that the pad
+and the arrow cluster stay distinct, so the `Key` half is already right; it is
+only the character half that is unanswerable without the latch.
+
+**Reproduce.** Boot the evdev backend (any bare-metal or QEMU run), focus a
+text field, press keypad-1 with Num Lock on. Nothing is inserted. On the host
+backend it works, because Windows hands the compositor its own character and
+that branch wins before the layout is ever consulted — the same masking that
+hid the space-bar bug fixed in this commit.
+
+**Proper fix.** Give `ModifierState` a `num_lock: bool` latch alongside
+`caps_lock`, toggled on press of `0x45` and ignored on release exactly as
+`0x3A` is, defaulting to **on** (which is what firmware sets on essentially
+every desktop keyboard, and what a user who bought a keypad expects). Then let
+`key_for_layout` consult it: with the latch on, `0x47`–`0x53` type
+`7 8 9 - 4 5 6 + 1 2 3 0 .`; with it off they keep answering `None` and stay
+navigation keys. `0x4A`/`0x4E`/`0xE035` (`-`, `+`, `/`) and `0x37` (`*`) are
+not double-duty and could type unconditionally. The decimal separator is the
+one genuinely locale-dependent key — a German keypad is engraved `,` — so it
+should come from the layout rather than the table, which is an argument for
+`LayoutSpec` growing a `decimal_separator` field rather than for hard-coding
+`'.'`.
+
+**Severity.** Medium. It is a whole physical key block that does nothing, and
+data-entry users reach for it first. Not urgent only because the top row works.
+
 **Two more found in the same function while reading it for the fix** (2026-08-24):
 
 * **`-n` swallows an argument it could not read.** The parse is
@@ -75231,7 +75481,7 @@ conventional `cat f | cut -c1 -` into a request to open a file literally named
 
 Rung 37 covers all of it.
 
-#### TD-A-LIVENESS-WATCHDOG-FALSE-FIRES-ON-CAPTURED-SELF-TEST-WORK (lane A, 2026-08-25) — **open**
+#### TD-A-LIVENESS-WATCHDOG-FALSE-FIRES-ON-CAPTURED-SELF-TEST-WORK (lane A, 2026-08-25) — ✅ FIXED (`bd40ac82e`, then properly by `d5025a8d9`)
 
 **In short:** a boot test failed with `LIVENESS WATCHDOG failure detected` even
 though every self-test in that same boot passed and the run went on to reach
@@ -75286,6 +75536,102 @@ rung 27 forever.
 
 **Severity.** Low correctness, medium friction: it fails a green tree at random
 and costs a full re-run to disprove each time.
+
+**Resolution (`bd40ac82e`) — not the fix proposed above.** The proposal was
+serial breadcrumbs inside rung 27. That would have worked for rung 27 and for
+nothing else. `capture_command` is also what serves `$(…)` substitution, every
+pipeline stage, and the SSH and telnet servers — so a *remote user* running any
+slow pipeline is invisible to the watchdog in exactly the same way, and no
+amount of instrumentation inside a self-test reaches them. The blind spot is the
+width of the capture mechanism, not of one rung.
+
+The real defect is that `shell_write_bytes`, on the capture branch, is the shell
+producing output and reports nothing. `kernel_output_count` now adds
+`kshell::captured_output_count()` to the serial byte count, so the honest answer
+to "is anything happening?" is the one the detector reads.
+
+This is not a raised threshold, and the distinction matters: tolerating a longer
+silence dulls a gate whose whole job is noticing that a boot stopped, whereas
+this reports a signal that was already there. Nor can it hide a real hang — a
+captured command that writes once and then blocks advances the sum once, the
+silence resumes, and the report follows on schedule. What it stops reporting is
+a captured command that loops *while writing*, which is a runaway rather than a
+hang, is caught by the allocator, and was already unreported in the uncaptured
+case for the same reason.
+
+Regression-tested by a third phase in `test_breadcrumb_does_not_certify_liveness`,
+driven through `shell_write_bytes` rather than by poking the counter — a drill
+that incremented the counter itself would pass whether or not the increment was
+still on the capture branch.
+
+**Left standing:** the underlying blind spot in `kernel_progress_count`
+(`sched/mod.rs`) is untouched and still real. A CPU-bound in-kernel loop that
+writes *nothing at all*, captured or otherwise, remains indistinguishable from a
+hang. The doc comment there argues correctly against closing it by counting
+kernel-mode ticks, and this change does not revisit that; it only stops the case
+where output existed and was not being counted.
+
+**That "left standing" paragraph was the whole remaining bug, and it bit on the
+very next boot.** The merged tree failed again — `[liveness] SYSTEM HANG`
+between rung 27's label and rung 28's, same place, with `bd40ac82e` in it. The
+reason is stated above without being recognised: rung 27 runs `find` looking for
+names that *are not there*. It produces no output, captured or otherwise,
+because there is nothing to produce. Counting captured bytes cannot help a
+command whose correct byte count is zero.
+
+**Resolution, part two (`d5025a8d9`).** With output silent by right, the
+total-hang branch falls back on `kernel_progress_count()`, whose claim is "no
+task-level forward progress of any kind". Its two sources — resolved page faults
+and completed block I/O — are the trace left by work that touches *a mapping or
+a disk*. A kernel-side computation over data already mapped and already resident
+leaves neither, so the counter stood still for 15 s while the kernel was working
+as hard as it ever does.
+
+Allocation is the trace that work *does* leave: a directory walk allocates a
+path per component per level, and the RIP ring above is four-fifths inside
+`heap::check_poison` and `Vec::push`. `mm::heap::alloc_progress_count()` sums
+`SLAB_ALLOCS`, `LARGE_ALLOCS` and every per-CPU cache's own `slab_allocs`,
+lock-free — this runs from the timer tick, and a watchdog that blocked could
+deadlock against the hang it exists to report — and `kernel_progress_count()`
+adds it.
+
+Allocations only, never frees. A loop that allocated and released one block for
+ever is a *livelock*, and the busy-livelock branch makes a separate claim about
+those; this counter exists to refute "nothing at all is happening". A hang
+spinning on a lock allocates nothing, so nothing the branch exists to catch is
+hidden by counting them. As with part one, this is not a raised threshold: it
+reports a signal that was there all along.
+
+**A second defect surfaced while hardening the drill for it.** Each of the four
+phases of `test_breadcrumb_does_not_certify_liveness` pins `LIVENESS_LAST_KWORK`
+so the progress discount is a no-op and the phase measures the *output* discount
+it names. `liveness_check` then takes its own fresh reading, and
+`without_interrupts` silences only the local core — so the pin was never
+airtight. It held while the sources were faults and block I/O, which an idle AP
+does not generate; an allocation on another core breaks it, and breaks it
+*invisibly*: a breadcrumb that wrongly counted as output and a cross-CPU
+allocation both leave the stall counter at 0. The drill would have reported the
+first when it saw the second, and phases 3 and 4 — which assert a *reset* —
+would have passed vacuously on exactly the boots where they were needed.
+
+The pin is now verified rather than assumed. `liveness_check` swaps its own
+reading into `LIVENESS_LAST_KWORK` *before* it branches, so reading the static
+back afterwards says exactly what it compared against, with no second sample and
+so no second race. A broken pin restarts the drill rather than failing it — that
+is the watchdog being right, not the code under test being wrong — bounded at 32
+restarts so a future change that makes every interval busy (a `serial_println!`
+that allocates, say) fails loudly instead of spinning under a `cli`.
+
+**Noticed in passing.** `mm::heap::stats` indexes `PCPU_SLAB_CACHES` with a bare
+`cpu_count().max(1)`, justified by a SAFETY comment resting on an invariant held
+a long way from there. `alloc_progress_count` clamps to `HEAP_MAX_CPUS` instead:
+the timer tick is not where that invariant should be discovered to have lapsed.
+
+**Still left standing, and now genuinely narrow:** a kernel loop that faults
+nothing, reads no block, allocates nothing and writes nothing is still
+indistinguishable from a hang — which is correct, because that description also
+fits a hang. The remaining false-positive risk is a long stretch of pure
+arithmetic over a fixed buffer, which no rung currently does.
 
 ## TD-AWK-RUNTIME-DIAGNOSTICS-CARRY-NO-SOURCE-LOCATION (lane B, 2026-08-24) — **open**
 
@@ -75342,6 +75688,63 @@ patch.
 **Severity.** Low for correctness — the exit status, the message text and
 everything already written to stdout all match gawk exactly. Medium for
 usability on long scripts, which is the case that most needs it.
+
+#### TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP (lane A, 2026-08-25) — ✅ FIXED (`5e523d20a`)
+
+**In short:** `sed` had its line-editing loop written out twice — once for
+`sed script file` and once for `cat file | sed script`. The two copies drifted,
+and by the time this was written they disagreed about the newline at the end of
+the output: the file form printed one, the pipe form did not. So the same script
+over the same bytes produced a different number of bytes depending on which end
+the text came in from, and `cat f | sed 's/a/b/' | wc -l` counted one line short.
+
+**Where.** `kernel/src/kshell.rs`, `cmd_sed` and `cmd_sed_input`. Both ended:
+
+```rust
+if output.ends_with('\n') { output.pop(); }
+shell_println!("{}", output);   // cmd_sed      -- puts one back
+shell_print!("{}", output);     // cmd_sed_input -- leaves it off
+```
+
+**This is the third drift in the same pair, which is why the fix is structural
+rather than another patch.**
+
+| When | What had drifted | How it was fixed |
+|---|---|---|
+| earlier | the pipe copy had lost the `-i` arm, so `cat f \| sed -i 's/a/b/'` filtered the pipe, left `f` untouched, and exited 0 | `classify_sed_args` extracted |
+| earlier | `filter_map` dropped unparseable `-e` expressions and ran the rest | `parse_sed_scripts` extracted; the fix had to be applied to *both* copies |
+| this one | the trailing newline | `sed_apply` extracted |
+
+Each time, the shared *parser* was factored out and the shared *loop* was left
+duplicated — so the next divergence landed in the part that was still copied.
+
+**Two more faults fell out of writing the single copy.**
+
+*Empty output printed a blank line.* `sed '/./d' f` deletes every line, so
+`output` is empty; `pop()` on an empty string does nothing and `shell_println!`
+then wrote a newline. A script that removes all the text emitted a line.
+
+*A file with no final newline gained one.* `str::lines` cannot tell `"a\nb"`
+from `"a\nb\n"`, so a loop that appends `\n` after every kept line invents one.
+GNU `sed` writes such a file back without a final newline. The rule is not "pop
+the last newline" — that gets `printf 'a\nb' | sed '2d'` wrong, where the
+surviving line `a` did come with a newline and keeps it. It is: a newline
+follows every emitted line *except* the last line of an input that did not end
+in one, which is a property of the input rather than of what survived.
+
+**Fixed by** `sed_apply(text, script, suppress) -> String`, called by both
+halves, with both printing it verbatim via `shell_print!`. Covered by
+self-test rung 38, whose assertions compare whole captured byte strings rather
+than searching them — the two halves already agreed on *which lines* appear, so
+only a byte comparison can see this class of divergence. Rung 38 also asserts
+that `-i` writes the same bytes the terminal would have shown, which was a third
+spelling of the output under the old code (it wrote the pre-`pop` string to the
+file and the post-`pop` string to the terminal).
+
+**Still duplicated, same shape, not yet fixed:** `cmd_awk`/`cmd_awk_input` each
+carry their own copy of the BEGIN/record/END driver, and
+`cmd_mapfile`/`cmd_mapfile_input` each carry their own copy of the `-t` flag
+scan. Both are the same accident waiting for its first divergence.
 
 ## TD-GREP-IS-MISSING-CONTEXT-COLOUR-BYTE-OFFSETS-AND-THE-FILE-SELECTORS (lane B, 2026-08-25) — **open** (the missing features; the defects below were fixed the same day)
 
@@ -75506,3 +75909,150 @@ removes the only hang and the only silently-wrong exit status. What is left
 produces no wrong answer to a query that works — the matching itself agrees
 with GNU across 305 cases — but `--color` is common enough that a script or a
 habit that uses it simply does not run.
+
+#### TD-A-POISON-CHECK-READS-EVERY-BYTE-ONE-AT-A-TIME-WHILE-THE-FILL-USES-REP-STOSB (lane A, 2026-08-25) — **open**
+
+**In short:** the debug heap writes a known filler byte over every block it
+frees and reads it back when the block is handed out again, so that a program
+still writing to memory it gave back is caught. Writing the filler is one bulk
+CPU instruction; reading it back is a loop that fetches **one byte at a time**,
+and the loop is deliberately built so the compiler cannot speed it up. For the
+largest blocks that is 4096 separate fetches on every single allocation. The
+comment above the switch claims the whole thing costs "~5-20ns per
+alloc/dealloc", which is true only for the smallest blocks.
+
+**Where.** `kernel/src/mm/heap.rs`: `check_poison` (~316) against `poison_free`
+(~131) and `poison_alloc` (~193). The asymmetry is one line each way —
+
+```rust
+// poison_free: one bulk `rep stosb`
+rawmem::fill_u8(ptr.add(12), FREE_POISON, class_size.saturating_sub(12));
+
+// check_poison: class_size scalar volatile loads, and no bulk counterpart
+for i in 12..class_size {
+    let byte = unsafe { rawmem::read_u8(ptr.add(i)) };
+    if byte != FREE_POISON { … }
+}
+```
+
+**Why it cannot simply be vectorised in place.** The volatility is load-bearing
+and documented: `check_poison` carries `#[inline(never)]` because with thin LTO
+the compiler otherwise inlines it into `pcpu_slab_alloc`, constant-propagates
+across the free→alloc boundary, "knows" what `poison_free` wrote, and deletes
+the read entirely — a check that is optimised away is a check that never runs.
+`rawmem::read_u8` exists to defeat that, and it also keeps the read out of
+KASAN's instrumentation, which has the slot marked freed. So the fix is not
+"drop the volatile"; it is to give `rawmem` a bulk *scan* with the same
+guarantees that `fill_u8` already provides for the write side.
+
+**Proper fix.** A `rawmem::scan_u8(ptr, value, len) -> Option<usize>` built on
+`repe scasb` — repeat *while equal*, which stops on the first byte that differs
+and leaves the offset in the count register, i.e. exactly the "first corrupted
+byte, and where" that `check_poison` reports. One instruction, opaque to the
+optimizer for the same reason `fill_u8`'s `rep stosb` is, and correspondingly
+fast under TCG where the whole string operation is a single helper call rather
+than 4096 translated loads. `check_poison` then becomes a call and a branch, and
+the "~5-20ns" comment becomes true for every class rather than the small ones.
+
+**Suspected impact, not yet measured.** This is the leading candidate for
+self-test rung 27 spending 15+ s between its own label and rung 28's — long
+enough that it was reported as a `SYSTEM HANG` on two boots (see
+`TD-A-LIVENESS-WATCHDOG-FALSE-FIRES-ON-CAPTURED-SELF-TEST-WORK`). The watchdog's
+RIP ring from that failure is eight-sixteenths inside the heap, and every
+symbolised frame is on a poison path:
+
+| samples | symbol |
+|---|---|
+| 2 | `mm::heap::check_poison` |
+| 4 | `mm::rawmem::fill_u8` |
+| 1 | `mm::heap::HeapInner::size_class_index` |
+| 1 | `alloc::vec::Vec::push` |
+
+That is evidence, not proof, and the entry should not be closed on it. **Measure
+first**: time N alloc/free cycles at the largest slab class with `enable_poison`
+on and off, from `clock_monotonic`, as a self-test rung that stays in the tree —
+the heap is on the performance-critical list (target < 200 ns for common sizes)
+and has no poison-overhead figure at all right now. Then fix, then re-measure,
+and only then decide whether rung 27 is explained or whether the VFS walk itself
+is also at fault.
+
+**Severity.** Low correctness — the check is *right*, just slow, and slowness in
+a debug-only path harms nothing a user sees. Medium friction: it inflates every
+boot test, and it inflates it specifically in a silent stretch, which is what
+turned it into two false hang reports and two wasted ~15-minute cycles.
+
+#### TD-A-FOLD-GUESSED-AT-EVERY-ARGUMENT-IT-COULD-NOT-READ (lane A, 2026-08-25) — ✅ FIXED (`6490dae29`)
+
+**In short:** `fold` wraps long lines to a width you give it. Ours ignored most
+of what you could type at it and carried on as if it had understood — a bad
+width silently became 80, `-w0` silently became 1, a second file name was glued
+onto the first, and any flag it did not know became part of the file name. Worse
+than any of those: a line containing an accented or non-Latin character could
+come out **empty**, with `fold` reporting success. All of it is fixed, and a
+self-test rung now pins each case.
+
+**Where.** `kernel/src/kshell.rs`: `parse_fold_args` and `fold_process`, both
+rewritten, plus `cmd_fold`/`cmd_fold_input`.
+
+**What was silent.** Every row reported exit 0:
+
+| written | what it did | what it looks like |
+|---|---|---|
+| `fold -w abc f` | folded at **80** | the width you asked for was honoured |
+| `fold -w0 f` | folded at **1** (`w.max(1)`) | ditto |
+| `fold -s -w20 f` | opened a file named `-s -w20 f` | `-s` was unimplemented, and so was the error |
+| `fold f1 f2` | opened one file named `f1 f2` | two operands became one name |
+| `fold f -w20` | folded at 80, then failed to open `f -w20` | flags were recognised only at the *start* of the line |
+| `fold -q f` | opened a file named `-q f` | an unknown flag became part of the name |
+| `printf 'zzα' \| fold -w3` | printed **nothing at all** | see below |
+
+The last one is the reason this moved to the front of the queue. `fold_process`
+measured the line in bytes (`line.len()`) and then sliced it with
+`line.get(pos..end)` — and when a chunk boundary landed inside a multi-byte
+character, `get` returned `None`, whose arm wrote nothing. The chunk was not
+truncated or mangled; it was **dropped**, silently, and `fold` exited 0. Any
+text that is not pure ASCII could lose whole runs of characters at a width that
+happened to land wrong.
+
+**Fixed by** the shape the `cut` rewrite established (`e43ef0307`):
+`FoldSpec { width, spaces, bytes, files }`, a `FoldParseError` whose `report()`
+uses GNU's wording, `split_words` instead of a position-dependent scan of the
+raw argument line, and a `fold_run(spec, stdin)` that attempts every operand and
+reports the worst status. `-` names the pipe. `-s` and `-b` are implemented
+rather than ignored, short flags bundle as getopt's do, and `fold -20` is
+accepted as GNU's obsolete spelling of `fold -w20`.
+
+The measuring loop is now a restatement of GNU's `fold_file` without its `goto`:
+input is split into indivisible units — a whole character, or one byte under
+`-b` — each unit is measured against the width, and a unit that would overrun
+ends the line and is measured again against the fresh column. A unit wider than
+the whole width (a tab under `-w4`) gets a line to itself rather than vanishing
+or looping. Columns follow GNU's `adjust_column`: a tab advances to the next
+multiple of 8, a backspace retreats one, a carriage return returns to the left
+margin, everything else counts one.
+
+Two further faults were found while writing the single loop:
+
+- **The final newline was invented.** `shell_println!` per line meant
+  `printf 'abcd' | fold -w2` wrote `ab\ncd\n`, where GNU writes `ab\ncd`. Same
+  class as the `sed` trailing-newline drift (`5e523d20a`), and fixed the same
+  way — the newline that was read is the newline that is written.
+- **`str::lines` ate a carriage return.** It strips a `\r` that precedes the
+  `\n`, which GNU treats as data *and* as a column reset. Splitting with
+  `split_inclusive('\n')` keeps it.
+
+Covered by self-test rung 39, which asserts whole byte strings rather than
+searching them: the failures here are about *where* the breaks fall and *which*
+bytes survive, and only a byte comparison can see either.
+
+**Left standing:** `-b` still cannot read input that is not valid UTF-8, because
+the pipe is narrowed to `&str` before `fold` sees it (`shell_bytes_as_str`, the
+`char`-oriented arm of `dispatch_with_input`). That is the shared byte-clean
+issue, not a `fold` one; what `-b` changes here is where the breaks fall, which
+is the reason people reach for it (`fold -b -w76` over base64), and that case is
+exact.
+
+**Noticed in passing:** `parse_cut_args` does not bundle short options, so
+`cut -sd: -f1` is refused as an unrecognized option where getopt would accept
+it. The fix is `parse_fold_args`'s flag loop. Not urgent — a refusal is honest,
+not a silent guess — but it is a gratuitous difference from every other `cut`.

@@ -73,6 +73,8 @@ import sys
 import unicodedata
 import urllib.request
 
+from rustfmt_out import rustfmt
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # The HarfBuzz release the sweep's oracle (uharfbuzz) wraps. Only used to fetch
@@ -709,6 +711,12 @@ def main():
         for lo, hi, cat in runs:
             w(f"    (0x{lo:04X}, 0x{hi:04X}, Category::{RUST_CATEGORY[cat]}),\n")
         w("];\n")
+    # Match what `cargo fmt -p osfont` would do to this file, so that
+    # regenerating it and formatting it are each a no-op after the other.
+    # Without this the two rewrite each other's output forever, and every
+    # unrelated diff carries a thousand lines of table churn. See
+    # rustfmt_out.py for the whole reason.
+    rustfmt(out)
 
     print(f"wrote {out}")
     print(f"  Unicode {version}{'' if checked else '  (UNVERIFIED: no .hbref/)'}")

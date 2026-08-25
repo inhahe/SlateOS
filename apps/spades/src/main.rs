@@ -21,7 +21,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -2730,7 +2730,7 @@ mod tests {
             key: Key::Up,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(game.bid_selection, 4);
     }
@@ -2744,7 +2744,7 @@ mod tests {
             key: Key::Down,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(game.bid_selection, 2);
     }
@@ -2758,7 +2758,7 @@ mod tests {
             key: Key::Down,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(game.bid_selection, 0);
     }
@@ -2772,7 +2772,7 @@ mod tests {
             key: Key::Up,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(game.bid_selection, 13);
     }
@@ -2786,7 +2786,7 @@ mod tests {
             key: Key::Up,
             modifiers: Modifiers::NONE,
             pressed: false,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(game.bid_selection, 5);
     }
@@ -2801,7 +2801,7 @@ mod tests {
             key: Key::Right,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(game.selected_card, 1);
     }
@@ -2816,7 +2816,7 @@ mod tests {
             key: Key::Left,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(game.selected_card, 0);
     }

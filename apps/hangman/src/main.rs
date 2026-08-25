@@ -27,7 +27,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{seed_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
 
 // -- Catppuccin Mocha palette -------------------------------------------
@@ -159,41 +159,105 @@ impl Category {
 
 // -- Word lists (100+ total) --------------------------------------------
 const ANIMALS: [&str; 24] = [
-    "elephant", "giraffe", "penguin", "dolphin", "kangaroo",
-    "cheetah", "octopus", "flamingo", "buffalo", "panther",
-    "leopard", "hamster", "gazelle", "toucan", "walrus",
-    "pelican", "lobster", "sparrow", "raccoon", "vulture",
-    "gorilla", "seahorse", "parrot", "falcon",
+    "elephant", "giraffe", "penguin", "dolphin", "kangaroo", "cheetah", "octopus", "flamingo",
+    "buffalo", "panther", "leopard", "hamster", "gazelle", "toucan", "walrus", "pelican",
+    "lobster", "sparrow", "raccoon", "vulture", "gorilla", "seahorse", "parrot", "falcon",
 ];
 
 const FRUITS: [&str; 22] = [
-    "banana", "strawberry", "pineapple", "blueberry", "raspberry",
-    "watermelon", "tangerine", "coconut", "avocado", "apricot",
-    "pomegranate", "cranberry", "nectarine", "dragonfruit", "mulberry",
-    "blackberry", "mandarin", "papaya", "guava", "lychee",
-    "mango", "cherry",
+    "banana",
+    "strawberry",
+    "pineapple",
+    "blueberry",
+    "raspberry",
+    "watermelon",
+    "tangerine",
+    "coconut",
+    "avocado",
+    "apricot",
+    "pomegranate",
+    "cranberry",
+    "nectarine",
+    "dragonfruit",
+    "mulberry",
+    "blackberry",
+    "mandarin",
+    "papaya",
+    "guava",
+    "lychee",
+    "mango",
+    "cherry",
 ];
 
 const COUNTRIES: [&str; 22] = [
-    "australia", "argentina", "brazil", "canada", "denmark",
-    "ethiopia", "finland", "germany", "hungary", "iceland",
-    "jamaica", "kenya", "malaysia", "norway", "portugal",
-    "romania", "singapore", "thailand", "ukraine", "vietnam",
-    "colombia", "morocco",
+    "australia",
+    "argentina",
+    "brazil",
+    "canada",
+    "denmark",
+    "ethiopia",
+    "finland",
+    "germany",
+    "hungary",
+    "iceland",
+    "jamaica",
+    "kenya",
+    "malaysia",
+    "norway",
+    "portugal",
+    "romania",
+    "singapore",
+    "thailand",
+    "ukraine",
+    "vietnam",
+    "colombia",
+    "morocco",
 ];
 
 const SPORTS: [&str; 20] = [
-    "basketball", "football", "baseball", "swimming", "wrestling",
-    "volleyball", "badminton", "archery", "fencing", "lacrosse",
-    "kayaking", "climbing", "cycling", "handball", "softball",
-    "triathlon", "sprinting", "javelin", "hurdles", "canoeing",
+    "basketball",
+    "football",
+    "baseball",
+    "swimming",
+    "wrestling",
+    "volleyball",
+    "badminton",
+    "archery",
+    "fencing",
+    "lacrosse",
+    "kayaking",
+    "climbing",
+    "cycling",
+    "handball",
+    "softball",
+    "triathlon",
+    "sprinting",
+    "javelin",
+    "hurdles",
+    "canoeing",
 ];
 
 const TECHNOLOGY: [&str; 20] = [
-    "algorithm", "bluetooth", "compiler", "database", "ethernet",
-    "firmware", "graphics", "hardware", "internet", "javascript",
-    "keyboard", "terminal", "microchip", "notebook", "software",
-    "protocol", "robotics", "transistor", "wireless", "processor",
+    "algorithm",
+    "bluetooth",
+    "compiler",
+    "database",
+    "ethernet",
+    "firmware",
+    "graphics",
+    "hardware",
+    "internet",
+    "javascript",
+    "keyboard",
+    "terminal",
+    "microchip",
+    "notebook",
+    "software",
+    "protocol",
+    "robotics",
+    "transistor",
+    "wireless",
+    "processor",
 ];
 
 /// Total number of words across all categories.
@@ -373,7 +437,11 @@ impl HangmanApp {
             .collect();
 
         // If no words match the difficulty filter, use all words.
-        let pool = if eligible.is_empty() { words } else { &eligible };
+        let pool = if eligible.is_empty() {
+            words
+        } else {
+            &eligible
+        };
 
         let idx = self.rng.below(pool.len());
         self.word = pool[idx].as_bytes().to_vec();
@@ -394,9 +462,11 @@ impl HangmanApp {
         for &b in &self.word {
             let idx = letter_index(b);
             if let Some(i) = idx
-                && !self.guessed[i] && !unrevealed.contains(&b) {
-                    unrevealed.push(b);
-                }
+                && !self.guessed[i]
+                && !unrevealed.contains(&b)
+            {
+                unrevealed.push(b);
+            }
         }
 
         // Reveal up to `count` letters.
@@ -492,9 +562,11 @@ impl HangmanApp {
         let mut unrevealed: Vec<u8> = Vec::new();
         for &b in &self.word {
             if let Some(i) = letter_index(b)
-                && !self.guessed[i] && !unrevealed.contains(&b) {
-                    unrevealed.push(b);
-                }
+                && !self.guessed[i]
+                && !unrevealed.contains(&b)
+            {
+                unrevealed.push(b);
+            }
         }
 
         if unrevealed.is_empty() {
@@ -902,10 +974,8 @@ impl HangmanApp {
             let head_cy = head_y + head_r;
             let segments = 12;
             for seg_i in 0..segments {
-                let a1 =
-                    (seg_i as f32) * std::f32::consts::TAU / (segments as f32);
-                let a2 = ((seg_i + 1) as f32) * std::f32::consts::TAU
-                    / (segments as f32);
+                let a1 = (seg_i as f32) * std::f32::consts::TAU / (segments as f32);
+                let a2 = ((seg_i + 1) as f32) * std::f32::consts::TAU / (segments as f32);
                 cmds.push(RenderCommand::Line {
                     x1: head_cx + head_r * a1.cos(),
                     y1: head_cy + head_r * a1.sin(),
@@ -1033,11 +1103,7 @@ impl HangmanApp {
         let key_gap = 4.0_f32;
 
         // Three rows of keys: QWERTYUIOP / ASDFGHJKL / ZXCVBNM
-        let rows: [&[u8]; 3] = [
-            b"QWERTYUIOP",
-            b"ASDFGHJKL",
-            b"ZXCVBNM",
-        ];
+        let rows: [&[u8]; 3] = [b"QWERTYUIOP", b"ASDFGHJKL", b"ZXCVBNM"];
         let row_offsets: [f32; 3] = [0.0, 16.0, 40.0];
 
         for (row_i, row) in rows.iter().enumerate() {
@@ -1051,11 +1117,7 @@ impl HangmanApp {
                 let (bg, fg) = if let Some(idx) = letter_index(lower) {
                     if self.guessed[idx] {
                         let in_word = self.word.contains(&lower);
-                        if in_word {
-                            (GREEN, BASE)
-                        } else {
-                            (RED, BASE)
-                        }
+                        if in_word { (GREEN, BASE) } else { (RED, BASE) }
                     } else {
                         (SURFACE0, TEXT_COLOR)
                     }
@@ -1182,8 +1244,14 @@ impl HangmanApp {
                 overflow: TextOverflow::Clip,
             });
         } else {
-            let wrong_str: String =
-                wrong.iter().map(|&b| (b as char).to_ascii_uppercase()).collect::<Vec<_>>().iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
+            let wrong_str: String = wrong
+                .iter()
+                .map(|&b| (b as char).to_ascii_uppercase())
+                .collect::<Vec<_>>()
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
             cmds.push(RenderCommand::Text {
                 x: sx + 10.0,
                 y: y_off,
@@ -1223,8 +1291,14 @@ impl HangmanApp {
                 overflow: TextOverflow::Clip,
             });
         } else {
-            let correct_str: String =
-                correct.iter().map(|&b| (b as char).to_ascii_uppercase()).collect::<Vec<_>>().iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
+            let correct_str: String = correct
+                .iter()
+                .map(|&b| (b as char).to_ascii_uppercase())
+                .collect::<Vec<_>>()
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
             cmds.push(RenderCommand::Text {
                 x: sx + 10.0,
                 y: y_off,
@@ -1388,9 +1462,10 @@ impl HangmanApp {
     /// Handle incoming events (called by the framework).
     fn handle_event(&mut self, event: &Event) {
         if let Event::Key(ke) = event
-            && ke.pressed {
-                self.handle_key(ke.key);
-            }
+            && ke.pressed
+        {
+            self.handle_key(ke.key);
+        }
     }
 
     fn handle_key(&mut self, key: Key) {
@@ -2299,7 +2374,7 @@ mod tests {
             key: Key::C,
             pressed: true,
             modifiers: Modifiers::default(),
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert!(app.guessed[letter_index(b'c').unwrap()]);
@@ -2312,7 +2387,7 @@ mod tests {
             key: Key::C,
             pressed: false,
             modifiers: Modifiers::default(),
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert!(!app.guessed[letter_index(b'c').unwrap()]);
@@ -2530,7 +2605,11 @@ mod tests {
         let colors: Vec<Color> = Category::ALL.iter().map(|c| c.color()).collect();
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {
-                assert_ne!(colors[i], colors[j], "Categories {} and {} share a color", i, j);
+                assert_ne!(
+                    colors[i], colors[j],
+                    "Categories {} and {} share a color",
+                    i, j
+                );
             }
         }
     }

@@ -540,7 +540,10 @@ fn parse_fvar(data: &[u8], span: Span) -> Option<(Vec<Axis>, Vec<Instance>)> {
         for i in 0..instance_count {
             let Some(rec) = base
                 .checked_add(i.saturating_mul(instance_size))
-                .filter(|r| r.checked_add(min_instance).is_some_and(|e| e <= table.len()))
+                .filter(|r| {
+                    r.checked_add(min_instance)
+                        .is_some_and(|e| e <= table.len())
+                })
             else {
                 // A truncated instance array costs the instances past the cut,
                 // not the axes: the axes are what drawing needs.
@@ -690,7 +693,10 @@ mod tests {
     fn default_normalizes_to_zero_whatever_the_user_scale() {
         // The point of the normalized space: 400 on a 300..400..700 axis and
         // 10.5 on a 5..10.5..36 axis are both exactly 0.
-        assert_eq!(normalize_value(&axis(b"wght", 300.0, 400.0, 700.0), 400.0), 0.0);
+        assert_eq!(
+            normalize_value(&axis(b"wght", 300.0, 400.0, 700.0), 400.0),
+            0.0
+        );
         assert_eq!(normalize_value(&axis(b"opsz", 5.0, 10.5, 36.0), 10.5), 0.0);
     }
 
@@ -725,7 +731,11 @@ mod tests {
         // minimum and the default.
         let a = axis(b"wght", 400.0, 400.0, 700.0);
         assert_eq!(normalize_value(&a, 400.0), 0.0);
-        assert_eq!(normalize_value(&a, 300.0), 0.0, "clamped to the minimum, which is the default");
+        assert_eq!(
+            normalize_value(&a, 300.0),
+            0.0,
+            "clamped to the minimum, which is the default"
+        );
         assert_eq!(normalize_value(&a, 700.0), 1.0);
         assert!(normalize_value(&a, 550.0).is_finite());
     }
@@ -832,7 +842,13 @@ mod tests {
     /// instance and no other.
     #[test]
     fn avar_rounds_to_the_nearest_coordinate_rather_than_truncating() {
-        let map = segment(&[(-16384, -16384), (-8192, -8192), (0, 0), (10923, 8192), (16384, 16384)]);
+        let map = segment(&[
+            (-16384, -16384),
+            (-8192, -8192),
+            (0, 0),
+            (10923, 8192),
+            (16384, 16384),
+        ]);
         assert_eq!(map.map(8192), 6144);
         // Two thirds, on the way up and on the mirrored way down: both round to
         // the nearer coordinate rather than towards the segment they started

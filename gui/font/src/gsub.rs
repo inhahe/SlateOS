@@ -123,7 +123,9 @@ use crate::indic::Char;
 use crate::joining::Form;
 use crate::lang::Lang;
 use crate::norm::Ignorable;
-use crate::otl::{ByScript, Lookup, MAX_SUBTABLES, Subtable, coverage_index, lookup_at, lookup_list};
+use crate::otl::{
+    ByScript, Lookup, MAX_SUBTABLES, Subtable, coverage_index, lookup_at, lookup_list,
+};
 use crate::script::ScriptTags;
 use crate::sfnt::{Span, u16_at};
 use crate::skip::{CLASS_BASE, CLASS_MARK, Definitions, Joiners, Skipper};
@@ -4516,13 +4518,20 @@ mod tests {
         let [bad, good] = lookup.subtables.as_slice() else {
             panic!("two subtables");
         };
-        assert!(bad.digest.may_have(FAR), "an unreadable coverage excludes nothing");
+        assert!(
+            bad.digest.may_have(FAR),
+            "an unreadable coverage excludes nothing"
+        );
         assert!(!good.digest.may_have(FAR), "its neighbour is unaffected");
         assert!(lookup.digest.may_have(FAR), "the union stays conservative");
 
         // And the broken subtable is still *tried*: it is unreadable, not
         // absent, so the good one answers only because the bad one declines.
-        let data = gsub_subtables(b"liga", LOOKUP_SINGLE, &[&broken, &single_list(&[10], &[42])]);
+        let data = gsub_subtables(
+            b"liga",
+            LOOKUP_SINGLE,
+            &[&broken, &single_list(&[10], &[42])],
+        );
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10]), [42]);
     }

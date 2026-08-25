@@ -780,11 +780,7 @@ mod tests {
     #[test]
     fn a_syllable_kind_survives_the_nibble_it_is_stored_in() {
         for serial in 0..16u8 {
-            for kind in [
-                Syllable::Consonant,
-                Syllable::Broken,
-                Syllable::NonMyanmar,
-            ] {
+            for kind in [Syllable::Consonant, Syllable::Broken, Syllable::NonMyanmar] {
                 assert_eq!(Syllable::from_code((serial << 4) | kind.code()), kind);
             }
         }

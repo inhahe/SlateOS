@@ -1000,10 +1000,8 @@ impl LoginManager {
             }
             _ => {
                 // Type character into password field.
-                if let Some(ch) = key.text
-                    && !ch.is_control()
-                {
-                    self.password_input.push(ch);
+                if key.types_text() {
+                    self.password_input.extend(key.typed());
                     self.error_message = None;
                 }
                 EventResult::Consumed
@@ -1039,10 +1037,8 @@ impl LoginManager {
                 EventResult::Consumed
             }
             _ => {
-                if let Some(ch) = key.text
-                    && !ch.is_control()
-                {
-                    self.password_input.push(ch);
+                if key.types_text() {
+                    self.password_input.extend(key.typed());
                     self.error_message = None;
                 }
                 EventResult::Consumed
@@ -2445,8 +2441,7 @@ mod tests {
     // The static is only ever read through the one `Authenticator` built with
     // its `fn`, so a per-test static is genuinely private to that test.
 
-    static FAKE_NOW_EXPIRY: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(1000);
+    static FAKE_NOW_EXPIRY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1000);
     static FAKE_NOW_COUNTDOWN: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(4000);
 
@@ -2481,7 +2476,10 @@ mod tests {
         // The next one earns one, and says so rather than making the user find
         // out by trying again.
         let err = mgr.authenticate("alice", "wrong").unwrap_err();
-        assert!(err.starts_with("Incorrect password. Try again in "), "{err}");
+        assert!(
+            err.starts_with("Incorrect password. Try again in "),
+            "{err}"
+        );
 
         // And now even the correct password waits its turn: the delay is on
         // *asking*, not on being wrong, or it would be an oracle for having
@@ -2558,7 +2556,10 @@ mod tests {
             later < first,
             "the wait must run down, not restart: {first}s then {later}s"
         );
-        assert!(err.contains(&later.to_string()), "{err} should name {later}");
+        assert!(
+            err.contains(&later.to_string()),
+            "{err} should name {later}"
+        );
     }
 
     /// A guess at a name that does not exist is counted, and answered in the
@@ -2713,7 +2714,7 @@ mod tests {
             key: Key::A,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('a'),
+            text: "a".to_string(),
         });
         mgr.handle_event(&event);
 
@@ -2925,7 +2926,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         mgr.handle_event(&down);
         assert_eq!(mgr.selected_user_index, 1);
@@ -2946,7 +2947,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         mgr.handle_event(&enter);
         assert_eq!(mgr.current_view, LoginView::PasswordEntry);
@@ -2959,7 +2960,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         mgr.handle_event(&esc);
         assert_eq!(mgr.current_view, LoginView::PowerMenu);
@@ -2975,7 +2976,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         mgr.handle_event(&esc);
         assert_eq!(mgr.current_view, LoginView::UserSelect);
@@ -2992,7 +2993,7 @@ mod tests {
                 key: Key::A, // Key code doesn't matter for text input.
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: Some(ch),
+                text: ch.to_string(),
             });
             mgr.handle_event(&event);
         }
@@ -3009,7 +3010,7 @@ mod tests {
             key: Key::Backspace,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         mgr.handle_event(&backspace);
         assert_eq!(mgr.password_input, "ab");
@@ -3029,7 +3030,7 @@ mod tests {
                 alt: true,
                 super_key: false,
             },
-            text: None,
+            text: String::new(),
         });
         mgr.handle_event(&event);
         assert!(mgr.accessibility.high_contrast);

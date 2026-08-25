@@ -767,7 +767,7 @@ mod tests {
             key: Key::Num1,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         // May or may not change based on current grid, but should not panic
@@ -781,7 +781,7 @@ mod tests {
             key: Key::N,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.moves, 0);
@@ -795,7 +795,7 @@ mod tests {
             key: Key::H,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert!(app.show_help);

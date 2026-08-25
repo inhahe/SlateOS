@@ -797,13 +797,24 @@ impl UnitConverterApp {
                 }
                 _ => {
                     // Type a character.
-                    if let Some(ch) = key.text
-                        && (ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == 'e' || ch == 'E') {
+                    let allowed: Vec<char> = key
+                        .typed()
+                        .filter(|ch| {
+                            ch.is_ascii_digit()
+                                || *ch == '.'
+                                || *ch == '-'
+                                || *ch == 'e'
+                                || *ch == 'E'
+                        })
+                        .collect();
+                    if !allowed.is_empty() {
+                        for ch in allowed {
                             self.from_input.insert(self.from_cursor, ch);
                             self.from_cursor += 1;
-                            self.do_convert();
-                            return true;
                         }
+                        self.do_convert();
+                        return true;
+                    }
                 }
             }
         }
@@ -2857,7 +2868,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let consumed = app.handle_key(&key);
         assert!(consumed);
@@ -2872,7 +2883,7 @@ mod tests {
             key: Key::Tab,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&key);
         assert!(!app.from_focused);
@@ -2889,7 +2900,7 @@ mod tests {
             key: Key::S,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&key);
         assert_eq!(app.from_unit_idx, orig_to);
@@ -2904,7 +2915,7 @@ mod tests {
             key: Key::F,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&key);
         assert!(app.is_current_favorite());
@@ -2919,7 +2930,7 @@ mod tests {
             key: Key::Num5,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('5'),
+            text: "5".to_string(),
         };
         app.handle_key(&key);
         assert_eq!(app.from_input, "5");
@@ -2934,7 +2945,7 @@ mod tests {
             key: Key::Backspace,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&key);
         assert_eq!(app.from_input, "12");

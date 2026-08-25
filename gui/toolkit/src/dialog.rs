@@ -446,11 +446,8 @@ impl FileDialog {
             }
             _ => {
                 // Text input for save-mode filename.
-                if self.mode == DialogMode::Save
-                    && let Some(ch) = event.text
-                    && !ch.is_control()
-                {
-                    self.filename_input.push(ch);
+                if self.mode == DialogMode::Save {
+                    self.filename_input.extend(event.typed());
                 }
                 DialogAction::None
             }
@@ -1482,7 +1479,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: crate::event::Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let action = dialog.handle_event(&event);
         assert_eq!(action, DialogAction::Cancelled);
@@ -1520,7 +1517,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: crate::event::Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         dialog.handle_event(&down);
         assert_eq!(dialog.selected_index(), Some(1));
@@ -1536,7 +1533,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: crate::event::Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         dialog.handle_event(&up);
         assert_eq!(dialog.selected_index(), Some(1));

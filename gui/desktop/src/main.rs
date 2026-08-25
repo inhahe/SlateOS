@@ -76,7 +76,7 @@ fn main() {
         key: Key::F4,
         pressed: true,
         modifiers: Modifiers::alt(),
-        text: None,
+        text: String::new(),
     };
     let closed = desktop.handle_hotkey(&alt_f4);
     println!(
@@ -138,7 +138,7 @@ fn main() {
         key: Key::Escape,
         pressed: true,
         modifiers: Modifiers::default(),
-        text: None,
+        text: String::new(),
     };
     println!(
         "Escape closed it: {} (still open: {})",
@@ -156,7 +156,7 @@ fn main() {
             super_key: true,
             ..Modifiers::NONE
         },
-        text: None,
+        text: String::new(),
     };
     println!(
         "Super+Left asked the compositor for {:?}",

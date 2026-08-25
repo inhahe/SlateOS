@@ -156,7 +156,11 @@ pub(crate) fn script_list(scripts: &[(&[u8; 4], &[u16])]) -> Vec<u8> {
 /// it is what a real face supporting two writing systems looks like, and
 /// the reason the selection walk starts at the ScriptList rather than the
 /// FeatureList — a tag alone does not say which script a feature is for.
-pub(crate) fn gsub_scripts(scripts: &[(&[u8; 4], &[u8; 4])], kind: u16, subtables: &[&[u8]]) -> Vec<u8> {
+pub(crate) fn gsub_scripts(
+    scripts: &[(&[u8; 4], &[u8; 4])],
+    kind: u16,
+    subtables: &[&[u8]],
+) -> Vec<u8> {
     // header 10 | scriptList | featureList | lookupList | subtables
     //
     // Each script gets its own Script table with a DefaultLangSys naming
@@ -193,7 +197,13 @@ pub(crate) fn gsub_from_scripts(
 /// The flag is the whole point of a handful of tests below: every other
 /// builder here writes a zero flag, so without this one the skipping walk
 /// is only ever exercised in its do-nothing configuration.
-pub(crate) fn gsub_flagged(tag: &[u8; 4], kind: u16, flag: u16, filter: u16, subtable: &[u8]) -> Vec<u8> {
+pub(crate) fn gsub_flagged(
+    tag: &[u8; 4],
+    kind: u16,
+    flag: u16,
+    filter: u16,
+    subtable: &[u8],
+) -> Vec<u8> {
     gsub_flagged_from_scripts(
         &script_list(&[(b"DFLT", &[0])]),
         &[tag],

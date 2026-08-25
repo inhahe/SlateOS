@@ -434,7 +434,8 @@ impl FontCache {
     /// bold face to use.
     pub fn set_face(&mut self, family: Family, weight: Weight, face: Arc<Face>) {
         self.faces.insert((family, weight), face);
-        self.fonts.retain(|(_, w, f), _| (*f, *w) != (family, weight));
+        self.fonts
+            .retain(|(_, w, f), _| (*f, *w) != (family, weight));
     }
 
     /// Parse `data` and install it for `family` at `weight`.
@@ -739,7 +740,11 @@ mod tests {
         cache
             .install_face(Family::Mono, Weight::Regular, build_test_font())
             .unwrap();
-        assert_eq!(cache.len(), 1, "only the Mono entry should have been dropped");
+        assert_eq!(
+            cache.len(),
+            1,
+            "only the Mono entry should have been dropped"
+        );
         assert!(
             cache.get(16.0, Weight::Regular, Family::Mono).is_scalable(),
             "the newly installed Mono face was not picked up"
@@ -759,7 +764,8 @@ mod tests {
             "an empty cache must serve the built-in face"
         );
 
-        cache.install_face(Family::Ui, Weight::Regular, build_test_font())
+        cache
+            .install_face(Family::Ui, Weight::Regular, build_test_font())
             .unwrap();
         assert!(cache.has_face(Family::Ui, Weight::Regular));
         assert!(
@@ -778,7 +784,8 @@ mod tests {
         // copy of a megabyte-scale file per size and re-parse the tables to get
         // it, which is what `Arc` in the cache is for.
         let mut cache = FontCache::new();
-        cache.install_face(Family::Ui, Weight::Regular, build_test_font())
+        cache
+            .install_face(Family::Ui, Weight::Regular, build_test_font())
             .unwrap();
         let mut faces = Vec::new();
         for px in [11.0, 16.0, 24.0, 48.0] {

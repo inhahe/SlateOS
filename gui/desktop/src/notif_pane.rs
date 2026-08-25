@@ -1912,7 +1912,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: guitk::event::Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
     }
 
@@ -2997,7 +2997,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: guitk::event::Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let result = pane.handle_key_event(&event);
         assert_eq!(result, EventResult::Consumed);
@@ -3011,7 +3011,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: guitk::event::Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let result = pane.handle_key_event(&event);
         assert_eq!(result, EventResult::Ignored);

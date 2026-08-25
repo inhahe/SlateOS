@@ -121,9 +121,11 @@ impl Board {
 
         for line in &LINES {
             if let Some(mark) = self.cells[line[0]]
-                && self.cells[line[1]] == Some(mark) && self.cells[line[2]] == Some(mark) {
-                    return Some(mark);
-                }
+                && self.cells[line[1]] == Some(mark)
+                && self.cells[line[2]] == Some(mark)
+            {
+                return Some(mark);
+            }
         }
         None
     }
@@ -143,9 +145,11 @@ impl Board {
 
         for line in &LINES {
             if let Some(mark) = self.cells[line[0]]
-                && self.cells[line[1]] == Some(mark) && self.cells[line[2]] == Some(mark) {
-                    return Some(*line);
-                }
+                && self.cells[line[1]] == Some(mark)
+                && self.cells[line[2]] == Some(mark)
+            {
+                return Some(*line);
+            }
         }
         None
     }
@@ -336,22 +340,18 @@ impl TicTacToeApp {
     fn event(&mut self, event: &Event) {
         match event {
             Event::Key(KeyEvent { key, .. }) => match key {
-                Key::Up
-                    if self.cursor_row > 0 => {
-                        self.cursor_row -= 1;
-                    }
-                Key::Down
-                    if self.cursor_row < 2 => {
-                        self.cursor_row += 1;
-                    }
-                Key::Left
-                    if self.cursor_col > 0 => {
-                        self.cursor_col -= 1;
-                    }
-                Key::Right
-                    if self.cursor_col < 2 => {
-                        self.cursor_col += 1;
-                    }
+                Key::Up if self.cursor_row > 0 => {
+                    self.cursor_row -= 1;
+                }
+                Key::Down if self.cursor_row < 2 => {
+                    self.cursor_row += 1;
+                }
+                Key::Left if self.cursor_col > 0 => {
+                    self.cursor_col -= 1;
+                }
+                Key::Right if self.cursor_col < 2 => {
+                    self.cursor_col += 1;
+                }
                 Key::Enter | Key::Space => {
                     if self.state == GameState::Playing {
                         self.place_mark(self.cursor_row, self.cursor_col);
@@ -813,7 +813,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.board.get(0, 0), Some(Mark::X));
     }
@@ -827,7 +827,7 @@ mod tests {
             key: Key::Up,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.cursor_row, 0);
 
@@ -835,7 +835,7 @@ mod tests {
             key: Key::Down,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.cursor_row, 1);
     }
@@ -848,7 +848,7 @@ mod tests {
             key: Key::Up,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.cursor_row, 0);
 
@@ -857,7 +857,7 @@ mod tests {
             key: Key::Right,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.cursor_col, 2);
     }
@@ -870,7 +870,7 @@ mod tests {
             key: Key::N,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.state, GameState::Playing);
         assert_eq!(app.board.available_moves().len(), 9);
@@ -884,7 +884,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.state, GameState::Playing);
     }

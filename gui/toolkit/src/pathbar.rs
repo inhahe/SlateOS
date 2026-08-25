@@ -326,13 +326,11 @@ impl PathBar {
 
     fn handle_key_breadcrumb(&mut self, event: &KeyEvent) -> EventResult {
         // Any printable character enters edit mode.
-        if let Some(ch) = event.text
-            && !ch.is_control()
-        {
+        if event.types_text() {
             self.enter_edit_mode();
-            // Insert the typed character.
+            // Insert everything the keystroke typed.
             self.edit_text.clear();
-            self.edit_text.push(ch);
+            self.edit_text.extend(event.typed());
             self.cursor = self.edit_text.len().into();
             return EventResult::Consumed;
         }
@@ -405,14 +403,15 @@ impl PathBar {
             }
             _ => {
                 // Insert character.
-                if let Some(ch) = event.text
-                    && !ch.is_control()
-                {
+                if event.types_text() {
                     self.delete_selection();
-                    self.edit_text.insert(self.cursor.byte, ch);
-                    // The caret stop after the insertion point is the far side
-                    // of the character just inserted, so there is always one.
-                    self.cursor = self.cursor.next_in(&self.edit_text).unwrap_or(self.cursor);
+                    for ch in event.typed() {
+                        self.edit_text.insert(self.cursor.byte, ch);
+                        // The caret stop after the insertion point is the far
+                        // side of the character just inserted, so there is
+                        // always one.
+                        self.cursor = self.cursor.next_in(&self.edit_text).unwrap_or(self.cursor);
+                    }
                     self.selection_anchor = None;
                     self.on_text_changed();
                     return EventResult::Consumed;
@@ -1155,7 +1154,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -1164,7 +1163,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some(ch),
+            text: ch.to_string(),
         }
     }
 
@@ -1173,7 +1172,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -1182,7 +1181,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::shift(),
-            text: None,
+            text: String::new(),
         }
     }
 

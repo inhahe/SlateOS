@@ -4152,8 +4152,8 @@ impl SettingsState {
                     return EventResult::Consumed;
                 }
                 _ => {
-                    if let Some(ch) = evt.text {
-                        self.search_query.push(ch);
+                    if evt.types_text() {
+                        self.search_query.extend(evt.typed());
                         return EventResult::Consumed;
                     }
                 }
@@ -4950,7 +4950,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         state.handle_event(&down);
         assert_eq!(state.current_category, SettingsCategory::Network);
@@ -4972,7 +4972,7 @@ mod tests {
             key: Key::Tab,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
 
         for &category in SettingsCategory::ALL {
@@ -5074,7 +5074,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         let result = state.handle_event(&esc);
         assert_eq!(result, EventResult::Consumed);
@@ -7394,7 +7394,7 @@ mod loop_tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         })
     }
 

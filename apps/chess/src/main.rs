@@ -2854,7 +2854,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&right);
         assert_eq!(app.cursor, Pos::new(0, 1));
@@ -2863,7 +2863,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&up);
         assert_eq!(app.cursor, Pos::new(1, 1));
@@ -2876,7 +2876,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&left);
         // Should stay at 0, not go negative
@@ -2886,7 +2886,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&down);
         assert_eq!(app.cursor.row, 0);
@@ -2902,7 +2902,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&esc);
         assert!(app.selected.is_none());
@@ -2918,7 +2918,7 @@ mod tests {
             key: Key::N,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&ctrl_n);
         assert!(app.move_history.is_empty());
@@ -2932,7 +2932,7 @@ mod tests {
             key: Key::Right,
             pressed: false, // release
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&right);
         assert_eq!(app.cursor.col, 0); // Should not move
@@ -3022,11 +3022,7 @@ mod tests {
         commands.iter().find_map(|c| match c {
             RenderCommand::Text {
                 y, text, font_size, ..
-            } if (*font_size - PIECE_FONT_SIZE).abs() < 0.01
-                && text.starts_with(glyph) =>
-            {
-                Some(*y)
-            }
+            } if (*font_size - PIECE_FONT_SIZE).abs() < 0.01 && text.starts_with(glyph) => Some(*y),
             _ => None,
         })
     }
@@ -3490,7 +3486,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(app.cursor.col, 1);

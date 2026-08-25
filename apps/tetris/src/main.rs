@@ -17,11 +17,11 @@
 //! progression, and pause/resume.
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent};
 #[cfg(test)]
 use guitk::event::Modifiers;
+use guitk::event::{Event, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{seed_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -133,12 +133,7 @@ impl PieceKind {
                 3 => [(0, 1), (1, 1), (2, 1), (3, 1)],
                 _ => [(1, 0), (1, 1), (1, 2), (1, 3)],
             },
-            Self::O => [
-                (0, 0),
-                (0, 1),
-                (1, 0),
-                (1, 1),
-            ],
+            Self::O => [(0, 0), (0, 1), (1, 0), (1, 1)],
             Self::T => match rotation {
                 0 => [(0, 1), (1, 0), (1, 1), (1, 2)],
                 1 => [(0, 1), (1, 1), (1, 2), (2, 1)],
@@ -270,10 +265,7 @@ impl ActivePiece {
         let mut result = [(0i8, 0i8); 4];
         let mut idx = 0;
         while idx < 4 {
-            result[idx] = (
-                self.row + offsets[idx].0,
-                self.col + offsets[idx].1,
-            );
+            result[idx] = (self.row + offsets[idx].0, self.col + offsets[idx].1);
             idx += 1;
         }
         result
@@ -405,10 +397,10 @@ fn count_t_corners(field: &[Option<Color>], row: i8, col: i8) -> usize {
 /// Front corners are the two corners adjacent to the flat side.
 fn count_t_front_corners(field: &[Option<Color>], row: i8, col: i8, rotation: u8) -> usize {
     let front_corners: [(i8, i8); 2] = match rotation {
-        0 => [(0, 0), (0, 2)],   // top-left, top-right
-        1 => [(0, 2), (2, 2)],   // top-right, bottom-right
-        2 => [(2, 0), (2, 2)],   // bottom-left, bottom-right
-        3 => [(0, 0), (2, 0)],   // top-left, bottom-left
+        0 => [(0, 0), (0, 2)], // top-left, top-right
+        1 => [(0, 2), (2, 2)], // top-right, bottom-right
+        2 => [(2, 0), (2, 2)], // bottom-left, bottom-right
+        3 => [(0, 0), (2, 0)], // top-left, bottom-left
         _ => [(0, 0), (0, 2)],
     };
     let mut count = 0;
@@ -1025,7 +1017,12 @@ impl TetrisApp {
 
     /// Total window width.
     fn window_width(&self) -> f32 {
-        PADDING + SIDEBAR_WIDTH + PADDING + self.field_pixel_width() + PADDING + SIDEBAR_WIDTH
+        PADDING
+            + SIDEBAR_WIDTH
+            + PADDING
+            + self.field_pixel_width()
+            + PADDING
+            + SIDEBAR_WIDTH
             + PADDING
     }
 
@@ -1208,49 +1205,56 @@ impl TetrisApp {
 
         // Ghost piece
         if self.status == GameStatus::Playing
-            && let (Some(piece), Some(ghost_row)) = (&self.current_piece, self.ghost_row()) {
-                // Only draw ghost if it's below the current piece
-                if ghost_row > piece.row {
-                    let ghost = ActivePiece {
-                        kind: piece.kind,
-                        rotation: piece.rotation,
-                        row: ghost_row,
-                        col: piece.col,
-                    };
-                    let ghost_color = piece.kind.color();
-                    let ghost_alpha = Color::rgba(ghost_color.r, ghost_color.g, ghost_color.b, 50);
-                    for (r, c) in ghost.absolute_cells() {
-                        if r >= HIDDEN_ROWS as i8 && r < TOTAL_ROWS as i8 && c >= 0 && c < FIELD_COLS as i8 {
-                            let vis_row = r as usize - HIDDEN_ROWS;
-                            let x = fx + c as f32 * (CELL_SIZE + CELL_GAP);
-                            let y = fy + vis_row as f32 * (CELL_SIZE + CELL_GAP);
-                            cmds.push(RenderCommand::StrokeRect {
-                                x,
-                                y,
-                                width: CELL_SIZE,
-                                height: CELL_SIZE,
-                                color: ghost_alpha,
-                                line_width: 1.5,
-                                corner_radii: CornerRadii::all(3.0),
-                            });
-                        }
-                    }
-                }
-            }
-
-        // Current piece
-        if self.status == GameStatus::Playing
-            && let Some(piece) = &self.current_piece {
-                let color = piece.kind.color();
-                for (r, c) in piece.absolute_cells() {
-                    if r >= HIDDEN_ROWS as i8 && r < TOTAL_ROWS as i8 && c >= 0 && c < FIELD_COLS as i8 {
+            && let (Some(piece), Some(ghost_row)) = (&self.current_piece, self.ghost_row())
+        {
+            // Only draw ghost if it's below the current piece
+            if ghost_row > piece.row {
+                let ghost = ActivePiece {
+                    kind: piece.kind,
+                    rotation: piece.rotation,
+                    row: ghost_row,
+                    col: piece.col,
+                };
+                let ghost_color = piece.kind.color();
+                let ghost_alpha = Color::rgba(ghost_color.r, ghost_color.g, ghost_color.b, 50);
+                for (r, c) in ghost.absolute_cells() {
+                    if r >= HIDDEN_ROWS as i8
+                        && r < TOTAL_ROWS as i8
+                        && c >= 0
+                        && c < FIELD_COLS as i8
+                    {
                         let vis_row = r as usize - HIDDEN_ROWS;
                         let x = fx + c as f32 * (CELL_SIZE + CELL_GAP);
                         let y = fy + vis_row as f32 * (CELL_SIZE + CELL_GAP);
-                        self.render_block(cmds, x, y, CELL_SIZE, color);
+                        cmds.push(RenderCommand::StrokeRect {
+                            x,
+                            y,
+                            width: CELL_SIZE,
+                            height: CELL_SIZE,
+                            color: ghost_alpha,
+                            line_width: 1.5,
+                            corner_radii: CornerRadii::all(3.0),
+                        });
                     }
                 }
             }
+        }
+
+        // Current piece
+        if self.status == GameStatus::Playing
+            && let Some(piece) = &self.current_piece
+        {
+            let color = piece.kind.color();
+            for (r, c) in piece.absolute_cells() {
+                if r >= HIDDEN_ROWS as i8 && r < TOTAL_ROWS as i8 && c >= 0 && c < FIELD_COLS as i8
+                {
+                    let vis_row = r as usize - HIDDEN_ROWS;
+                    let x = fx + c as f32 * (CELL_SIZE + CELL_GAP);
+                    let y = fy + vis_row as f32 * (CELL_SIZE + CELL_GAP);
+                    self.render_block(cmds, x, y, CELL_SIZE, color);
+                }
+            }
+        }
     }
 
     /// Render a single filled block with a slight highlight/shadow.
@@ -1578,7 +1582,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -1703,8 +1707,13 @@ mod tests {
         let colors: Vec<Color> = PieceKind::ALL.iter().map(|k| k.color()).collect();
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {
-                assert_ne!(colors[i], colors[j], "Pieces {:?} and {:?} share a color",
-                    PieceKind::ALL[i], PieceKind::ALL[j]);
+                assert_ne!(
+                    colors[i],
+                    colors[j],
+                    "Pieces {:?} and {:?} share a color",
+                    PieceKind::ALL[i],
+                    PieceKind::ALL[j]
+                );
             }
         }
     }
@@ -1852,7 +1861,10 @@ mod tests {
             let orig_rot = piece.rotation;
             if piece.kind != PieceKind::O {
                 assert!(app.try_rotate(true));
-                assert_eq!(app.current_piece.as_ref().unwrap().rotation, (orig_rot + 1) % 4);
+                assert_eq!(
+                    app.current_piece.as_ref().unwrap().rotation,
+                    (orig_rot + 1) % 4
+                );
             }
         }
     }
@@ -1864,7 +1876,10 @@ mod tests {
             let orig_rot = piece.rotation;
             if piece.kind != PieceKind::O {
                 assert!(app.try_rotate(false));
-                assert_eq!(app.current_piece.as_ref().unwrap().rotation, (orig_rot + 3) % 4);
+                assert_eq!(
+                    app.current_piece.as_ref().unwrap().rotation,
+                    (orig_rot + 3) % 4
+                );
             }
         }
     }
@@ -2303,7 +2318,10 @@ mod tests {
             assert!(!seen[idx], "Duplicate piece in first bag: {piece:?}");
             seen[idx] = true;
         }
-        assert!(seen.iter().all(|&s| s), "Not all pieces appeared in first bag");
+        assert!(
+            seen.iter().all(|&s| s),
+            "Not all pieces appeared in first bag"
+        );
     }
 
     #[test]
@@ -2502,10 +2520,10 @@ mod tests {
     fn test_t_corners_all_occupied() {
         let mut field = vec![None; TOTAL_ROWS * FIELD_COLS];
         // Set all four corners of a 3x3 bounding box
-        field[10 * FIELD_COLS + 4] = Some(BLUE);     // (10, 4) top-left
-        field[10 * FIELD_COLS + 6] = Some(BLUE);     // (10, 6) top-right
-        field[12 * FIELD_COLS + 4] = Some(BLUE);     // (12, 4) bottom-left
-        field[12 * FIELD_COLS + 6] = Some(BLUE);     // (12, 6) bottom-right
+        field[10 * FIELD_COLS + 4] = Some(BLUE); // (10, 4) top-left
+        field[10 * FIELD_COLS + 6] = Some(BLUE); // (10, 6) top-right
+        field[12 * FIELD_COLS + 4] = Some(BLUE); // (12, 4) bottom-left
+        field[12 * FIELD_COLS + 6] = Some(BLUE); // (12, 6) bottom-right
         let corners = count_t_corners(&field, 10, 4);
         assert_eq!(corners, 4);
     }
@@ -2568,9 +2586,15 @@ mod tests {
         let app = TetrisApp::with_seed(42);
         let cmds = app.render();
         // Ghost piece generates StrokeRect commands — count them
-        let stroke_count = cmds.iter().filter(|c| matches!(c, RenderCommand::StrokeRect { .. })).count();
+        let stroke_count = cmds
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::StrokeRect { .. }))
+            .count();
         // Should have at least 4 (ghost cells) + 1 (field border) + overlay borders
-        assert!(stroke_count >= 5, "Expected ghost piece stroke rects, found {stroke_count}");
+        assert!(
+            stroke_count >= 5,
+            "Expected ghost piece stroke rects, found {stroke_count}"
+        );
     }
 
     #[test]
@@ -2626,7 +2650,7 @@ mod tests {
             key: Key::Left,
             pressed: false, // Release, not press
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         app.handle_key(&event);
         assert_eq!(app.current_piece.as_ref().unwrap().col, col_before);
@@ -2639,7 +2663,10 @@ mod tests {
         let kind = app.current_piece.as_ref().unwrap().kind;
         press_key(&mut app, Key::Up);
         if kind != PieceKind::O {
-            assert_eq!(app.current_piece.as_ref().unwrap().rotation, (rot_before + 1) % 4);
+            assert_eq!(
+                app.current_piece.as_ref().unwrap().rotation,
+                (rot_before + 1) % 4
+            );
         }
     }
 
@@ -2650,7 +2677,10 @@ mod tests {
         let kind = app.current_piece.as_ref().unwrap().kind;
         press_key(&mut app, Key::Z);
         if kind != PieceKind::O {
-            assert_eq!(app.current_piece.as_ref().unwrap().rotation, (rot_before + 1) % 4);
+            assert_eq!(
+                app.current_piece.as_ref().unwrap().rotation,
+                (rot_before + 1) % 4
+            );
         }
     }
 
@@ -2661,7 +2691,10 @@ mod tests {
         let kind = app.current_piece.as_ref().unwrap().kind;
         press_key(&mut app, Key::X);
         if kind != PieceKind::O {
-            assert_eq!(app.current_piece.as_ref().unwrap().rotation, (rot_before + 3) % 4);
+            assert_eq!(
+                app.current_piece.as_ref().unwrap().rotation,
+                (rot_before + 3) % 4
+            );
         }
     }
 

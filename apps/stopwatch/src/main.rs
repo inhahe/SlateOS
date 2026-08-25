@@ -319,24 +319,21 @@ impl StopwatchApp {
             Key::R => {
                 self.stop();
             }
-            Key::M
-                if self.state == TimerState::Stopped => {
-                    self.mode = match self.mode {
-                        AppMode::Stopwatch => AppMode::Countdown,
-                        AppMode::Countdown => AppMode::Stopwatch,
-                    };
-                }
-            Key::T
-                if self.mode == AppMode::Countdown && self.state == TimerState::Stopped => {
-                    self.view = AppView::CountdownSetup;
-                }
+            Key::M if self.state == TimerState::Stopped => {
+                self.mode = match self.mode {
+                    AppMode::Stopwatch => AppMode::Countdown,
+                    AppMode::Countdown => AppMode::Stopwatch,
+                };
+            }
+            Key::T if self.mode == AppMode::Countdown && self.state == TimerState::Stopped => {
+                self.view = AppView::CountdownSetup;
+            }
             Key::H => {
                 self.view = AppView::History;
             }
-            Key::Up
-                if self.lap_scroll > 0 => {
-                    self.lap_scroll -= 1;
-                }
+            Key::Up if self.lap_scroll > 0 => {
+                self.lap_scroll -= 1;
+            }
             Key::Down => {
                 let max_scroll = self.laps.len().saturating_sub(self.max_visible_laps);
                 if self.lap_scroll < max_scroll {
@@ -352,10 +349,9 @@ impl StopwatchApp {
             Key::Escape | Key::H => {
                 self.view = AppView::Main;
             }
-            Key::Up
-                if self.history_scroll > 0 => {
-                    self.history_scroll -= 1;
-                }
+            Key::Up if self.history_scroll > 0 => {
+                self.history_scroll -= 1;
+            }
             Key::Down => {
                 let max = self.history.len().saturating_sub(8);
                 if self.history_scroll < max {
@@ -376,14 +372,12 @@ impl StopwatchApp {
                 self.countdown_remaining_ms = self.countdown_target_ms;
                 self.view = AppView::Main;
             }
-            Key::Left
-                if self.countdown_setup_field > 0 => {
-                    self.countdown_setup_field -= 1;
-                }
-            Key::Right
-                if self.countdown_setup_field < 2 => {
-                    self.countdown_setup_field += 1;
-                }
+            Key::Left if self.countdown_setup_field > 0 => {
+                self.countdown_setup_field -= 1;
+            }
+            Key::Right if self.countdown_setup_field < 2 => {
+                self.countdown_setup_field += 1;
+            }
             Key::Up => {
                 let max = if self.countdown_setup_field == 0 {
                     23
@@ -394,10 +388,9 @@ impl StopwatchApp {
                     self.countdown_setup_values[self.countdown_setup_field] += 1;
                 }
             }
-            Key::Down
-                if self.countdown_setup_values[self.countdown_setup_field] > 0 => {
-                    self.countdown_setup_values[self.countdown_setup_field] -= 1;
-                }
+            Key::Down if self.countdown_setup_values[self.countdown_setup_field] > 0 => {
+                self.countdown_setup_values[self.countdown_setup_field] -= 1;
+            }
             _ => {}
         }
     }
@@ -756,9 +749,7 @@ impl StopwatchApp {
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
-            let best = rec
-                .best_lap_ms
-                .map_or(String::from("-"), format_time_short);
+            let best = rec.best_lap_ms.map_or(String::from("-"), format_time_short);
             cmds.push(RenderCommand::Text {
                 x: 340.0,
                 y: ry,
@@ -887,7 +878,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -1330,7 +1321,7 @@ mod tests {
             key: Key::Space,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.state, TimerState::Stopped);
     }

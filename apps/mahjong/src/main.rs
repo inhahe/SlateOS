@@ -25,7 +25,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{seed_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -367,10 +367,7 @@ fn turtle_layout() -> Vec<TilePos> {
     }
 
     // Layer 3: 4 wide x 2 tall = 8 tiles
-    let layer3: &[(usize, &[usize])] = &[
-        (3, &[5, 6, 7, 8]),
-        (4, &[5, 6, 7, 8]),
-    ];
+    let layer3: &[(usize, &[usize])] = &[(3, &[5, 6, 7, 8]), (4, &[5, 6, 7, 8])];
     for &(row, cols) in layer3 {
         for &col in cols {
             positions.push(TilePos { layer: 3, row, col });
@@ -378,10 +375,7 @@ fn turtle_layout() -> Vec<TilePos> {
     }
 
     // Layer 4: 2 wide x 2 tall = 4 tiles (cap)
-    let layer4: &[(usize, &[usize])] = &[
-        (3, &[6, 7]),
-        (4, &[6, 7]),
-    ];
+    let layer4: &[(usize, &[usize])] = &[(3, &[6, 7]), (4, &[6, 7])];
     for &(row, cols) in layer4 {
         for &col in cols {
             positions.push(TilePos { layer: 4, row, col });
@@ -513,9 +507,7 @@ impl Board {
 
     /// Find all currently free tile indices.
     fn free_tiles(&self) -> Vec<usize> {
-        (0..self.tiles.len())
-            .filter(|&i| self.is_free(i))
-            .collect()
+        (0..self.tiles.len()).filter(|&i| self.is_free(i)).collect()
     }
 
     /// Find a matching pair of free tiles, if one exists.
@@ -574,10 +566,7 @@ impl Board {
             .map(|(i, _)| i)
             .collect();
 
-        let mut kinds: Vec<TileKind> = active_indices
-            .iter()
-            .map(|&i| self.tiles[i].kind)
-            .collect();
+        let mut kinds: Vec<TileKind> = active_indices.iter().map(|&i| self.tiles[i].kind).collect();
 
         rng.shuffle(&mut kinds);
 
@@ -589,11 +578,9 @@ impl Board {
     /// Screen coordinates for a tile at the given index.
     fn tile_screen_pos(&self, idx: usize) -> Option<(f32, f32)> {
         self.tiles.get(idx).map(|t| {
-            let x = BOARD_OFFSET_X
-                + t.pos.col as f32 * (TILE_W + TILE_GAP_X)
+            let x = BOARD_OFFSET_X + t.pos.col as f32 * (TILE_W + TILE_GAP_X)
                 - t.pos.layer as f32 * LAYER_OFFSET_X;
-            let y = BOARD_OFFSET_Y
-                + t.pos.row as f32 * (TILE_H + TILE_GAP_Y)
+            let y = BOARD_OFFSET_Y + t.pos.row as f32 * (TILE_H + TILE_GAP_Y)
                 - t.pos.layer as f32 * LAYER_OFFSET_Y;
             (x, y)
         })
@@ -611,9 +598,13 @@ impl Board {
 
         for idx in indices {
             if let Some((tx, ty)) = self.tile_screen_pos(idx)
-                && sx >= tx && sx < tx + TILE_W && sy >= ty && sy < ty + TILE_H {
-                    return Some(idx);
-                }
+                && sx >= tx
+                && sx < tx + TILE_W
+                && sy >= ty
+                && sy < ty + TILE_H
+            {
+                return Some(idx);
+            }
         }
         None
     }
@@ -674,7 +665,9 @@ impl Mahjong {
             rng,
             seed,
             selected: None,
-            cursor: Cursor { tile_idx: first_free },
+            cursor: Cursor {
+                tile_idx: first_free,
+            },
             undo_stack: Vec::new(),
             moves: 0,
             status: GameStatus::Playing,
@@ -735,7 +728,10 @@ impl Mahjong {
                     // Deselect
                     self.selected = None;
                     self.message = None;
-                } else if self.board.tiles[prev].kind.matches(self.board.tiles[idx].kind) {
+                } else if self.board.tiles[prev]
+                    .kind
+                    .matches(self.board.tiles[idx].kind)
+                {
                     // Match found!
                     self.board.remove_pair(prev, idx);
                     self.undo_stack.push(UndoEntry {
@@ -750,9 +746,10 @@ impl Mahjong {
                     self.update_status();
                     // Update cursor to a free tile if current is removed.
                     if let Some(ci) = self.cursor.tile_idx
-                        && self.board.tiles.get(ci).is_none_or(|t| t.removed) {
-                            self.cursor.tile_idx = self.board.free_tiles().first().copied();
-                        }
+                        && self.board.tiles.get(ci).is_none_or(|t| t.removed)
+                    {
+                        self.cursor.tile_idx = self.board.free_tiles().first().copied();
+                    }
                 } else {
                     self.message = Some("Tiles don't match!");
                     self.selected = Some(idx);
@@ -840,9 +837,9 @@ impl Mahjong {
                 // Check if the tile is in the requested direction.
                 let in_direction = match (dx, dy) {
                     (1, 0) => delta_x > 1.0,   // right
-                    (-1, 0) => delta_x < -1.0,  // left
-                    (0, 1) => delta_y > 1.0,    // down
-                    (0, -1) => delta_y < -1.0,  // up
+                    (-1, 0) => delta_x < -1.0, // left
+                    (0, 1) => delta_y > 1.0,   // down
+                    (0, -1) => delta_y < -1.0, // up
                     _ => false,
                 };
 
@@ -904,10 +901,11 @@ impl Mahjong {
 
     fn handle_mouse(&mut self, event: &MouseEvent) {
         if let MouseEventKind::Press(MouseButton::Left) = event.kind
-            && let Some(idx) = self.board.tile_at_screen(event.x, event.y) {
-                self.cursor.tile_idx = Some(idx);
-                self.try_select(idx);
-            }
+            && let Some(idx) = self.board.tile_at_screen(event.x, event.y)
+        {
+            self.cursor.tile_idx = Some(idx);
+            self.try_select(idx);
+        }
     }
 
     fn handle_event(&mut self, event: &Event) {
@@ -1005,10 +1003,7 @@ impl Mahjong {
             let is_free = self.board.is_free(idx);
             let is_selected = self.selected == Some(idx);
             let is_cursor = self.cursor.tile_idx == Some(idx);
-            let is_hint = self.show_hint
-                && self
-                    .hint
-                    .is_some_and(|(a, b)| idx == a || idx == b);
+            let is_hint = self.show_hint && self.hint.is_some_and(|(a, b)| idx == a || idx == b);
 
             // Shadow (gives depth illusion for stacked layers)
             if tile.pos.layer > 0 {
@@ -1091,7 +1086,12 @@ impl Mahjong {
                 tile.kind.text_color()
             };
             cmds.push(RenderCommand::Text {
-                x: text::center_x(label, tx + TILE_W / 2.0, TILE_FONT_SIZE, FontWeightHint::Bold),
+                x: text::center_x(
+                    label,
+                    tx + TILE_W / 2.0,
+                    TILE_FONT_SIZE,
+                    FontWeightHint::Bold,
+                ),
                 y: ty + TILE_H / 2.0 - TILE_FONT_SIZE / 2.0,
                 text: label.into(),
                 color: text_color,
@@ -1216,7 +1216,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -1225,7 +1225,7 @@ mod tests {
             key,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -1462,7 +1462,11 @@ mod tests {
         // because we have 144 tiles. The layout can have more positions than tiles
         // if we trim.
         // Actually, let's verify the layout count.
-        assert!(layout.len() >= 144, "Layout has {} positions, need at least 144", layout.len());
+        assert!(
+            layout.len() >= 144,
+            "Layout has {} positions, need at least 144",
+            layout.len()
+        );
     }
 
     #[test]
@@ -1545,7 +1549,11 @@ mod tests {
     #[test]
     fn board_is_not_won_with_tiles() {
         let board = Board::from_parts(
-            &[TilePos { layer: 0, row: 0, col: 0 }],
+            &[TilePos {
+                layer: 0,
+                row: 0,
+                col: 0,
+            }],
             &[TileKind::Bamboo(1)],
         );
         assert!(!board.is_won());
@@ -1555,7 +1563,11 @@ mod tests {
     fn board_free_tile_no_neighbors() {
         // Single tile on layer 0 — should be free.
         let board = Board::from_parts(
-            &[TilePos { layer: 0, row: 0, col: 0 }],
+            &[TilePos {
+                layer: 0,
+                row: 0,
+                col: 0,
+            }],
             &[TileKind::Bamboo(1)],
         );
         assert!(board.is_free(0));
@@ -1565,24 +1577,48 @@ mod tests {
     fn board_tile_blocked_by_tile_above() {
         let board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 1, row: 0, col: 0 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 1,
+                    row: 0,
+                    col: 0,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
         );
         assert!(!board.is_free(0)); // bottom tile blocked by top
-        assert!(board.is_free(1));  // top tile is free
+        assert!(board.is_free(1)); // top tile is free
     }
 
     #[test]
     fn board_tile_blocked_both_sides() {
         let board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 1 },
-                TilePos { layer: 0, row: 0, col: 2 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 1,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 2,
+                },
             ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2), TileKind::Bamboo(3)],
+            &[
+                TileKind::Bamboo(1),
+                TileKind::Bamboo(2),
+                TileKind::Bamboo(3),
+            ],
         );
         // Middle tile (col=1) is blocked on left (col=0) and right (col=2).
         assert!(!board.is_free(1));
@@ -1595,8 +1631,16 @@ mod tests {
     fn board_tile_blocked_one_side_is_free() {
         let board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 1 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 1,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
         );
@@ -1608,7 +1652,11 @@ mod tests {
     #[test]
     fn board_removed_tile_not_free() {
         let mut board = Board::from_parts(
-            &[TilePos { layer: 0, row: 0, col: 0 }],
+            &[TilePos {
+                layer: 0,
+                row: 0,
+                col: 0,
+            }],
             &[TileKind::Bamboo(1)],
         );
         board.tiles[0].removed = true;
@@ -1619,11 +1667,27 @@ mod tests {
     fn board_free_tiles_returns_correct_count() {
         let board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 1 },
-                TilePos { layer: 0, row: 0, col: 2 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 1,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 2,
+                },
             ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2), TileKind::Bamboo(3)],
+            &[
+                TileKind::Bamboo(1),
+                TileKind::Bamboo(2),
+                TileKind::Bamboo(3),
+            ],
         );
         // Edge tiles are free, middle is not.
         assert_eq!(board.free_tiles().len(), 2);
@@ -1633,8 +1697,16 @@ mod tests {
     fn board_find_hint_with_match() {
         let board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
         );
@@ -1648,8 +1720,16 @@ mod tests {
     fn board_find_hint_no_match() {
         let board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
         );
@@ -1660,8 +1740,16 @@ mod tests {
     fn board_find_hint_season_wildcard() {
         let board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Season(0), TileKind::Season(3)],
         );
@@ -1672,8 +1760,16 @@ mod tests {
     fn board_find_hint_flower_wildcard() {
         let board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Flower(1), TileKind::Flower(2)],
         );
@@ -1684,8 +1780,16 @@ mod tests {
     fn board_is_lost_no_pairs() {
         let board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Circle(2)],
         );
@@ -1696,8 +1800,16 @@ mod tests {
     fn board_is_not_lost_with_pairs() {
         let board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
         );
@@ -1741,7 +1853,11 @@ mod tests {
     #[test]
     fn board_tile_at_screen_finds_tile() {
         let board = Board::from_parts(
-            &[TilePos { layer: 0, row: 0, col: 0 }],
+            &[TilePos {
+                layer: 0,
+                row: 0,
+                col: 0,
+            }],
             &[TileKind::Bamboo(1)],
         );
         let (tx, ty) = board.tile_screen_pos(0).unwrap();
@@ -1752,7 +1868,11 @@ mod tests {
     #[test]
     fn board_tile_at_screen_misses_empty() {
         let board = Board::from_parts(
-            &[TilePos { layer: 0, row: 0, col: 0 }],
+            &[TilePos {
+                layer: 0,
+                row: 0,
+                col: 0,
+            }],
             &[TileKind::Bamboo(1)],
         );
         // Far away from any tile.
@@ -1764,8 +1884,16 @@ mod tests {
     fn board_tile_at_screen_topmost_wins() {
         let board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 1, row: 0, col: 0 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 1,
+                    row: 0,
+                    col: 0,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
         );
@@ -1869,8 +1997,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
         );
@@ -1886,8 +2022,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
         );
@@ -1905,10 +2049,26 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
-                TilePos { layer: 0, row: 0, col: 10 },
-                TilePos { layer: 0, row: 0, col: 15 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 10,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 15,
+                },
             ],
             &[
                 TileKind::Bamboo(1),
@@ -1939,8 +2099,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
         );
@@ -1955,8 +2123,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Circle(2)],
         );
@@ -1998,8 +2174,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
         );
@@ -2016,8 +2200,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
         );
@@ -2136,7 +2328,11 @@ mod tests {
     fn app_mouse_click_selects_tile() {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
-            &[TilePos { layer: 0, row: 0, col: 0 }],
+            &[TilePos {
+                layer: 0,
+                row: 0,
+                col: 0,
+            }],
             &[TileKind::Bamboo(1)],
         );
         app.status = GameStatus::Playing;
@@ -2157,8 +2353,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
         );
@@ -2173,8 +2377,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Circle(2)],
         );
@@ -2197,8 +2409,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Circle(2)],
         );
@@ -2247,7 +2467,9 @@ mod tests {
     fn render_has_background() {
         let app = Mahjong::new();
         let cmds = app.render(900.0, 700.0);
-        let has_bg = cmds.iter().any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == BASE));
+        let has_bg = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == BASE));
         assert!(has_bg);
     }
 
@@ -2255,9 +2477,9 @@ mod tests {
     fn render_has_title() {
         let app = Mahjong::new();
         let cmds = app.render(900.0, 700.0);
-        let has_title = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text.contains("Mahjong"))
-        });
+        let has_title = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Mahjong")));
         assert!(has_title);
     }
 
@@ -2266,7 +2488,10 @@ mod tests {
         let app = Mahjong::new();
         let cmds = app.render(900.0, 700.0);
         // Should have tile rectangles (at least the number of visible tiles).
-        let rects = cmds.iter().filter(|c| matches!(c, RenderCommand::FillRect { .. })).count();
+        let rects = cmds
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::FillRect { .. }))
+            .count();
         assert!(rects >= 10); // Many tile backgrounds.
     }
 
@@ -2274,9 +2499,9 @@ mod tests {
     fn render_has_help_bar() {
         let app = Mahjong::new();
         let cmds = app.render(900.0, 700.0);
-        let has_help = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text.contains("Undo"))
-        });
+        let has_help = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Undo")));
         assert!(has_help);
     }
 
@@ -2284,9 +2509,9 @@ mod tests {
     fn render_has_legend() {
         let app = Mahjong::new();
         let cmds = app.render(900.0, 700.0);
-        let has_legend = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text.contains("Legend"))
-        });
+        let has_legend = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Legend")));
         assert!(has_legend);
     }
 
@@ -2295,17 +2520,25 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
         );
         app.status = GameStatus::Playing;
         app.try_select(0);
         let cmds = app.render(900.0, 700.0);
-        let has_selected = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::FillRect { color, .. } if *color == TILE_SELECTED)
-        });
+        let has_selected = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == TILE_SELECTED));
         assert!(has_selected);
     }
 
@@ -2314,8 +2547,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
         );
@@ -2336,15 +2577,26 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
         );
         app.cursor.tile_idx = Some(0);
         app.selected = None;
         let cmds = app.render(900.0, 700.0);
-        let line_count = cmds.iter().filter(|c| matches!(c, RenderCommand::Line { .. })).count();
+        let line_count = cmds
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::Line { .. }))
+            .count();
         assert!(line_count >= 4); // 4 edges for the cursor border.
     }
 
@@ -2355,9 +2607,9 @@ mod tests {
         app.status = GameStatus::Won;
         app.message = Some("You win! Press N for new game.");
         let cmds = app.render(900.0, 700.0);
-        let has_win = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text.contains("WIN"))
-        });
+        let has_win = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("WIN")));
         assert!(has_win);
     }
 
@@ -2366,9 +2618,9 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.status = GameStatus::Lost;
         let cmds = app.render(900.0, 700.0);
-        let has_lost = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text.contains("No valid"))
-        });
+        let has_lost = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("No valid")));
         assert!(has_lost);
     }
 
@@ -2377,9 +2629,9 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.message = Some("Test message");
         let cmds = app.render(900.0, 700.0);
-        let has_msg = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text.contains("Test message"))
-        });
+        let has_msg = cmds.iter().any(
+            |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Test message")),
+        );
         assert!(has_msg);
     }
 
@@ -2388,15 +2640,23 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 1, row: 1, col: 1 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 1,
+                    row: 1,
+                    col: 1,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
         );
         let cmds = app.render(900.0, 700.0);
-        let has_shadow = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::FillRect { color, .. } if *color == TILE_SHADOW)
-        });
+        let has_shadow = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == TILE_SHADOW));
         assert!(has_shadow);
     }
 
@@ -2404,13 +2664,17 @@ mod tests {
     fn render_no_shadow_on_layer_zero() {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
-            &[TilePos { layer: 0, row: 0, col: 0 }],
+            &[TilePos {
+                layer: 0,
+                row: 0,
+                col: 0,
+            }],
             &[TileKind::Bamboo(1)],
         );
         let cmds = app.render(900.0, 700.0);
-        let has_shadow = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::FillRect { color, .. } if *color == TILE_SHADOW)
-        });
+        let has_shadow = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == TILE_SHADOW));
         assert!(!has_shadow);
     }
 
@@ -2421,10 +2685,26 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
-                TilePos { layer: 0, row: 1, col: 0 },
-                TilePos { layer: 0, row: 1, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 1,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 1,
+                    col: 5,
+                },
             ],
             &[
                 TileKind::Bamboo(1),
@@ -2450,8 +2730,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
         );
@@ -2469,10 +2757,26 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
-                TilePos { layer: 0, row: 1, col: 0 },
-                TilePos { layer: 0, row: 1, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 1,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 1,
+                    col: 5,
+                },
             ],
             &[
                 TileKind::Bamboo(1),
@@ -2517,8 +2821,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Season(0), TileKind::Season(3)],
         );
@@ -2534,8 +2846,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Flower(0), TileKind::Flower(2)],
         );
@@ -2551,9 +2871,21 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
-                TilePos { layer: 1, row: 0, col: 0 }, // blocks tile 0
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
+                TilePos {
+                    layer: 1,
+                    row: 0,
+                    col: 0,
+                }, // blocks tile 0
             ],
             &[
                 TileKind::Bamboo(1),
@@ -2574,8 +2906,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
         );
@@ -2589,8 +2929,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
         );
@@ -2604,8 +2952,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 3, col: 0 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 3,
+                    col: 0,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
         );
@@ -2619,8 +2975,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 3, col: 0 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 3,
+                    col: 0,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
         );
@@ -2633,7 +2997,11 @@ mod tests {
     fn cursor_stays_if_no_tile_in_direction() {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
-            &[TilePos { layer: 0, row: 0, col: 0 }],
+            &[TilePos {
+                layer: 0,
+                row: 0,
+                col: 0,
+            }],
             &[TileKind::Bamboo(1)],
         );
         app.cursor.tile_idx = Some(0);
@@ -2652,11 +3020,27 @@ mod tests {
     fn board_from_parts_correct_count() {
         let board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 1 },
-                TilePos { layer: 0, row: 0, col: 2 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 1,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 2,
+                },
             ],
-            &[TileKind::Bamboo(1), TileKind::Bamboo(2), TileKind::Bamboo(3)],
+            &[
+                TileKind::Bamboo(1),
+                TileKind::Bamboo(2),
+                TileKind::Bamboo(3),
+            ],
         );
         assert_eq!(board.tiles.len(), 3);
         assert_eq!(board.remaining(), 3);
@@ -2769,10 +3153,26 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
-                TilePos { layer: 0, row: 1, col: 0 },
-                TilePos { layer: 0, row: 1, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 1,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 1,
+                    col: 5,
+                },
             ],
             &[
                 TileKind::Bamboo(1),
@@ -2795,10 +3195,26 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
-                TilePos { layer: 0, row: 1, col: 0 },
-                TilePos { layer: 0, row: 1, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 1,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 1,
+                    col: 5,
+                },
             ],
             &[
                 TileKind::Bamboo(1),
@@ -2818,7 +3234,11 @@ mod tests {
     #[test]
     fn board_tile_at_screen_respects_removed() {
         let mut board = Board::from_parts(
-            &[TilePos { layer: 0, row: 0, col: 0 }],
+            &[TilePos {
+                layer: 0,
+                row: 0,
+                col: 0,
+            }],
             &[TileKind::Bamboo(1)],
         );
         let (tx, ty) = board.tile_screen_pos(0).unwrap();
@@ -2831,8 +3251,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(1)],
         );
@@ -2850,8 +3278,16 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         app.board = Board::from_parts(
             &[
-                TilePos { layer: 0, row: 0, col: 0 },
-                TilePos { layer: 0, row: 0, col: 5 },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                },
+                TilePos {
+                    layer: 0,
+                    row: 0,
+                    col: 5,
+                },
             ],
             &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
         );

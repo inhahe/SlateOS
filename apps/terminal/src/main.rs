@@ -460,7 +460,10 @@ impl TerminalState {
             ParserState::Osc => self.osc_byte(byte),
             ParserState::OscEscape => self.osc_escape_byte(byte),
             ParserState::Dcs => self.dcs_byte(byte),
-            ParserState::Utf8 { remaining, codepoint } => {
+            ParserState::Utf8 {
+                remaining,
+                codepoint,
+            } => {
                 self.utf8_byte(byte, remaining, codepoint);
             }
         }
@@ -484,15 +487,24 @@ impl TerminalState {
             // UTF-8 multi-byte start
             0xC0..=0xDF => {
                 let codepoint = (byte as u32) & 0x1F;
-                self.parser_state = ParserState::Utf8 { remaining: 1, codepoint };
+                self.parser_state = ParserState::Utf8 {
+                    remaining: 1,
+                    codepoint,
+                };
             }
             0xE0..=0xEF => {
                 let codepoint = (byte as u32) & 0x0F;
-                self.parser_state = ParserState::Utf8 { remaining: 2, codepoint };
+                self.parser_state = ParserState::Utf8 {
+                    remaining: 2,
+                    codepoint,
+                };
             }
             0xF0..=0xF7 => {
                 let codepoint = (byte as u32) & 0x07;
-                self.parser_state = ParserState::Utf8 { remaining: 3, codepoint };
+                self.parser_state = ParserState::Utf8 {
+                    remaining: 3,
+                    codepoint,
+                };
             }
             // Printable ASCII or other single-byte
             0x20..=0x7E => {
@@ -579,7 +591,8 @@ impl TerminalState {
             // Parameter bytes
             b'0'..=b'9' => {
                 self.csi_param_started = true;
-                self.csi_current_param = self.csi_current_param
+                self.csi_current_param = self
+                    .csi_current_param
                     .saturating_mul(10)
                     .saturating_add((byte - b'0') as u16);
             }
@@ -682,7 +695,10 @@ impl TerminalState {
             self.put_char(ch);
             self.parser_state = ParserState::Ground;
         } else {
-            self.parser_state = ParserState::Utf8 { remaining, codepoint };
+            self.parser_state = ParserState::Utf8 {
+                remaining,
+                codepoint,
+            };
         }
     }
 
@@ -717,10 +733,11 @@ impl TerminalState {
 
         // Write the character to the cell
         if let Some(line) = self.screen.get_mut(self.cursor_row)
-            && let Some(cell) = line.cells.get_mut(self.cursor_col) {
-                cell.ch = ch;
-                cell.attrs = self.current_attrs;
-            }
+            && let Some(cell) = line.cells.get_mut(self.cursor_col)
+        {
+            cell.ch = ch;
+            cell.attrs = self.current_attrs;
+        }
 
         // Advance cursor
         if self.cursor_col >= cols.saturating_sub(1) {
@@ -797,12 +814,13 @@ impl TerminalState {
             if self.scroll_top == 0
                 && self.scroll_bottom == self.rows().saturating_sub(1)
                 && !self.alt_screen_active
-                && let Some(line) = self.screen.first() {
-                    self.scrollback.push_back(line.clone());
-                    if self.scrollback.len() > self.config.scrollback_limit {
-                        self.scrollback.pop_front();
-                    }
+                && let Some(line) = self.screen.first()
+            {
+                self.scrollback.push_back(line.clone());
+                if self.scrollback.len() > self.config.scrollback_limit {
+                    self.scrollback.pop_front();
                 }
+            }
 
             // Remove the top line of the scroll region and insert a blank at the bottom
             let top = self.scroll_top;
@@ -932,8 +950,8 @@ impl TerminalState {
                 let row = Self::param_or(params, 0, 1) as usize;
                 let col = Self::param_or(params, 1, 1) as usize;
                 let base_row = if self.origin_mode { self.scroll_top } else { 0 };
-                self.cursor_row = (base_row + row.saturating_sub(1))
-                    .min(self.rows().saturating_sub(1));
+                self.cursor_row =
+                    (base_row + row.saturating_sub(1)).min(self.rows().saturating_sub(1));
                 self.cursor_col = col.saturating_sub(1).min(self.cols().saturating_sub(1));
                 self.pending_wrap = false;
             }
@@ -1046,11 +1064,8 @@ impl TerminalState {
                     }
                     6 => {
                         // Cursor position report
-                        let report = format!(
-                            "\x1b[{};{}R",
-                            self.cursor_row + 1,
-                            self.cursor_col + 1
-                        );
+                        let report =
+                            format!("\x1b[{};{}R", self.cursor_row + 1, self.cursor_col + 1);
                         self.output_buffer.extend_from_slice(report.as_bytes());
                     }
                     _ => {}
@@ -1082,17 +1097,17 @@ impl TerminalState {
             }
 
             // Cursor style (DECSCUSR)
-            (b'q', None) if !self.csi_intermediates.is_empty()
-                && self.csi_intermediates[0] == b' ' =>
+            (b'q', None)
+                if !self.csi_intermediates.is_empty() && self.csi_intermediates[0] == b' ' =>
             {
                 let style = Self::param_or(params, 0, 1);
                 self.cursor_style = match style {
-                    0 | 1 => CursorStyle::Block,    // blinking block
-                    2 => CursorStyle::Block,         // steady block
-                    3 => CursorStyle::Underline,     // blinking underline
-                    4 => CursorStyle::Underline,     // steady underline
-                    5 => CursorStyle::Bar,           // blinking bar
-                    6 => CursorStyle::Bar,           // steady bar
+                    0 | 1 => CursorStyle::Block, // blinking block
+                    2 => CursorStyle::Block,     // steady block
+                    3 => CursorStyle::Underline, // blinking underline
+                    4 => CursorStyle::Underline, // steady underline
+                    5 => CursorStyle::Bar,       // blinking bar
+                    6 => CursorStyle::Bar,       // steady bar
                     _ => CursorStyle::Block,
                 };
                 self.config.cursor_blink = matches!(style, 0 | 1 | 3 | 5);
@@ -1112,7 +1127,11 @@ impl TerminalState {
 
     /// Get a CSI parameter by index, with a default value if not present.
     fn param_or(params: &[u16], index: usize, default: u16) -> u16 {
-        params.get(index).copied().filter(|&v| v != 0).unwrap_or(default)
+        params
+            .get(index)
+            .copied()
+            .filter(|&v| v != 0)
+            .unwrap_or(default)
     }
 
     // ========================================================================
@@ -1482,9 +1501,10 @@ impl TerminalState {
             for c in 0..count {
                 let target = col + c;
                 if target < cols
-                    && let Some(cell) = line.cells.get_mut(target) {
-                        *cell = Cell::default();
-                    }
+                    && let Some(cell) = line.cells.get_mut(target)
+                {
+                    *cell = Cell::default();
+                }
             }
         }
     }
@@ -1533,9 +1553,10 @@ impl TerminalState {
         self.tab_stops.resize(new_cols, false);
         for i in (0..new_cols).step_by(8) {
             if let Some(stop) = self.tab_stops.get_mut(i)
-                && !*stop {
-                    *stop = true;
-                }
+                && !*stop
+            {
+                *stop = true;
+            }
         }
 
         // Resize screen lines
@@ -1615,18 +1636,20 @@ impl TerminalState {
         let mods = &event.modifiers;
 
         // If there is a text character (and no ctrl/alt modifiers), send it as UTF-8
-        if let Some(ch) = event.text
-            && !mods.ctrl && !mods.alt {
-                let mut buf = [0u8; 4];
-                let encoded = ch.encode_utf8(&mut buf);
-                return encoded.as_bytes().to_vec();
-            }
+        // The whole run, not its first character: a dead key whose composition
+        // failed types two, and sending one would leave the shell reading a
+        // line the user never typed.
+        if !event.text.is_empty() && !mods.ctrl && !mods.alt {
+            return event.text.clone().into_bytes();
+        }
 
         // Ctrl+letter produces control characters (^A = 0x01, ^Z = 0x1A, etc.)
-        if mods.ctrl && !mods.alt
-            && let Some(code) = self.ctrl_key_code(&event.key) {
-                return vec![code];
-            }
+        if mods.ctrl
+            && !mods.alt
+            && let Some(code) = self.ctrl_key_code(&event.key)
+        {
+            return vec![code];
+        }
 
         // Alt+key sends ESC prefix
         let prefix = if mods.alt { b"\x1b" as &[u8] } else { &[] };
@@ -1767,7 +1790,7 @@ impl TerminalState {
             Key::X => Some(0x18),
             Key::Y => Some(0x19),
             Key::Z => Some(0x1A),
-            Key::LeftBracket => Some(0x1B),  // Ctrl+[ = ESC
+            Key::LeftBracket => Some(0x1B), // Ctrl+[ = ESC
             Key::Backslash => Some(0x1C),
             Key::RightBracket => Some(0x1D),
             _ => None,
@@ -1958,9 +1981,8 @@ impl TerminalState {
             let line = if self.scroll_offset > 0 {
                 // Viewing scrollback
                 let scrollback_len = self.scrollback.len();
-                let offset_from_top = scrollback_len
-                    .saturating_sub(self.scroll_offset)
-                    + screen_row;
+                let offset_from_top =
+                    scrollback_len.saturating_sub(self.scroll_offset) + screen_row;
                 if offset_from_top < scrollback_len {
                     // Drawing from scrollback
                     if let Some(l) = self.scrollback.get(offset_from_top) {
@@ -2008,12 +2030,8 @@ impl TerminalState {
                 }
 
                 if cell.attrs.dim {
-                    fg_color = Color::rgba(
-                        fg_color.r / 2,
-                        fg_color.g / 2,
-                        fg_color.b / 2,
-                        fg_color.a,
-                    );
+                    fg_color =
+                        Color::rgba(fg_color.r / 2, fg_color.g / 2, fg_color.b / 2, fg_color.a);
                 }
 
                 // Draw background if not default
@@ -2077,24 +2095,29 @@ impl TerminalState {
 
             match self.cursor_style {
                 CursorStyle::Block => {
-                    tree.fill_rect(cx, cy, cw, ch, Color::rgba(
-                        cursor_color.r, cursor_color.g, cursor_color.b, 180,
-                    ));
+                    tree.fill_rect(
+                        cx,
+                        cy,
+                        cw,
+                        ch,
+                        Color::rgba(cursor_color.r, cursor_color.g, cursor_color.b, 180),
+                    );
                     // Re-draw the character under the cursor in inverse
                     if let Some(line) = self.screen.get(self.cursor_row)
                         && let Some(cell) = line.cells.get(self.cursor_col)
-                            && cell.ch != ' ' {
-                                tree.push(RenderCommand::Text {
-                                    x: cx,
-                                    y: cy,
-                                    text: cell.ch.to_string(),
-                                    color: scheme.background,
-                                    font_size: self.config.font_size,
-                                    font_weight: FontWeightHint::Regular,
-                                    max_width: Some(cw),
-                                    overflow: TextOverflow::Ellipsis,
-                                });
-                            }
+                        && cell.ch != ' '
+                    {
+                        tree.push(RenderCommand::Text {
+                            x: cx,
+                            y: cy,
+                            text: cell.ch.to_string(),
+                            color: scheme.background,
+                            font_size: self.config.font_size,
+                            font_weight: FontWeightHint::Regular,
+                            max_width: Some(cw),
+                            overflow: TextOverflow::Ellipsis,
+                        });
+                    }
                 }
                 CursorStyle::Underline => {
                     let uy = cy + ch - 2.0;
@@ -2158,9 +2181,21 @@ impl TerminalState {
                         let b_component = idx % 6;
                         let g_component = (idx / 6) % 6;
                         let r_component = idx / 36;
-                        let r = if r_component > 0 { r_component * 40 + 55 } else { 0 };
-                        let g = if g_component > 0 { g_component * 40 + 55 } else { 0 };
-                        let b = if b_component > 0 { b_component * 40 + 55 } else { 0 };
+                        let r = if r_component > 0 {
+                            r_component * 40 + 55
+                        } else {
+                            0
+                        };
+                        let g = if g_component > 0 {
+                            g_component * 40 + 55
+                        } else {
+                            0
+                        };
+                        let b = if b_component > 0 {
+                            b_component * 40 + 55
+                        } else {
+                            0
+                        };
                         Color::rgb(r, g, b)
                     }
                     232..=255 => {
@@ -2211,9 +2246,10 @@ impl TerminalState {
             }
             MouseEventKind::Move => {
                 if let Some(ref sel) = self.selection
-                    && sel.active {
-                        self.selection_extend(event.x, event.y);
-                    }
+                    && sel.active
+                {
+                    self.selection_extend(event.x, event.y);
+                }
             }
             MouseEventKind::Release(MouseButton::Left) => {
                 self.selection_end();
@@ -2322,8 +2358,13 @@ mod tests {
             ..TerminalConfig::default()
         });
         for i in 0..lines {
-            term.feed(format!("line {i}
-").as_bytes());
+            term.feed(
+                format!(
+                    "line {i}
+"
+                )
+                .as_bytes(),
+            );
         }
         term
     }

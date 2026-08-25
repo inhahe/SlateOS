@@ -24,7 +24,7 @@ use guitk::event::{Event, Key, MouseButton, MouseEvent, MouseEventKind};
 #[cfg(test)]
 use guitk::event::{KeyEvent, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{seed_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -390,21 +390,24 @@ impl Match3 {
     /// Generate a random gem for (row, col) that does not create a match.
     fn random_gem_no_match(&mut self, row: usize, col: usize) -> Gem {
         loop {
-            let gem_type =
-                GemType::from_index(self.rng.below(GEM_TYPE_COUNT as usize) as u8);
+            let gem_type = GemType::from_index(self.rng.below(GEM_TYPE_COUNT as usize) as u8);
             let gem = Gem::new(gem_type);
             // Check horizontal: if two to the left are the same type, skip.
             if col >= 2
                 && let (Some(a), Some(b)) = (self.board[row][col - 1], self.board[row][col - 2])
-                    && a.gem_type == gem_type && b.gem_type == gem_type {
-                        continue;
-                    }
+                && a.gem_type == gem_type
+                && b.gem_type == gem_type
+            {
+                continue;
+            }
             // Check vertical: if two above are the same type, skip.
             if row >= 2
                 && let (Some(a), Some(b)) = (self.board[row - 1][col], self.board[row - 2][col])
-                    && a.gem_type == gem_type && b.gem_type == gem_type {
-                        continue;
-                    }
+                && a.gem_type == gem_type
+                && b.gem_type == gem_type
+            {
+                continue;
+            }
             return gem;
         }
     }
@@ -557,12 +560,13 @@ impl Match3 {
                             for r in 0..GRID_SIZE {
                                 for c in 0..GRID_SIZE {
                                     if let Some(g) = self.board[r][c]
-                                        && g.gem_type == target_type {
-                                            let p = Pos::new(r, c);
-                                            if !to_remove.contains(&p) {
-                                                to_remove.push(p);
-                                            }
+                                        && g.gem_type == target_type
+                                    {
+                                        let p = Pos::new(r, c);
+                                        if !to_remove.contains(&p) {
+                                            to_remove.push(p);
                                         }
+                                    }
                                 }
                             }
                         }
@@ -576,11 +580,12 @@ impl Match3 {
 
             // Place special gem if one was determined.
             if let Some((pos, special)) = special_pos
-                && let Some(gem) = self.board[pos.row][pos.col] {
-                    self.board[pos.row][pos.col] = Some(Gem::with_special(gem.gem_type, special));
-                    // Remove this position from the removal list so the special gem survives.
-                    to_remove.retain(|&p| p != pos);
-                }
+                && let Some(gem) = self.board[pos.row][pos.col]
+            {
+                self.board[pos.row][pos.col] = Some(Gem::with_special(gem.gem_type, special));
+                // Remove this position from the removal list so the special gem survives.
+                to_remove.retain(|&p| p != pos);
+            }
         }
 
         // Remove matched gems.
@@ -1369,10 +1374,9 @@ impl Match3 {
 
     fn handle_event(&mut self, event: &Event) {
         match event {
-            Event::Key(ke)
-                if ke.pressed => {
-                    self.handle_key(ke.key);
-                }
+            Event::Key(ke) if ke.pressed => {
+                self.handle_key(ke.key);
+            }
             Event::Mouse(me) => self.handle_mouse(me),
             Event::Tick { elapsed_ms } => self.handle_tick(*elapsed_ms),
             _ => {}
@@ -1414,22 +1418,18 @@ impl Match3 {
         }
 
         match key {
-            Key::Left
-                if self.cursor.col > 0 => {
-                    self.cursor.col -= 1;
-                }
-            Key::Right
-                if self.cursor.col < GRID_SIZE - 1 => {
-                    self.cursor.col += 1;
-                }
-            Key::Up
-                if self.cursor.row > 0 => {
-                    self.cursor.row -= 1;
-                }
-            Key::Down
-                if self.cursor.row < GRID_SIZE - 1 => {
-                    self.cursor.row += 1;
-                }
+            Key::Left if self.cursor.col > 0 => {
+                self.cursor.col -= 1;
+            }
+            Key::Right if self.cursor.col < GRID_SIZE - 1 => {
+                self.cursor.col += 1;
+            }
+            Key::Up if self.cursor.row > 0 => {
+                self.cursor.row -= 1;
+            }
+            Key::Down if self.cursor.row < GRID_SIZE - 1 => {
+                self.cursor.row += 1;
+            }
             Key::Enter | Key::Space => {
                 self.select_or_swap(self.cursor);
             }
@@ -2297,7 +2297,7 @@ mod tests {
             key: Key::N,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('n'),
+            text: "n".to_string(),
         }));
         assert_eq!(game.score, 0);
     }
@@ -2310,7 +2310,7 @@ mod tests {
             key: Key::Num1,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('1'),
+            text: "1".to_string(),
         }));
         assert_eq!(game.mode, GameMode::Classic);
     }
@@ -2322,7 +2322,7 @@ mod tests {
             key: Key::Num2,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('2'),
+            text: "2".to_string(),
         }));
         assert_eq!(game.mode, GameMode::Timed);
     }
@@ -2334,7 +2334,7 @@ mod tests {
             key: Key::Num3,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('3'),
+            text: "3".to_string(),
         }));
         assert_eq!(game.mode, GameMode::Moves);
     }
@@ -2356,7 +2356,7 @@ mod tests {
             key: Key::N,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }));
         // Should not create a new game (key release ignored).
         // Can't easily verify no-op, but at least no panic.
@@ -2893,25 +2893,25 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }));
         game.handle_event(&Event::Key(KeyEvent {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }));
         game.handle_event(&Event::Key(KeyEvent {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }));
         game.handle_event(&Event::Key(KeyEvent {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }));
         // Tick forward.
         game.handle_event(&Event::Tick { elapsed_ms: 100 });

@@ -712,13 +712,11 @@ impl ScaledFont {
             &mut jamo,
             |ch| self.face.glyph_index(ch).is_some(),
             |ch| {
-                self.face
-                    .glyph_index(ch)
-                    .is_some_and(|gid| {
-                        self.face
-                            .advance_at(gid, &self.coords)
-                            .is_ok_and(|adv| adv == 0)
-                    })
+                self.face.glyph_index(ch).is_some_and(|gid| {
+                    self.face
+                        .advance_at(gid, &self.coords)
+                        .is_ok_and(|adv| adv == 0)
+                })
             },
         );
         // Unicode variation sequences: two characters that name one glyph, and
@@ -1032,7 +1030,9 @@ impl ScaledFont {
             }
             for at in segment.start..segment.end {
                 let Some(glyph) = glyphs.get(at) else { break };
-                if glyph.mark && let Some(slot) = roles.get_mut(at) {
+                if glyph.mark
+                    && let Some(slot) = roles.get_mut(at)
+                {
                     *slot = Role::Mark(glyph.klass);
                 }
             }
@@ -1665,10 +1665,7 @@ impl ScaledFont {
                 // an accent in, and a letter whose ink overhangs its cell
                 // (an italic `f`) would otherwise drag the accent out with it.
                 origin.x_bearing = 0;
-                origin.width = self
-                    .face
-                    .advance_at(gid, &self.coords)
-                    .map_or(0, i32::from);
+                origin.width = self.face.advance_at(gid, &self.coords).map_or(0, i32::from);
                 origin
             });
             for i in base.saturating_add(1)..end {
@@ -1682,7 +1679,9 @@ impl ScaledFont {
                 if origin.is_some() && k == 0 {
                     continue;
                 }
-                let Some(glyph) = glyphs.get_mut(i) else { break };
+                let Some(glyph) = glyphs.get_mut(i) else {
+                    break;
+                };
                 // Only on the no-base route does the offset move with the
                 // advance. On the other one the mark is about to be placed
                 // outright, offset and all, so shifting it first would be
@@ -3240,11 +3239,23 @@ mod tests {
         // will mirror them.
         let levels = byte_levels("(123)", Base::Rtl);
         assert_eq!(levels.len(), 5);
-        assert!(!levels[0].is_multiple_of(2), "the opening bracket is at {}", levels[0]);
-        assert!(!levels[4].is_multiple_of(2), "the closing bracket is at {}", levels[4]);
+        assert!(
+            !levels[0].is_multiple_of(2),
+            "the opening bracket is at {}",
+            levels[0]
+        );
+        assert!(
+            !levels[4].is_multiple_of(2),
+            "the closing bracket is at {}",
+            levels[4]
+        );
         // The digits are `EN`, which rule I1 raises to an even level inside an
         // odd-level run — they are drawn left to right inside a right-to-left
         // paragraph, which is how numbers work in Hebrew and Arabic.
-        assert!(levels[1].is_multiple_of(2), "the digits are at {}", levels[1]);
+        assert!(
+            levels[1].is_multiple_of(2),
+            "the digits are at {}",
+            levels[1]
+        );
     }
 }

@@ -743,10 +743,7 @@ mod tests {
     fn the_nikhahit_from_a_sara_am_is_shifted_like_any_other_vowel() {
         // The two passes in sequence: SARA AM splits, and the circle it left
         // above PO PLA then has to clear PO PLA's ascender.
-        assert_eq!(
-            pua("\u{0E1B}\u{0E33}", WIN),
-            vec![None, Some(0xF711), None]
-        );
+        assert_eq!(pua("\u{0E1B}\u{0E33}", WIN), vec![None, Some(0xF711), None]);
     }
 
     #[test]

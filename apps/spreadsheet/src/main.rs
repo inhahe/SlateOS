@@ -3314,7 +3314,8 @@ impl SpreadsheetApp {
                 EventResult::Consumed
             }
             Key::Home => {
-                *self.selection_mut() = Selection::single(CellAddr::new(0, self.selection().active.row));
+                *self.selection_mut() =
+                    Selection::single(CellAddr::new(0, self.selection().active.row));
                 self.ensure_cell_visible(self.selection().active);
                 EventResult::Consumed
             }
@@ -3366,11 +3367,10 @@ impl SpreadsheetApp {
             }
             _ => {
                 // Start editing if a printable character is typed
-                if let Some(ch) = event.text
-                    && !ch.is_control()
-                {
+                let typed: String = event.typed().collect();
+                if !typed.is_empty() {
                     self.mode = InteractionMode::Editing {
-                        buffer: EditBuffer::at_end(String::from(ch)),
+                        buffer: EditBuffer::at_end(typed),
                     };
                     return EventResult::Consumed;
                 }
@@ -3405,11 +3405,7 @@ impl SpreadsheetApp {
                 EventResult::Consumed
             }
             _ => {
-                if let Some(ch) = event.text
-                    && !ch.is_control()
-                {
-                    self.find_replace.search_text.push(ch);
-                }
+                self.find_replace.search_text.extend(event.typed());
                 EventResult::Consumed
             }
         }
@@ -4172,7 +4168,13 @@ impl SpreadsheetApp {
         let frozen_right = self.frozen_right();
         let grid_right = self.grid_right();
 
-        self.push_clip_rect(cmds, frozen_right, y, grid_right - frozen_right, COL_HEADER_HEIGHT);
+        self.push_clip_rect(
+            cmds,
+            frozen_right,
+            y,
+            grid_right - frozen_right,
+            COL_HEADER_HEIGHT,
+        );
         for col in frozen_cols..MAX_COLS {
             self.render_col_header(cmds, col, y);
         }
@@ -5131,10 +5133,10 @@ fn handle_editing_key(buffer: &mut EditBuffer, event: &KeyEvent) -> EventResult 
             EventResult::Consumed
         }
         _ => {
-            if let Some(ch) = event.text
-                && !ch.is_control()
-            {
-                buffer.insert(ch);
+            if event.types_text() {
+                for ch in event.typed() {
+                    buffer.insert(ch);
+                }
                 return EventResult::Consumed;
             }
             EventResult::Ignored
@@ -6900,7 +6902,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text,
+            text: text.map_or_else(String::new, |c| c.to_string()),
         }
     }
 
@@ -7552,7 +7554,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         })
     }
 

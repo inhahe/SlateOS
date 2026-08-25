@@ -1816,7 +1816,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_row, 4);
 
@@ -1824,7 +1824,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_col, 4);
 
@@ -1832,7 +1832,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_row, 3);
 
@@ -1840,7 +1840,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_col, 3);
     }
@@ -1854,7 +1854,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_row, 0); // Stays at 0
 
@@ -1862,7 +1862,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_col, 0); // Stays at 0
 
@@ -1872,7 +1872,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_row, 7); // Stays at 7
 
@@ -1880,7 +1880,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_col, 7); // Stays at 7
     }
@@ -1895,7 +1895,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         // After human places, AI should also have moved
         assert!(!app.move_history.is_empty());
@@ -1912,7 +1912,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert!(app.move_history.is_empty());
         assert!(app.message.contains("Illegal"));
@@ -1928,7 +1928,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert!(!app.move_history.is_empty());
 
@@ -1937,7 +1937,7 @@ mod tests {
             key: Key::N,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert!(app.move_history.is_empty());
         assert_eq!(app.board.count(Cell::Black), 2);
@@ -1951,7 +1951,7 @@ mod tests {
             key: Key::Down,
             pressed: false, // Release, not press
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_row, 3); // Unchanged
     }
@@ -2627,7 +2627,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.cursor_row, 4);
 
@@ -2657,7 +2657,7 @@ mod tests {
             key: Key::Space,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert!(!app.move_history.is_empty());
         assert_eq!(app.move_history[0].pos, Pos::new(2, 3));
@@ -2671,7 +2671,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.phase, Phase::Playing);
         assert!(app.move_history.is_empty());

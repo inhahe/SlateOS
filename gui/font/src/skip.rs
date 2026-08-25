@@ -705,7 +705,14 @@ mod tests {
     fn a_lookup_with_no_flag_skips_nothing() {
         let data = gdef(2, None, None);
         let defs = Definitions::parse(&data, Some(span(data.len())));
-        let skip = Skipper::new(&data, defs, 0, 0, u64::MAX, Joiners::substitution(false, false));
+        let skip = Skipper::new(
+            &data,
+            defs,
+            0,
+            0,
+            u64::MAX,
+            Joiners::substitution(false, false),
+        );
         assert!(skip.is_trivial());
         let glyphs = run(&[1, 10, 2]);
         // The mark at 1 is visible: nothing asked for it to be hidden.
@@ -1054,8 +1061,8 @@ mod tests {
             );
             // The same run under the automatic rule: the ZWJ is stepped over,
             // so the difference the flag makes is visible in one assertion.
-            let auto =
-                plain(&data, Joiners::substitution(false, false)).next_matching(&glyphs, 0, wants_3);
+            let auto = plain(&data, Joiners::substitution(false, false))
+                .next_matching(&glyphs, 0, wants_3);
             assert_eq!(auto, (kind == Ignorable::Zwj).then_some(2));
         }
     }
@@ -1093,7 +1100,14 @@ mod tests {
     fn a_walk_that_runs_out_of_run_fails_rather_than_matching_short() {
         let data = gdef(2, None, None);
         let defs = Definitions::parse(&data, Some(span(data.len())));
-        let skip = Skipper::new(&data, defs, 0, 0, u64::MAX, Joiners::substitution(false, false));
+        let skip = Skipper::new(
+            &data,
+            defs,
+            0,
+            0,
+            u64::MAX,
+            Joiners::substitution(false, false),
+        );
         let glyphs = run(&[1, 2]);
         assert_eq!(skip.walk_forward(&glyphs, 0, 3, |_, _| Some(())), None);
         assert!(skip.walk_backward(&glyphs, 1, 2, |_, _| Some(())).is_none());

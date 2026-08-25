@@ -1184,23 +1184,23 @@ impl InputDialog {
                 self.cursor = TextCursor::from(self.input_text.len());
             }
             _ => {
-                if let Some(ch) = event.text
-                    && !ch.is_control()
-                {
-                    // Typing over a selection replaces it, so the character
-                    // lands where the selection was rather than beside it.
+                if event.types_text() {
+                    // Typing over a selection replaces it, so the characters
+                    // land where the selection was rather than beside it.
                     crate::textedit::delete_selection(
                         &mut self.input_text,
                         &mut self.cursor,
                         &mut self.selection_anchor,
                     );
-                    self.input_text.insert(self.cursor.byte(), ch);
-                    // The boundary after the caret, once the text has the new
-                    // character in it, is where the typing left the caret.
-                    self.cursor = self
-                        .cursor
-                        .next_in(&self.input_text)
-                        .unwrap_or_else(|| TextCursor::from(self.input_text.len()));
+                    for ch in event.typed() {
+                        self.input_text.insert(self.cursor.byte(), ch);
+                        // The boundary after the caret, once the text has the
+                        // new character in it, is where the typing left it.
+                        self.cursor = self
+                            .cursor
+                            .next_in(&self.input_text)
+                            .unwrap_or_else(|| TextCursor::from(self.input_text.len()));
+                    }
                     self.validation_error = None;
                 }
             }
@@ -2789,7 +2789,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let result = overlay.handle_key(&key);
         assert_eq!(result, Some(DialogResult::Dismissed));
@@ -2806,7 +2806,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let result = overlay.handle_key(&key);
         assert_eq!(result, None);
@@ -2891,7 +2891,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&event);
         assert_eq!(dialog.result(), Some(&DialogResult::Ok));
@@ -2908,7 +2908,7 @@ mod tests {
             key: Key::Tab,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&tab);
         assert_eq!(dialog.focused_button(), 1);
@@ -2930,7 +2930,7 @@ mod tests {
             key: Key::Tab,
             pressed: true,
             modifiers: Modifiers::shift(),
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&shift_tab);
         assert_eq!(dialog.focused_button(), 2); // Wraps to last.
@@ -2945,7 +2945,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&esc);
         assert_eq!(dialog.result(), Some(&DialogResult::Dismissed));
@@ -2960,7 +2960,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&esc);
         // Should not have dismissed.
@@ -3196,7 +3196,7 @@ mod tests {
             key: Key::H,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('h'),
+            text: "h".to_string(),
         });
         dialog.handle_event(&event);
         assert_eq!(dialog.input_text(), "h");
@@ -3206,7 +3206,7 @@ mod tests {
             key: Key::I,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('i'),
+            text: "i".to_string(),
         });
         dialog.handle_event(&event);
         assert_eq!(dialog.input_text(), "hi");
@@ -3221,7 +3221,7 @@ mod tests {
             key: Key::Backspace,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&bs);
         assert_eq!(dialog.input_text(), "hell");
@@ -3237,7 +3237,7 @@ mod tests {
             key: Key::Delete,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&del);
         assert_eq!(dialog.input_text(), "ello");
@@ -3254,7 +3254,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&left);
         assert_eq!(dialog.cursor.byte(), 4);
@@ -3264,7 +3264,7 @@ mod tests {
             key: Key::Home,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&home);
         assert_eq!(dialog.cursor.byte(), 0);
@@ -3274,7 +3274,7 @@ mod tests {
             key: Key::End,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&end);
         assert_eq!(dialog.cursor.byte(), 5);
@@ -3295,7 +3295,7 @@ mod tests {
                 key: Key::Unknown(0),
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: Some(ch),
+                text: ch.to_string(),
             })
         }
         fn pressed(key: Key) -> Event {
@@ -3303,7 +3303,7 @@ mod tests {
                 key,
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: None,
+                text: String::new(),
             })
         }
 
@@ -3339,7 +3339,7 @@ mod tests {
             key: k,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         })
     }
 
@@ -3428,7 +3428,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&enter);
         assert_eq!(
@@ -3446,7 +3446,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&esc);
         assert_eq!(dialog.result(), Some(&DialogResult::Cancel));
@@ -3464,7 +3464,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&enter);
         // Should not accept because there is a validation error.
@@ -3483,7 +3483,7 @@ mod tests {
             key: Key::A,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('a'),
+            text: "a".to_string(),
         });
         dialog.handle_event(&event);
         assert!(!dialog.has_validation_error());
@@ -3503,7 +3503,7 @@ mod tests {
                 } else {
                     Modifiers::NONE
                 },
-                text: None,
+                text: String::new(),
             })
         }
 
@@ -3546,7 +3546,7 @@ mod tests {
                 } else {
                     Modifiers::NONE
                 },
-                text: None,
+                text: String::new(),
             }));
             assert_eq!(dialog.focused_button(), 0);
         }
@@ -3562,7 +3562,7 @@ mod tests {
             key: Key::Tab,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&tab);
         assert_eq!(dialog.focused_element, InputFocus::OkButton);
@@ -3662,7 +3662,7 @@ mod tests {
                 shift,
                 ..Modifiers::NONE
             },
-            text: None,
+            text: String::new(),
         })
     }
 
@@ -3765,7 +3765,7 @@ mod tests {
             key: Key::Z,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('Z'),
+            text: "Z".to_string(),
         }));
         assert_eq!(dialog.input_text, "Zdef");
         assert_eq!(dialog.cursor.byte(), 1);
@@ -3940,7 +3940,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&esc);
         assert!(dialog.is_cancelled());
@@ -3955,7 +3955,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         dialog.handle_event(&esc);
         assert!(!dialog.is_cancelled());
@@ -4535,7 +4535,7 @@ mod tests {
             key: Key::X,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('x'),
+            text: "x".to_string(),
         }));
         assert_eq!(dialog.input_text, "x");
     }

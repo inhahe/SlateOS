@@ -18,7 +18,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{seed_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
 
 // ---------------------------------------------------------------------------
@@ -501,7 +501,9 @@ impl Game2048App {
     }
 
     fn handle_event(&mut self, event: &Event) {
-        if let Event::Key(ke) = event { self.handle_key(ke) }
+        if let Event::Key(ke) = event {
+            self.handle_key(ke)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1394,7 +1396,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.state.grid[0][0], 4);
     }
@@ -1407,7 +1409,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.state.grid[0][3], 4);
     }
@@ -1420,7 +1422,7 @@ mod tests {
             key: Key::A,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('a'),
+            text: "a".to_string(),
         });
         assert_eq!(app.state.grid[0][0], 4);
     }
@@ -1433,13 +1435,13 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_key(&KeyEvent {
             key: Key::U,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('u'),
+            text: "u".to_string(),
         });
         assert_eq!(app.state.grid, grid_before);
     }
@@ -1452,13 +1454,13 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_key(&KeyEvent {
             key: Key::Z,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.state.grid, grid_before);
     }
@@ -1471,7 +1473,7 @@ mod tests {
             key: Key::N,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('n'),
+            text: "n".to_string(),
         });
         assert_eq!(app.state.score, 0);
         assert_eq!(app.state.moves_count, 0);
@@ -1485,14 +1487,14 @@ mod tests {
             key: Key::H,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('h'),
+            text: "h".to_string(),
         });
         assert!(app.show_help);
         app.handle_key(&KeyEvent {
             key: Key::H,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('h'),
+            text: "h".to_string(),
         });
         assert!(!app.show_help);
     }
@@ -1505,7 +1507,7 @@ mod tests {
             key: Key::C,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('c'),
+            text: "c".to_string(),
         });
         assert_eq!(app.state.status, GameStatus::WonContinuing);
     }
@@ -1518,7 +1520,7 @@ mod tests {
             key: Key::Left,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.state.grid, grid_before);
     }
@@ -1532,7 +1534,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.state.grid, grid_before);
     }
@@ -1702,7 +1704,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.state.grid[0][0], 4);
     }

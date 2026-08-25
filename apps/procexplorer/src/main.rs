@@ -1075,10 +1075,12 @@ impl ProcessExplorerState {
                 EventResult::Consumed
             }
             _ => {
-                if let Some(ch) = key.text
-                    && (ch.is_ascii_graphic() || ch == ' ')
-                {
-                    self.filter_text.push(ch);
+                let allowed: String = key
+                    .typed()
+                    .filter(|ch| ch.is_ascii_graphic() || *ch == ' ')
+                    .collect();
+                if !allowed.is_empty() {
+                    self.filter_text.push_str(&allowed);
                     self.rebuild_visible_list();
                 }
                 EventResult::Consumed

@@ -2248,7 +2248,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::default(),
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(app.dir_queue.len(), 1);

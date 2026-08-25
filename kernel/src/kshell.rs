@@ -11656,6 +11656,81 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "cmd | awk: a real program is success");
     }
 
+    serial_println!("  kshell::self_test 34: a named file wins over the pipe that feeds it");
+    // The same screen that found rung 33's bug found five commands whose piped
+    // halves parsed a file operand out of their arguments and then threw it
+    // away: `cut`, `fold`, `sed`, `awk` and `mapfile`. So `cat a | cut -f1 b`
+    // cut `a` and never opened `b` -- no error, no warning, exit 0. The other
+    // eleven paired commands all honour the operand, and so does GNU.
+    //
+    // Each check below pipes one token and names a file containing a *different*
+    // token, so the two possible answers are distinguishable in the output.
+    // Asserting only that the file's contents appear would not do it: a command
+    // that read both would pass that.
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        let file = "/tmp/kshell_operand.txt";
+        let pipe: &[u8] = b"zz_from_pipe\n";
+
+        crate::fs::Vfs::write_file(file, b"zz_from_file\n")?;
+        let out = piped(&alloc::format!("cut -c1-99 {}", file), pipe);
+        assert_output_contains("cut reads the named file", &out, b"zz_from_file");
+        assert_output_lacks("and not the pipe", &out, b"zz_from_pipe");
+
+        let out = piped(&alloc::format!("fold -w99 {}", file), pipe);
+        assert_output_contains("fold reads the named file", &out, b"zz_from_file");
+        assert_output_lacks("and not the pipe", &out, b"zz_from_pipe");
+
+        let out = piped(&alloc::format!("awk {{print}} {}", file), pipe);
+        assert_output_contains("awk reads the named file", &out, b"zz_from_file");
+        assert_output_lacks("and not the pipe", &out, b"zz_from_pipe");
+
+        // `sed` needs a script whose output distinguishes the two sources, so
+        // it substitutes on a word only the file contains.
+        let out = piped(
+            &alloc::format!("sed s/zz_from_file/zz_seen/ {}", file),
+            pipe,
+        );
+        assert_output_contains("sed reads the named file", &out, b"zz_seen");
+        assert_output_lacks("and not the pipe", &out, b"zz_from_pipe");
+
+        // `mapfile` stores rather than prints, so this reads the array back.
+        let _ = piped(&alloc::format!("mapfile -t ZZARR {}", file), pipe);
+        let out = capture_command("echo ${ZZARR[0]}");
+        assert_output_contains(
+            "mapfile fills the array from the file",
+            &out,
+            b"zz_from_file",
+        );
+        assert_output_lacks("and not from the pipe", &out, b"zz_from_pipe");
+
+        // With no file named, the pipe is still what gets read -- otherwise
+        // "the file wins" would have been implemented as "the pipe never wins".
+        let out = piped("cut -c1-99", pipe);
+        assert_output_contains(
+            "with no file, cut still reads the pipe",
+            &out,
+            b"zz_from_pipe",
+        );
+        assert_eq!(last_exit(), 0, "and that is a success");
+
+        // `sed -i` asks for a file to be rewritten. Given none, filtering the
+        // pipe and reporting success told the user a file had been edited that
+        // had not been -- the one case in this group that loses work.
+        let out = piped("sed -i s/zz_from_pipe/zz_seen/", pipe);
+        assert_output_lacks(
+            "sed -i with no file does not filter the pipe",
+            &out,
+            b"zz_seen",
+        );
+        assert_eq!(last_exit(), 1, "sed -i with nothing to edit is a failure");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -106322,8 +106397,16 @@ fn cmd_cut(args: &str) {
     }
 }
 
+/// `cut` on piped input. A named file wins over the pipe, as it does in GNU
+/// and as it does for every other paired command here; this used to parse the
+/// file operand out of the arguments and then throw it away, so
+/// `cat a.txt | cut -f1 b.txt` cut `a.txt` and never opened `b.txt`.
 fn cmd_cut_input(args: &str, input: &str) {
-    let (delim, fields, chars_range, _) = parse_cut_args(args);
+    let (delim, fields, chars_range, file) = parse_cut_args(args);
+    if file.is_some() {
+        cmd_cut(args);
+        return;
+    }
     cut_process(input, delim, &fields, chars_range);
 }
 
@@ -106640,8 +106723,14 @@ fn cmd_fold(args: &str) {
     }
 }
 
+/// `fold` on piped input. As with [`cmd_cut_input`], a named file wins over
+/// the pipe rather than being parsed and discarded.
 fn cmd_fold_input(args: &str, input: &str) {
-    let (width, _) = parse_fold_args(args);
+    let (width, file) = parse_fold_args(args);
+    if file.is_some() {
+        cmd_fold(args);
+        return;
+    }
     fold_process(input, width);
 }
 
@@ -107517,11 +107606,23 @@ fn cmd_mapfile_input(args: &str, input: &str) {
         }
     }
 
-    let var_name = if rest.is_empty() {
-        "MAPFILE"
-    } else {
-        rest.split_whitespace().next().unwrap_or("MAPFILE")
-    };
+    let mut words = rest.split_whitespace();
+    let var_name = words.next().unwrap_or("MAPFILE");
+
+    // A file operand wins over the pipe, matching the rest of this shell's
+    // paired commands. This used to take only the first word and silently drop
+    // the rest, so `cat a | mapfile ARR b` filled ARR from `a`.
+    //
+    // Note bash's own `mapfile` takes no file operand at all and would reject
+    // this as "too many arguments"; the file operand is this shell's own
+    // extension, so the consistent reading of it is the one that agrees with
+    // `cmd_mapfile`, not the one that agrees with bash about a spelling bash
+    // does not have.
+    if words.next().is_some() {
+        cmd_mapfile(args);
+        return;
+    }
+
     mapfile_store(var_name, input, strip_newlines);
     set_exit(0);
 }
@@ -119325,9 +119426,68 @@ fn cmd_lz4(args: &str) {
 ///   sed '/pattern/d' file.txt          Delete matching lines
 ///   sed -n '/pattern/p' file.txt       Print matching lines (like grep)
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-fn cmd_sed(args: &str) {
+/// A `sed` argument string, classified into its four parts.
+struct SedArgs<'a> {
+    /// `-i` was given: edit the files in place rather than printing.
+    in_place: bool,
+    /// `-n` was given: print only what a `p` command asks for.
+    suppress: bool,
+    /// The script words, in the order they were given.
+    scripts: alloc::vec::Vec<alloc::string::String>,
+    /// Everything that is neither a flag nor the script: the file operands.
+    files: alloc::vec::Vec<&'a str>,
+}
+
+/// Split a `sed` argument string into flags, script and file operands.
+///
+/// Shared by [`cmd_sed`] and [`cmd_sed_input`] because they had two copies of
+/// this loop, and the copies had already drifted: the pipe copy dropped the
+/// `-i` arm and never collected files at all. So `cat f | sed -i 's/a/b/'`
+/// filtered the pipe, left `f` untouched, and reported success — the user
+/// asked for an in-place edit and got a filter. Two copies of a parser is how
+/// one command comes to disagree with itself, which is the fault this whole
+/// line of work has been chasing; one copy is the fix that stops it recurring.
+fn classify_sed_args(args: &str) -> SedArgs<'_> {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
-    if parts.is_empty() {
+    let mut out = SedArgs {
+        in_place: false,
+        suppress: false,
+        scripts: alloc::vec::Vec::new(),
+        files: alloc::vec::Vec::new(),
+    };
+    let mut i = 0usize;
+
+    while let Some(&part) = parts.get(i) {
+        match part {
+            "-i" => out.in_place = true,
+            "-n" => out.suppress = true,
+            "-e" => {
+                i = i.saturating_add(1);
+                if let Some(&script) = parts.get(i) {
+                    out.scripts.push(alloc::string::String::from(script));
+                }
+            }
+            // The first word that looks like a script is the script; a later
+            // one is a file. That is why `sed 's/a/b/' 2d` reads `2d` as a
+            // filename even though it looks like a delete command — GNU reads
+            // it the same way, and both halves of this command now do too.
+            s if s.starts_with('s') || s.starts_with('/') || s.ends_with('d') => {
+                if out.scripts.is_empty() {
+                    out.scripts.push(alloc::string::String::from(s));
+                } else {
+                    out.files.push(s);
+                }
+            }
+            _ => out.files.push(part),
+        }
+        i = i.saturating_add(1);
+    }
+
+    out
+}
+
+fn cmd_sed(args: &str) {
+    if args.split_whitespace().next().is_none() {
         shell_println!("Usage: sed [-i] [-n] [-e CMD] 's/old/new/[g]' [file]");
         shell_println!("       sed [-i] [-n] '/pattern/d' [file]");
         shell_println!("       sed [-i] [-n] 'Nd' [file]  (delete line N)");
@@ -119335,35 +119495,12 @@ fn cmd_sed(args: &str) {
         return;
     }
 
-    let mut in_place = false;
-    let mut suppress = false;
-    let mut commands: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
-    let mut file_args: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-    let mut i = 0;
-
-    while i < parts.len() {
-        match parts[i] {
-            "-i" => in_place = true,
-            "-n" => suppress = true,
-            "-e" => {
-                i += 1;
-                if i < parts.len() {
-                    commands.push(alloc::string::String::from(parts[i]));
-                }
-            }
-            s if s.starts_with('s') || s.starts_with('/') || s.ends_with('d') => {
-                if commands.is_empty() {
-                    commands.push(alloc::string::String::from(s));
-                } else {
-                    file_args.push(s);
-                }
-            }
-            _ => {
-                file_args.push(parts[i]);
-            }
-        }
-        i += 1;
-    }
+    let SedArgs {
+        in_place,
+        suppress,
+        scripts: commands,
+        files: file_args,
+    } = classify_sed_args(args);
 
     if commands.is_empty() {
         shell_println!("sed: no command specified");
@@ -119605,37 +119742,41 @@ fn sed_replace_first(text: &str, pattern: &str, replacement: &str) -> alloc::str
 /// `cat config | sed 's/old' > config.new` wrote a file that looked plausible,
 /// was not edited at all, and reported success. GNU sed calls that
 /// `unterminated 's' command` and exits 1.
+///
+/// A file operand wins over the pipe, which is what `-i` needs in order to
+/// mean anything — see [`classify_sed_args`].
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_sed_input(args: &str, input: &str) {
-    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
-    if parts.is_empty() {
+    if args.split_whitespace().next().is_none() {
         shell_println!("Usage: cmd | sed [-n] [-e CMD] 's/old/new/[g]'");
         shell_println!("       cmd | sed [-n] '/pattern/d'");
         shell_println!("       cmd | sed [-n] 'Nd'  (delete line N)");
         set_exit(1);
         return;
     }
-    let mut suppress = false;
-    let mut commands: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
-    let mut i = 0;
 
-    while i < parts.len() {
-        match parts[i] {
-            "-n" => suppress = true,
-            "-e" => {
-                i += 1;
-                if i < parts.len() {
-                    commands.push(alloc::string::String::from(parts[i]));
-                }
-            }
-            s if s.starts_with('s') || s.starts_with('/') || s.ends_with('d') => {
-                if commands.is_empty() {
-                    commands.push(alloc::string::String::from(s));
-                }
-            }
-            _ => {}
-        }
-        i += 1;
+    let SedArgs {
+        in_place,
+        suppress,
+        scripts: commands,
+        files,
+    } = classify_sed_args(args);
+
+    // A named file wins and the pipe is left unread, as it does for every
+    // other paired command here and as it does in GNU. `cmd_sed` re-parses the
+    // same string, which is a few microseconds and one source of truth.
+    if !files.is_empty() {
+        cmd_sed(args);
+        return;
+    }
+
+    // `-i` with nothing to edit. Silently filtering the pipe instead is the
+    // failure that made this worth fixing: the user asked for a file to be
+    // rewritten, no file was, and the status said it worked.
+    if in_place {
+        shell_println!("sed: no input files while in-place editing");
+        set_exit(1);
+        return;
     }
 
     if commands.is_empty() {
@@ -119833,7 +119974,15 @@ fn cmd_awk_input(args: &str, input: &str) {
         return;
     }
 
-    let (fs_char, program, _files) = parse_awk_args(args);
+    let (fs_char, program, files) = parse_awk_args(args);
+
+    // Named files win over the pipe, as in GNU. This used to bind them to
+    // `_files` and drop them, so `cat a | awk '{print}' b` printed `a`.
+    if !files.is_empty() {
+        cmd_awk(args);
+        return;
+    }
+
     if program.is_empty() {
         shell_println!("awk: no program specified");
         set_exit(1);

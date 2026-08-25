@@ -75231,7 +75231,7 @@ conventional `cat f | cut -c1 -` into a request to open a file literally named
 
 Rung 37 covers all of it.
 
-#### TD-A-LIVENESS-WATCHDOG-FALSE-FIRES-ON-CAPTURED-SELF-TEST-WORK (lane A, 2026-08-25) — **open**
+#### TD-A-LIVENESS-WATCHDOG-FALSE-FIRES-ON-CAPTURED-SELF-TEST-WORK (lane A, 2026-08-25) — ✅ FIXED (`bd40ac82e`)
 
 **In short:** a boot test failed with `LIVENESS WATCHDOG failure detected` even
 though every self-test in that same boot passed and the run went on to reach
@@ -75342,3 +75342,94 @@ patch.
 **Severity.** Low for correctness — the exit status, the message text and
 everything already written to stdout all match gawk exactly. Medium for
 usability on long scripts, which is the case that most needs it.
+
+**Resolution (`bd40ac82e`) — not the fix proposed above.** The proposal was
+serial breadcrumbs inside rung 27. That would have worked for rung 27 and for
+nothing else. `capture_command` is also what serves `$(…)` substitution, every
+pipeline stage, and the SSH and telnet servers — so a *remote user* running any
+slow pipeline is invisible to the watchdog in exactly the same way, and no
+amount of instrumentation inside a self-test reaches them. The blind spot is the
+width of the capture mechanism, not of one rung.
+
+The real defect is that `shell_write_bytes`, on the capture branch, is the shell
+producing output and reports nothing. `kernel_output_count` now adds
+`kshell::captured_output_count()` to the serial byte count, so the honest answer
+to "is anything happening?" is the one the detector reads.
+
+This is not a raised threshold, and the distinction matters: tolerating a longer
+silence dulls a gate whose whole job is noticing that a boot stopped, whereas
+this reports a signal that was already there. Nor can it hide a real hang — a
+captured command that writes once and then blocks advances the sum once, the
+silence resumes, and the report follows on schedule. What it stops reporting is
+a captured command that loops *while writing*, which is a runaway rather than a
+hang, is caught by the allocator, and was already unreported in the uncaptured
+case for the same reason.
+
+Regression-tested by a third phase in `test_breadcrumb_does_not_certify_liveness`,
+driven through `shell_write_bytes` rather than by poking the counter — a drill
+that incremented the counter itself would pass whether or not the increment was
+still on the capture branch.
+
+**Left standing:** the underlying blind spot in `kernel_progress_count`
+(`sched/mod.rs`) is untouched and still real. A CPU-bound in-kernel loop that
+writes *nothing at all*, captured or otherwise, remains indistinguishable from a
+hang. The doc comment there argues correctly against closing it by counting
+kernel-mode ticks, and this change does not revisit that; it only stops the case
+where output existed and was not being counted.
+
+#### TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP (lane A, 2026-08-25) — ✅ FIXED (`5e523d20a`)
+
+**In short:** `sed` had its line-editing loop written out twice — once for
+`sed script file` and once for `cat file | sed script`. The two copies drifted,
+and by the time this was written they disagreed about the newline at the end of
+the output: the file form printed one, the pipe form did not. So the same script
+over the same bytes produced a different number of bytes depending on which end
+the text came in from, and `cat f | sed 's/a/b/' | wc -l` counted one line short.
+
+**Where.** `kernel/src/kshell.rs`, `cmd_sed` and `cmd_sed_input`. Both ended:
+
+```rust
+if output.ends_with('\n') { output.pop(); }
+shell_println!("{}", output);   // cmd_sed      -- puts one back
+shell_print!("{}", output);     // cmd_sed_input -- leaves it off
+```
+
+**This is the third drift in the same pair, which is why the fix is structural
+rather than another patch.**
+
+| When | What had drifted | How it was fixed |
+|---|---|---|
+| earlier | the pipe copy had lost the `-i` arm, so `cat f \| sed -i 's/a/b/'` filtered the pipe, left `f` untouched, and exited 0 | `classify_sed_args` extracted |
+| earlier | `filter_map` dropped unparseable `-e` expressions and ran the rest | `parse_sed_scripts` extracted; the fix had to be applied to *both* copies |
+| this one | the trailing newline | `sed_apply` extracted |
+
+Each time, the shared *parser* was factored out and the shared *loop* was left
+duplicated — so the next divergence landed in the part that was still copied.
+
+**Two more faults fell out of writing the single copy.**
+
+*Empty output printed a blank line.* `sed '/./d' f` deletes every line, so
+`output` is empty; `pop()` on an empty string does nothing and `shell_println!`
+then wrote a newline. A script that removes all the text emitted a line.
+
+*A file with no final newline gained one.* `str::lines` cannot tell `"a\nb"`
+from `"a\nb\n"`, so a loop that appends `\n` after every kept line invents one.
+GNU `sed` writes such a file back without a final newline. The rule is not "pop
+the last newline" — that gets `printf 'a\nb' | sed '2d'` wrong, where the
+surviving line `a` did come with a newline and keeps it. It is: a newline
+follows every emitted line *except* the last line of an input that did not end
+in one, which is a property of the input rather than of what survived.
+
+**Fixed by** `sed_apply(text, script, suppress) -> String`, called by both
+halves, with both printing it verbatim via `shell_print!`. Covered by
+self-test rung 38, whose assertions compare whole captured byte strings rather
+than searching them — the two halves already agreed on *which lines* appear, so
+only a byte comparison can see this class of divergence. Rung 38 also asserts
+that `-i` writes the same bytes the terminal would have shown, which was a third
+spelling of the output under the old code (it wrote the pre-`pop` string to the
+file and the post-`pop` string to the terminal).
+
+**Still duplicated, same shape, not yet fixed:** `cmd_awk`/`cmd_awk_input` each
+carry their own copy of the BEGIN/record/END driver, and
+`cmd_mapfile`/`cmd_mapfile_input` each carry their own copy of the `-t` flag
+scan. Both are the same accident waiting for its first divergence.

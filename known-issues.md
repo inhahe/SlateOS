@@ -76309,22 +76309,29 @@ once. A completely clean run is what a harness that cannot fail looks like from
 the outside. `timeout` now comes before `env`, and `DIFF_NEED` names both it and
 `sort` so a missing one skips the run instead of greening it.
 
-**Diagnostic wording** — five kinds, eight `?` cases, every one of lower value
-than the above: `grep` with no operands answers `grep: missing PATTERN` where GNU
-prints the usage summary; `--zzz` is `unknown option: --zzz` against GNU's
-`unrecognized option '--zzz'`; `-m x` names the offending value where GNU's does
-not; `-d bogus` prints gnulib's argmatch block but stops before the
-`Usage:`/`Try 'grep --help'` pair and exits 2 where GNU exits 1; and a leading
-quantifier under `-E` (`grep -E '*a'`) is accepted silently where GNU also warns
-`grep: warning: * at start of expression` on stderr while still exiting 0. All
-but the last belong with `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`
-rather than with grep. (`-D bogus` is *not* among them: GNU does not use argmatch
-for it, and we reproduce its one-liner and its status exactly.)
+**Diagnostic wording** — four kinds, four `?` cases, every one of lower value
+than the above, and all four now belong with
+`TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE` rather than with grep:
+`grep` with no operands answers `grep: missing PATTERN` where GNU prints the
+usage summary; `--zzz` is `unknown option: --zzz` against GNU's `unrecognized
+option '--zzz'`; `-m x` names the offending value where GNU's does not; and `-d
+bogus` prints gnulib's argmatch block but stops before the `Usage:`/`Try 'grep
+--help'` pair and exits 2 where GNU exits 1. (`-D bogus` is *not* among them: GNU
+does not use argmatch for it, and we reproduce its one-liner and its status
+exactly.)
+
+The fifth kind was the leading quantifier under `-E`: `grep -E '*a'` matched the
+same lines GNU's does but said nothing, where GNU also writes `grep: warning: *
+at start of expression`. **Fixed 2026-08-25** (`9a570ca64`). It was the one of
+the five that was not merely wording — that line is the only thing telling a
+user their pattern is not doing what they think — and it needed a parser change
+rather than a message change, so it is recorded in design-decisions.md §384
+along with the measured rule for *which* patterns warn.
 
 **Severity.** Low, and only wording is left. Every feature this entry was opened
 for is implemented and pinned by plain cases in `scripts/grep-diff.sh`, which now
-runs **435 agreeing cases** against GNU 3.11 with five deliberate divergences and
-eight wording gaps. The deliberate five are the two choices recorded elsewhere:
+runs **467 agreeing cases** against GNU 3.11 with five deliberate divergences and
+four wording gaps. The deliberate five are the two choices recorded elsewhere:
 we never suppress binary output, and we list a directory sorted where GNU uses
 readdir order (design-decisions.md §380).
 

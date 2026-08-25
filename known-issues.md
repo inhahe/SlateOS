@@ -76849,3 +76849,92 @@ failure class, and because fixing any one of them in isolation would leave a
 
 **No caller is affected.** Nothing in `kernel/` invokes `tr` — no self-test
 rung, no script — so the stricter parser cannot turn something green red.
+
+
+### TD-B-THE-SHELL-HARNESS-STILL-MEASURES-AGAINST-MSYS-BASH. `scripts/osh-bash-diff.py` compares a Windows `osh.exe` against Git-for-Windows bash, so every osh behaviour it certifies was learned from a Cygwin port — 2026-08-25 — OPEN
+
+**Where:** `scripts/osh-bash-diff.py`. Two lists decide what is compared:
+
+```python
+OSH_CANDIDATES = [
+    REPO / "target" / "x86_64-pc-windows-gnu" / "release" / "osh.exe",
+    ...
+]
+BASH_CANDIDATES = [
+    Path("C:/Program Files/Git/usr/bin/bash.exe"),
+    Path("/usr/bin/bash"),
+    Path("/bin/bash"),
+]
+```
+
+On this host the first entry of each wins, so the subject is a Windows binary
+and the reference is MSYS bash. `/usr/bin/bash` is reached only on a machine
+that has no Git for Windows.
+
+**What:** this is the same structural fault that
+`TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE` recorded for `sort`, one
+subsystem over, and it is still live. MSYS is a Cygwin derivative: it links
+`msys-2.0.dll`, not glibc. Its getopt wording, its signal table, its locale
+handling and its process model are all Cygwin's. A differential harness whose
+reference is MSYS certifies behaviour that no GNU/Linux system has — and
+SlateOS is a GNU/Linux-shaped target, so the wrong reference is wrong in the
+direction that matters.
+
+**This is not news to the tree, and that is the point.** `TOOL-OSH-BASH-DIFF`
+(above) says so plainly and resolves it by waiving: "Cases hitting those need an
+`# EXPECT-DIFF` waiver." That was the right call when there was no way to reach
+a glibc bash from a harness. There is now — every one of the twenty-five
+`scripts/*-diff.sh` coreutils harnesses reaches glibc through
+`scripts/diff-wsl.sh`, which re-execs into WSL, builds the subject for
+`x86_64-unknown-linux-gnu`, and refuses to run against a stale build. The shell
+harness was not part of that migration only because it is Python and does not
+match the `*-diff.sh` glob.
+
+**Four entries in this file exist because of it**, and each is a case the
+corpus cannot currently ask:
+
+| entry | what the MSYS reference costs |
+|---|---|
+| `TD-OILS-SIGNAL-NUMBERS-ARE-LINUXS-AND-CANNOT-BE-CHECKED-AGAINST-MSYS` | the signal table is untestable; the corpus tests only behaviour, never a number |
+| `TD-OILS-MSYS-CHMOD-TYPE-A` | `type -a` cannot be used on a file the case created, because MSYS `chmod +x` does not make `test -x` true |
+| `TD-OILS-HOST-ARGV0` | `argv[0]` for an external command is the resolved path, not the word typed |
+| `TD-OILS-A-NON-UTF-8-ARGUMENT-IS-REPLACED-ON-THE-WINDOWS-HOST` | a child sees `\xef\xbf\xbd` where bash's child sees `\xff` |
+
+The last two are *subject*-side, not reference-side: they are artifacts of osh
+being built for Windows, and would go away with the subject rather than with the
+reference. That is worth stating because it means the migration fixes both
+halves, not one.
+
+**What the fix looks like.** The Python equivalent of `diff-wsl.sh`, which is
+mostly the same six steps:
+
+1. Re-exec into WSL if not already there, carrying the harness's arguments.
+2. Build `osh` for `x86_64-unknown-linux-gnu` into
+   `$HOME/.cache/slateos-diff-target` — the same shared target directory the
+   shell harnesses use (design-decisions.md §374).
+3. Take the reference from `/usr/bin/bash`, and skip rather than fall back.
+4. Pin `LC_ALL=C.UTF-8`.
+5. Keep the newest-binary rule and the `write_bytes` rule, both of which are
+   still load-bearing (see `TOOL-OSH-BASH-DIFF`).
+6. Add the staleness guard: `osh` is one binary out of a package, and a cargo
+   cache that replays a library unit while relinking the binary is exactly the
+   failure `diff_assert_fresh` was written for.
+
+**The first measurement, before any of that**, is whether `userspace/oils`
+builds for `x86_64-unknown-linux-gnu` at all. It has never been asked to; it is
+built for `x86_64-pc-windows-gnu` on the host and for `x86_64-slateos` for the
+image. If it does not build, that is the finding and it comes first.
+
+**Expect a wave of differences, and treat each as a finding.** Roughly 150
+corpus cases have been written, run and waived against MSYS. Some fraction were
+tuned to MSYS behaviour and will differ against glibc — every such case is a
+place where osh was shaped by a Cygwin port, which is the whole reason to do
+this. Budget the triage, not just the migration. The four entries above should
+be re-examined at the same time: two should become testable and two should
+disappear.
+
+**Risk of leaving it.** It compounds. Every corpus case added between now and
+the migration is another case written against the wrong reference, and every
+`# EXPECT-DIFF` waiver added is a divergence pinned into the corpus as though
+it were behaviour. `sort` is the precedent: eleven option cases sat green for
+weeks while the implementation faithfully copied a Windows porting artifact.

@@ -98,15 +98,61 @@ ALLOWED = {
         "awk error formatter; callers set the status",
     ("cmd_selftest", "Usage: selftest <category>"):
         "a hint line inside the successful output of `selftest list`",
+
+    # The query halves of the five subcommand branches that used to answer a
+    # query and report a typo with one arm and one status. Each now has a
+    # sibling branch carrying the diagnostic and the `set_exit(1)`; what is
+    # left here is the branch reached only when *no* argument was given, where
+    # the line above the usage hint is the answer. Listed individually rather
+    # than by function, so that a *new* unfixed arm in any of them still trips.
+    ("cmd_fhist", "Usage: fhist autoversion <on|off>"):
+        "the `None` arm: a query, answered by the auto-versioning line above",
+    ("cmd_wallpaper", "Usage: wallpaper offset <x 0.0-1.0> <y 0.0-1.0>"):
+        "the no-argument `else`: a query, answered by the offset line above",
+    ("cmd_datausage", "Usage: datausage metered <on|off|roaming>"):
+        "the `None` arm: a query, answered by the metered-status line above",
+    ("cmd_notifgroup", "Usage: notifgroup mode <app|category|conversation|none>"):
+        "the no-argument `else`: a query, answered by the current-mode line above",
+    ("cmd_faceunlock", "Usage: faceunlock security <low|standard|high|maximum>"):
+        "the no-argument `else`: a query, answered by the current-level line above",
+
+    # `tsession` reaches this arm from `""`, `info` and `status` -- all three
+    # are requests for the session summary, which the lines above print. Its
+    # unrecognised-subcommand case has its own `_` arm and already fails.
+    ("cmd_tsession", "Usage: tsession <new|list|switch|kill|rename>"):
+        "the `\"\" | \"info\" | \"status\"` arm is the query; the `_` arm fails separately",
+
+    # These two catch-all help arms *are* resolved -- they end in
+    # `end_help_arm` like the other 23 -- but the checker cannot see it. Their
+    # help text lives in a nested `#[inline(never)] fn case()` (a stack-frame
+    # workaround for a very long arm), so the forward walk from the usage line
+    # leaves the *helper's* body long before reaching the call in the arm.
+    # Same situation as `sed_usage`/`awk_usage` above: a formatter whose only
+    # caller sets the status around it.
+    ("cmd_netsettings", "Usage: netsettings <subcommand>"):
+        "help text in a nested `fn case()`; its only caller ends in `end_help_arm`",
+    ("cmd_tasksched", "Usage: tasksched|schtask <subcommand>"):
+        "help text in a nested `fn case()`; its only caller ends in `end_help_arm`",
 }
 
-# Known-open, tracked in known-issues.md under
-# A-KSHELL-A-USAGE-ARM-THAT-FALLS-OUT-OF-A-MATCH-REPORTED-SUCCESS. These arms
-# are reached BOTH by an explicit help/query request (a success) and by an
-# unrecognised subcommand (a failure), so no single status is right for them --
-# the arm has to be split before it can be fixed. Kept separate from ALLOWED so
-# that the two are never confused: ALLOWED is correct, this is a debt with a
-# name attached.
+# Arms reached BOTH by an explicit help/query request (a success) and by an
+# unrecognised subcommand (a failure), so no single status is right for them.
+# Such an arm cannot be *fixed* by adding a status -- whichever one it sets,
+# one of its two callers is told something false -- it has to be split first.
+#
+# **This is empty, and that is the point.** It held 33 entries, which were the
+# residue of the sweep that fixed the 87 fall-out-of-a-match arms: that sweep
+# could give an arm a status but could not decide which status an arm serving
+# two callers deserved. All 33 have since been split -- 23 catch-all help arms
+# now end in `end_help_arm`, which sets the status only for a subcommand that
+# was not a request for help, and the rest gained a sibling branch so that the
+# query and the typo answer separately. See known-issues.md under
+# A-KSHELL-A-HELP-ARM-AND-A-TYPO-REPORTED-THE-SAME-THING.
+#
+# Kept in place rather than deleted, because the shape recurs: the next command
+# with a `_ => { help }` arm will arrive, and this is where it goes if it
+# cannot be split immediately. Kept separate from ALLOWED so the two are never
+# confused -- ALLOWED is correct, this is a debt with a name attached.
 #
 # The count matters, which is why this is a mapping and not a set. A bare set
 # of function names would exempt the *function*, so a genuinely new unfixed
@@ -114,21 +160,7 @@ ALLOWED = {
 # that was meant to cover a different arm entirely -- an allowlist that grows
 # holes on its own. Pinning the number means the debt can only shrink: fix one
 # and the count must come down with it, add one and the check trips.
-KNOWN_CONFLATED = {
-    "cmd_nat": 1, "cmd_socks": 1, "cmd_qos": 1, "cmd_vlan": 1, "cmd_smtp": 1,
-    "cmd_ftp": 1, "cmd_snmp": 1, "cmd_iperf": 1, "cmd_nc": 1, "cmd_dhcpv6": 1,
-    "cmd_sysinfo": 1, "cmd_perfmon": 1, "cmd_sysdiag": 1, "cmd_nightlight": 1,
-    "cmd_tasksched": 1, "cmd_envvars": 1, "cmd_bluetooth": 1,
-    "cmd_printmgr": 1, "cmd_screenrec": 1, "cmd_appnotify": 1,
-    "cmd_kernelbuild": 1, "cmd_wakesensor": 1, "cmd_netsettings": 1,
-    "cmd_pmcstat": 1, "cmd_swapcfg": 1, "cmd_lockdep": 1, "cmd_tsession": 1,
-    "cmd_notifgroup": 1, "cmd_faceunlock": 1, "cmd_datausage": 1,
-    "dispatch": 1,
-    # These two were patched by the mechanical pass and reverted: their arms
-    # print the current value first, so a bare invocation is a query that the
-    # inserted status turned into a failure. Same conflation, found late.
-    "cmd_wallpaper": 1, "cmd_fhist": 1,
-}
+KNOWN_CONFLATED = {}
 
 USAGE = re.compile(r'(?:console_println!|shell_println!)\s*\(\s*"\s*[Uu]sage\b')
 FN = re.compile(r"(?:pub )?(?:async )?fn ([a-z_0-9]+)")
@@ -170,6 +202,16 @@ def main(argv):
         for k in range(i, min(i + 300, len(lines))):
             s = lines[k]
             if "set_exit(" in s and "set_exit(0)" not in s:
+                raised = True
+                break
+            # `end_help_arm(cmd, sub)` is the resolution of a catch-all help
+            # arm, and it sets the status *conditionally* -- non-zero for an
+            # unrecognised subcommand, zero for `help`, which is the whole
+            # point. It counts as accounting for the site: the arm no longer
+            # answers both callers the same way. Matched by name rather than
+            # by inlining its body here, because a checker that re-derives
+            # what a helper does will drift away from the helper.
+            if "end_help_arm(" in s:
                 raised = True
                 break
             if k > i and re.search(r"\breturn\b", strip_strings(s)):

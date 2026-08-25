@@ -73675,6 +73675,33 @@ rule and judging it plausible. Two of the three false positives were single
 sites out of thousands, and both would have turned a working command into a
 failing one.
 
+#### 2026-08-24, later — the under-sweep is closed, by hand (lane A, `910ef26af`)
+
+All three sites now set a status. The predicate was never loosened, and should
+not be: the reasoning above still holds, and `"Network Usage:"` is still a row
+of a report. What changed is the recognition that **three is a number you fix by
+hand.** A rule that cannot safely admit three sites is a good rule; leaving the
+three sites broken because the rule cannot reach them is a separate decision,
+and it was the wrong one.
+
+Two had already been picked up by later waves (`base64: decode error:`, and the
+piped `tee` in `cmd_tee_input`) — so the count here was stale, and the entry
+still read "three unfixed sites" while only one was left. The survivor was
+`cmd_tee`, the `tee FILE TEXT` form.
+
+That one is worth recording for its shape rather than its size. `tee` is **one
+command with two implementations**, and they disagreed: the piped form set a
+status on a failed write, the two-argument form did not. Identical message,
+identical failure, opposite status — invisible in the output, visible only in
+`&&`. A per-message sweep cannot find that class at all, because nothing about
+either message is wrong; the defect is the *disagreement between two call
+paths*, which is only apparent when both are read together. Rung 32 therefore
+asserts both forms against the same bad path, and both against a good write.
+
+**Worth checking elsewhere:** any command with a piped and a non-piped
+implementation (`dispatch_with_input` vs `dispatch`) is a candidate for the same
+split-brain. This was found by hand, not by a rule.
+
 ### 2026-08-24 — the payoff: giving `syshealth` a status uncovered two real kernel bugs
 
 Fixed in `429a81bc3` and `e5c2d77df`. Recorded here because the *way* they

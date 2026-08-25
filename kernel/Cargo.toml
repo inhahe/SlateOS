@@ -32,6 +32,21 @@ tzrules = { path = "../tzrules" }
 # fixed-size -- which is what lets the kernel link it. See requests/
 # c-a-sha2-crate-exists-now.md and the reply beside it.
 sha2 = { path = "../sha2" }
+# The shared POSIX regular-expression engine, used by userspace's grep, sed,
+# awk and expr. The kernel shell carries its own awk and sed, and they were
+# matching `/regex/` with `str::contains` -- so `awk '/^err/'` matched lines
+# *containing* the four characters `^err`, and `awk '/x*/'`, a pattern that
+# matches everything, matched almost nothing. Each answered, and exited 0.
+#
+# Linking the one engine rather than writing a second is the whole point: a
+# kernel-resident regex engine would have to agree with userspace's forever,
+# which is the divergence this crate exists to prevent. Unconditionally
+# `no_std` as of lane B's reply (requests/b-a-ere-is-no-std-now-take-it.md,
+# design-decisions.md 381), so there is no feature to turn off -- and
+# deliberately so, since Cargo *unions* features across a build graph and
+# `default-features = false` here would not have stopped another crate in the
+# kernel's graph from switching `std` back on.
+ere = { path = "../userspace/ere" }
 
 # build.rs computes the Ada prebuilt-object stamp and had a *third* copy of
 # SHA-256, hand-written again. It runs on the host, so it can take the crate

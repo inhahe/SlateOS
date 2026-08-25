@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
 # One side of the `printf` differential test.
 #
-#   printf-probe.sh PRINTF-COMMAND CASE-FILE
+#   printf-probe.sh BIN-DIR CASE-FILE
 #
-# Runs PRINTF-COMMAND once per case and writes a four-line record for each:
+# Runs the `printf` in BIN-DIR once per case and writes a four-line record for
+# each:
 #
 #   CASE <name>
 #   RC <exit status>
 #   OUT <stdout>
 #   ERR <stderr>
 #
-# `scripts/printf-diff.sh` runs this script twice -- once on the host against
-# our `printf.exe`, once inside WSL against GNU's -- and compares the two
-# record files. Both sides run the *same* script for the same reason both
-# sides read the same case file: a difference in how the two sides were driven
-# would show up as a difference in `printf`, which is the one thing this test
-# must not do.
+# `scripts/printf-diff.sh` runs this script twice, once per side, and compares
+# the two record files. Both sides run the *same* script for the same reason
+# both sides read the same case file: a difference in how the two sides were
+# driven would show up as a difference in `printf`, which is the one thing this
+# test must not do.
 #
-# ## Why the command is run through `env`
+# ## Why BIN-DIR becomes the whole of `PATH`, rather than being a path to run
 #
-# Two constraints meet here, and `env` is the only spelling that satisfies
-# both.
+# Two constraints meet here, and `env PATH=<dir>` is the only spelling that
+# satisfies both.
 #
-# `printf` is a bash *builtin*, so inside WSL a bare `printf` does not run GNU
-# coreutils at all. The builtin is a different program with different
-# diagnostics -- it says `printf: 0o17: invalid number` where GNU says
-# `'0o17': value not completely converted` -- so a harness pointed at it would
-# report dozens of differences that say nothing about our code.
+# `printf` is a bash *builtin*, so a bare `printf` does not run GNU coreutils
+# at all. The builtin is a different program with different diagnostics -- it
+# says `printf: 0o17: invalid number` where GNU says `'0o17': value not
+# completely converted` -- so a harness pointed at it would report dozens of
+# differences that say nothing about our code.
 #
 # But spelling it `/usr/bin/printf` to dodge the builtin breaks the comparison
 # a second way: every GNU diagnostic is prefixed with `argv[0]`, so each one
@@ -34,10 +34,11 @@
 # `Try '...' --help` line would differ too. Every error case in the file would
 # fail for a reason that is purely about how the harness invoked it.
 #
-# `env printf` resolves the name through PATH -- which contains no builtins --
-# and execs it with `argv[0]` still the bare word `printf`. Our side is run
-# through `env` as well, for symmetry rather than necessity: our binary spells
-# its own name in diagnostics rather than reading `argv[0]`.
+# A directory holding one symlink named `printf`, installed as the whole of
+# `PATH`, resolves the name through a lookup that has no builtins in it and
+# execs the binary with `argv[0]` still the bare word. Ours is reached the same
+# way, for symmetry rather than necessity: our binary spells its own name in
+# diagnostics rather than reading `argv[0]`.
 #
 # The streams are recorded through `od -An -v -c` rather than verbatim.
 # printf's whole purpose is to emit bytes chosen by the caller: a case can put
@@ -51,11 +52,11 @@
 set -u
 
 if [ $# -ne 2 ]; then
-  echo "usage: printf-probe.sh PRINTF-COMMAND CASE-FILE" >&2
+  echo "usage: printf-probe.sh BIN-DIR CASE-FILE" >&2
   exit 2
 fi
 
-cmd=$1
+bin=$1
 casefile=$2
 
 out=$(mktemp)
@@ -83,7 +84,9 @@ while IFS=$'\x1f' read -r -a field; do
   # stdin is closed off: printf never reads it, but `timeout` and the shell
   # share a descriptor with the loop, and a child that read from it would eat
   # the rest of the case file.
-  timeout 10 env "$cmd" ${args[@]+"${args[@]}"} >"$out" 2>"$err" </dev/null
+  # `timeout` outside the `env` and not inside it: `env PATH=... timeout` would
+  # look for `timeout` in the *new* PATH, which holds nothing but `printf`.
+  timeout 10 env PATH="$bin" printf ${args[@]+"${args[@]}"} >"$out" 2>"$err" </dev/null
   rc=$?
 
   printf 'CASE %s\nRC %s\nOUT%s\nERR%s\n' "$name" "$rc" \

@@ -76548,7 +76548,51 @@ than a bug: the fix is for `net::http` and `kshell` to share one, most
 naturally in a small `base64` module, and the `net/websocket.rs` caller at
 `:193` moves with it.
 
-#### TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH (lane A, 2026-08-25) — filed, blocked on `ere` going `no_std`
+#### TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH (lane A, 2026-08-25) — ✅ FIXED
+
+**Update, 2026-08-25.** Lane B made `ere` unconditionally `no_std` (their reply
+is `requests/b-a-ere-is-no-std-now-take-it.md`; no feature flag, because Cargo
+*unions* features across a build graph and `default-features = false` in one
+crate cannot stop another from turning `std` back on). The kernel now depends
+on it, and **`awk`'s `/pattern/` is a real POSIX extended regular expression**:
+`awk_compile_pattern` builds an `ere::Regex` when the *program* is read, so an
+invalid regexp is refused before any input is opened, and nothing recompiles
+per record. `kshell::self_test` rung 45 pins the three rows lane B asked for —
+`/^err/` anchors, `/a.c/` matches `abc`/`axc`, `/x*/` matches every line — plus
+brackets, alternation, groups, an undecodable record, and the two distinct
+refusals (`invalid regular expression` vs `unsupported pattern`).
+
+**`sed` followed in the same shape** — addresses *and* `s///` in one commit, so
+the command was never half a regex engine. `sed_addr_matches` takes a compiled
+`SedAddr::Regex`; `sed_replace_first`/`sed_replace_all` (`str::find` and a
+`str::find` loop) are gone, replaced by `sed_substitute`, which walks
+`capture_spans_iter`. Three deliberate differences from `awk`:
+
+- **BRE, not ERE.** `ere::bre::compile`, because without `-E` sed's patterns are
+  *basic* regular expressions: `a+b` is three literal characters, `a\+b` is the
+  repetition, `\(…\)` is a group and `(` is ordinary. Compiling them as EREs
+  would pass every anchor and `.` test and still silently change what a working
+  script means.
+- **`&` and `\1`…`\9` are now replacement references** rather than literal text,
+  parsed once into a `Vec<SedRepl>` template at script-parse time. `\N` with no
+  group `N` is a *script* error (GNU: `invalid reference \3 on 's' command's
+  RHS`), not an empty expansion at run time; `\U` and the other GNU case
+  conversions are refused rather than emitted as their own letters.
+- **An empty pattern is refused.** GNU's `s//X/` means "the last regexp used",
+  which this shell does not keep; matching the empty string everywhere instead
+  would interleave the replacement between every character and exit 0.
+
+`find_unescaped` was fixed in the same commit: it looked *back* one byte from a
+candidate delimiter, which cannot tell `\/` from `\\/`, so `sed 's/x/\\/'` — a
+replacement of one literal backslash — was reported `unterminated command`. It
+now steps over an escape instead.
+
+`kshell::self_test` rung 46 pins all of it: the two anchors in an address and in
+`s///`, `.`, the four BRE-vs-ERE spellings, `\1`, `&`, `\&`, `\\`, `g` vs not,
+the zero-width-match advance (`s/x*/-/g` on `ab` is `-a-b-`, as GNU has it), an
+escaped delimiter, and the four refusals — each of which must exit non-zero
+*and* print nothing, since a sed that emits its input unchanged and exits 0 is
+indistinguishable from one that did the edit.
 
 **In short:** `awk '/^err/ {print}'` in the kernel shell does not match lines
 that *start* with `err`. It matches lines that *contain* the four characters
@@ -76583,10 +76627,10 @@ The third row is the worst of them: a pattern that in awk matches *everything*
 here matches almost nothing, so a filter that should be a no-op silently
 discards the whole input.
 
-**Why it is still open.** This is the same bug as
-`B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-str::contains`, and it has
-the same right answer: use the `ere` crate lane B wrote for it. But `ere`
-cannot be linked into the kernel today —
+**Why it was open** (the original entry; lane B has since answered). This is the
+same bug as `B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-str::contains`,
+and it has the same right answer: use the `ere` crate lane B wrote for it. But
+`ere` could not be linked into the kernel —
 
 ```toml
 bstr = { version = "1.13.0", default-features = false, features = ["std"] }
@@ -76604,7 +76648,8 @@ engines that must agree about `[[:alpha:]]`, leftmost-longest and backreference
 semantics will not agree for long. A kernel-resident copy would also have to be
 re-verified against gawk independently, duplicating `scripts/awk-diff.sh`.
 
-**The fallback, if lane B declines.** Refuse rather than guess: any `/.../`
+**The fallback, had lane B declined** — not needed; they said yes. Refuse rather
+than guess: any `/.../`
 pattern containing a metacharacter reports `awk: regular expressions are not
 supported in the kernel shell` and exits 2. Worse for the user, but a refusal
 is detectable and a wrong answer is not.
@@ -76697,10 +76742,10 @@ first.
 Covered by self-test rung 41, which asserts whole byte strings rather than
 searching them.
 
-**Left standing:** `/re/` is still a substring match — see
-`TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`, blocked on
-`ere` gaining a `no_std` build — and the statement executor still ignores
-anything it cannot run, below.
+**Left standing at the time:** `/re/` was still a substring match, and the
+statement executor still ignored anything it could not run. Both are closed —
+the statements by the entry below, and `/re/` by the `ere` dependency, under
+`TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`.
 
 #### TD-A-AWK-IGNORES-EVERY-STATEMENT-IT-CANNOT-RUN (lane A, 2026-08-25) — ✅ FIXED
 
@@ -76730,12 +76775,17 @@ Three things came with it:
   that is the one case where echoing the text and evaluating it provably agree
   — a decimal is not, since awk formats `5.0` through `OFMT` and prints `5`.
 
-**Still not refused: `/pattern/`**, which remains a substring match. That is the
-separate `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`,
-blocked on the `ere` crate gaining a `no_std` build; refusing every `/…/` with
-a metacharacter is the documented fallback if that request is declined, and is
-not done pre-emptively because it would break working invocations while the
-request is open.
+**`/pattern/`, the carve-out this entry left standing, is now closed** — not by
+a refusal but by the engine, which was always the better answer. The kernel
+links `ere`, and `awk_compile_pattern` builds a real `ere::Regex` from the
+pattern text. That also turned §294's check from a convention into a type:
+`awk_validate_program` used to evaluate each pattern against a dummy empty
+record and ask only whether an answer came back, which was sound only because
+of a hand-written invariant ("whether an answer exists depends on the pattern
+alone") that nothing enforced and that rung 42 had to pin by hand. It is now
+`awk_compile_program`, whose *output* is what runs, and
+`awk_compile_pattern(&str)` cannot see a record at all. See
+`TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`.
 
 The original entry follows.
 

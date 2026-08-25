@@ -16,36 +16,58 @@
 # output is nothing but NULs. stderr wording is not compared — GNU's comes from
 # its getopt and the host's error table, ours from `coreutils::errmsg`.
 #
-# `LC_ALL=C` is pinned, and it is not a convenience. In any other locale GNU
-# collates with the locale's tables, and SlateOS has none — see
-# `known-issues.md`. Comparing against a collating GNU would be comparing
-# against a specification we have deliberately not implemented yet.
+# ## Why both sides run inside WSL, and why that let this file lose half of
+# itself
+#
+# `scripts/diff-wsl.sh` gives the general reasons. This harness is the one that
+# proved them: the "option parsing" section below spent a while certifying
+# wording no GNU/Linux system has ever printed, because `$GNU` was MSYS2's sort
+# and MSYS2's getopt is not glibc's. See that section, and `known-issues.md` →
+# `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`.
+#
+# The fix at the time was local: give that one section a second reference
+# (`wsl -e env LC_ALL=C sort`), and a third for the `argmatch` rows that need a
+# UTF-8 locale — three references, two "is it reachable" probes, and a
+# `HAVE_GLIBC` guard on every row so the file still ran on a host with only
+# MSYS. All of that was scaffolding for a split that no longer exists. There is
+# one reference now, it is glibc's, and every row uses it.
+#
+# ## The locale is `C.UTF-8`, not `C`
+#
+# The reason this file used to pin `C` still holds: in a collating locale GNU
+# sorts with the locale's tables and SlateOS has none (`known-issues.md`), so
+# comparing against a collating GNU would be comparing against a specification
+# we have deliberately not implemented. `C.UTF-8` is not a collating locale —
+# glibc gives it codepoint order, the same as `C`. Measured, not assumed: every
+# fixture in this file, under every ordering option it uses, produces
+# byte-identical output from glibc's sort under the two.
+#
+# What `C.UTF-8` additionally buys is the `argmatch` rows, which used to need a
+# reference of their own: gnulib's `quote()` prints U+2018/U+2019 under a UTF-8
+# locale and ASCII apostrophes under `C`, and since §351 ours prints the curly
+# pair in every locale. Under `C` the *reference* was the wrong one.
 set -u
 
-# Our sort is a native Windows binary, so MSYS would rewrite an argument that
-# looks like a path — `-t/` above all.
-export MSYS2_ARG_CONV_EXCL='*'
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one name
+# `sort` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+DIFF_PROG=sort
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils sort "${OURS:-}") || exit 1
-GNU=${GNU:-sort}
-export LC_ALL=C
+# Both sides are reached through a symlink named `sort` in a directory that is
+# the whole of `PATH` for that one invocation, so `argv[0]` is the bare word on
+# both and the `sort: ` prefix on every diagnostic matches.
+OURS_RUN="env PATH=$bindir/ours sort"
+GNU_RUN="env PATH=$bindir/gnu sort"
 
-if ! printf 'b\na\n' | "$GNU" >/dev/null 2>&1; then
-  echo "sort-diff: GNU sort not reachable (tried: $GNU) -- skipping."
-  exit 0
-fi
+echo "sort-diff:"
+echo "  ours: $OURS"
+echo "  gnu:  $gnu_real"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d)
-trap 'rm -rf "$fixtures"' EXIT
-OURS_ABS=$OURS
-case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$PWD/$OURS" ;; esac
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
 cd "$fixtures" >/dev/null || exit 1
 
 # Two columns, blanks of both widths, so a field's leading blanks are visible.
@@ -83,11 +105,11 @@ compare() {
   # stdout goes to a file, not through a pipe into `od`: in `x=$(sort | od)`
   # the status recorded would be od's, so every failing case would pass.
   if [ "$stdin" = "-" ]; then
-    "$OURS_ABS" "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    "$GNU" "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    $OURS_RUN "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    $GNU_RUN  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   else
-    printf '%b' "$stdin" | "$OURS_ABS" "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
-    printf '%b' "$stdin" | "$GNU" "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
+    printf '%b' "$stdin" | $OURS_RUN "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
+    printf '%b' "$stdin" | $GNU_RUN  "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
   fi
   o_out=$(od -An -tx1 <"$o_bin"); g_out=$(od -An -tx1 <"$g_bin")
   rm -f "$o_bin" "$g_bin"
@@ -437,7 +459,7 @@ run_stdin '\xff\n\xfe\n' -r
 # calls ambiguous, silently resolved to `--dictionary-order`.
 #
 # ...and it then spent a while measuring the wrong thing, which is worth more
-# than the defects it found. `$GNU` is MSYS2's `sort`, and MSYS2 is a Cygwin
+# than the defects it found. `$GNU` was MSYS2's `sort`, and MSYS2 is a Cygwin
 # derivative: it links `msys-2.0.dll` rather than glibc, and **its getopt is not
 # glibc's**. The two disagree on every message in this section:
 #
@@ -451,28 +473,20 @@ run_stdin '\xff\n\xfe\n' -r
 # So these cases all *passed* while our sort emitted wording no GNU/Linux system
 # has ever printed. A differential harness is only as good as the thing it
 # differs against, and "GNU sort" on this host turned out to be two different
-# programs. The rest of the script is unaffected — the disagreement is confined
-# to getopt — so the fix is not to move the whole harness but to give this one
-# section the reference it actually needs.
-GLIBC=${GLIBC:-"wsl -e env LC_ALL=C sort"}
-if printf 'b\na\n' | $GLIBC >/dev/null 2>&1; then
-  HAVE_GLIBC=yes
-else
-  HAVE_GLIBC=no
-  echo "sort-diff: glibc sort not reachable (tried: $GLIBC)"
-  echo "           -- skipping the option-diagnostic comparisons."
-fi
+# programs.
+#
+# The first fix was local — a second reference for this section alone — and it
+# was the wrong shape, because it left the file with two ideas of what GNU is
+# and a `HAVE_GLIBC` guard on every row to cope. `scripts/diff-wsl.sh` is that
+# fix generalised: the whole harness now references glibc, so this section is
+# ordinary and needs nothing of its own.
 
-# Compare stderr and status against a reference. `$1` is the reference command;
-# the option diagnostics use glibc's sort, the `--files0-from` cases below use
-# the local one because their text comes from sort itself and strerror, not from
-# getopt.
-run_msg_against() {
-  local ref="$1"; shift
+# Compare stderr and status, rather than only *whether* stderr was loud.
+run_msg() {
   local o_err g_err o_rc g_rc
   o_err=$(mktemp); g_err=$(mktemp)
-  printf 'a\n' | "$OURS_ABS" "$@" >/dev/null 2>"$o_err"; o_rc=$?
-  printf 'a\n' | $ref "$@" >/dev/null 2>"$g_err"; g_rc=$?
+  printf 'a\n' | $OURS_RUN "$@" >/dev/null 2>"$o_err"; o_rc=$?
+  printf 'a\n' | $GNU_RUN  "$@" >/dev/null 2>"$g_err"; g_rc=$?
   if [ "$o_rc" = "$g_rc" ] && cmp -s "$o_err" "$g_err"; then
     AGREED=yes
   else
@@ -484,35 +498,15 @@ run_msg_against() {
   report "sort $* [stderr]"
 }
 
-run_msg() { run_msg_against "$GNU" "$@"; }
-# Skips rather than fails when there is no WSL, so the script still runs on a
-# host that has only the MSYS reference.
-run_getopt() {
-  [ "$HAVE_GLIBC" = yes ] || return 0
-  run_msg_against "$GLIBC" "$@"
-}
-# The same reference under `C.UTF-8`, for the `argmatch` rows. Those are the one
-# part of this file that is neither collation nor glibc: `argmatch` is gnulib's
-# and quotes with `quote()`, which since §351 prints U+2018/U+2019 in every
-# locale on our side and does so only under a UTF-8 locale on GNU's. Nothing in
-# these rows sorts anything, so the header's reason for pinning `C` — that
-# SlateOS has no collation tables to compare against — does not reach them.
-GLIBC_UTF8=${GLIBC_UTF8:-"wsl -e env LC_ALL=C.UTF-8 sort"}
-run_argmatch() {
-  [ "$HAVE_GLIBC" = yes ] || return 0
-  run_msg_against "$GLIBC_UTF8" "$@"
-}
-
 # The cases where differing from glibc is the point. `report` is bypassed so a
 # difference counts as expected and, more usefully, so agreement is reported as
 # an XPASS — if we ever stop escaping, this says so instead of going quiet.
-xfail_getopt() {
-  [ "$HAVE_GLIBC" = yes ] || return 0
+xfail_msg() {
   local reason="$1"; shift
   local o_err g_err o_rc g_rc
   o_err=$(mktemp); g_err=$(mktemp)
-  printf 'a\n' | "$OURS_ABS" "$@" >/dev/null 2>"$o_err"; o_rc=$?
-  printf 'a\n' | $GLIBC "$@" >/dev/null 2>"$g_err"; g_rc=$?
+  printf 'a\n' | $OURS_RUN "$@" >/dev/null 2>"$o_err"; o_rc=$?
+  printf 'a\n' | $GNU_RUN  "$@" >/dev/null 2>"$g_err"; g_rc=$?
   if [ "$o_rc" = "$g_rc" ] && cmp -s "$o_err" "$g_err"; then
     xpass=$((xpass+1))
     printf 'XPASS sort %s [stderr]\n  now agrees with glibc, so this reason is stale: %s\n' \
@@ -527,48 +521,48 @@ xfail_getopt() {
 
 # Abbreviation: unambiguous ones resolve, ambiguous ones are refused, and an
 # exact match wins even when it is a prefix of a longer option.
-run_getopt --rev
-run_getopt --r
-run_getopt --d
-run_getopt --c
-run_getopt --che
-run_getopt --k
-run_getopt --m
-run_getopt --s
-run_getopt --u
-run_getopt --i
-run_getopt --z
-run_getopt --b
-run_getopt --h
-run_getopt --v
-run_getopt --n
-run_getopt --g
-run_getopt --co
-run_getopt --fie
-run_getopt --stab
+run_msg --rev
+run_msg --r
+run_msg --d
+run_msg --c
+run_msg --che
+run_msg --k
+run_msg --m
+run_msg --s
+run_msg --u
+run_msg --i
+run_msg --z
+run_msg --b
+run_msg --h
+run_msg --v
+run_msg --n
+run_msg --g
+run_msg --co
+run_msg --fie
+run_msg --stab
 # The ambiguous list is printed in the order the options are *declared*, not
 # alphabetically, so it is a direct readout of GNU's table. An empty prefix
 # matches everything, which makes `--=x` print the whole table in one line and
 # is how that order was measured in the first place.
-run_getopt --=x
+run_msg --=x
 # The five getopt diagnostics. A short option and a long one get different
 # sentences, and the two that resolve to something name the resolution rather
 # than what was typed — `--k` reports `--key`, `--stab=x` reports `--stable`.
-run_getopt -x
-run_getopt -k
-run_getopt -o
-run_getopt --bogus
-run_getopt --fo=bar
-run_getopt --key
-run_getopt --output
-run_getopt --sort
-run_getopt --rev=x
-run_getopt --stab=x
-run_getopt --zero-term=x
-run_getopt --help=x
-run_getopt --version=x
-run_getopt --parallel
-run_getopt --field-separator
+run_msg -x
+run_msg -k
+run_msg -o
+run_msg --bogus
+run_msg --fo=bar
+run_msg --key
+run_msg --output
+run_msg --sort
+run_msg --rev=x
+run_msg --stab=x
+run_msg --zero-term=x
+run_msg --help=x
+run_msg --version=x
+run_msg --parallel
+run_msg --field-separator
 # A byte that is neither an option nor printable. This is the one place we
 # differ from glibc deliberately: glibc writes the byte between two literal `'`
 # and escapes nothing between them, so the diagnostic carries a raw control byte
@@ -576,24 +570,25 @@ run_getopt --field-separator
 # lets a file called `--fo\nsort: ...` forge a second diagnostic line. We put the
 # name through `quote` instead. Every name a person would type is unaffected,
 # which is what the cases above check.
-xfail_getopt "glibc emits the raw byte; we escape it" -$'\xc3'
-xfail_getopt "glibc emits the raw byte; we escape it" -$'\x01'
+xfail_msg "glibc emits the raw byte; we escape it" -$'\xc3'
+xfail_msg "glibc emits the raw byte; we escape it" -$'\x01'
 # argmatch: a bad argument *to* an option lists the valid ones and exits 1. It
 # is a prefix match like getopt's, and an ambiguous one is a different sentence
 # from an invalid one — but only when the candidates disagree, which is why
 # `--check=q` resolves while `--check=` does not.
 #
-# `run_argmatch`, not `run_getopt`: these are the only rows in this section that
-# do *not* come from glibc's getopt. `argmatch` is gnulib's and quotes with
-# `quote()`, so since §351 they are curly and must be referenced under a UTF-8
-# locale, where GNU's are curly too. The rest of the section stays at `C` with
-# everything else in this file — see the collation note in the header.
-run_argmatch --sort=bogus
-run_argmatch --check=bogus
-run_argmatch --check=
-run_argmatch --sort=
-run_argmatch --check=quiets
-run_argmatch --sort=NUMERIC
+# These are the only rows in this section that do *not* come from glibc's
+# getopt, and they used to need a reference of their own: `argmatch` is
+# gnulib's and quotes with `quote()`, which since §351 is curly on our side in
+# every locale and is curly on GNU's only under a UTF-8 one. Now that the whole
+# file runs at `C.UTF-8` — see the locale note in the header — they are just
+# rows.
+run_msg --sort=bogus
+run_msg --check=bogus
+run_msg --check=
+run_msg --sort=
+run_msg --check=quiets
+run_msg --sort=NUMERIC
 run_stdin '10\n9\n' --sort=hum
 run_stdin '10\n9\n' --sort=n
 run_stdin 'b\na\n' --check=q

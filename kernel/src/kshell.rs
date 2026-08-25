@@ -1391,12 +1391,19 @@ fn remove_quotes(s: &str) -> String {
 /// naming an argument the user never wrote as a delimiter. Splitting on spaces
 /// is the single most common thing anyone asks `cut` to do.
 ///
+/// `tr` is the same shape as `cut` but worse, because it failed *silently*.
+/// Both of its sets can be a space — `tr ' ' '_'` and `tr -d ' '` — and
+/// dequoted the first of those is `  _`, whose words are the empty string and
+/// `_`. An empty SET1 matches nothing, so `tr` copied its input out unchanged
+/// and exited 0: the one outcome indistinguishable from a file that needed no
+/// translating.
+///
 /// The list is the migration path, not a special case: a command moves onto
 /// it when it learns to parse quotes, and when everything is on it this
 /// function and [`remove_quotes`] both go away in favour of a real argv.
 /// See `known-issues.md` → `TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV`.
 fn command_parses_own_quotes(cmd: &str) -> bool {
-    matches!(cmd, "trap" | "awk" | "fold" | "base64" | "cut")
+    matches!(cmd, "trap" | "awk" | "fold" | "base64" | "cut" | "tr")
 }
 
 /// Expand a `${...}` brace expression.
@@ -6837,12 +6844,15 @@ fn trim_trailing_newlines(bytes: &[u8]) -> &[u8] {
 /// is provided.  Commands that don't support piped input ignore it and execute
 /// normally.
 ///
-/// `input` is bytes because the pipe channel and the capture buffer are bytes,
-/// but every `cmd_*_input` implementation below still takes `&str`, so the
-/// narrowing happens once here via [`shell_bytes_as_str`] rather than 19 times
-/// with 19 different failure behaviours.  A command whose input cannot be
+/// `input` is bytes because the pipe channel and the capture buffer are bytes.
+/// The arms below are in two groups: those that take the bytes as they arrived,
+/// and those that still take `&str` and so must be narrowed first.  The
+/// narrowing happens once, in the second group's arm, via
+/// [`shell_bytes_as_str`] — rather than once per command with a different
+/// failure behaviour each time.  A command in that group whose input cannot be
 /// decoded does not run at all and exits non-zero, which is what stops `tee`
-/// from writing a U+FFFD-mangled copy of a binary file.
+/// from writing a U+FFFD-mangled copy of a binary file.  The group is shrinking:
+/// each command that learns to work in bytes moves up into the first.
 fn dispatch_with_input(line: &str, input: &[u8]) {
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
@@ -6902,6 +6912,12 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         // *line*, and a line it cannot decode is reported rather than allowed
         // to empty the file.
         "cut" => cmd_cut_input(args, input),
+        // `tr` decodes only when SET1 contains a non-ASCII character, which
+        // is the one case where the byte and character readings can differ.
+        // An all-ASCII SET1 -- `tr a-z A-Z`, `tr -d '\r'` -- can never match
+        // inside a multi-byte sequence, so the byte pass is exact, and it is
+        // the only reading defined on a pipe that is not text.
+        "tr" => cmd_tr_input(args, input),
         "cat" if args.is_empty() => {
             // `cat` with no args reads from pipe.
             shell_write_bytes(input);
@@ -6913,13 +6929,13 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         // cope with it. Converting one more of these is a matter of moving its
         // arm up into the block above.
         //
-        // `grep` and `tr` are `char`-oriented (character classes, code-point
-        // ranges); `sed` is a real text interpreter; `xargs` and `column`
-        // re-parse into words and measure display width. `mapfile` is blocked
-        // on something else rather than on itself — it stores its lines as
-        // `String`s in the shell environment, which is still a `String` map,
-        // so converting it here would only move the decode one call deeper.
-        "grep" | "mapfile" | "readarray" | "tr" | "xargs" | "column" | "sed" => {
+        // `grep` is `char`-oriented (character classes, code-point ranges);
+        // `sed` is a real text interpreter; `xargs` and `column` re-parse into
+        // words and measure display width. `mapfile` is blocked on something
+        // else rather than on itself — it stores its lines as `String`s in the
+        // shell environment, which is still a `String` map, so converting it
+        // here would only move the decode one call deeper.
+        "grep" | "mapfile" | "readarray" | "xargs" | "column" | "sed" => {
             let Some(text) = shell_bytes_as_str(input, cmd) else {
                 set_exit(1);
                 return;
@@ -6927,7 +6943,6 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
             match cmd {
                 "grep" => cmd_grep_input(args, text),
                 "mapfile" | "readarray" => cmd_mapfile_input(args, text),
-                "tr" => cmd_tr_input(args, text),
                 "xargs" => cmd_xargs_input(args, text),
                 "column" => cmd_column_input(args, text),
                 "sed" => cmd_sed_input(args, text),
@@ -13010,15 +13025,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "and is a success");
 
         // The invariant that makes validating with a dummy record sound:
-        // whether a pattern or an expression can be evaluated is a function of
-        // the program text alone. Same fragments, two unlike records.
-        for pattern in ["", "/alpha/", "NR > 2", "NF == 2", "$1 > 5", "junk"] {
-            assert_eq!(
-                awk_pattern_eval(pattern, b"", 0, 0).is_some(),
-                awk_pattern_eval(pattern, b"7 beta", 9, 2).is_some(),
-                "pattern recognition must not depend on the record"
-            );
-        }
+        // whether a fragment can be evaluated is a function of the program text
+        // alone. Same fragments, two unlike records.
+        //
+        // Patterns no longer need an assertion for this: `awk_compile_pattern`
+        // takes the pattern text and nothing else, so a record cannot reach the
+        // decision. The loop that used to pin it by hand was deleted when the
+        // invariant moved into the signature. Expressions still go through
+        // `awk_format_print`, which does see a record, so theirs stays.
         for expr in ["\"s\"", "NR", "NF", "$0", "$NF", "$9", "42", "5.0", "total"] {
             assert_eq!(
                 awk_format_print(expr, b"", &[], 0, 0).is_some(),
@@ -13160,6 +13174,467 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = crate::fs::Vfs::remove(spaced);
 
         let _ = crate::fs::Vfs::remove(bin);
+    }
+
+    serial_println!(
+        "  kshell::self_test 44: tr reads its own quotes, and refuses what it cannot do"
+    );
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+        fn plain(cmd: &str) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch(cmd);
+            capture.finish()
+        }
+
+        // The bug this rung exists for. `tr` was not on
+        // `command_parses_own_quotes`, so `' ' '_'` arrived as `  _`, whose
+        // `splitn(2, ' ')` halves are "" and " _". An empty SET1 matches
+        // nothing, so the input came back *unchanged* at exit 0 -- the one
+        // outcome indistinguishable from a text that needed no translating.
+        let out = piped("tr ' ' '_'", b"a b c\n");
+        assert_eq!(out.as_slice(), b"a_b_c\n", "a quoted space is a set of one");
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // The same fault on the delete side, which took the other branch of
+        // the split and so failed loudly instead -- two halves of one command
+        // disagreeing about what had happened.
+        let out = piped("tr -d ' '", b"a b c\n");
+        assert_eq!(
+            out.as_slice(),
+            b"abc\n",
+            "and so is a quoted space to delete"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // There was no flag loop at all: the first word was compared against
+        // the literal "-d" and *otherwise used as SET1*. So the three real tr
+        // options this one does not implement became data, silently.
+        // `tr -s ab` translated `-` into `a` and `s` into `b`.
+        let out = piped("tr -s ab", b"-s-s\n");
+        assert!(
+            out.windows(4).any(|w| w == b"-s i"),
+            "-s is refused by name, not used as a set: {out:?}"
+        );
+        assert_eq!(last_exit(), 1, "and refusing is a failure");
+        assert!(
+            !out.windows(5).any(|w| w == b"abab\n"),
+            "and above all it does not answer"
+        );
+
+        for (line, want) in [
+            ("tr -c a b", &b"-c i"[..]),
+            ("tr -C a b", &b"-c i"[..]),
+            ("tr -t a b", &b"-t i"[..]),
+            ("tr --complement a b", &b"-c i"[..]),
+        ] {
+            let out = piped(line, b"abc\n");
+            assert!(
+                out.windows(4).any(|w| w == want),
+                "`{line}` names the option it cannot honour: {out:?}"
+            );
+            assert_eq!(last_exit(), 1, "`{line}` is a failure");
+        }
+
+        // A bundle names the offending letter, not the bundle.
+        let out = piped("tr -ds ab", b"abc\n");
+        assert!(
+            out.windows(4).any(|w| w == b"-s i"),
+            "a bundle reports the letter that is unsupported: {out:?}"
+        );
+
+        // Anything else beginning with `-` is unrecognised rather than SET1.
+        let out = piped("tr -q a b", b"abc\n");
+        assert!(
+            out.windows(21).any(|w| w == b"unrecognized option '"),
+            "an unknown option is refused: {out:?}"
+        );
+        assert_eq!(last_exit(), 1, "and refusing is a failure");
+
+        // Operand counting. `splitn(2, ' ')` swept everything after the first
+        // word into SET2, so `tr a b c d` expanded `b c d` -- spaces included.
+        let out = piped("tr a b c d", b"abcd\n");
+        assert!(
+            out.windows(14).any(|w| w == b"extra operand "),
+            "a fourth operand is refused, not absorbed into SET2: {out:?}"
+        );
+        assert_eq!(last_exit(), 1, "and refusing is a failure");
+
+        let out = piped("tr abc", b"abc\n");
+        assert!(
+            out.windows(16).any(|w| w == b"missing operand "),
+            "a translation with no SET2 is refused: {out:?}"
+        );
+        assert_eq!(last_exit(), 1, "and refusing is a failure");
+
+        // `-d` is satisfied by one set, so the same word count is fine there.
+        let out = piped("tr -d abc", b"abcd\n");
+        assert_eq!(out.as_slice(), b"d\n", "one set is all `-d` needs");
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // `--` is how a set that begins with `-` is written.
+        let out = piped("tr -- -x _y", b"a-b\n");
+        assert_eq!(out.as_slice(), b"a_b\n", "`--` ends the options");
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // The file form. A file name with a space in it is one operand, and
+        // the file is the operand *after* the sets rather than a third set.
+        let spaced = "/tmp/zz tr spaced";
+        crate::fs::Vfs::write_file(spaced, b"a b\n")?;
+        let out = plain(&alloc::format!("tr ' ' '-' '{spaced}'"));
+        assert_eq!(
+            out.as_slice(),
+            b"a-b\n",
+            "the file operand follows both sets"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+        let _ = crate::fs::Vfs::remove(spaced);
+
+        // `expand_tr_set` no longer strips an outer quote pair, because
+        // `split_words` has already removed the quoting and what is left is
+        // data. Two apostrophes are a set of two apostrophes.
+        assert_eq!(expand_tr_set("''"), alloc::vec!['\'', '\'']);
+
+        // The other half of the bug. The file read was
+        // `from_utf8(&data).unwrap_or("")`, so a file `tr` could not decode
+        // became an *empty* one: no output, exit 0. An all-ASCII SET1 needs no
+        // decoding at all -- no ASCII byte can occur inside a multi-byte UTF-8
+        // sequence, so the byte pass matches exactly what the character pass
+        // would have.
+        let bin = "/tmp/zz_tr_bin";
+        crate::fs::Vfs::write_file(bin, b"a\xff\r\nb\xc3\x28\r\n")?;
+
+        let out = plain(&alloc::format!("tr -d '\\r' {bin}"));
+        assert_eq!(
+            out.as_slice(),
+            b"a\xff\nb\xc3\x28\n",
+            "an ASCII delete over an undecodable file keeps every other byte"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        let out = piped("tr ab AB", b"a\xffb\n");
+        assert_eq!(
+            out.as_slice(),
+            b"A\xffB\n",
+            "and so does an ASCII translation over an undecodable pipe"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // A non-ASCII SET1 genuinely has to decode, and there an input that
+        // will not decode is reported rather than answered.
+        let out = plain(&alloc::format!("tr é e {bin}"));
+        assert!(
+            out.windows(14).any(|w| w == b"not valid text"),
+            "a non-ASCII SET1 over undecodable input is reported: {out:?}"
+        );
+        assert_eq!(last_exit(), 1, "and reporting is a failure");
+
+        // ...but the same set over input that *is* text still works, so the
+        // refusal is about the input and not about the set.
+        let out = piped("tr é e", "café\n".as_bytes());
+        assert_eq!(
+            out.as_slice(),
+            b"cafe\n",
+            "a non-ASCII SET1 over text works"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // A multi-byte SET2 member is written out as its bytes: a replacement
+        // is only ever emitted, never matched, so it needs no ASCII.
+        let out = piped("tr e é", b"cafe\n");
+        assert_eq!(
+            out.as_slice(),
+            "café\n".as_bytes(),
+            "an ASCII SET1 with a multi-byte SET2 stays on the byte path"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // First occurrence wins in a duplicated SET1, as the character path's
+        // `position` did.
+        let out = piped("tr aa bc", b"a\n");
+        assert_eq!(
+            out.as_slice(),
+            b"b\n",
+            "a duplicated SET1 member keeps its first mapping"
+        );
+
+        // A short SET2 repeats its last character -- GNU's default, and the
+        // reading `-t` would change, which is why `-t` is refused.
+        let out = piped("tr abc x", b"abc\n");
+        assert_eq!(
+            out.as_slice(),
+            b"xxx\n",
+            "a short SET2 pads with its last character"
+        );
+
+        let _ = crate::fs::Vfs::remove(bin);
+    }
+
+    serial_println!("  kshell::self_test 45: awk's /pattern/ is a regular expression");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // The three rows lane B asked to have pinned when `ere` landed in the
+        // kernel (requests/a-b-ere-is-std-only-....md and the reply beside it).
+        // Each of them used to answer, and to exit 0 doing it.
+        let data = b"err one\nnot err two\nabc\naxc\nadc\n" as &[u8];
+
+        // `/^err/` anchors. It used to match every line *containing* the four
+        // characters `^err` -- which is none of them, so a filter that should
+        // select one line selected nothing and called that success.
+        let out = piped("awk '/^err/ {print}'", data);
+        assert_eq!(
+            out.as_slice(),
+            b"err one\n",
+            "^ anchors to the start of the record"
+        );
+        assert_eq!(last_exit(), 0, "and a matching program is a success");
+
+        // `.` is any character, not a full stop.
+        let out = piped("awk '/a.c/ {print}'", data);
+        assert_eq!(
+            out.as_slice(),
+            b"abc\naxc\nadc\n",
+            ". matches any character, and does not mean a literal dot"
+        );
+
+        // `/x*/` matches everything -- zero or more. As a substring search for
+        // the two characters `x*` it matched nothing at all, which is the exact
+        // inversion that makes this class of bug so hard to notice.
+        let out = piped("awk '/x*/ {print}'", data);
+        assert_eq!(
+            out.as_slice(),
+            data,
+            "a pattern that matches everything matches every line"
+        );
+
+        // The metacharacters that make the substring reading wrong, from the
+        // other direction: a bracket, an alternation, a group, a bound.
+        for (prog, want) in [
+            (
+                "awk '/^[an]/ {print}'",
+                b"not err two\nabc\naxc\nadc\n" as &[u8],
+            ),
+            ("awk '/one|two/ {print}'", b"err one\nnot err two\n"),
+            ("awk '/^(err|abc)$/ {print}'", b"abc\n"),
+            ("awk '/^a.c$/ {print}'", b"abc\naxc\nadc\n"),
+            ("awk '/a[bd]c/ {print}'", b"abc\nadc\n"),
+        ] {
+            let out = piped(prog, data);
+            assert_eq!(out.as_slice(), want, "{}", prog);
+            assert_eq!(last_exit(), 0, "and each is a success");
+        }
+
+        // A literal that happens to contain no metacharacter still behaves as
+        // it always did, so the change is not a regression for plain text.
+        let out = piped("awk '/err/ {print}'", data);
+        assert_eq!(out.as_slice(), b"err one\nnot err two\n", "a plain literal");
+
+        // An empty regexp is still the whole-record match awk says it is.
+        let out = piped("awk '// {print}'", b"x\ny\n");
+        assert_eq!(out.as_slice(), b"x\ny\n", "// matches every record");
+
+        // A record that is not text is matched byte-for-byte rather than being
+        // dropped: the engine takes bytes, as `awk_feed` already had them.
+        let out = piped("awk '/^a/ {print}'", b"a\xffb\nz\xffb\n");
+        assert_eq!(
+            out.as_slice(),
+            b"a\xffb\n",
+            "matching does not require the record to decode"
+        );
+
+        // A regexp the engine rejects is refused before any input is read, and
+        // it is refused as a *regexp* error rather than as an unsupported
+        // pattern -- the two are different failures and say so.
+        let out = piped("awk '/a[b/ {print}'", data);
+        assert_output_contains(
+            "an unclosed bracket is a regexp error",
+            &out,
+            b"invalid regular expression",
+        );
+        assert_eq!(last_exit(), 2, "and is refused, not run");
+        assert!(
+            !out.windows(4).any(|w| w == b"abc\n"),
+            "and no record is printed by a program that was refused"
+        );
+
+        // A pattern this shell cannot evaluate at all is still the other
+        // message: `$1 > 5` never reaches the engine.
+        let out = piped("awk '$1 > 5 {print}'", data);
+        assert_output_contains(
+            "a non-regexp pattern is still 'unsupported pattern'",
+            &out,
+            b"unsupported pattern",
+        );
+        assert_eq!(last_exit(), 2, "and is refused");
+
+        // Compilation is a function of the pattern text alone -- the property
+        // that lets a program be refused before a single record is read. This
+        // is now enforced by `awk_compile_pattern`'s signature; the assertion
+        // here pins the *classification*, i.e. which of the three outcomes each
+        // pattern gets.
+        for (pattern, ok, bad_regex) in [
+            ("", true, false),
+            ("/alpha/", true, false),
+            ("/x*/", true, false),
+            ("NR > 2", true, false),
+            ("NF == 2", true, false),
+            ("$1 > 5", false, false),
+            ("junk", false, false),
+            ("/a[b/", false, true),
+        ] {
+            let got = awk_compile_pattern(pattern);
+            assert_eq!(got.is_ok(), ok, "pattern '{}' acceptance", pattern);
+            assert_eq!(
+                matches!(got, Err(AwkPatternError::BadRegex(_))),
+                bad_regex,
+                "pattern '{}' failure kind",
+                pattern
+            );
+        }
+    }
+
+    serial_println!("  kshell::self_test 46: sed matches basic regular expressions");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // `classify_sed_args` splits its argument line on whitespace, so a sed
+        // script here cannot contain a space (`TD-KSHELL-COMMANDS-TAKE-A-FLAT-
+        // STRING-NOT-ARGV`). Every case below is written without one; that is a
+        // constraint on the test, not on what is being tested.
+
+        // ---- addresses ----------------------------------------------------
+        //
+        // An address used to be `line.contains(pat)`, so an anchor selected the
+        // lines holding a literal `^` — none of them. `sed '/^abc/d'` deleted
+        // nothing and exited 0, which reads exactly like a file that had no
+        // matching lines.
+        let out = piped("sed '/^abc/d'", b"abc\nzabc\n");
+        assert_eq!(out.as_slice(), b"zabc\n", "^ anchors an address");
+        assert_eq!(last_exit(), 0, "and the run is a success");
+
+        let out = piped("sed -n '/a.c/p'", b"abc\naxc\nxyz\n");
+        assert_eq!(
+            out.as_slice(),
+            b"abc\naxc\n",
+            ". in an address is any character"
+        );
+
+        // ---- s/// left-hand side ------------------------------------------
+        //
+        // `sed_replace_first` was `str::find`, so the pattern was three literal
+        // characters.
+        let out = piped("sed 's/a.c/X/'", b"abc\naxc\nzzz\n");
+        assert_eq!(out.as_slice(), b"X\nX\nzzz\n", ". in s/// is any character");
+
+        // The two anchors, which a substring search can never satisfy: no line
+        // contains a `^` or a `$`, so both of these used to be no-ops.
+        let out = piped("sed 's/^/PRE/'", b"a\nb\n");
+        assert_eq!(
+            out.as_slice(),
+            b"PREa\nPREb\n",
+            "^ is the start of the line"
+        );
+        let out = piped("sed 's/c$/K/'", b"abc\ncab\n");
+        assert_eq!(out.as_slice(), b"abK\ncab\n", "$ is the end of the line");
+
+        // ---- BRE, specifically ---------------------------------------------
+        //
+        // Compiling sed's patterns as *extended* regular expressions would pass
+        // every assertion above and still be wrong. These four are the ones that
+        // tell the dialects apart: without `-E`, `+` and `(` are ordinary
+        // characters and the repetition/group spellings are the backslashed
+        // ones.
+        let out = piped("sed 's/a+b/X/'", b"a+b\naab\n");
+        assert_eq!(
+            out.as_slice(),
+            b"X\naab\n",
+            "in a BRE, + is a literal plus sign"
+        );
+        let out = piped("sed 's/a\\+b/X/'", b"a+b\naab\n");
+        assert_eq!(
+            out.as_slice(),
+            b"a+b\nX\n",
+            "and the repetition is spelled backslash-plus"
+        );
+        let out = piped("sed 's/(a)/X/'", b"(a)\na\n");
+        assert_eq!(
+            out.as_slice(),
+            b"X\na\n",
+            "in a BRE, parentheses are literal"
+        );
+        let out = piped("sed 's/\\(a\\)b/[\\1]/'", b"ab\n");
+        assert_eq!(
+            out.as_slice(),
+            b"[a]\n",
+            "and the group is spelled backslash-paren"
+        );
+
+        // ---- s/// right-hand side ------------------------------------------
+        //
+        // `&` and `\1` were literal text: `sed 's/\(a*\)b/[\1]/'` wrote the two
+        // characters `\1`, and both exited 0.
+        let out = piped("sed 's/\\(a*\\)b/[\\1]/'", b"aaab\n");
+        assert_eq!(out.as_slice(), b"[aaa]\n", "\\1 is the first group");
+        let out = piped("sed 's/abc/[&]/'", b"xabcy\n");
+        assert_eq!(out.as_slice(), b"x[abc]y\n", "& is the whole match");
+        let out = piped("sed 's/abc/\\&/'", b"abc\n");
+        assert_eq!(out.as_slice(), b"&\n", "\\& is a literal ampersand");
+        // The doubled backslash `find_unescaped` used to read as an escaped
+        // delimiter, which made this exact script `unterminated command`.
+        let out = piped("sed 's/abc/\\\\/'", b"abc\n");
+        assert_eq!(out.as_slice(), b"\\\n", "\\\\ is a literal backslash");
+
+        // ---- the mechanics that must keep working --------------------------
+        let out = piped("sed 's/a/X/'", b"aaa\n");
+        assert_eq!(out.as_slice(), b"Xaa\n", "without g, only the first match");
+        let out = piped("sed 's/a/X/g'", b"aaa\n");
+        assert_eq!(out.as_slice(), b"XXX\n", "with g, every match");
+        // An empty match is a position, not a span. GNU writes the replacement
+        // between every pair of characters and then stops; a loop that did not
+        // step past a zero-width match would never terminate.
+        let out = piped("sed 's/x*/-/g'", b"ab\n");
+        assert_eq!(out.as_slice(), b"-a-b-\n", "a zero-width match advances");
+        // An escaped delimiter still means the delimiter.
+        let out = piped("sed 's/a\\/b/X/'", b"a/b\n");
+        assert_eq!(out.as_slice(), b"X\n", "an escaped delimiter is literal");
+        // A pattern with no metacharacter behaves as it always did.
+        let out = piped("sed 's/zz_subject/zz_hit/'", b"zz_subject\n");
+        assert_eq!(out.as_slice(), b"zz_hit\n", "a plain literal still works");
+
+        // ---- refusals -------------------------------------------------------
+        //
+        // Each of these is a script this shell cannot honour. Every one is
+        // reported and exits non-zero rather than being approximated, and none
+        // of them prints the input: a sed that emits its input unchanged and
+        // exits 0 is indistinguishable from one that did the edit.
+        for (script, want) in [
+            ("sed 's//X/'", b"no previous regular expression" as &[u8]),
+            ("sed 's/a[b/X/'", b"Unmatched ["),
+            ("sed 's/\\(a\\)/\\3/'", b"invalid reference"),
+            ("sed 's/a/\\U/'", b"unsupported replacement escape"),
+        ] {
+            let out = piped(script, b"abc\n");
+            assert_output_contains(script, &out, want);
+            assert_eq!(last_exit(), 1, "{} is refused", script);
+            assert!(
+                !out.windows(4).any(|w| w == b"abc\n"),
+                "{} does not print its input",
+                script
+            );
+        }
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -108255,80 +108730,345 @@ fn cmd_cut_input(args: &str, input: &[u8]) {
     }
 }
 
-/// `tr SET1 SET2` — translate characters.
-///
-/// Replaces each character in SET1 with the corresponding character in SET2.
-/// `tr -d SET1` deletes characters in SET1.
-fn cmd_tr(args: &str) {
-    // tr needs piped input; standalone usage reads a file.
-    let mut parts = args.splitn(3, ' ');
-    let set1_or_flag = parts.next().unwrap_or("");
-    let set2_or_file = parts.next().unwrap_or("");
-    let file = parts.next().unwrap_or("").trim();
+/// What a `tr` command line asked for, once it has been parsed.
+struct TrSpec {
+    /// Expanded SET1: the characters to translate *from*, or to delete.
+    set1: Vec<char>,
+    /// Expanded SET2. Empty in delete mode, where there is no SET2 to give.
+    set2: Vec<char>,
+    /// `-d`: delete the members of SET1 rather than translating them.
+    delete: bool,
+    /// The optional file operand.
+    ///
+    /// GNU's `tr` has none — it reads standard input and nothing else — so
+    /// this is a deliberate extension, kept because the kernel shell's
+    /// pipelines are shallow and `tr -d '\r' file` is worth having without
+    /// one. The cost is that `tr a b c` is a translation of file `c` here
+    /// where GNU calls it an extra operand.
+    file: Option<String>,
+}
 
-    if set1_or_flag == "-d" {
-        // Delete mode: tr -d SET1 FILE
-        if set2_or_file.is_empty() {
-            shell_println!("Usage: tr -d CHARS [file]  or pipe: cmd | tr -d CHARS");
-            set_exit(1);
-            return;
+/// Why a `tr` command line could not be honoured.
+///
+/// `cmd_tr` used to return no errors of this kind at all: there was no flag
+/// loop and no operand count: the first word was compared against the literal
+/// `"-d"` and *otherwise used as SET1*, and everything after the second word
+/// was swept into SET2 by a `splitn`. So each of the cases below was answered
+/// rather than reported, and every one of them exited 0:
+///
+/// | written | what it did |
+/// |---|---|
+/// | `tr -s ab` | translated `-`→`a` and `s`→`b` — the flag became the set |
+/// | `tr -c a b` | translated `-`→`a` and `c`→`b`, then took `b` as a file |
+/// | `tr a b c d` | expanded `b c d`, spaces and all, as SET2 |
+/// | `tr ' ' '_'` | SET1 was **empty**, so the input passed through unchanged |
+///
+/// The last of those is the quote-removal boundary rather than the parser:
+/// see [`command_parses_own_quotes`], which `tr` now qualifies for.
+enum TrParseError {
+    /// A real `tr` option that this one does not implement. Naming it is the
+    /// point: the old parser used the flag word as SET1, so `tr -s ab` gave a
+    /// wrong answer where it should have given none.
+    Unsupported(char, &'static str),
+    /// Anything else beginning with `-`.
+    UnknownOption(String),
+    /// No SET1 at all.
+    NoSets,
+    /// `tr a` — a translation needs a SET2 as well.
+    MissingSet2(String),
+    /// More operands than there are places to put them.
+    ExtraOperand(String),
+}
+
+impl TrParseError {
+    /// Print the diagnostic. GNU's wording where GNU has one, so a user who
+    /// knows `tr` recognises what went wrong.
+    fn report(&self) {
+        match *self {
+            Self::Unsupported(opt, hint) => {
+                shell_println!("tr: -{} is not supported ({})", opt, hint);
+            }
+            Self::UnknownOption(ref opt) => {
+                shell_println!("tr: unrecognized option '{}'", opt);
+            }
+            Self::NoSets => {
+                shell_println!("tr: missing operand");
+                shell_println!("Usage: tr SET1 SET2 [file]  or  tr -d SET1 [file]");
+            }
+            Self::MissingSet2(ref set1) => {
+                shell_println!("tr: missing operand after '{}'", set1);
+                shell_println!("Usage: tr SET1 SET2 [file]  or  tr -d SET1 [file]");
+            }
+            Self::ExtraOperand(ref word) => {
+                shell_println!("tr: extra operand '{}'", word);
+            }
         }
-        if !file.is_empty() {
-            let resolved = resolve_path(file);
-            match crate::fs::Vfs::read_file(&resolved) {
-                Ok(data) => {
-                    let text = core::str::from_utf8(&data).unwrap_or("");
-                    tr_delete(text, set2_or_file);
+    }
+}
+
+/// Parse `tr`'s arguments, or say why they cannot be honoured.
+///
+/// Words come from [`split_words`], which respects quotes and removes them.
+/// That is what makes a space expressible as a set at all: `tr ' ' '_'` used
+/// to be dequoted at the dispatch boundary into `  _`, whose `splitn(2, ' ')`
+/// halves are the empty string and ` _` — an empty SET1 that matches nothing,
+/// so the input was copied out unchanged and reported as a success.
+fn parse_tr_args(args: &str) -> Result<TrSpec, TrParseError> {
+    let words = split_words(args);
+    let mut delete = false;
+    let mut operands: Vec<String> = Vec::new();
+    let mut flags_done = false;
+
+    for word in &words {
+        // A lone `-` is an operand, not a flag; `--` ends the options, which
+        // is how a set that begins with `-` is written.
+        if flags_done || !word.starts_with('-') || word.len() < 2 {
+            operands.push(word.clone());
+            continue;
+        }
+        match word.as_str() {
+            "--" => {
+                flags_done = true;
+                continue;
+            }
+            "--delete" => {
+                delete = true;
+                continue;
+            }
+            "--squeeze-repeats" => {
+                return Err(TrParseError::Unsupported(
+                    's',
+                    "this tr does not squeeze repeated characters",
+                ));
+            }
+            "--complement" => {
+                return Err(TrParseError::Unsupported(
+                    'c',
+                    "this tr does not complement a set",
+                ));
+            }
+            "--truncate-set1" => {
+                return Err(TrParseError::Unsupported(
+                    't',
+                    "this tr pads SET2 with its last character instead",
+                ));
+            }
+            _ => {}
+        }
+        if word.starts_with("--") {
+            return Err(TrParseError::UnknownOption(word.clone()));
+        }
+        // Short options, bundled or not. Each is reported by its own letter,
+        // so `-ds` names `-s` rather than the bundle.
+        for c in word.chars().skip(1) {
+            match c {
+                'd' => delete = true,
+                's' => {
+                    return Err(TrParseError::Unsupported(
+                        's',
+                        "this tr does not squeeze repeated characters",
+                    ));
                 }
+                'c' | 'C' => {
+                    return Err(TrParseError::Unsupported(
+                        'c',
+                        "this tr does not complement a set",
+                    ));
+                }
+                't' => {
+                    return Err(TrParseError::Unsupported(
+                        't',
+                        "this tr pads SET2 with its last character instead",
+                    ));
+                }
+                _ => return Err(TrParseError::UnknownOption(alloc::format!("-{c}"))),
+            }
+        }
+    }
+
+    // `-d` takes SET1 and an optional file; a translation takes both sets and
+    // an optional file. Counting is the whole difference between refusing an
+    // extra operand and quietly expanding it as part of a set.
+    let wanted = if delete { 1 } else { 2 };
+    if operands.is_empty() {
+        return Err(TrParseError::NoSets);
+    }
+    if operands.len() < wanted {
+        let set1 = operands.first().cloned().unwrap_or_default();
+        return Err(TrParseError::MissingSet2(set1));
+    }
+    if let Some(extra) = operands.get(wanted.saturating_add(1)) {
+        return Err(TrParseError::ExtraOperand(extra.clone()));
+    }
+
+    let set1 = expand_tr_set(operands.first().map_or("", String::as_str));
+    let set2 = if delete {
+        Vec::new()
+    } else {
+        expand_tr_set(operands.get(1).map_or("", String::as_str))
+    };
+    Ok(TrSpec {
+        set1,
+        set2,
+        delete,
+        file: operands.get(wanted).cloned(),
+    })
+}
+
+/// `tr SET1 SET2` — translate characters; `tr -d SET1` — delete them.
+fn cmd_tr(args: &str) {
+    match parse_tr_args(args) {
+        Ok(spec) => tr_run(&spec, None),
+        Err(e) => {
+            e.report();
+            set_exit(1);
+        }
+    }
+}
+
+fn cmd_tr_input(args: &str, input: &[u8]) {
+    match parse_tr_args(args) {
+        Ok(spec) => tr_run(&spec, Some(input)),
+        Err(e) => {
+            e.report();
+            set_exit(1);
+        }
+    }
+}
+
+/// Run a parsed `tr` over its file operand, or over the pipe if there is none.
+fn tr_run(spec: &TrSpec, stdin: Option<&[u8]>) {
+    match spec.file {
+        Some(ref path) => {
+            let resolved = resolve_path(path);
+            match crate::fs::Vfs::read_file(&resolved) {
+                // Previously `from_utf8(&data).unwrap_or("")`, which turned a
+                // file `tr` could not decode into an *empty* one: no output,
+                // exit 0, indistinguishable from a file that really was empty.
+                // The pipe form never had this bug — `dispatch_with_input`
+                // narrowed through `shell_bytes_as_str`, which reports and
+                // exits 1 — so the two halves of one command disagreed about
+                // what an undecodable input meant.
+                Ok(data) => tr_apply(spec, &data, path),
                 Err(e) => {
-                    shell_println!("tr: {}: {:?}", file, e);
+                    shell_println!("tr: {}: {:?}", path, e);
                     set_exit(1);
                 }
             }
-        } else {
-            shell_println!("Usage: tr -d CHARS [file]");
-            set_exit(1);
         }
-    } else if set1_or_flag.is_empty() || set2_or_file.is_empty() {
-        shell_println!("Usage: tr SET1 SET2 [file]  or  tr -d CHARS [file]");
-        set_exit(1);
-    } else if !file.is_empty() {
-        let resolved = resolve_path(file);
-        match crate::fs::Vfs::read_file(&resolved) {
-            Ok(data) => {
-                let text = core::str::from_utf8(&data).unwrap_or("");
-                tr_translate(text, set1_or_flag, set2_or_file);
-            }
-            Err(e) => {
-                shell_println!("tr: {}: {:?}", file, e);
+        None => match stdin {
+            Some(data) => tr_apply(spec, data, "-"),
+            None => {
+                shell_println!("Usage: tr SET1 SET2 [file]  or  tr -d SET1 [file]");
+                shell_println!("       cmd | tr SET1 SET2  or  cmd | tr -d SET1");
                 set_exit(1);
             }
+        },
+    }
+}
+
+/// What to do with one input byte, once SET1 is known to be all ASCII.
+///
+/// `None` in the table means "not in SET1": pass the byte through untouched.
+#[derive(Clone, Copy)]
+enum TrAction {
+    /// `-d`: drop the byte.
+    Drop,
+    /// Write this character's UTF-8 in place of the byte. The replacement is
+    /// unconstrained — SET2 is only ever *written*, never matched — so a
+    /// multi-byte one is simply emitted as its bytes.
+    Emit(char),
+}
+
+/// Build the 256-entry byte table for an all-ASCII SET1.
+///
+/// First occurrence wins, which is what the character path's
+/// `s1.iter().position(..)` did, so `tr aa bc` still maps `a` to `b`.
+fn tr_byte_table(spec: &TrSpec) -> [Option<TrAction>; 256] {
+    let mut table = [None; 256];
+    for (pos, &c) in spec.set1.iter().enumerate() {
+        // The caller checks this; a non-ASCII member has no single byte to
+        // key on, and skipping it here would silently drop it from the set.
+        if !c.is_ascii() {
+            continue;
         }
-    } else {
-        shell_println!("Usage: tr SET1 SET2 [file]  or pipe: cmd | tr SET1 SET2");
+        let Some(slot) = table.get_mut(c as usize) else {
+            continue;
+        };
+        if slot.is_some() {
+            continue;
+        }
+        *slot = Some(if spec.delete {
+            TrAction::Drop
+        } else {
+            // A short SET2 repeats its last character, which is GNU's default
+            // (`-t` asks for the other reading and is refused). An *empty*
+            // SET2 cannot reach here — `split_words` drops an empty quoted
+            // word, so `tr a ''` is a missing operand — but if it did, leaving
+            // the character alone is what the character path's `unwrap_or(ch)`
+            // does.
+            TrAction::Emit(
+                spec.set2
+                    .get(pos)
+                    .or_else(|| spec.set2.last())
+                    .copied()
+                    .unwrap_or(c),
+            )
+        });
+    }
+    table
+}
+
+/// Apply a parsed `tr` to one input.
+///
+/// **The byte path is not an optimisation — it is the only reading that is
+/// defined on input that is not text.** Whenever every member of SET1 is
+/// ASCII the two readings provably coincide: UTF-8 is self-synchronising, so
+/// every byte of a multi-byte sequence is `>= 0x80` while every ASCII
+/// character is `< 0x80`, and therefore no member of an all-ASCII SET1 can
+/// occur *inside* a character. A byte-wise pass matches exactly the bytes a
+/// character-wise pass would have matched and leaves every other byte alone —
+/// the same output on valid UTF-8, and a defined one on bytes that are not.
+/// `tr -d '\r'` over a binary file is the case that matters, and it is the
+/// overwhelmingly common shape: `tr a-z A-Z`, `tr -d '\0'`, `tr ' ' '_'`.
+///
+/// Only a SET1 with a non-ASCII member in it — `tr é e`, `tr -d 'à-â'` —
+/// genuinely has to decode, and there an input that will not decode is
+/// reported rather than answered.
+fn tr_apply(spec: &TrSpec, data: &[u8], name: &str) {
+    if spec.set1.iter().all(char::is_ascii) {
+        let table = tr_byte_table(spec);
+        let mut out: Vec<u8> = Vec::with_capacity(data.len());
+        let mut buf = [0u8; 4];
+        for &b in data {
+            match table.get(b as usize).copied().flatten() {
+                None => out.push(b),
+                Some(TrAction::Drop) => {}
+                Some(TrAction::Emit(c)) => {
+                    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                }
+            }
+        }
+        shell_write_bytes(&out);
+        return;
+    }
+
+    let Ok(text) = core::str::from_utf8(data) else {
+        shell_println!(
+            "tr: {}: not valid text, and SET1 contains non-ASCII characters",
+            name
+        );
         set_exit(1);
+        return;
+    };
+    if spec.delete {
+        tr_delete(text, &spec.set1);
+    } else {
+        tr_translate(text, &spec.set1, &spec.set2);
     }
 }
 
-fn cmd_tr_input(args: &str, input: &str) {
-    let mut parts = args.splitn(2, ' ');
-    let set1_or_flag = parts.next().unwrap_or("");
-    let set2 = parts.next().unwrap_or("");
-
-    if set1_or_flag == "-d" {
-        tr_delete(input, set2);
-    } else if !set2.is_empty() {
-        tr_translate(input, set1_or_flag, set2);
-    } else {
-        shell_println!("Usage: cmd | tr SET1 SET2  or  cmd | tr -d CHARS");
-        set_exit(1);
-    }
-}
-
-fn tr_translate(text: &str, set1: &str, set2: &str) {
-    let s1: Vec<char> = expand_tr_set(set1);
-    let s2: Vec<char> = expand_tr_set(set2);
-
+fn tr_translate(text: &str, s1: &[char], s2: &[char]) {
     let mut result = String::with_capacity(text.len());
     for ch in text.chars() {
         if let Some(pos) = s1.iter().position(|&c| c == ch) {
@@ -108342,8 +109082,7 @@ fn tr_translate(text: &str, set1: &str, set2: &str) {
     shell_print!("{}", result);
 }
 
-fn tr_delete(text: &str, set1: &str) {
-    let s1: Vec<char> = expand_tr_set(set1);
+fn tr_delete(text: &str, s1: &[char]) {
     let mut result = String::with_capacity(text.len());
     for ch in text.chars() {
         if !s1.contains(&ch) {
@@ -108362,8 +109101,14 @@ fn tr_delete(text: &str, set1: &str) {
 /// Latin-1 characters `Ã` and `©`, neither of which appears in decoded input,
 /// so the translation silently did nothing. Ranges were worse: `start..=end`
 /// over bytes could run from half of one character into half of another.
+///
+/// This no longer calls `strip_quotes`. It used to, because `tr` received a
+/// line that had already been dequoted at the dispatch boundary and a quote
+/// could only have arrived as `\'` — but now [`parse_tr_args`] splits with
+/// [`split_words`], which removes the quoting itself, so a quote reaching here
+/// is data. Stripping it would eat the outer pair of `tr "''" x`, which is how
+/// you ask to translate two apostrophes.
 fn expand_tr_set(set: &str) -> Vec<char> {
-    let set = strip_quotes(set);
     let src: Vec<char> = set.chars().collect();
     let len = src.len();
     let mut chars = Vec::new();
@@ -122026,7 +122771,19 @@ fn cmd_sed(args: &str) {
         };
 
         let text = core::str::from_utf8(&data).unwrap_or("");
-        let output = sed_apply(text, &parsed, suppress);
+        // A declined match is not "no match": the engine hit its work limit and
+        // has no verdict. Folding that into `false` would silently keep a line
+        // that `d` was asked to delete, so the file is left exactly as it was
+        // and the failure is reported. Under `-i` that matters most — a partial
+        // answer written back over the original is unrecoverable.
+        let output = match sed_apply(text, &parsed, suppress) {
+            Ok(output) => output,
+            Err(_) => {
+                shell_println!("sed: '{}': {}", path.display(), ere::MatchLimit);
+                set_exit(1);
+                continue;
+            }
+        };
 
         if in_place {
             match crate::fs::Vfs::write_file(&path, output.as_bytes()) {
@@ -122048,12 +122805,16 @@ fn cmd_sed(args: &str) {
     }
 }
 
-/// Parsed sed command.
+/// Parsed sed command, with every regular expression already compiled.
+///
+/// Compiled at parse time for the reason `awk` compiles at parse time: a script
+/// that cannot be honoured must be refused before the first line is read, not
+/// discovered part-way through an edit that has already written half a file.
 enum SedCmd {
     /// `s/pattern/replacement/[g]`
     Substitute {
-        pattern: alloc::string::String,
-        replacement: alloc::string::String,
+        pattern: ere::Regex,
+        replacement: alloc::vec::Vec<SedRepl>,
         global: bool,
         addr: SedAddr,
     },
@@ -122063,22 +122824,40 @@ enum SedCmd {
     Print { addr: SedAddr },
 }
 
+/// One piece of an `s///` replacement.
+///
+/// A parsed template rather than a string, because `&` and `\1` have to be
+/// distinguished from the literal characters `&` and `1` *once*, when the
+/// script is read, rather than re-scanned for every line of every file.
+enum SedRepl {
+    /// Text to emit as it stands.
+    Lit(alloc::string::String),
+    /// `&` or `\0` (the whole match) and `\1`…`\9` (a group).
+    Group(usize),
+}
+
 /// Sed address (line selector).
 enum SedAddr {
     /// All lines.
     All,
     /// Specific line number.
     Line(usize),
-    /// Lines matching a pattern.
-    Pattern(alloc::string::String),
+    /// Lines matching a **basic** regular expression.
+    Regex(ere::Regex),
 }
 
 /// Check if a sed address matches the current line.
-fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &str) -> bool {
+///
+/// `Err` is a declined answer, not a "no" — see [`AwkPattern::matches`] for why
+/// that distinction is load-bearing. It matters more here than in `awk`: this
+/// verdict can select a line for `d`, so folding a declined match into `false`
+/// would keep a line the script asked to delete, or (for the negated forms this
+/// shell does not yet have) delete one it asked to keep.
+fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &str) -> Result<bool, ere::MatchLimit> {
     match addr {
-        SedAddr::All => true,
-        SedAddr::Line(n) => line_num == *n,
-        SedAddr::Pattern(pat) => line.contains(pat.as_str()),
+        SedAddr::All => Ok(true),
+        SedAddr::Line(n) => Ok(line_num == *n),
+        SedAddr::Regex(re) => re.is_match(line.as_bytes()),
     }
 }
 
@@ -122098,7 +122877,11 @@ fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &str) -> bool {
 /// final newline for input that had none. A newline follows every emitted line
 /// *except* the last line of an input that did not end in one — which is a
 /// property of the input, not of whether that line survived the script.
-fn sed_apply(text: &str, script: &[SedCmd], suppress: bool) -> alloc::string::String {
+fn sed_apply(
+    text: &str,
+    script: &[SedCmd],
+    suppress: bool,
+) -> Result<alloc::string::String, ere::MatchLimit> {
     let final_newline = text.ends_with('\n');
     let total = text.lines().count();
     let mut output = alloc::string::String::new();
@@ -122117,21 +122900,17 @@ fn sed_apply(text: &str, script: &[SedCmd], suppress: bool) -> alloc::string::St
                     global,
                     addr,
                 } => {
-                    if sed_addr_matches(addr, line_num, &current) {
-                        if *global {
-                            current = sed_replace_all(&current, pattern, replacement);
-                        } else {
-                            current = sed_replace_first(&current, pattern, replacement);
-                        }
+                    if sed_addr_matches(addr, line_num, &current)? {
+                        current = sed_substitute(&current, pattern, replacement, *global)?;
                     }
                 }
                 SedCmd::Delete { addr } => {
-                    if sed_addr_matches(addr, line_num, &current) {
+                    if sed_addr_matches(addr, line_num, &current)? {
                         deleted = true;
                     }
                 }
                 SedCmd::Print { addr } => {
-                    if sed_addr_matches(addr, line_num, &current) {
+                    if sed_addr_matches(addr, line_num, &current)? {
                         print_this = true;
                     }
                 }
@@ -122146,7 +122925,7 @@ fn sed_apply(text: &str, script: &[SedCmd], suppress: bool) -> alloc::string::St
         }
     }
 
-    output
+    Ok(output)
 }
 
 /// Why a `sed` script could not be turned into a [`SedCmd`].
@@ -122172,6 +122951,18 @@ enum SedParseError {
     /// Recognised in shape, but the bytes do not slice — a non-ASCII delimiter,
     /// which this byte-wise scanner cannot walk without landing mid-character.
     Invalid,
+    /// The regular expression itself did not compile. Carries glibc's own
+    /// sentence for the failure, so the kernel shell words it as userspace does.
+    BadRegex(&'static str),
+    /// An empty pattern, which in GNU sed means "the last regexp used". This
+    /// shell keeps no such thing, and matching the empty string everywhere
+    /// instead would be an answer rather than a refusal.
+    NoPreviousRegex,
+    /// `\N` in a replacement, where the pattern has no group `N`.
+    BadGroupRef(char),
+    /// A replacement escape this shell does not implement — `\U` and the other
+    /// GNU case conversions. Refused rather than emitted as its own text.
+    BadReplEscape(char),
 }
 
 impl SedParseError {
@@ -122207,6 +122998,32 @@ impl SedParseError {
                 shell_println!(
                     "sed: -e expression #{}: invalid command syntax: {}",
                     n,
+                    script
+                );
+            }
+            Self::BadRegex(msg) => {
+                shell_println!("sed: -e expression #{}: {}: {}", n, msg, script);
+            }
+            Self::NoPreviousRegex => {
+                shell_println!(
+                    "sed: -e expression #{}: no previous regular expression: {}",
+                    n,
+                    script
+                );
+            }
+            Self::BadGroupRef(c) => {
+                shell_println!(
+                    "sed: -e expression #{}: invalid reference \\{} on `s' command's RHS: {}",
+                    n,
+                    c,
+                    script
+                );
+            }
+            Self::BadReplEscape(c) => {
+                shell_println!(
+                    "sed: -e expression #{}: unsupported replacement escape \\{} in {}",
+                    n,
+                    c,
                     script
                 );
             }
@@ -122274,10 +123091,15 @@ fn parse_sed_command(cmd: &str) -> Result<SedCmd, SedParseError> {
             return Err(SedParseError::UnknownFlag(c));
         }
 
-        let pattern =
-            alloc::string::String::from(cmd.get(pat_start..pat_end).ok_or(SedParseError::Invalid)?);
-        let replacement =
-            alloc::string::String::from(cmd.get(rep_start..rep_end).ok_or(SedParseError::Invalid)?);
+        let pattern = sed_compile(
+            cmd.get(pat_start..pat_end).ok_or(SedParseError::Invalid)?,
+            delim,
+        )?;
+        let replacement = sed_parse_replacement(
+            cmd.get(rep_start..rep_end).ok_or(SedParseError::Invalid)?,
+            delim,
+            pattern.group_count(),
+        )?;
         let global = flags.contains('g');
 
         return Ok(SedCmd::Substitute {
@@ -122291,19 +123113,17 @@ fn parse_sed_command(cmd: &str) -> Result<SedCmd, SedParseError> {
     // Address commands: /pattern/d or /pattern/p
     if bytes.first() == Some(&b'/') {
         let pat_end = find_unescaped(bytes, b'/', 1).ok_or(SedParseError::Unterminated)?;
-        let pattern =
-            alloc::string::String::from(cmd.get(1..pat_end).ok_or(SedParseError::Invalid)?);
+        let addr = SedAddr::Regex(sed_compile(
+            cmd.get(1..pat_end).ok_or(SedParseError::Invalid)?,
+            b'/',
+        )?);
         let action = cmd
             .get(pat_end.saturating_add(1)..)
             .ok_or(SedParseError::Invalid)?;
 
         return match action.trim() {
-            "d" => Ok(SedCmd::Delete {
-                addr: SedAddr::Pattern(pattern),
-            }),
-            "p" => Ok(SedCmd::Print {
-                addr: SedAddr::Pattern(pattern),
-            }),
+            "d" => Ok(SedCmd::Delete { addr }),
+            "p" => Ok(SedCmd::Print { addr }),
             _ => Err(SedParseError::Unknown),
         };
     }
@@ -122321,36 +123141,223 @@ fn parse_sed_command(cmd: &str) -> Result<SedCmd, SedParseError> {
     Err(SedParseError::Unknown)
 }
 
+/// Compile one sed pattern as a **basic** regular expression.
+///
+/// BRE and not ERE, and the difference is not cosmetic: in a BRE `a+b` is the
+/// three literal characters, `a\+b` is the repetition, and groups are `\(…\)`
+/// while a bare `(` is an ordinary character. Compiling sed's patterns as EREs
+/// would swap those readings round and silently change what a working script
+/// means — which is the same class of fault as the substring search this
+/// replaces, only harder to spot because most patterns would still work.
+/// `sed -E` (which this shell does not have) is where the ERE reading belongs.
+///
+/// `\<delim>` inside the pattern is the delimiter as a literal character, which
+/// is how it gets past [`find_unescaped`]. The backslash is stripped before the
+/// engine sees it, as GNU does: `\/` is not a defined BRE escape, so leaving it
+/// in would turn a working `s/a\/b/x/` into a compile error.
+fn sed_compile(pattern: &str, delim: u8) -> Result<ere::Regex, SedParseError> {
+    let mut src = alloc::vec::Vec::with_capacity(pattern.len());
+    let mut escaped = false;
+    for &b in pattern.as_bytes() {
+        if escaped {
+            // Only the delimiter loses its backslash; every other escape is the
+            // engine's to interpret, and eating backslashes here would break
+            // `\(`, `\{`, `\.` and the rest of BRE's syntax.
+            if b != delim {
+                src.push(b'\\');
+            }
+            src.push(b);
+            escaped = false;
+            continue;
+        }
+        if b == b'\\' {
+            escaped = true;
+            continue;
+        }
+        src.push(b);
+    }
+    if escaped {
+        src.push(b'\\');
+    }
+
+    // An empty pattern in GNU sed means "the last regexp used", and this shell
+    // has no last regexp to offer. Compiling it would match the empty string
+    // everywhere, so `s//X/g` would interleave `X` between every character and
+    // report success -- a wrong answer, where GNU gives an error.
+    if src.is_empty() {
+        return Err(SedParseError::NoPreviousRegex);
+    }
+
+    ere::bre::compile(&src, false).map_err(|e| SedParseError::BadRegex(e.message()))
+}
+
+/// Parse an `s///` replacement into the pieces [`sed_render`] emits.
+///
+/// `&` is the whole match and `\1`…`\9` are groups, as in every sed. Both used
+/// to be literal text: `sed 's/\(a*\)b/[\1]/'` wrote the two characters `\1`,
+/// and `sed 's/x/[&]/'` wrote `[&]`, in both cases exiting 0.
+///
+/// `ngroups` is the pattern's group count, so `\3` against a pattern with two
+/// groups is a *script* error rather than an empty expansion at run time. GNU
+/// calls it `invalid reference \3 on 's' command's RHS`.
+///
+/// An escape this shell does not implement is refused rather than passed
+/// through as its own text. `\U`, `\L`, `\u`, `\l` and `\E` are GNU case
+/// conversions; emitting a literal `U` for `\U` would be a wrong answer of
+/// exactly the kind `s/a/b/i` was rejected for.
+fn sed_parse_replacement(
+    repl: &str,
+    delim: u8,
+    ngroups: usize,
+) -> Result<alloc::vec::Vec<SedRepl>, SedParseError> {
+    let mut out = alloc::vec::Vec::new();
+    let mut lit = alloc::string::String::new();
+    let mut chars = repl.chars();
+
+    while let Some(c) = chars.next() {
+        if c == '&' {
+            if !lit.is_empty() {
+                out.push(SedRepl::Lit(core::mem::take(&mut lit)));
+            }
+            out.push(SedRepl::Group(0));
+            continue;
+        }
+        if c != '\\' {
+            lit.push(c);
+            continue;
+        }
+        let Some(next) = chars.next() else {
+            // A replacement ending in a backslash. GNU: `unterminated `s'
+            // command`, because the backslash would have escaped the delimiter.
+            return Err(SedParseError::Unterminated);
+        };
+        match next {
+            '0'..='9' => {
+                let n = next as usize - '0' as usize;
+                if n > ngroups {
+                    return Err(SedParseError::BadGroupRef(next));
+                }
+                if !lit.is_empty() {
+                    out.push(SedRepl::Lit(core::mem::take(&mut lit)));
+                }
+                out.push(SedRepl::Group(n));
+            }
+            'n' => lit.push('\n'),
+            't' => lit.push('\t'),
+            'r' => lit.push('\r'),
+            '\\' | '&' => lit.push(next),
+            // The delimiter, escaped so it could get past `find_unescaped`.
+            c if c.is_ascii() && c as u32 == u32::from(delim) => lit.push(c),
+            other => return Err(SedParseError::BadReplEscape(other)),
+        }
+    }
+
+    if !lit.is_empty() {
+        out.push(SedRepl::Lit(lit));
+    }
+    Ok(out)
+}
+
 /// Find the position of an unescaped delimiter byte starting from `start`.
+///
+/// The scan steps *over* an escape rather than looking backwards from a
+/// candidate delimiter, which is the only way to read `\\` correctly. Looking
+/// back one byte cannot tell `\/` (an escaped delimiter) from `\\/` (an escaped
+/// backslash, then the delimiter): both have a backslash in front of the `/`.
+/// The old code answered "escaped" to each, so `sed 's/x/\\/'` — a replacement
+/// of one literal backslash — was reported as `unterminated command`, and any
+/// script whose pattern or replacement ended in a backslash was unreachable.
 fn find_unescaped(bytes: &[u8], delim: u8, start: usize) -> Option<usize> {
     let mut i = start;
-    while i < bytes.len() {
-        if bytes[i] == delim {
-            // Check if preceded by backslash.
-            if i > start && bytes[i - 1] == b'\\' {
-                i += 1;
-                continue;
-            }
+    while let Some(&b) = bytes.get(i) {
+        if b == b'\\' {
+            // Whatever follows is that byte's own, delimiter or not. A trailing
+            // lone backslash puts `i` past the end, which ends the loop and
+            // reports the command as unterminated — which it is.
+            i = i.saturating_add(2);
+            continue;
+        }
+        if b == delim {
             return Some(i);
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
     None
 }
 
-/// Replace the first occurrence of `pattern` in `text` with `replacement`.
-fn sed_replace_first(text: &str, pattern: &str, replacement: &str) -> alloc::string::String {
-    if pattern.is_empty() {
-        return alloc::string::String::from(text);
+/// Apply one `s///` to one line.
+///
+/// This replaces `sed_replace_first` and `sed_replace_all`, which were
+/// `str::find` and a `str::find` loop: `sed 's/a.c/x/'` replaced only the
+/// literal three characters `a.c`, `sed 's/^/> /'` prefixed nothing at all
+/// because no line contains a `^`, and both exited 0. The pattern is now a
+/// **basic** regular expression, which is what sed means without `-E`.
+///
+/// The unreplaced-tail write at the end is why this cannot be a `map`/`join`:
+/// what follows the last match has to be copied whether or not there was a
+/// match at all, and `sed_replace_all`'s loop got that right only by accident
+/// of its structure.
+fn sed_substitute(
+    text: &str,
+    re: &ere::Regex,
+    repl: &[SedRepl],
+    global: bool,
+) -> Result<alloc::string::String, ere::MatchLimit> {
+    let hay = text.as_bytes();
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(hay.len());
+    let mut last = 0usize;
+
+    for caps in re.capture_spans_iter(hay) {
+        let caps = caps?;
+        let Some((s, e)) = caps.first().copied().flatten() else {
+            break;
+        };
+        out.extend_from_slice(hay.get(last..s).unwrap_or_default());
+        sed_render(repl, hay, &caps, &mut out);
+        last = e;
+        if !global {
+            break;
+        }
     }
-    if let Some(pos) = text.find(pattern) {
-        let mut result = alloc::string::String::with_capacity(text.len());
-        result.push_str(&text[..pos]);
-        result.push_str(replacement);
-        result.push_str(&text[pos + pattern.len()..]);
-        result
-    } else {
-        alloc::string::String::from(text)
+    out.extend_from_slice(hay.get(last..).unwrap_or_default());
+
+    // The subject was a `str`, every span the engine reports is on a character
+    // boundary, and every literal spliced in came from a `str`, so the result
+    // is valid UTF-8 by construction. It is still checked rather than assumed:
+    // `from_utf8_unchecked` here would make an engine bug into undefined
+    // behaviour in the kernel, and the cost is a linear scan of one line.
+    Ok(match alloc::string::String::from_utf8(out) {
+        Ok(s) => s,
+        // Unreachable for the reason above. Returning the line unedited would
+        // be a silent wrong answer, so say what happened and keep going with
+        // the closest honest thing: the input.
+        Err(_) => {
+            shell_println!("sed: internal error: substitution produced invalid text");
+            alloc::string::String::from(text)
+        }
+    })
+}
+
+/// Expand a parsed replacement template for one match.
+///
+/// A group that did not participate contributes nothing — which is distinct
+/// from a group that does not *exist*, and that one is rejected at parse time,
+/// where it can still be reported as a script error.
+fn sed_render(
+    parts: &[SedRepl],
+    hay: &[u8],
+    caps: &[Option<(usize, usize)>],
+    out: &mut alloc::vec::Vec<u8>,
+) {
+    for part in parts {
+        match part {
+            SedRepl::Lit(text) => out.extend_from_slice(text.as_bytes()),
+            SedRepl::Group(n) => {
+                if let Some(Some((s, e))) = caps.get(*n) {
+                    out.extend_from_slice(hay.get(*s..*e).unwrap_or_default());
+                }
+            }
+        }
     }
 }
 
@@ -122419,24 +123426,16 @@ fn cmd_sed_input(args: &str, input: &str) {
     // of the extraction. The pop that used to stand here is what lost the final
     // newline on every piped `sed`, so `cat f | sed 's/a/b/' | wc -l` counted
     // one line short.
-    shell_print!("{}", sed_apply(input, &parsed, suppress));
-}
-
-/// Replace all occurrences of `pattern` in `text` with `replacement`.
-fn sed_replace_all(text: &str, pattern: &str, replacement: &str) -> alloc::string::String {
-    if pattern.is_empty() {
-        return alloc::string::String::from(text);
+    // Same declined-match rule as the file half: nothing is printed, because a
+    // partial edit that exits 0 is exactly the silent guess this wiring exists
+    // to remove.
+    match sed_apply(input, &parsed, suppress) {
+        Ok(output) => shell_print!("{}", output),
+        Err(_) => {
+            shell_println!("sed: {}", ere::MatchLimit);
+            set_exit(1);
+        }
     }
-    let mut result = alloc::string::String::with_capacity(text.len());
-    let mut start = 0;
-    while let Some(pos) = text[start..].find(pattern) {
-        let abs_pos = start + pos;
-        result.push_str(&text[start..abs_pos]);
-        result.push_str(replacement);
-        start = abs_pos + pattern.len();
-    }
-    result.push_str(&text[start..]);
-    result
 }
 
 // ---------------------------------------------------------------------------
@@ -122653,11 +123652,32 @@ fn text_records(data: &[u8]) -> alloc::vec::Vec<&[u8]> {
     body.split(|&b| b == b'\n').collect()
 }
 
+/// A match the engine declined to decide, naming the pattern that caused it.
+///
+/// Its own type rather than a bare `MatchLimit` so the message can point at the
+/// rule: a multi-rule program gives the user no other way to tell which pattern
+/// ran out of budget.
+struct AwkMatchAbort(alloc::string::String);
+
+impl AwkMatchAbort {
+    fn report(&self) {
+        shell_println!("awk: {}: {}", self.0, ere::MatchLimit);
+    }
+}
+
 /// Run every rule over one source's records, advancing `nr` across sources.
 ///
 /// `nr` is threaded rather than reset per file because awk's `NR` counts
 /// records over the whole run; `FNR` (per-file) is not implemented.
-fn awk_feed(data: &[u8], rules: &[AwkRule], fs: &AwkFs, nr: &mut usize) {
+///
+/// Stops at the first match the engine declines to decide rather than treating
+/// it as "no match" — see [`AwkPattern::matches`].
+fn awk_feed(
+    data: &[u8],
+    rules: &[AwkCompiled],
+    fs: &AwkFs,
+    nr: &mut usize,
+) -> Result<(), AwkMatchAbort> {
     for record in text_records(data) {
         *nr = nr.saturating_add(1);
         let fields = awk_split_fields(record, fs);
@@ -122666,16 +123686,71 @@ fn awk_feed(data: &[u8], rules: &[AwkRule], fs: &AwkFs, nr: &mut usize) {
             if rule.is_begin || rule.is_end {
                 continue;
             }
-            // `unwrap_or(false)` is unreachable for a validated program:
-            // `awk_validate_program` has already refused every pattern this
-            // returns `None` for. A rule that somehow escaped it is skipped
-            // rather than substring-matched, which is the honest reading of
-            // "cannot evaluate".
-            if awk_pattern_eval(&rule.pattern, record, *nr, nf).unwrap_or(false) {
-                awk_exec_action(&rule.action, record, &fields, *nr, nf);
+            match rule.pattern.matches(record, *nr, nf) {
+                Ok(true) => awk_exec_action(&rule.action, record, &fields, *nr, nf),
+                Ok(false) => {}
+                Err(_) => {
+                    return Err(AwkMatchAbort(alloc::string::String::from(
+                        rule.text.as_str(),
+                    )));
+                }
             }
         }
     }
+    Ok(())
+}
+
+/// Read every input source in order, returning the worst read status.
+///
+/// Split out of [`awk_run`] so that a declined match can stop the run with `?`
+/// from any of the three places input arrives, instead of three copies of the
+/// same report-and-return — the duplicated-arm shape that has already produced
+/// two of this file's recorded bugs.
+fn awk_feed_inputs(
+    spec: &AwkSpec,
+    stdin: Option<&[u8]>,
+    rules: &[AwkCompiled],
+    fs: &AwkFs,
+    nr: &mut usize,
+) -> Result<u8, AwkMatchAbort> {
+    let mut worst: u8 = 0;
+
+    if spec.files.is_empty() {
+        match stdin {
+            Some(data) => awk_feed(data, rules, fs, nr)?,
+            None => {
+                shell_println!("awk: no file operand and no input to read");
+                worst = worst.max(1);
+            }
+        }
+        return Ok(worst);
+    }
+
+    for path in &spec.files {
+        if path == "-" {
+            match stdin {
+                Some(data) => awk_feed(data, rules, fs, nr)?,
+                None => {
+                    shell_println!("awk: -: no input to read");
+                    worst = worst.max(1);
+                }
+            }
+            continue;
+        }
+        let resolved = resolve_path(path);
+        match crate::fs::Vfs::read_file(&resolved) {
+            // Straight from the VFS, undecoded.
+            Ok(data) => awk_feed(&data, rules, fs, nr)?,
+            Err(e) => {
+                // Every operand is attempted and the worst status reported: a
+                // later readable file must not erase an earlier missing one.
+                shell_println!("awk: {}: {:?}", path, e);
+                worst = worst.max(1);
+            }
+        }
+    }
+
+    Ok(worst)
 }
 
 /// The one `awk` driver, shared by the file and pipe forms.
@@ -122701,17 +123776,19 @@ fn awk_run(spec: &AwkSpec, stdin: Option<&[u8]>) {
         }
     };
 
-    let rules = parse_awk_program(&spec.program);
-
     // Before anything runs, and before any file is opened: a program with a
-    // statement or pattern this shell cannot execute is refused whole. Running
-    // the recognised parts would produce output that looks like a result — see
+    // statement or pattern this shell cannot execute is refused whole, and so
+    // is one whose regular expression does not compile. Running the recognised
+    // parts would produce output that looks like a result — see
     // design-decisions §294.
-    if let Err(e) = awk_validate_program(&rules) {
-        e.report();
-        set_exit(2);
-        return;
-    }
+    let rules = match awk_compile_program(parse_awk_program(&spec.program)) {
+        Ok(rules) => rules,
+        Err(e) => {
+            e.report();
+            set_exit(2);
+            return;
+        }
+    };
 
     let mut nr: usize = 0;
 
@@ -122727,38 +123804,14 @@ fn awk_run(spec: &AwkSpec, stdin: Option<&[u8]>) {
     let mut worst: u8 = 0;
 
     if needs_input {
-        if spec.files.is_empty() {
-            match stdin {
-                Some(data) => awk_feed(data, &rules, &fs, &mut nr),
-                None => {
-                    shell_println!("awk: no file operand and no input to read");
-                    worst = worst.max(1);
-                }
-            }
-        } else {
-            for path in &spec.files {
-                if path == "-" {
-                    match stdin {
-                        Some(data) => awk_feed(data, &rules, &fs, &mut nr),
-                        None => {
-                            shell_println!("awk: -: no input to read");
-                            worst = worst.max(1);
-                        }
-                    }
-                    continue;
-                }
-                let resolved = resolve_path(path);
-                match crate::fs::Vfs::read_file(&resolved) {
-                    // Straight from the VFS, undecoded.
-                    Ok(data) => awk_feed(&data, &rules, &fs, &mut nr),
-                    Err(e) => {
-                        // Every operand is attempted and the worst status
-                        // reported: a later readable file must not erase an
-                        // earlier missing one.
-                        shell_println!("awk: {}: {:?}", path, e);
-                        worst = worst.max(1);
-                    }
-                }
+        match awk_feed_inputs(spec, stdin, &rules, &fs, &mut nr) {
+            Ok(w) => worst = worst.max(w),
+            Err(e) => {
+                // A declined match stops the run: `END` must not report an `NR`
+                // for records whose rules never got a verdict.
+                e.report();
+                set_exit(2);
+                return;
             }
         }
     }
@@ -122783,7 +123836,8 @@ fn awk_usage(piped: bool) {
     shell_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
     shell_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
     shell_println!("  Stmts:  print, print <expr>[, <expr>...] -- and nothing else");
-    shell_println!("  Pttrns: empty, /text/, NR <op> N, NF <op> N (<op>: > >= < <= == !=)");
+    shell_println!("  Pttrns: empty, /regexp/, NR <op> N, NF <op> N (<op>: > >= < <= == !=)");
+    shell_println!("  /regexp/ is a POSIX extended regular expression.");
     shell_println!("  A program outside that set is refused, not partly run (exit 2).");
     shell_println!("  `-` as an operand names the pipe.");
 }
@@ -122805,14 +123859,16 @@ fn awk_usage(piped: bool) {
 /// before it runs — `awk: unsupported statement: '…'`, exit 2 — rather than
 /// having the unrecognised parts skipped, which is what it used to do while
 /// still reporting success. See design-decisions §294 for why refusal beats a
-/// partial implementation here, and `awk_validate_program` for the check.
+/// partial implementation here, and [`awk_compile_program`] for the check.
 ///
-/// **`/pattern/` is a substring match, not a regular expression.** The kernel
-/// shell has no regex engine, so `/^err/` matches the literal `^err`. This is
-/// tracked as `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`
-/// and is blocked on the `ere` crate gaining a `no_std` build. It is the one
-/// wrong answer the refusal above deliberately leaves in place, because the fix
-/// is the engine, not a refusal.
+/// **`/pattern/` is a real POSIX extended regular expression.** It used to be a
+/// substring search — `/^err/` matched lines *containing* those four
+/// characters, and `/x*/`, which matches everything, matched almost nothing —
+/// recorded as `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`
+/// and blocked on the `ere` crate gaining a `no_std` build. Lane B made `ere`
+/// unconditionally `no_std`, so the kernel now links the same engine userspace's
+/// `grep`, `sed`, `awk` and `expr` use, rather than carrying a second one that
+/// would have to agree with it forever.
 ///
 /// Examples:
 ///   awk '{ print $1 }' file.txt            First field of each line
@@ -123039,8 +124095,33 @@ fn awk_split_fields<'a>(record: &'a [u8], fs: &AwkFs) -> alloc::vec::Vec<&'a [u8
     }
 }
 
-/// Evaluate `<var> <op> <integer>`, where the variable's value is already
-/// resolved, or `None` if `rest` is not a comparison this shell can evaluate.
+/// The comparison in an `NR`/`NF` pattern, once parsed.
+#[derive(Clone, Copy)]
+enum AwkOp {
+    Ge,
+    Le,
+    Eq,
+    Ne,
+    Gt,
+    Lt,
+}
+
+impl AwkOp {
+    /// Apply the operator to an already-resolved variable value.
+    fn eval(self, value: usize, n: usize) -> bool {
+        match self {
+            Self::Ge => value >= n,
+            Self::Le => value <= n,
+            Self::Eq => value == n,
+            Self::Ne => value != n,
+            Self::Gt => value > n,
+            Self::Lt => value < n,
+        }
+    }
+}
+
+/// Parse `<op> <integer>`, or `None` if `rest` is not a comparison this shell
+/// can evaluate.
 ///
 /// One chain serves both `NR` and `NF`. There used to be two, and they had
 /// already drifted: the `NR` copy handled all six operators and the `NF` copy
@@ -123051,63 +124132,129 @@ fn awk_split_fields<'a>(record: &'a [u8], fs: &AwkFs) -> alloc::vec::Vec<&'a [u8
 ///
 /// The two-character operators are tested before the one-character ones, so
 /// `>=` is never read as `>` followed by a stray `=`.
-fn awk_compare(value: usize, rest: &str) -> Option<bool> {
+fn awk_parse_cmp(rest: &str) -> Option<(AwkOp, usize)> {
     let rest = rest.trim();
-    for op in [">=", "<=", "==", "!=", ">", "<"] {
-        let Some(n_str) = rest.strip_prefix(op) else {
+    for (text, op) in [
+        (">=", AwkOp::Ge),
+        ("<=", AwkOp::Le),
+        ("==", AwkOp::Eq),
+        ("!=", AwkOp::Ne),
+        (">", AwkOp::Gt),
+        ("<", AwkOp::Lt),
+    ] {
+        let Some(n_str) = rest.strip_prefix(text) else {
             continue;
         };
-        let n = n_str.trim().parse::<usize>().ok()?;
-        return Some(match op {
-            ">=" => value >= n,
-            "<=" => value <= n,
-            "==" => value == n,
-            "!=" => value != n,
-            ">" => value > n,
-            _ => value < n,
-        });
+        return Some((op, n_str.trim().parse::<usize>().ok()?));
     }
     None
 }
 
-/// Evaluate a pattern against the current record, or `None` if this shell
-/// cannot evaluate it at all.
+/// Which record counter an `NR`/`NF` pattern compares.
+#[derive(Clone, Copy)]
+enum AwkVar {
+    Nr,
+    Nf,
+}
+
+/// A pattern this shell's `awk` can evaluate, with any regular expression
+/// already compiled.
 ///
-/// The `None` arm is the point of the function. It used to be a fall-through
-/// to a substring search, so `awk '$1 > 5 { print }'` searched each record for
-/// the seven characters `$1 > 5`, found none, printed nothing, and exited 0 —
-/// a filter that silently matched nothing rather than saying it could not run.
+/// Compiling happens once, when the program is read and before any input file
+/// is opened. That is worth two things beyond speed: `awk '/[/ {print}'` is
+/// refused up front instead of once per record, and a pattern that reaches
+/// [`Self::matches`] is one the engine has already accepted.
 ///
-/// **Invariant:** whether this returns `Some` depends on `pattern` alone; the
-/// record, `nr` and `nf` affect only the value inside. That is what lets
-/// [`awk_validate_program`] ask the question with a dummy record before any
-/// rule has run, and `kshell::self_test` rung 42 pins it by evaluating the same
-/// patterns against two unlike records and comparing only `is_some()`.
+/// This type is also what makes design-decisions §294's whole-program check
+/// *structural* rather than conventional. The check used to evaluate each
+/// pattern against a dummy empty record and ask only whether an answer existed,
+/// which was sound only because of a hand-written invariant — "whether an
+/// answer exists depends on the pattern text alone" — that nothing enforced,
+/// and which `kshell::self_test` rung 42 had to pin by hand. Building a pattern
+/// from text, with no record in sight, puts that invariant in the signature:
+/// there is now no way to run a pattern that was not accepted first.
+enum AwkPattern {
+    /// No pattern — every record matches.
+    Always,
+    /// `/re/` — a POSIX **extended** regular expression, as in every awk.
+    Regex(ere::Regex),
+    /// `NR <op> N` or `NF <op> N`.
+    Count { var: AwkVar, op: AwkOp, n: usize },
+}
+
+/// Why a pattern could not be compiled.
+enum AwkPatternError {
+    /// Not a pattern this shell can evaluate at all — `$1 > 5`, `/a/ && /b/`.
+    Unsupported,
+    /// `/re/`, but the regular expression itself is invalid.
+    BadRegex(ere::EreError),
+}
+
+/// Turn one pattern's source text into something runnable.
 ///
-/// The `/.../` arm is a **substring** match, not a regular expression; see
-/// `cmd_awk`'s doc comment and
-/// `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`.
-fn awk_pattern_eval(pattern: &str, line: &[u8], nr: usize, nf: usize) -> Option<bool> {
+/// The `Unsupported` arm is the point of the function. It used to be a
+/// fall-through to a substring search, so `awk '$1 > 5 { print }'` searched
+/// each record for the seven characters `$1 > 5`, found none, printed nothing,
+/// and exited 0 — a filter that silently matched nothing rather than saying it
+/// could not run.
+///
+/// The `/re/` arm used to be the same silent guess by the other door: it *was*
+/// the substring search, so `/^err/` matched lines containing those four
+/// characters, `/a.c/` matched only the literal `a.c`, and `/x*/` — a pattern
+/// that matches every line — matched almost none. It now goes to the one shared
+/// engine that userspace's `grep`, `sed`, `awk` and `expr` use, so the kernel
+/// shell and userspace cannot disagree about what a pattern means.
+/// [`ere::Regex::new`] is `Syntax::POSIX_EXTENDED`, which is what awk wants;
+/// `Syntax::EGREP` exists for `grep -E`'s two measured GNU deviations and is
+/// not awk's dialect.
+fn awk_compile_pattern(pattern: &str) -> Result<AwkPattern, AwkPatternError> {
     if pattern.is_empty() {
-        return Some(true); // No pattern — match all.
+        return Ok(AwkPattern::Always);
     }
 
-    // /regex/ pattern — literal string match.
     if pattern.starts_with('/') && pattern.ends_with('/') && pattern.len() >= 2 {
-        let pat = pattern
+        let body = pattern
             .get(1..pattern.len().saturating_sub(1))
             .unwrap_or("");
-        return Some(awk_bytes_contain(line, pat.as_bytes()));
+        return match ere::Regex::new(body.as_bytes()) {
+            Ok(re) => Ok(AwkPattern::Regex(re)),
+            Err(e) => Err(AwkPatternError::BadRegex(e)),
+        };
     }
 
-    if let Some(rest) = pattern.strip_prefix("NR") {
-        return awk_compare(nr, rest);
-    }
-    if let Some(rest) = pattern.strip_prefix("NF") {
-        return awk_compare(nf, rest);
+    for (name, var) in [("NR", AwkVar::Nr), ("NF", AwkVar::Nf)] {
+        let Some(rest) = pattern.strip_prefix(name) else {
+            continue;
+        };
+        let (op, n) = awk_parse_cmp(rest).ok_or(AwkPatternError::Unsupported)?;
+        return Ok(AwkPattern::Count { var, op, n });
     }
 
-    None
+    Err(AwkPatternError::Unsupported)
+}
+
+impl AwkPattern {
+    /// Whether this pattern selects the current record.
+    ///
+    /// `Err` is *not* folded into `false`. A pattern containing a backreference
+    /// runs on a backtracker with a step budget, and it can decline to answer;
+    /// reporting "did not match" for a question the engine refused to decide
+    /// would be a wrong answer dressed as a real one, which is the whole shape
+    /// this command has spent three commits removing. The caller stops and says
+    /// so instead.
+    fn matches(&self, record: &[u8], nr: usize, nf: usize) -> Result<bool, ere::MatchLimit> {
+        match self {
+            Self::Always => Ok(true),
+            Self::Regex(re) => re.is_match(record),
+            Self::Count { var, op, n } => Ok(op.eval(
+                match var {
+                    AwkVar::Nr => nr,
+                    AwkVar::Nf => nf,
+                },
+                *n,
+            )),
+        }
+    }
 }
 
 /// The statements this shell's `awk` can run.
@@ -123183,6 +124330,10 @@ fn awk_exec_action(action: &str, line: &[u8], fields: &[&[u8]], nr: usize, nf: u
 enum AwkUnsupported {
     Pattern(alloc::string::String),
     Statement(alloc::string::String),
+    /// `/re/` reached the engine and the engine rejected it. Distinct from
+    /// `Pattern`, which means this shell never got as far as the engine: one
+    /// says "awk cannot do that", the other says "that is not a regexp".
+    Regex(alloc::string::String, &'static str),
 }
 
 impl AwkUnsupported {
@@ -123192,31 +124343,60 @@ impl AwkUnsupported {
         match self {
             Self::Pattern(p) => shell_println!("awk: unsupported pattern: '{}'", p),
             Self::Statement(s) => shell_println!("awk: unsupported statement: '{}'", s),
+            // glibc's own sentence for the failure, via `EreError::message`, so
+            // the kernel shell words a bad regexp the way userspace does.
+            Self::Regex(p, msg) => shell_println!("awk: invalid regular expression {}: {}", p, msg),
         }
     }
 }
 
-/// Check that every rule in a parsed program can actually be run.
+/// A rule whose pattern is compiled and whose statements have been checked:
+/// everything needed to run it, and nothing left that could still fail to
+/// parse.
+struct AwkCompiled {
+    /// The pattern's source text. Kept only so a run-time refusal can name it;
+    /// nothing reads it to decide anything.
+    text: alloc::string::String,
+    pattern: AwkPattern,
+    action: alloc::string::String,
+    is_begin: bool,
+    is_end: bool,
+}
+
+/// Compile every rule in a parsed program, or refuse the program.
 ///
-/// This runs once, before any rule executes, so the verdict depends only on the
-/// program text — a program that would have been mis-run on some inputs is
-/// refused on all of them, including the inputs where the wrong answer would
-/// have looked right. See design-decisions §294.
+/// This runs once, before any rule executes and before any file is opened, so
+/// the verdict depends only on the program text — a program that would have
+/// been mis-run on some inputs is refused on all of them, including the inputs
+/// where the wrong answer would have looked right. See design-decisions §294.
 ///
-/// Patterns are checked by evaluating them against a dummy empty record and
-/// asking only whether the answer exists. That is sound because of
-/// [`awk_pattern_eval`]'s documented invariant: whether it returns `Some`
-/// depends on the pattern alone. The same holds for [`awk_format_print`].
-fn awk_validate_program(rules: &[AwkRule]) -> Result<(), AwkUnsupported> {
+/// Compiling *is* the check. This used to be `awk_validate_program`, which
+/// evaluated each pattern against a dummy empty record and asked only whether
+/// an answer came back; what then ran was the same untyped strings the check
+/// had inspected, so nothing but a comment stopped a later edit from running a
+/// pattern the check had never approved. Now the check's *output* is what runs.
+/// Statements stay a textual check because [`awk_classify_stmt`] is already the
+/// single classifier both the checker and the executor go through, and it
+/// borrows from the action rather than owning anything.
+///
+/// Takes the rules by value so actions and pattern texts are moved, not copied.
+fn awk_compile_program(
+    rules: alloc::vec::Vec<AwkRule>,
+) -> Result<alloc::vec::Vec<AwkCompiled>, AwkUnsupported> {
+    let mut out = alloc::vec::Vec::with_capacity(rules.len());
     for rule in rules {
         // BEGIN and END carry no pattern of their own; `rule.pattern` is empty
-        // for both, and an empty pattern is always evaluable, so checking it
+        // for both, and an empty pattern always compiles, so compiling it
         // unconditionally is correct as well as simpler.
-        if awk_pattern_eval(&rule.pattern, b"", 0, 0).is_none() {
-            return Err(AwkUnsupported::Pattern(alloc::string::String::from(
-                rule.pattern.as_str(),
-            )));
-        }
+        let pattern = match awk_compile_pattern(&rule.pattern) {
+            Ok(p) => p,
+            Err(AwkPatternError::Unsupported) => {
+                return Err(AwkUnsupported::Pattern(rule.pattern));
+            }
+            Err(AwkPatternError::BadRegex(e)) => {
+                return Err(AwkUnsupported::Regex(rule.pattern, e.message()));
+            }
+        };
         for stmt in rule.action.split(';') {
             let stmt = stmt.trim();
             if stmt.is_empty() {
@@ -123234,8 +124414,15 @@ fn awk_validate_program(rules: &[AwkRule]) -> Result<(), AwkUnsupported> {
                 }
             }
         }
+        out.push(AwkCompiled {
+            text: rule.pattern,
+            pattern,
+            action: rule.action,
+            is_begin: rule.is_begin,
+            is_end: rule.is_end,
+        });
     }
-    Ok(())
+    Ok(out)
 }
 
 /// Evaluate a print expression, expanding $N, NR, NF, and string literals.

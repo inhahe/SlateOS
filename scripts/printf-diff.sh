@@ -1,40 +1,45 @@
 #!/usr/bin/env bash
 # Differential test: our `printf` against GNU's.
 #
-# ## Why the reference is inside WSL
+# ## Why both sides run inside WSL
 #
-# The host's `/usr/bin` is MSYS2, a Cygwin derivative. Its `printf` *is* GNU
-# coreutils' printf, so pointing this harness at it is a useful positive
-# control (`OURS=/usr/bin/printf ./scripts/printf-diff.sh` should report almost
-# nothing) -- but it is not a reference, because the numbers printf prints come
-# from the C library, and Cygwin's is not glibc's. The two agree on most of
-# what printf prints, which is worse than disagreeing on all of it: it would
-# look like a passing test while diverging on exactly the 80-bit corners that
-# `coreutils::extfloat` exists for. So the reference is run in WSL.
+# `scripts/diff-wsl.sh` gives the general reasons; the one that decided it here
+# is the reference. The host's `/usr/bin` is MSYS2, a Cygwin derivative. Its
+# `printf` *is* GNU coreutils' printf, so pointing this harness at it is a
+# useful positive control (`OURS=/usr/bin/printf ./scripts/printf-diff.sh`
+# should report almost nothing) -- but it is not a reference, because the
+# numbers printf prints come from the C library, and Cygwin's is not glibc's.
+# The two agree on most of what printf prints, which is worse than disagreeing
+# on all of it: it would look like a passing test while diverging on exactly the
+# 80-bit corners that `coreutils::extfloat` exists for.
 #
-# ## Why the reference is `printf` and not `/usr/bin/printf`
+# The subject moved into WSL with it, which is what this file gained by being
+# migrated. It used to be a `x86_64-pc-windows-gnu` build driven from the host
+# while the reference ran under `wsl -e bash -c`, and that split cost three
+# things: `MSYS2_ARG_CONV_EXCL='*'` had to be exported so MSYS would not rewrite
+# the format `[%05.2f]` or the argument `/` into something with a drive letter
+# in it; the case file had to be *copied* into WSL through `cat`, because a
+# `wsl -e bash -c '...'` command line passes through two shells and a Win32
+# command-line encoder that a format like `%\303\251` or an argument that is a
+# single backslash does not survive -- printf needed that more than any other
+# harness, since its first argument is a format string and the formats worth
+# testing are precisely the ones made of awkward bytes; and the two printfs were
+# linked against different C libraries, so any difference could be blamed on the
+# host. Both sides are now the same kind of binary on the same kernel, and the
+# case file is read twice from where it was written.
+#
+# ## Why the reference is reached through a directory and not by path
 #
 # Because `printf` is a shell builtin, and because GNU's diagnostics carry
-# `argv[0]`. The probe threads that needle with `env`; the reasoning is in
+# `argv[0]`. The preamble's `$bindir` threads that needle; the reasoning is in
 # `scripts/printf-probe.sh`.
-#
-# ## Why the cases are a file and not a list of shell lines
-#
-# Both sides have to receive byte-identical argv, and they run under different
-# operating systems -- ours natively on Windows, GNU's under WSL. Anything
-# quoted into a `wsl -e bash -c '...'` command line passes through two shells
-# and a Win32 command-line encoder, and a format like `%\303\251` or an
-# argument that is a single backslash does not survive that intact. Writing the
-# cases to a file, copying the file, and having an identical probe script read
-# it on both sides removes every layer that could rewrite an argument. printf
-# needs this more than seq did: its first argument is a format string, and the
-# formats worth testing are precisely the ones made of awkward bytes.
 #
 # ## Why `LC_ALL=C.UTF-8`
 #
-# Three of printf's answers are locale-dependent, and this file used to pin `C`
-# because two of them were implemented for `C`. Both have since moved, so `C`
-# is now the setting in which the *reference* would be wrong:
+# Fixed by the preamble. Three of printf's answers are locale-dependent, and
+# this file used to pin `C` because two of them were implemented for `C`. Both
+# have since moved, so `C` is now the setting in which the *reference* would be
+# wrong:
 #
 #   * gnulib's `quote()` wraps the offending argument in every numeric
 #     diagnostic. It prints U+2018/U+2019 under a UTF-8 locale and ASCII
@@ -69,7 +74,19 @@
 
 set -u
 
-cd "$(dirname "$0")/.." || exit 1
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one name
+# `printf` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+#
+# `DIFF_REF` is spelled out rather than left to the default `command -v printf`,
+# which finds the shell builtin: the preamble is sourced by a shell, and the
+# builtin is not the program under comparison. See `scripts/printf-probe.sh`.
+DIFF_PROG=printf
+DIFF_REF="/usr/bin/printf /bin/printf"
+DIFF_NEED="timeout python3"
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
+
+cd "$root" || exit 1
 
 RANDOM_CASES=400
 SEED=20260817
@@ -85,38 +102,27 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-TARGET=x86_64-pc-windows-gnu
-# Built here, from the package named, rather than picked up out of `target/`.
-# This harness is where the stale-binary problem was first found; the shared
-# helper is that fix generalised to all twenty-seven harnesses, and it also
-# pins *which* crate's binary is meant. See `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(DIFF_TARGET=$TARGET subject_binary coreutils printf "${OURS:-}") || exit 1
-GNU=${GNU:-printf}
+# `--keep` works by replacing the cleanup function rather than by setting a
+# second `EXIT` trap, which would replace the preamble's one instead of adding
+# to it. The whole scratch directory then survives, symlinked binaries and all,
+# which is what makes a kept case reproducible by hand.
+WORK=$DIFF_TMP/work
+mkdir -p "$WORK"
+if [ "$KEEP" = 1 ]; then
+  diff_cleanup() { echo "kept: $DIFF_TMP (cases and records in work/)"; }
+fi
 
-# Our printf is a native Windows binary, so MSYS would helpfully rewrite any
-# argument that looks like a path -- turning the format `[%05.2f]` or the
-# argument `/` into something with a drive letter in it.
-export MSYS2_ARG_CONV_EXCL='*'
-export LC_ALL=C.UTF-8
+echo "ours: $OURS"
+echo "gnu:  $gnu_real"
 
-WORK=$(mktemp -d)
-cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }
-trap cleanup EXIT
-[ "$KEEP" = 1 ] && echo "working files in $WORK"
-
-python scripts/printf-cases.py "$RANDOM_CASES" "$SEED" > "$WORK/cases" || exit 1
+python3 scripts/printf-cases.py "$RANDOM_CASES" "$SEED" > "$WORK/cases" || exit 1
 echo "$(wc -l < "$WORK/cases") cases"
 
 echo "running ours..."
-bash scripts/printf-probe.sh "$OURS" "$WORK/cases" > "$WORK/ours" || exit 1
+bash scripts/printf-probe.sh "$bindir/ours" "$WORK/cases" > "$WORK/ours" || exit 1
 
-echo "running GNU's, in WSL..."
-wsl -e bash -c 'mkdir -p /tmp/printfdiff && cat > /tmp/printfdiff/probe.sh' \
-  < scripts/printf-probe.sh || exit 1
-wsl -e bash -c 'cat > /tmp/printfdiff/cases' < "$WORK/cases" || exit 1
-wsl -e bash -c "cd /tmp/printfdiff && LC_ALL=C.UTF-8 bash probe.sh '$GNU' cases" \
-  > "$WORK/theirs" || exit 1
+echo "running GNU's..."
+bash scripts/printf-probe.sh "$bindir/gnu" "$WORK/cases" > "$WORK/theirs" || exit 1
 
 if [ "$FLIP" = 1 ]; then
   # Drop the reference's first record, so every case is compared against its

@@ -73441,7 +73441,7 @@ spent. Everywhere else in the shell a usage error is still 1, and the 17
 `"Syntax error: …"` sites remain queued for flat `set_exit(1)` exactly as
 originally planned.
 
-### 2026-08-24 — `gunzip FILE` compresses a file that isn't gzip, instead of refusing
+### 2026-08-24 — `gunzip FILE` compresses a file that isn't gzip, instead of refusing — ✅ FIXED same day (lane A, `4d9990f4c`)
 
 **In short:** typing `gunzip notes.txt` does not report "that isn't a gzip
 file". It *compresses* `notes.txt` and writes `notes.txt.gz` — the exact
@@ -73487,3 +73487,36 @@ commit would make both harder to review and to revert. Queued as the next task.
 **Severity.** Data-affecting but not destructive: the original file is not
 removed, so the outcome is a spurious `.gz` alongside it and a command that
 reported success for doing the reverse of its name.
+
+**Fixed 2026-08-24 in `4d9990f4c`**, along the lines proposed above but with one
+deliberate departure. The proposal kept the magic-byte sniff "as the tie-break
+for `gzip` with no flags (where it is genuinely useful — `gzip file.gz` should
+not double-compress)". That would have left the guess deciding the direction in
+exactly one case, and the case it decides is one where the two possible answers
+are *compress again* and *decompress* — i.e. it would still silently do the
+reverse of what `gzip` means, just from a narrower doorway. The fix instead
+makes the name decide unconditionally and answers `gzip file.gz` by **refusing**
+(`already gzip-compressed, not compressing again`, exit 1), which is what GNU
+gzip does. The magic bytes now decide nothing; they are only consulted where the
+direction is already settled, to ask whether the file is consistent with it.
+
+The refusal is keyed on the header rather than on a `.gz` suffix — a suffix is a
+claim and the header is the fact — and `-o` bypasses it, since naming the output
+explicitly reads as deliberate.
+
+Also fixed the `-d` half: `"-d" => {}` became `"-d" | "--decompress"` setting a
+real flag, so the flag that had been documented in the command's own usage text
+all along now does what the text says.
+
+The two loose ends the entry raised are both closed. Self-test **rung 30**
+covers all five directions, each on a file whose contents point the other way,
+so the old guess cannot satisfy any of them; the round-trip is asserted on the
+recovered bytes rather than on the success line. Rung 29's `-t` workaround is
+kept, but now as a test of the sweep rather than a way around this bug, and its
+comment says so. Rung 30 also picks up the `-t`-success assertion rung 29 had to
+drop for want of a working compressor.
+
+**The sibling pairs were checked and are fine.** `bzip2`/`bunzip2`, `xz`/`unxz`,
+`zstd`/`unzstd` and `lz4`/`unlz4` each have separate `cmd_*` functions and
+separate dispatch arms; the `un*`/`*cat` arms are decompress-only aliases. Only
+gzip/gunzip ever conflated the two directions, which is why only it could guess.

@@ -59,6 +59,10 @@ printf '/usr/bin\n/tmp/x\nrelative\n'   > paths.txt
 printf 'Alpha1\nbeta22\nGAMMA333\n'     > mixed.txt
 printf 'A\x01\x7f\x80\xff\xc3\xa9Z\n'   > bytes.txt
 printf 'd\ne\nf\n'                      > def.txt
+# NUL-separated, for `-z`. It holds an embedded newline on purpose: under `-z`
+# a newline is an ordinary byte, so a command that still splits on one is
+# visibly wrong here and merely lucky against a file that has none.
+printf 'a\0b\nB\0c\0'                   > nulsep.txt
 : > empty.txt
 
 # --- one invocation of one side ----------------------------------------------
@@ -497,6 +501,20 @@ run_stdin empty.txt 's/a/b/'
 run_stdin abc.txt -s 'p'
 run_stdin abc.txt -n '$p'
 run_stdin abc.txt -z 's/a/A/'
+
+# `-z` moves the *buffer delimiter*, which every command that joins or splits
+# the pattern space has to follow. Five of them once used a literal `\n`, so
+# `N` built a pattern space that `D` and `P` could then not split, and `G`/`H`
+# corrupted the hold space the same way. The fixture carries an embedded
+# newline so that splitting on the wrong byte shows up rather than passing.
+run_stdin nulsep.txt -z 'N'
+run_stdin nulsep.txt -z -n 'N;P'
+run_stdin nulsep.txt -z -n '$!{N;D};p'
+run_stdin nulsep.txt -z -n 'H;${x;p}'
+run_stdin nulsep.txt -z 'x;s/^/H/;x;G'
+run_stdin nulsep.txt -z -n 'l'
+run_stdin nulsep.txt -z -n 'l 3'
+run_stdin nulsep.txt -z '$!N;s/\n/-/'
 run_stdin abc.txt --posix 's/a/A/'
 run_stdin abc.txt -u 's/a/A/'
 run_stdin abc.txt --debug 's/a/A/'

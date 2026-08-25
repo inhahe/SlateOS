@@ -1686,7 +1686,7 @@ impl<'w> Exec<'w> {
                 }
                 Action::Delete => return Ok(Flow::Deleted),
                 Action::DeleteFirstLine => {
-                    return Ok(match self.pattern.iter().position(|&b| b == b'\n') {
+                    return Ok(match self.pattern.iter().position(|&b| b == out.sep) {
                         Some(i) => {
                             self.pattern.drain(..=i);
                             Flow::Restart
@@ -1699,7 +1699,7 @@ impl<'w> Exec<'w> {
                     out.line(&bytes, self.had_sep)?;
                 }
                 Action::PrintFirstLine => {
-                    let (bytes, sep) = match self.pattern.iter().position(|&b| b == b'\n') {
+                    let (bytes, sep) = match self.pattern.iter().position(|&b| b == out.sep) {
                         Some(i) => (self.pattern.get(..i).unwrap_or_default().to_vec(), true),
                         None => (self.pattern.clone(), self.had_sep),
                     };
@@ -1731,7 +1731,7 @@ impl<'w> Exec<'w> {
                     self.flush_appends(out)?;
                     match input.next_line() {
                         Some(l) => {
-                            self.pattern.push(b'\n');
+                            self.pattern.push(out.sep);
                             self.pattern.extend_from_slice(&l.bytes);
                             self.had_sep = l.had_sep;
                             self.line_num = self.line_num.saturating_add(1);
@@ -1749,12 +1749,12 @@ impl<'w> Exec<'w> {
                 }
                 Action::Hold => self.hold.clone_from(&self.pattern),
                 Action::HoldAppend => {
-                    self.hold.push(b'\n');
+                    self.hold.push(out.sep);
                     self.hold.extend_from_slice(&self.pattern);
                 }
                 Action::Get => self.pattern.clone_from(&self.hold),
                 Action::GetAppend => {
-                    self.pattern.push(b'\n');
+                    self.pattern.push(out.sep);
                     self.pattern.extend_from_slice(&self.hold);
                 }
                 Action::Exchange => std::mem::swap(&mut self.pattern, &mut self.hold),
@@ -1796,7 +1796,7 @@ impl<'w> Exec<'w> {
                     self.write_wfile(*idx, &bytes, out)?;
                 }
                 Action::WriteFirstLine(idx) => {
-                    let (bytes, sep) = match self.pattern.iter().position(|&b| b == b'\n') {
+                    let (bytes, sep) = match self.pattern.iter().position(|&b| b == out.sep) {
                         Some(i) => (self.pattern.get(..i).unwrap_or_default().to_vec(), true),
                         None => (self.pattern.clone(), self.had_sep),
                     };
@@ -2573,18 +2573,25 @@ mod tests {
     }
 
     fn run_opts(script: &str, input: &str, suppress: bool, ere: bool) -> String {
-        let compiled = compile(script.as_bytes(), ere)
-            .unwrap_or_else(|e| panic!("compiling {script:?}: {}", e.msg));
+        let out = run_sep(script.as_bytes(), input.as_bytes(), suppress, ere, b'\n');
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// [`run_opts`] over bytes, with the separator `-z` would have chosen.
+    ///
+    /// Separate because every caller but the `-z` tests wants text, and a
+    /// separator of NUL makes the input and the output both unprintable.
+    fn run_sep(script: &[u8], input: &[u8], suppress: bool, ere: bool, sep: u8) -> Vec<u8> {
+        let compiled = compile(script, ere)
+            .unwrap_or_else(|e| panic!("compiling {}: {}", String::from_utf8_lossy(script), e.msg));
         let mut sink: Vec<u8> = Vec::new();
         let mut inp = Input {
             paths: Vec::new(),
             next_path: 0,
             cur_name: OsString::from("stdin"),
-            cur: Some(Box::new(BufReader::new(io::Cursor::new(
-                input.as_bytes().to_vec(),
-            )))),
+            cur: Some(Box::new(BufReader::new(io::Cursor::new(input.to_vec())))),
             peeked: None,
-            sep: b'\n',
+            sep,
             had_error: false,
         };
         let mut job = Job {
@@ -2592,10 +2599,10 @@ mod tests {
             wfiles: open_wfiles(&compiled.wfiles),
             rfiles: open_rfiles(&compiled.rfiles),
             suppress: suppress || compiled.suppress,
-            sep: b'\n',
+            sep,
         };
         job.run_one(&mut inp, &mut sink);
-        String::from_utf8_lossy(&sink).into_owned()
+        sink
     }
 
     // ---------------- the defect that started this ----------------
@@ -3092,6 +3099,47 @@ mod tests {
         }
         // A script that reaches nowhere is unaffected.
         assert!(compile_script(b"s/a/b/p", false, DEFAULT_LINE_LEN, true).is_ok());
+    }
+
+    // ---------------- `-z` ----------------
+
+    /// Every command that joins or splits the pattern space has to do it on the
+    /// *buffer delimiter*, not on a newline. Five of them used a literal `\n`,
+    /// so under `-z` they silently worked on the wrong byte: `N` produced a
+    /// pattern space joined by a newline that `D` and `P` could then not find,
+    /// and `G`/`H` corrupted the hold space the same way.
+    ///
+    /// Each expectation below is what GNU sed printed for the same script.
+    #[test]
+    fn the_separator_that_joins_and_splits_is_the_one_dash_z_chose() {
+        let z = |script: &str, input: &[u8]| run_sep(script.as_bytes(), input, false, false, 0);
+        let zn = |script: &str, input: &[u8]| run_sep(script.as_bytes(), input, true, false, 0);
+
+        // `N` joins with NUL. This is a discriminating test on its own: joined
+        // with a newline the output would be `a\nb\0`, one byte in the middle
+        // different, which is exactly the bug.
+        assert_eq!(z("N", b"a\0b\0"), b"a\0b\0".to_vec());
+        // `G` appends the hold space after a NUL.
+        assert_eq!(z("x;s/^/H/;x;G", b"a\0"), b"a\0H\0".to_vec());
+        // `H` appends to the hold space after a NUL — including the first time,
+        // when the hold space is empty, which is why this starts with one.
+        assert_eq!(zn("H;${x;p}", b"a\0b\0"), b"\0a\0b\0".to_vec());
+        // `P` prints as far as the first NUL, and terminates with one.
+        assert_eq!(zn("N;P", b"a\0b\0"), b"a\0".to_vec());
+        // `D` deletes as far as the first NUL and restarts without reading.
+        assert_eq!(zn("$!{N;D};p", b"a\0b\0c\0"), b"c\0".to_vec());
+    }
+
+    #[test]
+    fn capital_w_splits_on_the_separator_too() {
+        let dir = std::env::temp_dir().join("sed-wz-test");
+        let _ = fs::create_dir_all(&dir);
+        let target = dir.join("wz.txt");
+        let _ = fs::remove_file(&target);
+        let script = format!("N;W {}", target.to_string_lossy());
+        run_sep(script.as_bytes(), b"a\0b\0", true, false, 0);
+        assert_eq!(fs::read(&target).expect("W wrote nothing"), b"a\0");
+        let _ = fs::remove_file(&target);
     }
 
     // ---------------- compile errors ----------------

@@ -76159,3 +76159,97 @@ its own commit and its own rung.
 **Not a regression.** This has been true since the command was written; the
 `908043883` rewrite neither caused it nor made it worse. It is recorded now
 because the rewrite is what made it visible.
+
+## `A-KSHELL-TR-ANSWERS-FIVE-QUESTIONS-IT-WAS-NOT-ASKED` (lane A, 2026-08-25) — **open**
+
+**Where.** `kernel/src/kshell.rs` — `cmd_tr` (~108262), `cmd_tr_input`
+(~108312), `tr_translate` (~108328), `tr_delete` (~108345), `expand_tr_set`
+(~108365).
+
+**What.** The kernel shell's `tr` has five separate ways of producing a
+confident, successful, wrong answer. None of them is a refusal; every one of
+them exits 0.
+
+| typed | what it does | what it should do |
+|---|---|---|
+| `cat f \| tr ' ' '_'` | passes the text through **unchanged** | replace spaces with underscores |
+| `tr ' ' '_' file` | usage message, exit 1 | the same, on the file |
+| `cat f \| tr -s ab` | translates `-`→`a` and `s`→`b` | refuse: `-s` is not implemented |
+| `cat f \| tr a b c d` | expands `b c d` as one set | refuse: extra operand |
+| `tr -d x binaryfile` | prints **nothing at all** | say the file is not text |
+| `tr -d '[:space:]'` | deletes `[`, `:`, `s`, `p`, `a`, `c`, `e`, `]` | delete whitespace |
+
+**Why, one at a time.**
+
+1. **A set cannot contain a space.** `tr` is not on
+   `command_parses_own_quotes`, so `remove_quotes` runs over its line before it
+   arrives: `' ' '_'` becomes `  _` (two spaces and an underscore). `cmd_tr_input`
+   then does `args.splitn(2, ' ')`, which yields `("", " _")` — SET1 is the
+   *empty* set, so `expand_tr_set("")` is empty, nothing matches, and the input
+   is copied out verbatim with exit 0. This is the same fault `cut -d' '` had
+   (fixed in `667d34060`), except that `cut` at least failed loudly.
+   The file form takes the other branch of the same split and reaches the usage
+   message instead, so the two halves of one command disagree about what
+   happened.
+
+2. **An unknown option becomes SET1.** There is no flag loop at all — the first
+   word is compared to the literal `"-d"` and otherwise *used as a set*. So
+   `tr -s ab` is read as "translate `-` and `s` into `a` and `b`". `-s`
+   (squeeze), `-c`/`-C` (complement) and `-t` (truncate SET1) are all real `tr`
+   options that this one does not implement, and all three are silently
+   reinterpreted as data.
+
+3. **Extra operands are absorbed.** `splitn(2, ' ')` in the pipe form puts
+   everything after the first word into SET2, so `tr a b c d` expands
+   `b c d` — including the spaces — as the replacement set.
+
+4. **An undecodable file becomes an empty one.** Both file paths read
+   `core::str::from_utf8(&data).unwrap_or("")`, so a file `tr` cannot decode
+   produces no output and exits 0, indistinguishable from a file that really
+   was empty. This is the same silent-guess-by-another-door already fixed in
+   `tac`, `fold`, `base64`, `awk` and `cut`. Note the *pipe* form does not have
+   this bug — `dispatch_with_input` narrows through `shell_bytes_as_str`, which
+   reports and exits 1 — so, again, the two halves of one command disagree.
+
+5. **Character classes are literals.** `expand_tr_set` knows ranges (`a-z`) and
+   escapes (`\n`, `\t`, `\r`) and nothing else, so POSIX's `[:alpha:]`,
+   `[:digit:]`, `[:space:]` … expand to their own punctuation, and the `[x*n]`
+   repeat form and octal `\NNN` escapes do likewise. `tr -d '[:space:]'` on a
+   line containing a `c` deletes the `c`.
+
+**What the fix looks like.** Three commits, mirroring the shape `cut` already
+has in this file (`CutSpec` / `CutParseError` / `parse_cut_args`):
+
+1. **Arguments.** A `TrSpec` and a `TrParseError`, parsed from
+   [`split_words`] rather than `splitn`, with `tr` added to
+   `command_parses_own_quotes` — which it then qualifies for, by the rule that
+   function documents. A real flag loop that names `-s`, `-c`/`-C` and `-t` as
+   *unsupported* rather than eating them as data, refuses anything else
+   beginning with `-`, and checks the operand count (1–2 words for `-d`, 2–3
+   for a translation). `strip_quotes` comes out of `expand_tr_set` at the same
+   time, because with the quotes already removed by `split_words` it would
+   start eating real data (`tr "''" x`).
+2. **Data.** Byte-clean whenever every character of SET1 is ASCII — which is
+   provably identical to the character path, since UTF-8 is self-synchronising
+   and so no ASCII byte ever occurs inside a multi-byte sequence, and it is
+   still correct on input that is not text at all. `tr -d '\r'` over a binary
+   file is the case that matters. When SET1 *does* contain a non-ASCII
+   character the input genuinely has to be decoded, and a file that will not
+   decode is reported (`tr: <file>: not valid text, and SET1 contains
+   non-ASCII characters`) with exit 1 rather than treated as empty.
+3. **Sets.** `[:alnum:] [:alpha:] [:blank:] [:cntrl:] [:digit:] [:graph:]
+   [:lower:] [:print:] [:punct:] [:space:] [:upper:] [:xdigit:]`, the `[x*n]`
+   and `[x*]` repeat forms, and octal `\NNN`. The classes are defined over
+   ASCII only — that is what GNU does in the C locale, it is the reading that
+   keeps them inside the byte-clean fast path above, and a Unicode reading
+   would have to answer questions (is `²` a digit?) that `tr`'s positional
+   set-to-set correspondence cannot express anyway. An unrecognised `[:name:]`
+   is an error, not a literal.
+
+**Not a regression.** All five have been true since the command was written.
+They are recorded together because they are one command's worth of the same
+failure class, and because fixing any one of them in isolation would leave a
+`tr` that is honest about one thing and not the others.
+
+**No caller is affected.** Nothing in `kernel/` invokes `tr` — no self-test
+rung, no script — so the stricter parser cannot turn something green red.

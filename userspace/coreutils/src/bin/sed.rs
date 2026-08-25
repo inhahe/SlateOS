@@ -449,6 +449,10 @@ impl Parser<'_> {
         if pat.is_empty() {
             return Ok(None);
         }
+        // The one funnel every pattern passes through, which is why GNU's
+        // byte-naming escapes are converted here rather than at each of the
+        // three places a pattern is written.
+        let pat = &normalize_regex(pat)?;
         let r = if self.ere {
             Regex::new_flags(pat, ci)
         } else {
@@ -521,7 +525,13 @@ impl Parser<'_> {
     ///
     /// Both spellings are accepted — POSIX's `a\` followed by the text on the
     /// next line, and the one-liner `a text` every script actually uses.
-    fn parse_text(&mut self) -> Vec<u8> {
+    ///
+    /// The text takes the same byte-naming escapes as everything else, so
+    /// `a p\tq\x41` appends `p`, a tab, `q`, `A` — measured against GNU, which
+    /// runs the same `normalize_text` over it as over a pattern. Note that the
+    /// `\` in `a\x41` is the *marker* introducing the text and is eaten above,
+    /// which is why GNU appends the three characters `x41` there and not `A`.
+    fn parse_text(&mut self) -> Result<Vec<u8>, String> {
         self.skip_blank();
         if self.peek() == Some(b'\\') {
             self.i = self.i.saturating_add(1);
@@ -535,18 +545,32 @@ impl Parser<'_> {
                 break;
             }
             self.i = self.i.saturating_add(1);
-            if c == b'\\' {
-                match self.bump() {
-                    // A continued line: the newline is part of the text.
-                    Some(b'\n') => out.push(b'\n'),
-                    Some(n) => out.push(n),
-                    None => break,
-                }
+            if c != b'\\' {
+                out.push(c);
                 continue;
             }
-            out.push(c);
+            let esc = self.i;
+            let Some(n) = self.bump() else { break };
+            if let Some(b) = control_byte(n) {
+                out.push(b);
+                continue;
+            }
+            match named_byte(self.s, esc) {
+                Some(Named::Byte(b, next)) => {
+                    out.push(b);
+                    self.i = next;
+                }
+                Some(Named::Backslash(next)) => {
+                    out.push(b'\\');
+                    self.i = next;
+                }
+                Some(Named::Recursive) => return Err(RECURSIVE_C.to_string()),
+                // A continued line — the newline is part of the text — and
+                // anything else: the character itself.
+                None => out.push(n),
+            }
         }
-        out
+        Ok(out)
     }
 
     /// A file name argument, which runs to the end of the line — a `;` in a
@@ -676,7 +700,7 @@ impl Parser<'_> {
 
         Ok(Subst {
             re: self.compile(&pat, ci)?,
-            repl: parse_replacement(&raw_repl),
+            repl: parse_replacement(&raw_repl)?,
             global,
             occurrence: occurrence.max(1),
             print,
@@ -688,8 +712,8 @@ impl Parser<'_> {
         let delim = self
             .bump()
             .ok_or_else(|| "`y' needs a delimiter".to_string())?;
-        let from = unescape_y(&self.take_until(delim, false, "`y' command")?);
-        let to = unescape_y(&self.take_until(delim, false, "`y' command")?);
+        let from = unescape_y(&self.take_until(delim, false, "`y' command")?)?;
+        let to = unescape_y(&self.take_until(delim, false, "`y' command")?)?;
         if from.len() != to.len() {
             return Err("strings for `y' command are different lengths".to_string());
         }
@@ -719,8 +743,114 @@ fn literal_for(c: u8) -> Vec<u8> {
     }
 }
 
-/// `y` takes text, not a pattern, so only the escapes that name a byte apply.
-fn unescape_y(raw: &[u8]) -> Vec<u8> {
+/// GNU's wording for `\c\`, which it refuses rather than guessing at.
+const RECURSIVE_C: &str = "recursive escaping after \\c not allowed";
+
+/// The escapes that name a control character by letter.
+///
+/// GNU converts these in the same pass as the numeric ones below, which is why
+/// `\t` is a tab in a regular expression, in a replacement, in `y` and in `a`
+/// text alike. `\b` is deliberately absent: GNU sed 4.0 read it as a backspace,
+/// but every version since reads it as a word boundary, which is `ere`'s to
+/// interpret and not ours.
+fn control_byte(c: u8) -> Option<u8> {
+    Some(match c {
+        b'a' => 0x07,
+        b'f' => 0x0c,
+        b'n' => b'\n',
+        b'r' => b'\r',
+        b't' => b'\t',
+        b'v' => 0x0b,
+        _ => return None,
+    })
+}
+
+/// One digit of `base`, or `None` if `c` is not one.
+fn digit(c: u8, base: u8) -> Option<u8> {
+    let v = match c {
+        b'0'..=b'9' => c.wrapping_sub(b'0'),
+        b'a'..=b'f' => c.wrapping_sub(b'a').wrapping_add(10),
+        b'A'..=b'F' => c.wrapping_sub(b'A').wrapping_add(10),
+        _ => return None,
+    };
+    (v < base).then_some(v)
+}
+
+/// What one of GNU's byte-naming escapes turned out to be.
+enum Named {
+    /// The byte it names, and the index just past the escape.
+    Byte(u8, usize),
+    /// `\c` with the script ending right after it: GNU emits a lone backslash
+    /// and drops the `c`.
+    Backslash(usize),
+    /// `\c\`, which GNU refuses — see [`RECURSIVE_C`].
+    Recursive,
+}
+
+/// Read `\xNN`, `\oNNN`, `\dNNN` or `\cX`, where `raw[i]` is the character
+/// *after* the backslash.
+///
+/// `None` means the escape is none of those and belongs to whoever asked: `\w`
+/// to the regex engine, `\1` to the replacement parser, `\;` to nobody.
+///
+/// The three numeric forms are GNU's `convert_number`, measured rather than
+/// recalled: **at most two** hexadecimal digits and **at most three** decimal
+/// or octal ones, the value taken mod 256, and *no* digits at all is not an
+/// error — the letter then denotes itself, which is why `sed 's/\x/Z/'`
+/// replaces an `x`. So GNU reads `\x616` as `a` then `6`, `\d0977` as `a` then
+/// `7`, `\x0061` as NUL then `61`, and `\d300` as `,`.
+fn named_byte(raw: &[u8], i: usize) -> Option<Named> {
+    let letter = raw.get(i).copied()?;
+    let (base, max) = match letter {
+        b'x' => (16u8, 2usize),
+        b'd' => (10, 3),
+        b'o' => (8, 3),
+        b'c' => {
+            let after = i.saturating_add(1);
+            return Some(match raw.get(after).copied() {
+                None => Named::Backslash(after),
+                Some(b'\\') => Named::Recursive,
+                // GNU's own arithmetic: fold to upper case, then flip the bit
+                // that separates a control code from its printable partner, so
+                // `\cI` is a tab and `\c1` is `q`.
+                Some(c) => Named::Byte(c.to_ascii_uppercase() ^ 0x40, after.saturating_add(1)),
+            });
+        }
+        _ => return None,
+    };
+    // Accumulating in a `u8` is the mod-256 wrap, not an accident of width:
+    // GNU stores the running value in a `char`, which is why `\d300` is `,`.
+    let mut n: u8 = 0;
+    let first = i.saturating_add(1);
+    let mut j = first;
+    let end = first.saturating_add(max);
+    while j < end {
+        let Some(d) = raw.get(j).copied().and_then(|c| digit(c, base)) else {
+            break;
+        };
+        n = n.wrapping_mul(base).wrapping_add(d);
+        j = j.saturating_add(1);
+    }
+    Some(if j == first {
+        Named::Byte(letter, j)
+    } else {
+        Named::Byte(n, j)
+    })
+}
+
+/// GNU's `normalize_text` for a regular expression: every escape that names a
+/// byte becomes that byte, and every other escape is left for the regex engine.
+///
+/// The produced byte is **not** protected, which is GNU's behaviour and is
+/// surprising enough to be worth stating: `\x2e` is the metacharacter `.` and
+/// not a literal dot, so `sed 's/\x2e/Z/'` replaces the first character of any
+/// line. `\x5c` is a bare backslash, so `sed 's/\x5c/Z/'` is a *trailing
+/// backslash* error — which is exactly what GNU reports. Both measured.
+///
+/// The conversion runs after the delimiter scan, so a delimiter it produces is
+/// a character and not the end of the command: `sed 's/\x2f/Z/'` replaces a
+/// slash.
+fn normalize_regex(raw: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(raw.len());
     let mut i = 0usize;
     while let Some(&c) = raw.get(i) {
@@ -729,20 +859,83 @@ fn unescape_y(raw: &[u8]) -> Vec<u8> {
             out.push(c);
             continue;
         }
-        match raw.get(i).copied() {
-            Some(b'n') => out.push(b'\n'),
-            Some(b't') => out.push(b'\t'),
-            Some(b'r') => out.push(b'\r'),
-            Some(b'\\') => out.push(b'\\'),
-            Some(other) => out.push(other),
-            None => out.push(b'\\'),
+        let Some(&n) = raw.get(i) else {
+            out.push(b'\\');
+            break;
+        };
+        if let Some(b) = control_byte(n) {
+            out.push(b);
+            i = i.saturating_add(1);
+            continue;
         }
-        i = i.saturating_add(1);
+        match named_byte(raw, i) {
+            Some(Named::Byte(b, next)) => {
+                out.push(b);
+                i = next;
+            }
+            Some(Named::Backslash(next)) => {
+                out.push(b'\\');
+                i = next;
+            }
+            Some(Named::Recursive) => return Err(RECURSIVE_C.to_string()),
+            // Not ours: `\w`, `\(`, `\1`, `\.` all reach the engine as written.
+            None => {
+                out.push(b'\\');
+                out.push(n);
+                i = i.saturating_add(1);
+            }
+        }
     }
-    out
+    Ok(out)
 }
 
-fn parse_replacement(raw: &[u8]) -> Vec<Rep> {
+/// `y` takes text, not a pattern, so only the escapes that name a byte apply.
+fn unescape_y(raw: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0usize;
+    while let Some(&c) = raw.get(i) {
+        i = i.saturating_add(1);
+        if c != b'\\' {
+            out.push(c);
+            continue;
+        }
+        let Some(&n) = raw.get(i) else {
+            out.push(b'\\');
+            break;
+        };
+        if let Some(b) = control_byte(n) {
+            out.push(b);
+            i = i.saturating_add(1);
+            continue;
+        }
+        match named_byte(raw, i) {
+            Some(Named::Byte(b, next)) => {
+                out.push(b);
+                i = next;
+            }
+            Some(Named::Backslash(next)) => {
+                out.push(b'\\');
+                i = next;
+            }
+            Some(Named::Recursive) => return Err(RECURSIVE_C.to_string()),
+            // `\\` and anything else: the character itself.
+            None => {
+                out.push(n);
+                i = i.saturating_add(1);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Parse an `s` command's replacement into its literal and substituted parts.
+///
+/// A byte an escape *names* is a literal by construction here — it goes into
+/// the pending literal run rather than back into the text — which is how GNU's
+/// protection of the same byte works out: `s/a/\x26/` yields a `&` and not the
+/// whole match, and `s/a/\x5cn/` yields a backslash followed by an `n` and not
+/// a newline. Both measured.
+fn parse_replacement(raw: &[u8]) -> Result<Vec<Rep>, String> {
     let mut parts: Vec<Rep> = Vec::new();
     let mut lit: Vec<u8> = Vec::new();
     let flush = |lit: &mut Vec<u8>, parts: &mut Vec<Rep>| {
@@ -767,18 +960,13 @@ fn parse_replacement(raw: &[u8]) -> Vec<Rep> {
             lit.push(b'\\');
             break;
         };
+        let esc = i;
         i = i.saturating_add(1);
         match n {
             b'0'..=b'9' => {
                 flush(&mut lit, &mut parts);
                 parts.push(Rep::Group(usize::from(n.wrapping_sub(b'0'))));
             }
-            b'n' => lit.push(b'\n'),
-            b't' => lit.push(b'\t'),
-            b'r' => lit.push(b'\r'),
-            b'a' => lit.push(0x07),
-            b'f' => lit.push(0x0c),
-            b'v' => lit.push(0x0b),
             b'u' | b'l' | b'U' | b'L' | b'E' => {
                 flush(&mut lit, &mut parts);
                 parts.push(Rep::Case(match n {
@@ -789,12 +977,30 @@ fn parse_replacement(raw: &[u8]) -> Vec<Rep> {
                     _ => CaseOp::End,
                 }));
             }
-            // `\&`, `\\`, `\<newline>` and anything else: the character itself.
-            other => lit.push(other),
+            _ => {
+                if let Some(b) = control_byte(n) {
+                    lit.push(b);
+                    continue;
+                }
+                match named_byte(raw, esc) {
+                    Some(Named::Byte(b, next)) => {
+                        lit.push(b);
+                        i = next;
+                    }
+                    Some(Named::Backslash(next)) => {
+                        lit.push(b'\\');
+                        i = next;
+                    }
+                    Some(Named::Recursive) => return Err(RECURSIVE_C.to_string()),
+                    // `\&`, `\\`, `\<newline>` and anything else: the character
+                    // itself.
+                    None => lit.push(n),
+                }
+            }
         }
     }
     flush(&mut lit, &mut parts);
-    parts
+    Ok(parts)
 }
 
 /// Why a script would not compile.
@@ -944,9 +1150,9 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
             b'G' => Action::GetAppend,
             b'x' => Action::Exchange,
             b'=' => Action::LineNumber,
-            b'a' => Action::AppendText(p.parse_text()),
-            b'i' => Action::InsertText(p.parse_text()),
-            b'c' => Action::ChangeText(p.parse_text()),
+            b'a' => Action::AppendText(p.parse_text()?),
+            b'i' => Action::InsertText(p.parse_text()?),
+            b'c' => Action::ChangeText(p.parse_text()?),
             b'r' => {
                 p.deny_in_sandbox()?;
                 Action::ReadFile(p.parse_filename()?)
@@ -2567,6 +2773,16 @@ mod tests {
         compile_script(script, ere, DEFAULT_LINE_LEN, false)
     }
 
+    /// Why [`compile`] refused `script`. Panics if it did not — `Script` has no
+    /// `Debug`, so `unwrap_err` is not available and would be less informative
+    /// than naming the script anyway.
+    fn compile_err(script: &[u8]) -> String {
+        match compile(script, false) {
+            Ok(_) => panic!("{} compiled", String::from_utf8_lossy(script)),
+            Err(e) => e.msg,
+        }
+    }
+
     /// Run a script over some text and return what it wrote.
     fn run(script: &str, input: &str) -> String {
         run_opts(script, input, false, false)
@@ -2883,6 +3099,93 @@ mod tests {
         assert_eq!(run("2c\\\nnew", "a\nb\nc\n"), "a\nnew\nc\n");
         // For a range, `c` writes its text once, when the range closes.
         assert_eq!(run("1,2c\\\nnew", "a\nb\nc\n"), "new\nc\n");
+    }
+
+    // ---- the escapes that name a byte -------------------------------------
+    //
+    // Every expectation below was measured against GNU sed 4.9 under
+    // `LC_ALL=C.UTF-8`, not read off the manual, which does not say how many
+    // digits each form takes or what happens when there are none.
+
+    #[test]
+    fn a_numeric_escape_names_a_byte_in_a_pattern() {
+        assert_eq!(run("s/\\x61/Z/", "abc\n"), "Zbc\n");
+        assert_eq!(run("s/\\o141/Z/", "abc\n"), "Zbc\n");
+        assert_eq!(run("s/\\d097/Z/", "abc\n"), "Zbc\n");
+        assert_eq!(run("s/\\cI/T/", "a\tb\n"), "aTb\n");
+        // In an address as much as in `s`, and in the `y` command's arguments.
+        assert_eq!(run_opts("/\\x61/p", "abc\n", true, false), "abc\n");
+        assert_eq!(run("y/\\x61\\x62/XY/", "abc\n"), "XYc\n");
+        assert_eq!(run("y/a/\\x58/", "abc\n"), "Xbc\n");
+    }
+
+    #[test]
+    fn a_numeric_escape_names_a_byte_in_a_replacement() {
+        assert_eq!(run("s/a/\\x41/", "abc\n"), "Abc\n");
+        assert_eq!(run("s/a/\\o101/", "abc\n"), "Abc\n");
+        assert_eq!(run("s/a/\\d065/", "abc\n"), "Abc\n");
+        assert_eq!(run("s/a/\\cI/", "abc\n"), "\tbc\n");
+        // And the byte it names is a *literal*, where the same character
+        // written plainly would not be: `&` is the whole match and `\n` is a
+        // newline, but `\x26` and `\x5cn` are neither.
+        assert_eq!(run("s/a/\\x26/", "abc\n"), "&bc\n");
+        assert_eq!(run("s/a/\\d092/", "abc\n"), "\\bc\n");
+        assert_eq!(run("s/a/\\o134n/", "abc\n"), "\\nbc\n");
+        assert_eq!(run("s/a/\\x31/", "abc\n"), "1bc\n");
+    }
+
+    #[test]
+    fn a_pattern_does_not_protect_the_byte_an_escape_names() {
+        // This is the surprising half and it is GNU's: the byte goes into the
+        // pattern raw, so `\x2e` is the metacharacter and matches anything.
+        assert_eq!(run("s/\\x2e/Z/", "abc\n"), "Zbc\n");
+        assert_eq!(run("s/\\x2e/Z/", "a.c\n"), "Z.c\n");
+        assert_eq!(run("s/a\\x2a/Z/", "aaa\n"), "Z\n");
+        assert_eq!(run("s/\\x5b\\x61\\x5d/Z/", "abc\n"), "Zbc\n");
+        // A bare backslash, therefore the error a bare backslash always is.
+        assert!(compile_err(b"s/\\x5c/Z/").contains("trailing backslash"));
+        // The conversion runs after the delimiter scan, so a delimiter it
+        // produces is a character and not the end of the command.
+        assert_eq!(run("s/\\x2f/Z/", "a/c\n"), "aZc\n");
+    }
+
+    #[test]
+    fn a_numeric_escape_takes_the_digits_gnu_takes_and_no_more() {
+        // Two hexadecimal digits, three decimal or octal ones.
+        assert_eq!(run("s/\\x616/Z/", "a6\n"), "Z\n");
+        assert_eq!(run("s/\\d0977/Z/", "a7\n"), "Z\n");
+        assert_eq!(run("s/\\o1418/Z/", "a8\n"), "Z\n");
+        assert_eq!(run("s/\\x0061/Z/", "a1\n"), "a1\n");
+        // No digits at all is not an error: the letter denotes itself.
+        assert_eq!(run("s/\\x/Z/", "xbc\n"), "Zbc\n");
+        assert_eq!(run("s/\\xg/Z/", "xgc\n"), "Zc\n");
+        assert_eq!(run("s/\\d/Z/", "dbc\n"), "Zbc\n");
+        assert_eq!(run("s/\\o/Z/", "obc\n"), "Zbc\n");
+        // The value wraps mod 256 rather than saturating or erroring.
+        assert_eq!(run("s/\\d300/Z/", "a,b\n"), "aZb\n");
+    }
+
+    #[test]
+    fn control_x_folds_case_then_flips_the_control_bit() {
+        assert_eq!(run("s/a/[\\c1]/", "abc\n"), "[q]bc\n");
+        assert_eq!(run("s/a/[\\cq]/", "abc\n"), "[\x11]bc\n");
+        // `\c` at the very end of the script: GNU emits a lone backslash and
+        // drops the `c`.
+        assert_eq!(run("s/a/[\\c/", "abc\n"), "[\\bc\n");
+        // `\c\` it refuses outright rather than guessing.
+        assert_eq!(
+            compile_err(b"s/a/[\\c\\t]/"),
+            "recursive escaping after \\c not allowed"
+        );
+    }
+
+    #[test]
+    fn the_text_of_a_i_and_c_takes_the_same_escapes() {
+        assert_eq!(run("1a\\\np\\tq\\x41", "z\n"), "z\np\tqA\n");
+        assert_eq!(run("1a\\\np\\nq", "z\n"), "z\np\nq\n");
+        // The `\` in `i\x41` is the marker introducing the text, so it is eaten
+        // and the three characters `x41` are what is left — GNU's answer too.
+        assert_eq!(run("1i\\x41", "z\n"), "x41\nz\n");
     }
 
     #[test]

@@ -329,6 +329,32 @@ run_stdin words2.txt -E 's/\w/./g'
 run_stdin words2.txt -E 's/\s/_/g'
 run_stdin words2.txt -n '/\<c\>/p'
 run_stdin words2.txt -n '/\bx1\b/p'
+# The escapes that name a byte. GNU converts these while parsing the script, so
+# they reach the regex engine as bytes: `\x2e` is the metacharacter `.` and
+# `\x2f` is a slash that does not end the command. In a replacement the same
+# byte is a literal instead, which is why `\x26` is an ampersand and not the
+# whole match.
+run_stdin words.txt 's/\x66oo/X/'
+run_stdin words.txt 's/\o146oo/X/'
+run_stdin words.txt 's/\d102oo/X/'
+run_stdin words.txt 's/\x2e/Z/'
+run_stdin words.txt 's/\x2f/Z/'
+run_stdin words.txt 's/f\x6f\x2a/X/'
+run_stdin words.txt 's/\x/Z/'
+run_stdin words.txt 's/\d300/Z/'
+run_stdin abc.txt 's/a/\x41/'
+run_stdin abc.txt 's/a/\o101/'
+run_stdin abc.txt 's/a/\d065/'
+run_stdin abc.txt 's/a/\x26/'
+run_stdin abc.txt 's/a/\d092n/'
+run_stdin abc.txt 's/a/\x31/'
+run_stdin abc.txt 's/a/[\c1]/'
+run_stdin abc.txt 's/\cI/T/'
+run_stdin abc.txt 'y/\x61\x62/XY/'
+run_stdin abc.txt $'1a\\\np\\tq\\x41'
+run_stdin abc.txt '1i\x41'
+run_stdin abc.txt 's/\x5c/Z/'
+run_stdin abc.txt 's/a/[\c\t]/'
 # A replacement carrying an escape that is not a group reference, and one
 # carrying a literal newline.
 run_stdin abc.txt 's/b/\n/'

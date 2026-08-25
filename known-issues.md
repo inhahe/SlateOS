@@ -75591,3 +75591,74 @@ removes the only hang and the only silently-wrong exit status. What is left
 produces no wrong answer to a query that works — the matching itself agrees
 with GNU across 217 cases — but `-C` and `--color` are common enough that a
 script or a habit that uses them simply does not run.
+
+#### TD-A-POISON-CHECK-READS-EVERY-BYTE-ONE-AT-A-TIME-WHILE-THE-FILL-USES-REP-STOSB (lane A, 2026-08-25) — **open**
+
+**In short:** the debug heap writes a known filler byte over every block it
+frees and reads it back when the block is handed out again, so that a program
+still writing to memory it gave back is caught. Writing the filler is one bulk
+CPU instruction; reading it back is a loop that fetches **one byte at a time**,
+and the loop is deliberately built so the compiler cannot speed it up. For the
+largest blocks that is 4096 separate fetches on every single allocation. The
+comment above the switch claims the whole thing costs "~5-20ns per
+alloc/dealloc", which is true only for the smallest blocks.
+
+**Where.** `kernel/src/mm/heap.rs`: `check_poison` (~316) against `poison_free`
+(~131) and `poison_alloc` (~193). The asymmetry is one line each way —
+
+```rust
+// poison_free: one bulk `rep stosb`
+rawmem::fill_u8(ptr.add(12), FREE_POISON, class_size.saturating_sub(12));
+
+// check_poison: class_size scalar volatile loads, and no bulk counterpart
+for i in 12..class_size {
+    let byte = unsafe { rawmem::read_u8(ptr.add(i)) };
+    if byte != FREE_POISON { … }
+}
+```
+
+**Why it cannot simply be vectorised in place.** The volatility is load-bearing
+and documented: `check_poison` carries `#[inline(never)]` because with thin LTO
+the compiler otherwise inlines it into `pcpu_slab_alloc`, constant-propagates
+across the free→alloc boundary, "knows" what `poison_free` wrote, and deletes
+the read entirely — a check that is optimised away is a check that never runs.
+`rawmem::read_u8` exists to defeat that, and it also keeps the read out of
+KASAN's instrumentation, which has the slot marked freed. So the fix is not
+"drop the volatile"; it is to give `rawmem` a bulk *scan* with the same
+guarantees that `fill_u8` already provides for the write side.
+
+**Proper fix.** A `rawmem::scan_u8(ptr, value, len) -> Option<usize>` built on
+`repe scasb` — repeat *while equal*, which stops on the first byte that differs
+and leaves the offset in the count register, i.e. exactly the "first corrupted
+byte, and where" that `check_poison` reports. One instruction, opaque to the
+optimizer for the same reason `fill_u8`'s `rep stosb` is, and correspondingly
+fast under TCG where the whole string operation is a single helper call rather
+than 4096 translated loads. `check_poison` then becomes a call and a branch, and
+the "~5-20ns" comment becomes true for every class rather than the small ones.
+
+**Suspected impact, not yet measured.** This is the leading candidate for
+self-test rung 27 spending 15+ s between its own label and rung 28's — long
+enough that it was reported as a `SYSTEM HANG` on two boots (see
+`TD-A-LIVENESS-WATCHDOG-FALSE-FIRES-ON-CAPTURED-SELF-TEST-WORK`). The watchdog's
+RIP ring from that failure is eight-sixteenths inside the heap, and every
+symbolised frame is on a poison path:
+
+| samples | symbol |
+|---|---|
+| 2 | `mm::heap::check_poison` |
+| 4 | `mm::rawmem::fill_u8` |
+| 1 | `mm::heap::HeapInner::size_class_index` |
+| 1 | `alloc::vec::Vec::push` |
+
+That is evidence, not proof, and the entry should not be closed on it. **Measure
+first**: time N alloc/free cycles at the largest slab class with `enable_poison`
+on and off, from `clock_monotonic`, as a self-test rung that stays in the tree —
+the heap is on the performance-critical list (target < 200 ns for common sizes)
+and has no poison-overhead figure at all right now. Then fix, then re-measure,
+and only then decide whether rung 27 is explained or whether the VFS walk itself
+is also at fault.
+
+**Severity.** Low correctness — the check is *right*, just slow, and slowness in
+a debug-only path harms nothing a user sees. Medium friction: it inflates every
+boot test, and it inflates it specifically in a silent stretch, which is what
+turned it into two false hang reports and two wasted ~15-minute cycles.

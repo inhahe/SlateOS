@@ -44,10 +44,10 @@
 # | knob | default | meaning |
 # |---|---|---|
 # | `DIFF_PROG`      | *required* | the utility's name: used for messages, for finding the reference, and as the one name both binaries are reached by |
-# | `DIFF_PKG`       | `coreutils` | the cargo package to build from |
+# | `DIFF_PKG`       | `coreutils` | the cargo package(s) to build from; more than one for a harness whose subjects do not share a crate |
 # | `DIFF_BINS`      | `$DIFF_PROG` | the `--bin` names to build; more than one for a harness that compares a family |
 # | `DIFF_FORWARD`   | (none) | extra environment variable names to carry across the re-exec, beyond `OURS` and `VERBOSE` |
-# | `DIFF_REF`       | (none) | candidate paths for the reference, tried in order, instead of looking on `PATH`. `echo` needs this: `command -v echo` finds the shell builtin, which is not what is being compared |
+# | `DIFF_REF`       | (none) | candidate paths for the reference, tried in order, instead of looking on `PATH`. `echo` needs this: `command -v echo` finds the shell builtin, which is not what is being compared. Single-binary harnesses only |
 # | `DIFF_NEED`      | (none) | other commands that must exist inside WSL, or the run is skipped rather than run without them |
 # | `DIFF_NO_REF`    | (unset) | do not look for a reference; the harness finds its own |
 # | `DIFF_NO_BINDIR` | (unset) | do not build the `PATH` directories; the harness makes its own |
@@ -59,9 +59,10 @@
 # | `root`       | the repository root |
 # | `target_dir` | the shared Linux target directory |
 # | `OURS`       | our binary, absolute (single `DIFF_BINS` only) |
-# | `gnu_real`   | the reference binary, absolute (unless `DIFF_NO_REF`) |
+# | `gnu_real`   | the reference binary, absolute (single `DIFF_BINS`, unless `DIFF_NO_REF`) |
 # | `DIFF_TMP`   | a scratch directory, removed on exit |
-# | `bindir`     | `$DIFF_TMP/bin`, holding `ours/$DIFF_PROG` and `gnu/$DIFF_PROG` |
+# | `bindir`     | `$DIFF_TMP/bin`, holding `ours/NAME` and `gnu/NAME` for each of `DIFF_BINS` |
+# | `DIFF_SKIPPED` | the `DIFF_BINS` entries with no reference on this host (multi-binary only) |
 # | `diff_ours`  | `diff_ours NAME` -> the path of another built binary |
 #
 # A harness's own fixtures belong under `$DIFF_TMP`, so that the one `EXIT`
@@ -213,13 +214,16 @@ diff_newer_than() {
        -name '*.rs' -newer "$1" -print -quit 2>/dev/null
 }
 
-# The package's library artifact, or nothing if it has none.
+# One library artifact per package in `DIFF_PKG`, or nothing for a package that
+# has no library.
 #
 # `deps/` holds one per build hash; the newest is the one the binaries above
 # were just linked against.
-diff_lib_artifact() {
-  ls -t "$target_dir/x86_64-unknown-linux-gnu/debug/deps/lib${DIFF_PKG}-"*.rlib \
-    2>/dev/null | head -1
+diff_lib_artifacts() {
+  for diff_p in $DIFF_PKG; do
+    ls -t "$target_dir/x86_64-unknown-linux-gnu/debug/deps/lib${diff_p}-"*.rlib \
+      2>/dev/null | head -1
+  done
 }
 
 # `BINARY|NEWER-FILE` for the first stale artifact, or nothing.
@@ -243,14 +247,13 @@ diff_lib_artifact() {
 # the artifact that actually holds the shared code is checked on its own.
 diff_first_stale() {
   local diff_b diff_bin diff_late diff_lib
-  diff_lib=$(diff_lib_artifact)
-  if [ -n "$diff_lib" ]; then
+  for diff_lib in $(diff_lib_artifacts); do
     diff_late=$(diff_newer_than "$diff_lib")
     if [ -n "$diff_late" ]; then
       printf '%s|%s\n' "$diff_lib" "$diff_late"
       return 0
     fi
-  fi
+  done
   for diff_b in $DIFF_BINS; do
     diff_bin=$(diff_ours "$diff_b")
     if [ ! -f "$diff_bin" ]; then
@@ -273,10 +276,12 @@ diff_assert_fresh() {
 
   echo "$DIFF_PROG-diff: ${diff_stale%%|*}" >&2
   echo "  is older than ${diff_stale#*|} -- the build cache is stale. Cleaning." >&2
-  ( cd "$root" && cargo clean -p "$DIFF_PKG" \
-      --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2
+  for diff_p in $DIFF_PKG; do
+    ( cd "$root" && cargo clean -p "$diff_p" \
+        --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2
+  done
   # shellcheck disable=SC2086
-  ( cd "$root" && cargo build -p "$DIFF_PKG" $diff_args \
+  ( cd "$root" && cargo build $diff_args \
       --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || return 1
 
   diff_stale=$(diff_first_stale)
@@ -302,9 +307,10 @@ if [ -z "$OURS" ]; then
   # build` for the whole family rather than one per binary, so the output does
   # not read as though something were rebuilt between two halves of a run.
   diff_args=
+  for diff_p in $DIFF_PKG; do diff_args="$diff_args -p $diff_p"; done
   for diff_b in $DIFF_BINS; do diff_args="$diff_args --bin $diff_b"; done
   # shellcheck disable=SC2086
-  ( cd "$root" && cargo build -p "$DIFF_PKG" $diff_args \
+  ( cd "$root" && cargo build $diff_args \
       --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || exit 1
   diff_assert_fresh || exit 1
   case $DIFF_BINS in
@@ -365,11 +371,48 @@ trap diff_cleanup EXIT
 diff_run() { { "$@" 2>&4; } 4>&2 2>/dev/null; }
 
 bindir=$DIFF_TMP/bin
+DIFF_SKIPPED=
 if [ -z "${DIFF_NO_BINDIR:-}" ]; then
-  # Each binary is reached through a symlink named `$DIFF_PROG`, in a directory
-  # that is the whole of `PATH` for that one invocation, so `argv[0]` is the
-  # bare word on both sides and the `prog: ` prefix on every diagnostic matches.
+  # Each binary is reached through a symlink named after the utility, in a
+  # directory that is the whole of `PATH` for that one invocation, so `argv[0]`
+  # is the bare word on both sides and the `prog: ` prefix on every diagnostic
+  # matches.
   mkdir -p "$bindir/ours" "$bindir/gnu"
-  ln -s "$OURS" "$bindir/ours/$DIFF_PROG"
-  ln -s "$gnu_real" "$bindir/gnu/$DIFF_PROG"
+  case $DIFF_BINS in
+    *' '*|*'	'*|*'
+'*)
+      # A family, or a harness whose subjects live in different crates. Each
+      # name gets its own pair, and its own reference found by that name --
+      # `DIFF_REF` names one path and so cannot describe more than one binary.
+      #
+      # A name with no reference on this host is *skipped*, not fatal: a family
+      # harness is still worth running over the rest, and `DIFF_SKIPPED` says
+      # out loud which ones did not run. That is the opposite of the
+      # single-binary rule below, where no reference means there is nothing
+      # left for the harness to do at all.
+      for diff_b in $DIFF_BINS; do
+        diff_gnu=
+        for diff_cand in "/usr/bin/$diff_b" "/bin/$diff_b"; do
+          [ -x "$diff_cand" ] && { diff_gnu=$diff_cand; break; }
+        done
+        # `OURS` names a *directory* for a multi-binary harness, since there is
+        # no single subject for it to name.
+        if [ -n "$OURS" ] && [ -d "$OURS" ]; then
+          diff_bin=$OURS/$diff_b
+        else
+          diff_bin=$(diff_ours "$diff_b")
+        fi
+        if [ -z "$diff_gnu" ] || [ ! -x "$diff_bin" ]; then
+          DIFF_SKIPPED="$DIFF_SKIPPED $diff_b"
+          continue
+        fi
+        ln -s "$diff_bin" "$bindir/ours/$diff_b"
+        ln -s "$diff_gnu" "$bindir/gnu/$diff_b"
+      done
+      ;;
+    *)
+      ln -s "$OURS" "$bindir/ours/$DIFF_PROG"
+      ln -s "$gnu_real" "$bindir/gnu/$DIFF_PROG"
+      ;;
+  esac
 fi

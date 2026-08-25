@@ -1,19 +1,28 @@
 #!/usr/bin/env bash
 # Differential test: our tsort against GNU tsort.
 #
-# ## Why the reference is glibc, and only glibc
+# ## Why both sides run inside WSL
 #
-# The host's `tsort` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll`
-# rather than glibc, whose `getopt` words every option diagnostic differently
-# (`unknown option -- x` against `invalid option -- 'x'`). A harness pointed at
-# it would certify sentences no GNU/Linux system prints. See `known-issues.md`
-# → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, and the identical
-# note at the top of `comm-diff.sh`, `join-diff.sh`, `paste-diff.sh`,
-# `fold-diff.sh`, `expand-diff.sh`, `head-diff.sh`, `wc-diff.sh`, `cut-diff.sh`,
-# `uniq-diff.sh` and `nl-diff.sh`.
+# `scripts/diff-wsl.sh` gives the reasons. The reference has to be glibc's: the
+# host's `tsort` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll` rather
+# than glibc, whose `getopt` words every option diagnostic differently
+# (`unknown option -- x` against `invalid option -- 'x'`), so a harness pointed
+# at it certifies sentences no GNU/Linux system prints (`known-issues.md` →
+# `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`). This file already
+# avoided that by reaching for `wsl -e env LC_ALL=$loc tsort`, at the cost of a
+# WSL process per case and a probe to check that `wsl`'s inherited Windows cwd
+# landed on the same bytes under `/mnt/...`.
+#
+# The subject moving with it is the part that changed an answer — see the
+# directory-operand case at the foot of this file, which was an expected
+# difference only because a Windows `File::open` refuses a directory outright.
+#
+# The locale stays a per-case argument to `run_side` rather than being pinned
+# once at the top, because the last section below deliberately re-runs under
+# `C`; see the next paragraph.
 #
 # Run `OURS=/usr/bin/tsort ./scripts/tsort-diff.sh` to confirm the harness still
-# discriminates: it should report dozens of differences, not zero.
+# discriminates: every expected difference should turn into an XPASS.
 #
 # ## Why the whole harness runs under `LC_ALL=C.UTF-8`
 #
@@ -50,49 +59,38 @@
 # ## Cases that differ on purpose
 #
 # `--help` and `--version`, whose text is ours rather than the GNU project's,
-# and a directory operand, which a Windows host refuses to open at all.
+# and the getopt rows that reach one of those two texts by another spelling.
 set -u
 
-# Our tsort is a native Windows binary, so MSYS would rewrite an argument that
-# looks like a path.
-export MSYS2_ARG_CONV_EXCL='*'
-
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils tsort "${OURS:-}") || exit 1
-export LC_ALL=${LC_ALL:-C.UTF-8}
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `tsort` so `argv[0]` matches. See `scripts/diff-wsl.sh`.  `timeout` is
+# named because every invocation below is bounded with it; see `run_side`.
+DIFF_PROG=tsort
+DIFF_NEED=timeout
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d)
-trap 'rm -rf "$fixtures"' EXIT
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
 cd "$fixtures" >/dev/null || exit 1
-OURS_ABS=$OURS
-case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$OLDPWD/$OURS" ;; esac
 
 # Every invocation is bounded, on both sides. The loop-breaking pass is the
 # specific reason: it repeats a whole tree walk until the backward chain closes,
 # and an implementation that failed to clear a link would repeat it forever.
 # The *reference* is wrapped too, so a harness that only bounded our side would
 # hang on the day the reference was the buggy one.
-run_ours() { timeout -k 2 30 "$OURS_ABS" "$@"; }
-run_gnu()  { local loc=$1; shift; timeout -k 2 30 wsl -e env "LC_ALL=$loc" tsort "$@"; }
-
-# WSL is invoked with the Windows cwd, which for an MSYS temp directory lands on
-# the same bytes under `/mnt/c/...`. Verified rather than assumed, because a
-# reference that silently ran somewhere else would report every file operand as
-# missing and still "agree" on the ones fed through stdin.
-printf 'a b\n' > .probe
-if [ "$(run_gnu C .probe 2>/dev/null | tr '\n' '|')" = "a|b|" ]; then
-  HAVE_GNU=yes
-else
-  HAVE_GNU=no
-  echo "tsort-diff: glibc tsort not reachable in this directory; skipping"
-fi
-rm -f .probe
+#
+# One invocation of one side. `$1` is `ours` or `gnu`; each is reached through
+# a symlink named `tsort` in a directory that is the whole of `PATH` for that one
+# invocation, so `argv[0]` is the bare word on both sides. The locale stays a
+# per-case argument because half the cases here are *about* the locale; it is
+# spliced into the same `env` that narrows `PATH`.
+run_side() {
+  local side=$1 loc=$2; shift 2
+  timeout -k 2 30 env "LC_ALL=$loc" PATH="$bindir/$side" tsort "$@"
+}
 
 # --- fixtures ----------------------------------------------------------------
 # One relation, the smallest thing that is not empty.
@@ -179,11 +177,11 @@ compare() {
   # cannot be read. See the same note in cat-diff.sh.
   local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
   if [ "$stdin" = "-" ]; then
-    run_ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    run_gnu "$loc" "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    run_side ours "$loc" "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    run_side gnu  "$loc" "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   else
-    printf '%b' "$stdin" | run_ours "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
-    printf '%b' "$stdin" | run_gnu "$loc" "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
+    printf '%b' "$stdin" | run_side ours "$loc" "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
+    printf '%b' "$stdin" | run_side gnu  "$loc" "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
   fi
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   rm -f "$o_bin" "$g_bin"
@@ -219,15 +217,14 @@ report() {
   return 0
 }
 
-run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C.UTF-8 "$@"; report "tsort $*"; }
+run_case()  { compare - C.UTF-8 "$@"; report "tsort $*"; }
 # The same case under `C`. Unlike `comm`'s and `join`'s second locale, this is
 # not measuring a divergence: it is the evidence that there is none to measure,
 # because `tsort` never calls `strcoll`. Only the ordering cases belong here —
 # a diagnostic run under `C` would report GNU's ASCII marks against our curly
 # ones and fail for a reason that has nothing to do with ordering.
-run_c()     { [ "$HAVE_GNU" = yes ] || return 0; compare - C "$@"; report "tsort $* [C]"; }
+run_c()     { compare - C "$@"; report "tsort $* [C]"; }
 run_stdin() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
   compare "$input" C.UTF-8 "$@"
   report "printf '$input' | tsort $*"
@@ -236,7 +233,6 @@ run_stdin() {
 # that starts agreeing is reported too — an xfail that silently becomes correct
 # is a stale note in the harness.
 xfail_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local why="$1"; shift
   compare - C.UTF-8 "$@"
   if [ "$AGREED" = yes ]; then
@@ -334,10 +330,15 @@ run_case -- -x
 run_case one.txt -- one.txt
 run_case -- one.txt -x
 run_case one.txt -- --version
-# An operand that will not open, and one that opens and will not read.
+# An operand that will not open, and one that opens and will not read. The
+# second used to be an expected difference and is not one any more: opening a
+# directory succeeds on POSIX and the *read* fails, so GNU says `subdir: Is a
+# directory` and so do we. It differed only while the subject was a Windows
+# build, where `File::open` refuses a directory outright — see the same trap in
+# `filekind.rs`, where a Windows `is_file()` calls a pipe a regular file.
 run_case nosuch.txt
 run_case ''
-xfail_case 'a directory operand cannot be opened on a Windows host' subdir
+run_case subdir
 
 # --- getopt -------------------------------------------------------------------
 # There are no short options at all, so every short spelling is an error —
@@ -399,9 +400,7 @@ xfail_case 'the first option wins, and it is --help' --help --version
 xfail_case 'the first option wins, and it is --version' --version --help
 xfail_case 'a bad option after --version is never looked at' --version -x
 
-if [ "$HAVE_GNU" = yes ]; then
-  printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
-  [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"
-  printf '\n'
-fi
+printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
+[ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"
+printf '\n'
 [ "$fail" -eq 0 ] || exit 1

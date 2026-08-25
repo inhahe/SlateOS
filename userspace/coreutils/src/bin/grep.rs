@@ -68,7 +68,7 @@ use coreutils::filekind;
 use coreutils::fnmatch::{Flags as FnmatchFlags, fnmatch};
 use coreutils::quote::{self, quotef_os};
 use coreutils::stdfd;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
@@ -1121,15 +1121,42 @@ fn quote_ere(literal: &[u8]) -> Vec<u8> {
 }
 
 /// Compile every pattern, or name the first one that will not compile.
-fn compile_patterns(patterns: &[Vec<u8>], opts: &Options) -> Result<Vec<Pat>, String> {
+///
+/// The second half of the answer is the diagnostics to print before searching:
+/// egrep syntax accepts shapes POSIX-extended refuses, and GNU says so rather
+/// than accepting them silently — `grep -E '*a'` matches `a` *and* writes
+/// `grep: warning: * at start of expression`. See [`ere::Warning`]. They are
+/// returned rather than printed here so that the tests can read them and so
+/// that a later compile error still takes precedence over them: a pattern list
+/// that does not compile prints its error and searches nothing, and warning
+/// first about a run that is not going to happen would be noise.
+fn compile_patterns(
+    patterns: &[Vec<u8>],
+    opts: &Options,
+) -> Result<(Vec<Pat>, Vec<String>), String> {
     let mut out = Vec::with_capacity(patterns.len());
+    let mut warnings = Vec::new();
+    // GNU collapses duplicate patterns, which is invisible in the output of a
+    // search -- two copies of a pattern select the same lines as one -- and
+    // visible here: `grep -E -e '*a' -e '*a'` warns once, `-e '*a' -e '*b'`
+    // twice. Measured. Doing it for real rather than only for the diagnostic
+    // also saves the duplicate its search.
+    let mut seen: BTreeSet<&[u8]> = BTreeSet::new();
     for p in patterns {
+        if !seen.insert(p.as_slice()) {
+            continue;
+        }
         if p.is_empty() {
             out.push(Pat::Empty);
             continue;
         }
         let compiled = match opts.syntax {
-            Syntax::Basic => bre::compile(p, opts.ignore_case),
+            // Only `-E` can produce a warning: `-F` escapes every
+            // metacharacter, and in a BRE a leading `*` is an ordinary
+            // character rather than an operator with nothing to repeat, so
+            // there is nothing to remark on. Measured — `grep -G '*a'` and
+            // `grep -F '*a'` are both silent.
+            Syntax::Basic => bre::compile(p, opts.ignore_case).map(|re| (re, Vec::new())),
             // `-E` is *egrep* syntax, which is not the POSIX-extended syntax
             // the same engine gives `osh`, `find -regextype posix-extended`
             // and `awk`. The two differ on what happens to nonsense: GNU
@@ -1137,14 +1164,27 @@ fn compile_patterns(patterns: &[Vec<u8>], opts: &Options) -> Result<Vec<Pat>, St
             // matches the text `a{b}`, where POSIX-extended refuses both.
             // Compiling grep's patterns in the stricter dialect would refuse
             // patterns GNU grep runs. See `ere::Syntax` for the measured table.
-            Syntax::Extended => Regex::new_syntax(p, opts.ignore_case, EreSyntax::EGREP),
+            Syntax::Extended => Regex::new_syntax_warn(p, opts.ignore_case, EreSyntax::EGREP),
             // `-F` escapes every metacharacter before it gets here, so no
             // pattern reaching this arm can contain the constructs the two
             // dialects disagree about.
-            Syntax::Fixed => Regex::new_flags(&quote_ere(p), opts.ignore_case),
+            Syntax::Fixed => {
+                Regex::new_flags(&quote_ere(p), opts.ignore_case).map(|re| (re, Vec::new()))
+            }
         };
         match compiled {
-            Ok(re) => out.push(Pat::Re(re)),
+            Ok((re, warned)) => {
+                // The pattern is not named: GNU's line is the operator and
+                // nothing else, even with several `-e`, which is why `-e '*a'
+                // -e '*b'` prints two lines that are identical but for the
+                // operator. Measured.
+                warnings.extend(warned.into_iter().map(|w| match w {
+                    ere::Warning::QuantifierAtStart(q) => {
+                        format!("warning: {} at start of expression", q.token())
+                    }
+                }));
+                out.push(Pat::Re(re));
+            }
             Err(e) => {
                 // Escaped, not lossy: a pattern is an argv token, so it is a
                 // byte string and need not decode. `from_utf8_lossy` would
@@ -1160,7 +1200,7 @@ fn compile_patterns(patterns: &[Vec<u8>], opts: &Options) -> Result<Vec<Pat>, St
             }
         }
     }
-    Ok(out)
+    Ok((out, warnings))
 }
 
 /// Whether a byte can be part of a word, for `-w`.
@@ -1531,7 +1571,17 @@ fn run_main() -> ExitCode {
     }
 
     let pats = match compile_patterns(&patterns, &parsed.opts) {
-        Ok(p) => p,
+        Ok((p, warnings)) => {
+            // Before any searching, and without touching the exit status: a
+            // warned-about pattern still runs, and `grep -E '*a' f` exits 0 or
+            // 1 on the search as usual. `-q` and `-s` do not suppress these
+            // either — `-s` is about unreadable files and `-q` about the
+            // selected lines, and neither is about the pattern. Measured.
+            for w in warnings {
+                diag!("grep: {w}");
+            }
+            p
+        }
         Err(e) => {
             diag!("grep: {e}");
             return ExitCode::from(2);
@@ -2333,7 +2383,16 @@ mod tests {
 
     /// Compile one pattern under `opts` — most cases have exactly one.
     fn pats(pattern: &str, opts: &Options) -> Vec<Pat> {
-        compile_patterns(&[pattern.as_bytes().to_vec()], opts).unwrap()
+        compile_patterns(&[pattern.as_bytes().to_vec()], opts)
+            .unwrap()
+            .0
+    }
+
+    /// The diagnostics compiling `patterns` under `opts` would print, without
+    /// the `grep: ` prefix `main` adds.
+    fn pat_warnings(patterns: &[&str], opts: &Options) -> Vec<String> {
+        let owned: Vec<Vec<u8>> = patterns.iter().map(|p| p.as_bytes().to_vec()).collect();
+        compile_patterns(&owned, opts).unwrap().1
     }
 
     /// The `unwrap` is the assertion: a test pattern that exhausted the
@@ -2999,7 +3058,8 @@ mod tests {
             &[b"\\(a*\\)\\(a*\\)\\(a*\\)\\(a*\\)\\(a*\\)\\1\\2\\3\\4\\5b".to_vec()],
             &o,
         )
-        .unwrap();
+        .unwrap()
+        .0;
         let line = vec![b'a'; 300];
         assert!(line_selected(&line, &pats, &o).is_err());
     }
@@ -3015,7 +3075,9 @@ mod tests {
     #[test]
     fn several_patterns_are_matched_as_one_set() {
         let o = Options::default();
-        let p = compile_patterns(&[b"foo".to_vec(), b"^bar".to_vec()], &o).unwrap();
+        let p = compile_patterns(&[b"foo".to_vec(), b"^bar".to_vec()], &o)
+            .unwrap()
+            .0;
         assert!(line_selected(b"a foo b", &p, &o).unwrap());
         assert!(line_selected(b"bar b", &p, &o).unwrap());
         assert!(!line_selected(b"a bar", &p, &o).unwrap());
@@ -3074,7 +3136,9 @@ mod tests {
         let p = pats("a|ab", &o);
         assert_eq!(matches_in(&p, b"ab", &o).unwrap(), vec![(0, 2)]);
         // …and across `-e` patterns, which are a set and not an order.
-        let p = compile_patterns(&[b"a".to_vec(), b"ab".to_vec()], &o).unwrap();
+        let p = compile_patterns(&[b"a".to_vec(), b"ab".to_vec()], &o)
+            .unwrap()
+            .0;
         assert_eq!(matches_in(&p, b"ab", &o).unwrap(), vec![(0, 2)]);
     }
 
@@ -3894,7 +3958,9 @@ mod tests {
             vec![b"aaa".to_vec(), b"ccc".to_vec()]
         );
         assert_eq!(
-            parse_args(&s(&["--regexp=aaa\nccc", "f"])).unwrap().patterns,
+            parse_args(&s(&["--regexp=aaa\nccc", "f"]))
+                .unwrap()
+                .patterns,
             vec![b"aaa".to_vec(), b"ccc".to_vec()]
         );
         assert_eq!(
@@ -3911,6 +3977,97 @@ mod tests {
                 .patterns,
             parse_args(&s(&["-e", "a\n\nb", "f"])).unwrap().patterns
         );
+    }
+
+    /// `-E` reports a quantifier with nothing before it, and still searches.
+    ///
+    /// Every row measured against grep 3.11: the pattern was run on one line of
+    /// stdin and stderr compared verbatim. The engine decides *which* patterns
+    /// warn — see `ere::Warning` and its own test — so what is checked here is
+    /// grep's half: the wording, that only `-E` produces any, and that a
+    /// duplicate pattern is collapsed rather than warned about twice.
+    #[test]
+    fn a_quantifier_with_nothing_before_it_is_reported_under_e() {
+        let e = &Options {
+            syntax: Syntax::Extended,
+            ..Options::default()
+        };
+        assert_eq!(
+            pat_warnings(&["*a"], e),
+            vec!["warning: * at start of expression"]
+        );
+        assert_eq!(
+            pat_warnings(&["{2}a"], e),
+            vec!["warning: {...} at start of expression"],
+            "an interval is named by class, not by the text that was written"
+        );
+        // One line per operator, in order, and the pattern is never named --
+        // which is why two different patterns give two identical lines.
+        assert_eq!(pat_warnings(&["*+?a"], e).len(), 3);
+        assert_eq!(
+            pat_warnings(&["*a", "*b"], e),
+            vec![
+                "warning: * at start of expression",
+                "warning: * at start of expression"
+            ]
+        );
+        // GNU collapses a repeated pattern before compiling it, so it warns
+        // once. Measured: `-e '*a' -e '*a'` prints one line, `-e '*a' -e '*b'`
+        // two.
+        assert_eq!(pat_warnings(&["*a", "*a"], e).len(), 1);
+        // Ordinary patterns are silent, and so is every other syntax: `*` at
+        // the start of a BRE is a literal asterisk, and `-F` escapes it.
+        assert!(pat_warnings(&["x*", "^a*", "()*"], e).is_empty());
+        for syntax in [Syntax::Basic, Syntax::Fixed] {
+            let o = &Options {
+                syntax,
+                ..Options::default()
+            };
+            assert!(
+                pat_warnings(&["*a"], o).is_empty(),
+                "{syntax:?} has no operator to complain about"
+            );
+        }
+    }
+
+    /// A warned-about pattern is compiled and run like any other.
+    #[test]
+    fn a_warned_pattern_still_searches() {
+        let o = Options {
+            syntax: Syntax::Extended,
+            ..Options::default()
+        };
+        // `*a` is the empty expression repeated, then `a` — so it selects every
+        // line holding an `a`, exactly as `a` does.
+        let p = pats("*a", &o);
+        assert!(line_selected(b"xax", &p, &o).unwrap());
+        assert!(!line_selected(b"xxx", &p, &o).unwrap());
+    }
+
+    /// Collapsing a duplicate pattern does not change what is selected.
+    ///
+    /// It is a search optimisation that happens to be observable only through
+    /// the diagnostic above, so the thing worth pinning is that it stays
+    /// unobservable everywhere else.
+    #[test]
+    fn a_duplicate_pattern_is_collapsed_without_changing_the_answer() {
+        let o = Options::default();
+        let (one, _) = compile_patterns(&[b"foo".to_vec()], &o).unwrap();
+        let (twice, _) =
+            compile_patterns(&[b"foo".to_vec(), b"foo".to_vec(), b"foo".to_vec()], &o).unwrap();
+        assert_eq!(twice.len(), one.len(), "the copies are dropped");
+        for line in [&b"a foo b"[..], b"foo", b"bar", b""] {
+            assert_eq!(
+                line_selected(line, &one, &o).unwrap(),
+                line_selected(line, &twice, &o).unwrap(),
+                "{line:?}"
+            );
+        }
+        // The empty pattern deduplicates too, and one copy of it still matches
+        // every line -- dropping it entirely would be the damaging mistake.
+        let (empty, _) = compile_patterns(&[Vec::new(), Vec::new()], &o).unwrap();
+        assert_eq!(empty.len(), 1);
+        assert!(line_selected(b"anything", &empty, &o).unwrap());
     }
 
     #[test]

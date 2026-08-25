@@ -463,16 +463,47 @@ grep -E 'a{2,}' braces
 grep -E 'a{1,2}' braces
 grep -E '[abc]+' abc
 # RE_CONTEXT_INDEP_OPS: a quantifier with nothing to quantify repeats the empty
-# expression rather than being REG_BADRPT. The *answer* agreed from the first
-# run; what did not is that GNU also prints `grep: warning: * at start of
-# expression` to stderr while still exiting 0. That warning is the only thing
-# telling a user their pattern is not doing what they think, so it is a gap and
-# not a difference of opinion.
-?we accept a leading quantifier silently; GNU warns `* at start of expression` on stderr and still exits 0|grep -E '*a' braces
-?we accept a leading quantifier silently; GNU warns `+ at start of expression` on stderr and still exits 0|grep -E '+a' braces
-?we accept a leading quantifier silently; GNU warns `? at start of expression` on stderr and still exits 0|grep -E '?a' braces
+# expression rather than being REG_BADRPT -- and GNU says so on stderr while
+# still exiting on the search, which is the only thing telling a user their
+# pattern is not doing what they think. Both halves are compared here; the
+# warning was a gap until 2026-08-25.
+grep -E '*a' braces
+grep -E '+a' braces
+grep -E '?a' braces
+grep -E '{2}a' braces
+# Stacked operators each get their own line, in order.
+grep -E '**a' braces
+grep -E '*+?a' braces
+# An assertion is not an atom, so it does not satisfy the branch -- but a real
+# atom before it does, which is why the second and fourth of these are silent.
+grep -E '^*' abc
 grep -E 'a^*b' braces
-?we accept a leading quantifier silently; GNU warns `* at start of expression` on stderr and still exits 0|grep -E '^*' abc
+grep -E '$*' abc
+grep -E 'a$*' abc
+grep -E '\b*' abc
+grep -E 'a\b*' abc
+# Each branch and each group body begins a fresh expression; a group as a whole
+# is an atom to what encloses it, even an empty one.
+grep -E 'a|*b' braces
+grep -E '(*a)' braces
+grep -E '()*' abc
+# A `{` that rolls back to a literal consumed no operator, so there is nothing
+# to warn about -- `{,3}a` is a real interval and does warn.
+grep -E '{}a' braces
+grep -E '{1,2,3}a' braces
+grep -E '{,3}a' braces
+# The warning does not touch the exit status and is not suppressed by -q or -s,
+# which are about the selected lines and about unreadable files.
+grep -qE '*a' braces
+grep -sE '*a' braces
+# A repeated pattern is collapsed before compiling, so it warns once; two
+# different ones warn twice.
+grep -E -e '*a' -e '*a' braces
+grep -E -e '*a' -e '*b' braces
+# Only -E has an operator to complain about: a leading `*` is a literal in a
+# BRE, and -F escapes it.
+grep -G '*a' braces
+grep -F '*a' braces
 # RE_INVALID_INTERVAL_ORD: a `{` that does not open a well-formed interval is a
 # literal brace.
 grep -E 'a{b}' braces
@@ -547,6 +578,23 @@ grep -cf pats words
 grep -f /nonexistent abc
 grep -e a -f pats words
 grep -F -e a -e b abc
+# A newline inside `-e` or inside the operand separates patterns, which is how a
+# pattern list gets into a script without a temporary file. Ours searched for a
+# single pattern holding a newline -- which no line of input can contain, so it
+# found nothing -- until 2026-08-25.
+grep $'a\nc' abc
+grep -e $'a\nc' abc
+grep --regexp=$'a\nc' abc
+grep -E $'a\nc' abc
+grep -F $'a\nc' abc
+grep -e $'a\nc' -e b abc
+# A trailing newline is not symmetric between the two sources: in a `-f` file it
+# ends the last pattern, in a `-e` argument it begins an empty one -- and the
+# empty pattern matches every line, so this really is the difference between a
+# search and `cat`.
+grep -e $'a\n' abc
+grep -e $'\na' abc
+grep -c -e $'a\n' abc
 
 # --- option parsing at the edges ---
 grep -- -a braces

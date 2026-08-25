@@ -118,5 +118,6 @@ pub mod engine;
 
 pub use ch::{BStr, Ch, Str, chars, from_chars};
 pub use engine::{
-    CaptureMatches, EreError, GroupSpans, MatchLimit, Matches, RegCode, Regex, Syntax,
+    CaptureMatches, EreError, GroupSpans, MatchLimit, Matches, Quantifier, RegCode, Regex, Syntax,
+    Warning,
 };

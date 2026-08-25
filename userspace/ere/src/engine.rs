@@ -524,6 +524,62 @@ impl Default for Syntax {
     }
 }
 
+/// Which repetition operator a [`Warning`] is about.
+///
+/// The spelling in [`Quantifier::token`] is the one GNU uses in its diagnostic,
+/// which is the *class* of operator rather than the text that was written: every
+/// interval is `{...}`, so `{2}a` and `{,3}a` produce the same line. Measured on
+/// grep 3.11.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quantifier {
+    /// `*`
+    Star,
+    /// `+`
+    Plus,
+    /// `?`
+    Question,
+    /// `{m}`, `{m,}`, `{,n}` or `{m,n}`
+    Interval,
+}
+
+impl Quantifier {
+    /// How GNU names this operator in a diagnostic.
+    #[must_use]
+    pub fn token(self) -> &'static str {
+        match self {
+            Quantifier::Star => "*",
+            Quantifier::Plus => "+",
+            Quantifier::Question => "?",
+            Quantifier::Interval => "{...}",
+        }
+    }
+}
+
+/// Something accepted, but worth telling the user about.
+///
+/// A warning is never an error: the pattern compiled, and the caller may ignore
+/// the list entirely — [`Regex::new_syntax`] does exactly that. It exists
+/// because [`Syntax::EGREP`] deliberately accepts shapes that
+/// [`Syntax::POSIX_EXTENDED`] rejects, and "accepted silently" is not the same
+/// answer GNU gives: `grep -E '*a'` matches `a` *and* prints a warning, so a
+/// `grep` that only did the first half is still visibly different.
+///
+/// Only `grep` has wording to print here, and it owns that wording — the engine
+/// reports the fact, not the sentence. The other callers of this engine
+/// (`osh`, `find`, `sed -E`, `awk`) use [`Syntax::POSIX_EXTENDED`], where these
+/// patterns are hard errors rather than warnings, so they never see one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Warning {
+    /// A quantifier was consumed with no atom before it in the current branch,
+    /// so it repeats the empty expression: `*a`, `^*`, `a|*b`, `(*a)`, `\b*`.
+    ///
+    /// "Atom" excludes the zero-width assertions — `^`, `$`, `\b`, `\<`, `\>`
+    /// are not something to repeat, which is why `^*` warns while `a^*b` does
+    /// not (the `a` is the atom the branch needed). An empty group *is* an
+    /// atom, so `()*` is silent. All measured against grep 3.11.
+    QuantifierAtStart(Quantifier),
+}
+
 /// One bound of a `{m,n}` interval as [`EParser::fetch_number`] read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BraceNum {
@@ -532,6 +588,25 @@ enum BraceNum {
     Absent,
     /// Something that is not a count — a non-digit, or the end of the pattern.
     Invalid,
+}
+
+/// One repetition operator as [`EParser::parse_quantifier`] read it.
+///
+/// The `kind` is carried alongside the bounds rather than derived from them
+/// because the two are not the same question: `{0,}` and `*` bound identically
+/// and are named differently in a diagnostic, and `+` versus `{1,}` likewise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Quant {
+    kind: Quantifier,
+    min: usize,
+    /// `None` = unbounded.
+    max: Option<usize>,
+}
+
+impl Quant {
+    fn new(kind: Quantifier, min: usize, max: Option<usize>) -> Quant {
+        Quant { kind, min, max }
+    }
 }
 
 /// What ended one bound of a `{m,n}` interval.
@@ -555,6 +630,16 @@ struct EParser {
     /// Which dialect's answer to give for the two kinds of nonsense that
     /// distinguish them — see [`Syntax`].
     syntax: Syntax,
+    /// Whether the branch being parsed has yet produced something a quantifier
+    /// could repeat.
+    ///
+    /// Scoped to the *branch*, not the pattern: [`Self::parse_concat`] clears
+    /// it on entry and restores it on exit, so each side of a `|` and the
+    /// inside of each group starts afresh. That is what makes `a|*b` warn while
+    /// `ab*` does not. Assertions do not set it — see [`Warning`].
+    seen_atom: bool,
+    /// Accepted-but-notable things found while parsing; see [`Warning`].
+    warnings: Vec<Warning>,
 }
 
 impl EParser {
@@ -637,6 +722,17 @@ impl EParser {
     /// compile. That is why the depth has to be tracked rather than simply
     /// breaking on the character.
     fn parse_concat(&mut self) -> Result<Node, EreError> {
+        // A branch starts with nothing to repeat, and the enclosing branch's
+        // answer is restored on the way out — so a group is an atom to whatever
+        // contains it (`()*` is silent) while being a fresh start inside
+        // (`(*a)` warns). See `seen_atom`.
+        let outer_seen_atom = core::mem::replace(&mut self.seen_atom, false);
+        let parsed = self.parse_concat_inner();
+        self.seen_atom = outer_seen_atom;
+        parsed
+    }
+
+    fn parse_concat_inner(&mut self) -> Result<Node, EreError> {
         let mut parts = Vec::new();
         while let Some(c) = self.peek() {
             if c == '|' || (c == ')' && self.depth > 0) {
@@ -684,8 +780,15 @@ impl EParser {
             // measured, all three.
             let mark = self.pos;
             match self.parse_quantifier() {
-                Ok(Some((min, max))) => {
-                    let node = repeat(Node::Empty, min, max);
+                Ok(Some(q)) => {
+                    // Warned about here rather than in `parse_quantifier`
+                    // because only a quantifier that was actually *consumed*
+                    // counts: the `Ok(None)` and `Err` arms below both leave
+                    // the `{` to be re-read as a literal, and GNU is silent for
+                    // both (`{b}a`, `{}a` and `{1,2,3}a` all warn nothing while
+                    // `{,3}a` does — measured).
+                    self.warn_at_start(q.kind);
+                    let node = repeat(Node::Empty, q.min, q.max);
                     return self.stack_quantifiers(node);
                 }
                 // A `{` that rolled back to a literal; fall through to
@@ -695,7 +798,20 @@ impl EParser {
             }
         }
         let atom = self.parse_atom()?;
+        // An assertion is not something to repeat, so it leaves the branch
+        // still wanting an atom: that is the whole of why `^*` warns and `a^*b`
+        // does not.
+        if !matches!(atom, Node::Start | Node::End | Node::Word(_)) {
+            self.seen_atom = true;
+        }
         self.stack_quantifiers(atom)
+    }
+
+    /// Record a [`Warning::QuantifierAtStart`] if the branch has no atom yet.
+    fn warn_at_start(&mut self, kind: Quantifier) {
+        if !self.seen_atom {
+            self.warnings.push(Warning::QuantifierAtStart(kind));
+        }
     }
 
     /// Apply every quantifier at the cursor to `node`, innermost first.
@@ -708,7 +824,7 @@ impl EParser {
     /// matters here is that it *compiles*, because the previous reading of
     /// "quantifier already applied" as an error made those four patterns fail.)
     fn stack_quantifiers(&mut self, mut node: Node) -> Result<Node, EreError> {
-        while let Some((min, max)) = self.parse_quantifier()? {
+        while let Some(q) = self.parse_quantifier()? {
             // `^` is an assertion, not an atom, so glibc reports `^*` and
             // `a^*b` the way it reports a leading `*`. `$` it does accept.
             // Under egrep syntax nothing here is an error at all, and `^*`
@@ -718,32 +834,39 @@ impl EParser {
             if matches!(node, Node::Start) && !self.syntax.context_indep_ops {
                 return Err(nothing_to_repeat());
             }
-            node = repeat(node, min, max);
+            // Each *stacked* quantifier warns too, not just the first: `**a`
+            // and `*+?a` produce two and three lines respectively, and `?*`
+            // names both operators in order. `seen_atom` has already been set
+            // by the caller if the base was a real atom, so `a**` is silent.
+            self.warn_at_start(q.kind);
+            node = repeat(node, q.min, q.max);
         }
         Ok(node)
     }
 
     /// Consume a `*` / `+` / `?` / `{m,n}` quantifier if one is at the cursor.
-    fn parse_quantifier(&mut self) -> Result<Option<(usize, Option<usize>)>, EreError> {
+    fn parse_quantifier(&mut self) -> Result<Option<Quant>, EreError> {
         match self.peek_ascii() {
             Some('*') => {
                 self.bump(1);
-                Ok(Some((0, None)))
+                Ok(Some(Quant::new(Quantifier::Star, 0, None)))
             }
             Some('+') => {
                 self.bump(1);
-                Ok(Some((1, None)))
+                Ok(Some(Quant::new(Quantifier::Plus, 1, None)))
             }
             Some('?') => {
                 self.bump(1);
-                Ok(Some((0, Some(1))))
+                Ok(Some(Quant::new(Quantifier::Question, 0, Some(1))))
             }
             // `parse_brace` answers `None` when the `{` is not an interval at
             // all, which under egrep syntax means it is an ordinary character.
             // That is the same `None` this function uses for "no quantifier
             // here", and deliberately so: to the caller the two are the same
             // fact — the cursor has not moved and the next thing is an atom.
-            Some('{') => self.parse_brace(),
+            Some('{') => Ok(self
+                .parse_brace()?
+                .map(|(min, max)| Quant::new(Quantifier::Interval, min, max))),
             _ => Ok(None),
         }
     }
@@ -1499,15 +1622,37 @@ impl Regex {
     /// Returns [`EreError`] on a syntax error, as [`Regex::new`] — though
     /// which patterns are syntax errors is part of what `syntax` selects.
     pub fn new_syntax(pattern: BStr<'_>, ci: bool, syntax: Syntax) -> Result<Regex, EreError> {
+        Self::new_syntax_warn(pattern, ci, syntax).map(|(re, _)| re)
+    }
+
+    /// Compile an ERE pattern in a chosen dialect, keeping any [`Warning`]s.
+    ///
+    /// Only `grep -E` has a use for these — see [`Warning`] — and it is the
+    /// caller's job to phrase them; the list may be empty and may be ignored,
+    /// which is what [`Regex::new_syntax`] does.
+    ///
+    /// # Errors
+    /// Returns [`EreError`] on a syntax error, as [`Regex::new_syntax`]. A
+    /// warning is never an error: a pattern that produced one still compiled,
+    /// and a pattern that failed produces none, because the failure discards
+    /// everything the parse had accumulated.
+    pub fn new_syntax_warn(
+        pattern: BStr<'_>,
+        ci: bool,
+        syntax: Syntax,
+    ) -> Result<(Regex, Vec<Warning>), EreError> {
         let mut parser = EParser {
             chars: bytes::chars(pattern).collect(),
             pos: 0,
             ngroups: 0,
             depth: 0,
             syntax,
+            seen_atom: false,
+            warnings: Vec::new(),
         };
         let ast = parser.parse()?;
         let ngroups = parser.ngroups;
+        let warnings = core::mem::take(&mut parser.warnings);
 
         let mut c = Compiler {
             prog: Vec::new(),
@@ -1536,13 +1681,16 @@ impl Regex {
             return Err(EreError::new(RegCode::TooBig, b"regex too large".to_vec()));
         }
 
-        Ok(Regex {
-            prog: c.prog,
-            ngroups,
-            entry: real,
-            ci,
-            has_backref: c.has_backref,
-        })
+        Ok((
+            Regex {
+                prog: c.prog,
+                ngroups,
+                entry: real,
+                ci,
+                has_backref: c.has_backref,
+            },
+            warnings,
+        ))
     }
 
     /// Number of capturing groups (excluding the whole-match group 0).
@@ -2726,6 +2874,95 @@ mod tests {
         // though a `^` in the middle of a pattern can never hold.
         assert!(me("^*", "b"));
         assert!(me("a^*b", "ab"));
+    }
+
+    /// Every quantifier accepted with nothing before it is also reported.
+    ///
+    /// Accepting these silently is not what GNU does — `grep -E '*a'` matches
+    /// *and* prints `grep: warning: * at start of expression` — so the two
+    /// halves are one behaviour and are tested as one. Every row is a measured
+    /// `grep -E` run against grep 3.11: the pattern was fed one line on stdin
+    /// and stderr compared verbatim.
+    #[test]
+    fn egrep_reports_a_quantifier_with_nothing_before_it() {
+        use Quantifier::{Interval, Plus, Question, Star};
+        let warn = |pat: &str| {
+            Regex::new_syntax_warn(pat.as_bytes(), false, Syntax::EGREP)
+                .unwrap_or_else(|e| panic!("{pat:?} should compile: {e:?}"))
+                .1
+                .into_iter()
+                .map(|Warning::QuantifierAtStart(q)| q)
+                .collect::<Vec<_>>()
+        };
+
+        // The operator is named by class, so every interval is `{...}`.
+        assert_eq!(Star.token(), "*");
+        assert_eq!(Interval.token(), "{...}");
+
+        for (pat, want) in [
+            // Nothing at all before the operator.
+            ("*a", vec![Star]),
+            ("+a", vec![Plus]),
+            ("?a", vec![Question]),
+            ("{2}a", vec![Interval]),
+            ("{,3}a", vec![Interval]),
+            ("*", vec![Star]),
+            ("*a*", vec![Star]),
+            // Stacked operators each get their own line, in order.
+            ("**a", vec![Star, Star]),
+            ("*+?a", vec![Star, Plus, Question]),
+            ("?*", vec![Question, Star]),
+            // An assertion is not an atom, so it does not satisfy the branch —
+            // but a preceding real atom does, which is the `a^*b` row.
+            ("^*", vec![Star]),
+            ("^{2}", vec![Interval]),
+            ("$*", vec![Star]),
+            ("^^*", vec![Star]),
+            (r"\b*", vec![Star]),
+            (r"\<*", vec![Star]),
+            (r"\b\b*", vec![Star]),
+            ("a^*b", vec![]),
+            ("a$*", vec![]),
+            (r"a\b*", vec![]),
+            ("a^{2}b", vec![]),
+            // Each branch and each group body starts afresh; a group as a
+            // whole is an atom to what encloses it, even an empty one.
+            ("a|*b", vec![Star]),
+            ("*|*", vec![Star, Star]),
+            ("(*a)", vec![Star]),
+            ("(a|*b)", vec![Star]),
+            ("(|*a)", vec![Star]),
+            ("()*", vec![]),
+            ("a()*", vec![]),
+            ("(a)*", vec![]),
+            // A `{` that rolls back to a literal consumed no quantifier, so
+            // there is nothing to warn about — the brace is just a character.
+            ("{b}a", vec![]),
+            ("{}a", vec![]),
+            ("{1,2,3}a", vec![]),
+            // Ordinary patterns stay silent.
+            ("x*", vec![]),
+            ("^a*", vec![]),
+            ("a{2}{3}", vec![]),
+            ("x{,3}", vec![]),
+        ] {
+            assert_eq!(warn(pat), want, "warnings for {pat:?}");
+        }
+    }
+
+    /// A warning is not an error, and neither implies the other.
+    #[test]
+    fn warnings_are_absent_where_they_cannot_arise() {
+        // POSIX-extended rejects every shape that would warn, so a caller in
+        // that dialect never has a list to print.
+        for pat in ["*a", "^*", "a|*b", "(*a)"] {
+            assert!(Regex::new_syntax_warn(pat.as_bytes(), false, Syntax::POSIX_EXTENDED).is_err());
+        }
+        // And a pattern that fails to compile under egrep reports the error,
+        // not a partial list of warnings.
+        assert!(Regex::new_syntax_warn(b"*a(", false, Syntax::EGREP).is_err());
+        // `new_syntax` is the same parse with the list dropped.
+        assert!(Regex::new_syntax(b"*a", false, Syntax::EGREP).is_ok());
     }
 
     /// Under egrep syntax a `{` that opens no interval is an ordinary

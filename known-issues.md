@@ -78043,3 +78043,120 @@ was wrong was the evidence for it.
 The swept corpus stands at **2952 tests, 2310 unproved -- 21.7 % proved, 0
 dangling, 184 single-prover**; the figures recorded above after module 86 were
 21.5 % and 204.
+
+### Follow-on: what lesson 42 looks like when it is mechanical
+
+Lesson 42 came out of one test that copied a production predicate. The obvious
+next question is whether that was a one-off or a class, so lane C went looking
+for other places where a test holds its own copy of something production owns.
+
+The search found two shapes, and they are worth keeping apart because only one
+of them can be automated.
+
+**The shape a machine can find** is a duplicated *list*. Three desktop test
+modules each declared `const OFFERED: [AccentColor; 14] = [...]`, byte for byte
+the body of `AccentColor::presets()`, and looped over the copy. Nothing made the
+copies follow the original; a fifteenth accent would have been offered by the
+settings panel and walked by no test. Worse, `test_accent_color_count` pins
+`presets().len() == 14` *next to the list*, which reads as the palette being
+guarded and is exactly why nobody noticed the four loops that were not. The fix
+was structural rather than another test: delete the three copies and walk
+`AccentColor::presets()` directly, so the divergence has nowhere to happen.
+
+The same shape in the general case is `const ALL: [Foo; N]` -- a declaration
+that claims to name every variant of an enum, which the language does not
+check. Add a variant and the array is still a valid array of N `Foo`s; it has
+simply stopped being all of them, and the loop that walks it silently stops
+asking about one case. `scripts/check-variant-lists.py` now audits every such
+list in lane C against its enum. Verdict today: **59 exhaustive lists, 0 out of
+step** -- so this is a hazard rather than a live bug, which is the result worth
+having but only because it was checked rather than assumed. The script carries
+a `--self-test` because a miscounting checker reports a clean tree exactly the
+way a clean tree does, and that is not hypothetical: its first version reported
+`CursorShape` as 12 of its 13 variants. `requests/c-a-wire-the-variant-list-gate-into-boot-test.md`
+asks lane A to ring it from `boot-test.sh`, where its six siblings live.
+
+Two notes that will save the next reader some work. First, the in-language fix
+does not exist yet: `const _: () = assert!(Foo::ALL.len() ==
+core::mem::variant_count::<Foo>())` is `E0658` on this tree's host toolchain
+(stable 1.95.0, checked directly rather than assumed), and no `gui/` or `apps/`
+crate carries a `#![feature]` gate. If it stabilises, the script should be
+deleted in favour of the assertion -- an error *at* the list beats a report
+*about* the list. Second, an exhaustive `match` elsewhere in the crate is not
+the guard it looks like: it does break the build when a variant is added, but
+it breaks it in `label()`, the author fixes it there, the compiler goes quiet,
+and the list is still the old length.
+
+**The shape a machine cannot find** is the original one: a copied *expression*.
+`show_desktop_does_not_ask_an_already_minimized_window_to_minimize` did not
+contain a literal copy -- it was `self.current_desktop` in production against
+`shell.current_desktop` in the test -- so grep was never going to find it, and
+a stricter grep would only have produced false positives to wade through. The
+detector for that shape is the sweep itself, which asks the only question that
+distinguishes a copy from a check: *does changing the production code change
+the test's answer?* No separate audit is warranted, because the audit already
+runs, module by module.
+
+That is the audit closed. One duplicated list removed, one class of duplicated
+list gated, and the remaining class handed back to the instrument that was
+already detecting it.
+
+### Lesson 44: check what the compiler catches by breaking it and reading the line number
+
+The audit above turned up a third shape, and it is the one worth generalising,
+because it is not about tests at all.
+
+`Palette::roles()` in `gui/appearance/src/lib.rs` returns
+`[(&'static str, Color); 21]` -- one entry per colour field of `Palette` -- and
+three sweeps consume it: the two-mode divergence check, the 4.5:1 legibility
+floor, and the shell's conversion sweep that asserts a module draws only from
+the palette it was handed. Its doc comment said:
+
+> The array's length is part of the signature so that adding a field without
+> adding it here fails to compile.
+
+That is false, and it had been false for as long as the comment existed. An
+array of 21 entries is a valid `[_; 21]` however many fields the struct has;
+the length in the signature only catches the *reverse* mistake, an entry added
+to the array without the count being changed. Adding a twenty-second `Color` to
+`Palette` produces exactly two errors, both `E0063`, both at the struct literals
+in `for_mode` -- and none at `roles`. So the compiler does stop the commit, just
+in the wrong place: the author fills in the two literals, the compiler falls
+silent, and the new colour is in the palette and in none of the sweeps.
+
+The field the crate added most recently, `teal`, carries a doc comment that says
+"a sweep that silently skips a field is the failure those sweeps exist to
+catch." The hazard was understood, written down next to the code, and still not
+guarded -- because everyone including its author believed the sentence in
+`roles`.
+
+**The lesson is the method, not the bug.** Twice in one session a claim about
+what the compiler enforces was settled by breaking the code and reading the
+error's line number rather than by reasoning about it, and reasoning would have
+been wrong both times, in opposite directions:
+
+| Claim | Reasoned | Measured |
+|---|---|---|
+| "the array length makes a new field fail to compile *here*" | plausible | false -- E0063 at `for_mode`, nothing at `roles` |
+| "an exhaustive `match` elsewhere means a stale `ALL` list gets noticed" | plausible | true that it errors, false that it errors anywhere useful |
+| "`assert!(ALL.len() == variant_count::<T>())` would fix it" | plausible | `E0658`, still unstable on 1.95.0 |
+
+The measurement costs one `cargo check` against a deliberately broken tree,
+which is under a minute, and it is the only thing that distinguishes "the
+compiler is watching this" from "the compiler is watching something nearby."
+Where a comment claims a compile-time guarantee, break it once and confirm the
+error lands where the comment says it does. If it lands somewhere else, the
+comment is describing a different guarantee than the one the reader will assume.
+
+**A guarantee documented but not enforced is worse than none, because it is the
+reason nobody looks.** An unguarded list at least looks unguarded.
+
+The remedy here was in-language and available on stable: a struct pattern with
+no `..` is exhaustive, so `roles` now destructures `*self` and a new field is
+`E0027: pattern does not mention field` at the destructure itself. The two
+non-colour fields are named and discarded (`panel_alpha: _, light: _`) rather
+than swept up by `..`, so the decision that they are not roles is on the record
+and a future non-colour cannot slip in behind them. Prefer this to a check
+script wherever the shape allows it -- an error at the omission beats a report
+about it, which is the same reason `check-variant-lists.py` documents its own
+deletion for the day `variant_count` stabilises.

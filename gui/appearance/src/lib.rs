@@ -1068,32 +1068,73 @@ impl Palette {
     /// Written out by hand, and deliberately so: the point of the sweeps that
     /// consume this is that a field added later is *not* silently skipped, and
     /// a macro or a reflection trick would skip it for exactly the same reason
-    /// the renderer would. The array's length is part of the signature so that
-    /// adding a field without adding it here fails to compile.
+    /// the renderer would.
+    ///
+    /// What holds it to that is the destructure in the body, **not** the array
+    /// length in the signature. This comment used to claim the length did the
+    /// job, and it does not: the length only catches the reverse mistake, an
+    /// entry added to the array without the count being changed. Adding a
+    /// twenty-second `Color` to [`Palette`] leaves this a perfectly valid array
+    /// of twenty-one — checked, not assumed, and the only two errors are
+    /// `E0063` at the struct literals in [`for_mode`](Self::for_mode). Fix
+    /// those, and the compiler falls silent with the new colour absent from
+    /// every sweep that reads this. A guarantee that is documented but not real
+    /// is worse than none, because it is the reason nobody looks.
     #[must_use]
     pub fn roles(&self) -> [(&'static str, Color); 21] {
+        // A struct pattern with no `..` is exhaustive, so this stops compiling
+        // the moment `Palette` grows a field: a new colour cannot reach the
+        // palette without someone deciding, right here, whether it is a role.
+        // The two non-colours are named and discarded rather than swept up by
+        // `..`, so that decision is on the record as well -- and so that a
+        // future non-colour field does not slip in behind them.
+        let Self {
+            crust,
+            mantle,
+            base,
+            surface0,
+            surface1,
+            surface2,
+            overlay0,
+            subtext0,
+            subtext1,
+            text,
+            red,
+            green,
+            yellow,
+            peach,
+            blue,
+            lavender,
+            mauve,
+            sapphire,
+            teal,
+            sky,
+            accent,
+            panel_alpha: _,
+            light: _,
+        } = *self;
         [
-            ("crust", self.crust),
-            ("mantle", self.mantle),
-            ("base", self.base),
-            ("surface0", self.surface0),
-            ("surface1", self.surface1),
-            ("surface2", self.surface2),
-            ("overlay0", self.overlay0),
-            ("subtext0", self.subtext0),
-            ("subtext1", self.subtext1),
-            ("text", self.text),
-            ("red", self.red),
-            ("green", self.green),
-            ("yellow", self.yellow),
-            ("peach", self.peach),
-            ("blue", self.blue),
-            ("lavender", self.lavender),
-            ("mauve", self.mauve),
-            ("sapphire", self.sapphire),
-            ("teal", self.teal),
-            ("sky", self.sky),
-            ("accent", self.accent),
+            ("crust", crust),
+            ("mantle", mantle),
+            ("base", base),
+            ("surface0", surface0),
+            ("surface1", surface1),
+            ("surface2", surface2),
+            ("overlay0", overlay0),
+            ("subtext0", subtext0),
+            ("subtext1", subtext1),
+            ("text", text),
+            ("red", red),
+            ("green", green),
+            ("yellow", yellow),
+            ("peach", peach),
+            ("blue", blue),
+            ("lavender", lavender),
+            ("mauve", mauve),
+            ("sapphire", sapphire),
+            ("teal", teal),
+            ("sky", sky),
+            ("accent", accent),
         ]
     }
 

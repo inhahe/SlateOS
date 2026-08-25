@@ -1109,33 +1109,25 @@ mod tests {
             .len()
     }
 
-    /// The fourteen named accents the appearance page offers.
-    ///
-    /// Shared by the two tests that must not be satisfied by a single sample.
-    /// `accented()`'s magenta is the right fixture for asking "did this site
-    /// follow the accent at all", because it is in no palette and so cannot be
-    /// matched by accident. It is the wrong fixture for asking anything about
-    /// a *function of* the accent: `readable_on` is a threshold, one accent
-    /// samples one side of it, and the pair of hues in judgement 5 collides
-    /// for exactly one of the fourteen. Walk the list for those.
-    const OFFERED: [AccentColor; 14] = [
-        AccentColor::Blue,
-        AccentColor::Lavender,
-        AccentColor::Teal,
-        AccentColor::Green,
-        AccentColor::Yellow,
-        AccentColor::Peach,
-        AccentColor::Pink,
-        AccentColor::Mauve,
-        AccentColor::Red,
-        AccentColor::Rosewater,
-        AccentColor::Flamingo,
-        AccentColor::Maroon,
-        AccentColor::Sky,
-        AccentColor::Sapphire,
-    ];
-
     /// `p` for `light` mode wearing `accent`, as the settings page would build.
+    ///
+    /// The two tests that call this walk [`AccentColor::presets`] — the list
+    /// the settings page draws its swatches from, and so the authority for
+    /// "every accent a user can choose". They used to walk a hand-written copy
+    /// of that list declared here, which is exactly the failure module 87 in
+    /// `known-issues.md` names: a test that re-derives the answer proves its
+    /// own copy. A fifteenth accent would have gone into `presets`, been
+    /// noticed by `test_accent_color_count`, and then been skipped in silence
+    /// by both loops below — so the one new hue that broke the picker would be
+    /// the one hue nothing checked.
+    ///
+    /// Why they walk the list at all, rather than sampling one accent:
+    /// `accented()`'s magenta is the right fixture for asking "did this site
+    /// follow the accent *at all*", because it is in no palette and so cannot
+    /// be matched by accident. It is the wrong fixture for asking anything
+    /// about a *function of* the accent. `readable_on` is a threshold, and one
+    /// accent samples one side of it; the pair of hues in judgement 5 collides
+    /// for exactly one of the accents currently offered.
     fn wearing(light: bool, accent: AccentColor) -> Palette {
         let mut p = Palette::for_mode(light);
         p.accent = if light {
@@ -1312,7 +1304,7 @@ mod tests {
         const NEAR_WHITE: u32 = 0x00EF_F1F5;
         let mut seen = Vec::new();
         for light in [false, true] {
-            for accent in OFFERED {
+            for &accent in AccentColor::presets() {
                 let p = wearing(light, accent);
                 let mut mgr = everything_showing();
                 mgr.set_layout(SnapLayoutPreset::TwoEqualHalves);
@@ -1345,7 +1337,7 @@ mod tests {
         }
         assert_eq!(
             seen,
-            vec![NEAR_WHITE; 2 * OFFERED.len() * 2],
+            vec![NEAR_WHITE; 2 * AccentColor::presets().len() * 2],
             "a label changed with the mode or with the accent"
         );
     }
@@ -1373,15 +1365,18 @@ mod tests {
     fn an_inactive_preset_is_never_the_accent_the_user_chose() {
         // Judgement 5, and the reason it is a test rather than a comment: the
         // thumbnails used to say "active" with blue and "inactive" with
-        // lavender, and `AccentColor::Lavender` is one of the fourteen accents
-        // the settings page offers. Under that accent the picker stopped
-        // saying which layout was active at all.
+        // lavender, and `AccentColor::Lavender` is one of the accents the
+        // settings page offers. Under that accent the picker stopped saying
+        // which layout was active at all.
         //
-        // This walks all fourteen rather than one, because a pair of hues
-        // collides for exactly one of them and a spot check picks the other
-        // thirteen with probability 13/14.
+        // This walks the whole palette rather than one accent, because the
+        // pair of hues collides for exactly one member of it -- so a spot
+        // check picks a passing accent almost every time. It walks
+        // `AccentColor::presets` rather than a list written out here, so that
+        // an accent added to the settings page is one this test asks about;
+        // see `wearing`.
         for light in [false, true] {
-            for accent in OFFERED {
+            for &accent in AccentColor::presets() {
                 let p = wearing(light, accent);
                 let mut mgr = SnapManager::new(DESK);
                 mgr.show_picker();

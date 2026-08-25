@@ -6844,12 +6844,15 @@ fn trim_trailing_newlines(bytes: &[u8]) -> &[u8] {
 /// is provided.  Commands that don't support piped input ignore it and execute
 /// normally.
 ///
-/// `input` is bytes because the pipe channel and the capture buffer are bytes,
-/// but every `cmd_*_input` implementation below still takes `&str`, so the
-/// narrowing happens once here via [`shell_bytes_as_str`] rather than 19 times
-/// with 19 different failure behaviours.  A command whose input cannot be
+/// `input` is bytes because the pipe channel and the capture buffer are bytes.
+/// The arms below are in two groups: those that take the bytes as they arrived,
+/// and those that still take `&str` and so must be narrowed first.  The
+/// narrowing happens once, in the second group's arm, via
+/// [`shell_bytes_as_str`] — rather than once per command with a different
+/// failure behaviour each time.  A command in that group whose input cannot be
 /// decoded does not run at all and exits non-zero, which is what stops `tee`
-/// from writing a U+FFFD-mangled copy of a binary file.
+/// from writing a U+FFFD-mangled copy of a binary file.  The group is shrinking:
+/// each command that learns to work in bytes moves up into the first.
 fn dispatch_with_input(line: &str, input: &[u8]) {
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
@@ -6909,6 +6912,12 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         // *line*, and a line it cannot decode is reported rather than allowed
         // to empty the file.
         "cut" => cmd_cut_input(args, input),
+        // `tr` decodes only when SET1 contains a non-ASCII character, which
+        // is the one case where the byte and character readings can differ.
+        // An all-ASCII SET1 -- `tr a-z A-Z`, `tr -d '\r'` -- can never match
+        // inside a multi-byte sequence, so the byte pass is exact, and it is
+        // the only reading defined on a pipe that is not text.
+        "tr" => cmd_tr_input(args, input),
         "cat" if args.is_empty() => {
             // `cat` with no args reads from pipe.
             shell_write_bytes(input);
@@ -6920,13 +6929,13 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         // cope with it. Converting one more of these is a matter of moving its
         // arm up into the block above.
         //
-        // `grep` and `tr` are `char`-oriented (character classes, code-point
-        // ranges); `sed` is a real text interpreter; `xargs` and `column`
-        // re-parse into words and measure display width. `mapfile` is blocked
-        // on something else rather than on itself — it stores its lines as
-        // `String`s in the shell environment, which is still a `String` map,
-        // so converting it here would only move the decode one call deeper.
-        "grep" | "mapfile" | "readarray" | "tr" | "xargs" | "column" | "sed" => {
+        // `grep` is `char`-oriented (character classes, code-point ranges);
+        // `sed` is a real text interpreter; `xargs` and `column` re-parse into
+        // words and measure display width. `mapfile` is blocked on something
+        // else rather than on itself — it stores its lines as `String`s in the
+        // shell environment, which is still a `String` map, so converting it
+        // here would only move the decode one call deeper.
+        "grep" | "mapfile" | "readarray" | "xargs" | "column" | "sed" => {
             let Some(text) = shell_bytes_as_str(input, cmd) else {
                 set_exit(1);
                 return;
@@ -6934,7 +6943,6 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
             match cmd {
                 "grep" => cmd_grep_input(args, text),
                 "mapfile" | "readarray" => cmd_mapfile_input(args, text),
-                "tr" => cmd_tr_input(args, text),
                 "xargs" => cmd_xargs_input(args, text),
                 "column" => cmd_column_input(args, text),
                 "sed" => cmd_sed_input(args, text),
@@ -13291,6 +13299,80 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // `split_words` has already removed the quoting and what is left is
         // data. Two apostrophes are a set of two apostrophes.
         assert_eq!(expand_tr_set("''"), alloc::vec!['\'', '\'']);
+
+        // The other half of the bug. The file read was
+        // `from_utf8(&data).unwrap_or("")`, so a file `tr` could not decode
+        // became an *empty* one: no output, exit 0. An all-ASCII SET1 needs no
+        // decoding at all -- no ASCII byte can occur inside a multi-byte UTF-8
+        // sequence, so the byte pass matches exactly what the character pass
+        // would have.
+        let bin = "/tmp/zz_tr_bin";
+        crate::fs::Vfs::write_file(bin, b"a\xff\r\nb\xc3\x28\r\n")?;
+
+        let out = plain(&alloc::format!("tr -d '\\r' {bin}"));
+        assert_eq!(
+            out.as_slice(),
+            b"a\xff\nb\xc3\x28\n",
+            "an ASCII delete over an undecodable file keeps every other byte"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        let out = piped("tr ab AB", b"a\xffb\n");
+        assert_eq!(
+            out.as_slice(),
+            b"A\xffB\n",
+            "and so does an ASCII translation over an undecodable pipe"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // A non-ASCII SET1 genuinely has to decode, and there an input that
+        // will not decode is reported rather than answered.
+        let out = plain(&alloc::format!("tr é e {bin}"));
+        assert!(
+            out.windows(14).any(|w| w == b"not valid text"),
+            "a non-ASCII SET1 over undecodable input is reported: {out:?}"
+        );
+        assert_eq!(last_exit(), 1, "and reporting is a failure");
+
+        // ...but the same set over input that *is* text still works, so the
+        // refusal is about the input and not about the set.
+        let out = piped("tr é e", "café\n".as_bytes());
+        assert_eq!(
+            out.as_slice(),
+            b"cafe\n",
+            "a non-ASCII SET1 over text works"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // A multi-byte SET2 member is written out as its bytes: a replacement
+        // is only ever emitted, never matched, so it needs no ASCII.
+        let out = piped("tr e é", b"cafe\n");
+        assert_eq!(
+            out.as_slice(),
+            "café\n".as_bytes(),
+            "an ASCII SET1 with a multi-byte SET2 stays on the byte path"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // First occurrence wins in a duplicated SET1, as the character path's
+        // `position` did.
+        let out = piped("tr aa bc", b"a\n");
+        assert_eq!(
+            out.as_slice(),
+            b"b\n",
+            "a duplicated SET1 member keeps its first mapping"
+        );
+
+        // A short SET2 repeats its last character -- GNU's default, and the
+        // reading `-t` would change, which is why `-t` is refused.
+        let out = piped("tr abc x", b"abc\n");
+        assert_eq!(
+            out.as_slice(),
+            b"xxx\n",
+            "a short SET2 pads with its last character"
+        );
+
+        let _ = crate::fs::Vfs::remove(bin);
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -108582,7 +108664,7 @@ fn cmd_tr(args: &str) {
     }
 }
 
-fn cmd_tr_input(args: &str, input: &str) {
+fn cmd_tr_input(args: &str, input: &[u8]) {
     match parse_tr_args(args) {
         Ok(spec) => tr_run(&spec, Some(input)),
         Err(e) => {
@@ -108593,15 +108675,19 @@ fn cmd_tr_input(args: &str, input: &str) {
 }
 
 /// Run a parsed `tr` over its file operand, or over the pipe if there is none.
-fn tr_run(spec: &TrSpec, stdin: Option<&str>) {
+fn tr_run(spec: &TrSpec, stdin: Option<&[u8]>) {
     match spec.file {
         Some(ref path) => {
             let resolved = resolve_path(path);
             match crate::fs::Vfs::read_file(&resolved) {
-                Ok(data) => {
-                    let text = core::str::from_utf8(&data).unwrap_or("");
-                    tr_apply(spec, text);
-                }
+                // Previously `from_utf8(&data).unwrap_or("")`, which turned a
+                // file `tr` could not decode into an *empty* one: no output,
+                // exit 0, indistinguishable from a file that really was empty.
+                // The pipe form never had this bug — `dispatch_with_input`
+                // narrowed through `shell_bytes_as_str`, which reports and
+                // exits 1 — so the two halves of one command disagreed about
+                // what an undecodable input meant.
+                Ok(data) => tr_apply(spec, &data, path),
                 Err(e) => {
                     shell_println!("tr: {}: {:?}", path, e);
                     set_exit(1);
@@ -108609,7 +108695,7 @@ fn tr_run(spec: &TrSpec, stdin: Option<&str>) {
             }
         }
         None => match stdin {
-            Some(text) => tr_apply(spec, text),
+            Some(data) => tr_apply(spec, data, "-"),
             None => {
                 shell_println!("Usage: tr SET1 SET2 [file]  or  tr -d SET1 [file]");
                 shell_println!("       cmd | tr SET1 SET2  or  cmd | tr -d SET1");
@@ -108619,7 +108705,100 @@ fn tr_run(spec: &TrSpec, stdin: Option<&str>) {
     }
 }
 
-fn tr_apply(spec: &TrSpec, text: &str) {
+/// What to do with one input byte, once SET1 is known to be all ASCII.
+///
+/// `None` in the table means "not in SET1": pass the byte through untouched.
+#[derive(Clone, Copy)]
+enum TrAction {
+    /// `-d`: drop the byte.
+    Drop,
+    /// Write this character's UTF-8 in place of the byte. The replacement is
+    /// unconstrained — SET2 is only ever *written*, never matched — so a
+    /// multi-byte one is simply emitted as its bytes.
+    Emit(char),
+}
+
+/// Build the 256-entry byte table for an all-ASCII SET1.
+///
+/// First occurrence wins, which is what the character path's
+/// `s1.iter().position(..)` did, so `tr aa bc` still maps `a` to `b`.
+fn tr_byte_table(spec: &TrSpec) -> [Option<TrAction>; 256] {
+    let mut table = [None; 256];
+    for (pos, &c) in spec.set1.iter().enumerate() {
+        // The caller checks this; a non-ASCII member has no single byte to
+        // key on, and skipping it here would silently drop it from the set.
+        if !c.is_ascii() {
+            continue;
+        }
+        let Some(slot) = table.get_mut(c as usize) else {
+            continue;
+        };
+        if slot.is_some() {
+            continue;
+        }
+        *slot = Some(if spec.delete {
+            TrAction::Drop
+        } else {
+            // A short SET2 repeats its last character, which is GNU's default
+            // (`-t` asks for the other reading and is refused). An *empty*
+            // SET2 cannot reach here — `split_words` drops an empty quoted
+            // word, so `tr a ''` is a missing operand — but if it did, leaving
+            // the character alone is what the character path's `unwrap_or(ch)`
+            // does.
+            TrAction::Emit(
+                spec.set2
+                    .get(pos)
+                    .or_else(|| spec.set2.last())
+                    .copied()
+                    .unwrap_or(c),
+            )
+        });
+    }
+    table
+}
+
+/// Apply a parsed `tr` to one input.
+///
+/// **The byte path is not an optimisation — it is the only reading that is
+/// defined on input that is not text.** Whenever every member of SET1 is
+/// ASCII the two readings provably coincide: UTF-8 is self-synchronising, so
+/// every byte of a multi-byte sequence is `>= 0x80` while every ASCII
+/// character is `< 0x80`, and therefore no member of an all-ASCII SET1 can
+/// occur *inside* a character. A byte-wise pass matches exactly the bytes a
+/// character-wise pass would have matched and leaves every other byte alone —
+/// the same output on valid UTF-8, and a defined one on bytes that are not.
+/// `tr -d '\r'` over a binary file is the case that matters, and it is the
+/// overwhelmingly common shape: `tr a-z A-Z`, `tr -d '\0'`, `tr ' ' '_'`.
+///
+/// Only a SET1 with a non-ASCII member in it — `tr é e`, `tr -d 'à-â'` —
+/// genuinely has to decode, and there an input that will not decode is
+/// reported rather than answered.
+fn tr_apply(spec: &TrSpec, data: &[u8], name: &str) {
+    if spec.set1.iter().all(char::is_ascii) {
+        let table = tr_byte_table(spec);
+        let mut out: Vec<u8> = Vec::with_capacity(data.len());
+        let mut buf = [0u8; 4];
+        for &b in data {
+            match table.get(b as usize).copied().flatten() {
+                None => out.push(b),
+                Some(TrAction::Drop) => {}
+                Some(TrAction::Emit(c)) => {
+                    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                }
+            }
+        }
+        shell_write_bytes(&out);
+        return;
+    }
+
+    let Ok(text) = core::str::from_utf8(data) else {
+        shell_println!(
+            "tr: {}: not valid text, and SET1 contains non-ASCII characters",
+            name
+        );
+        set_exit(1);
+        return;
+    };
     if spec.delete {
         tr_delete(text, &spec.set1);
     } else {

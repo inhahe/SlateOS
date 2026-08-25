@@ -858,9 +858,19 @@ impl ReminderManager {
     }
 
     /// Dismiss a reminder permanently.
+    ///
+    /// Dismisses *one* reminder -- the first live one for the event -- so that
+    /// waving away a day-before notice does not also cancel the hour-before
+    /// one. Calling it again retires the next.
+    ///
+    /// The `!r.dismissed` half of the test is what makes "again" work. Without
+    /// it the loop stops on the already-dismissed reminder it retired last
+    /// time, and every later call is a no-op: the event's second notice
+    /// becomes permanently un-dismissable and fires forever. `snooze` carries
+    /// the same guard for the same reason.
     pub fn dismiss(&mut self, event_id: u64) {
         for r in &mut self.reminders {
-            if r.event_id == event_id {
+            if r.event_id == event_id && !r.dismissed {
                 r.dismissed = true;
                 break;
             }
@@ -3190,6 +3200,41 @@ mod tests {
         assert!(!store.update_event(999, |_| {}));
     }
 
+    /// `event_store_update_nonexistent` asks an *empty* store for a missing
+    /// ID, and an empty store answers "not found" to almost any predicate --
+    /// including a wrong one. Found by the reintroduction harness (module 86,
+    /// defect `E`): swapping the lookup's `==` for `>=` left the whole suite
+    /// green, because nothing ever asked a *populated* store for an ID it no
+    /// longer held.
+    ///
+    /// That is the state a delete leaves behind, and it is reached by the
+    /// ordinary sequence of deleting an event while its editor is open: the
+    /// edit would then silently land on whichever event happened to be next in
+    /// the list, overwriting a different appointment than the one on screen.
+    #[test]
+    fn an_update_to_a_deleted_event_does_not_land_on_a_later_one() {
+        let mut store = EventStore::new();
+        let first = add(&mut store, make_event("Dentist", 100, 200));
+        let second = add(&mut store, make_event("Standup", 300, 400));
+        assert!(store.remove_event(first));
+
+        // `first` is gone, but `second` -- whose ID is higher -- is not, and
+        // it is now the only event in the list.
+        let mut ran = false;
+        assert!(
+            !store.update_event(first, |e| {
+                ran = true;
+                e.title = "Clobbered".to_string();
+            }),
+            "updating a deleted event must report that it did not happen"
+        );
+        assert!(!ran, "the closure must not run against some other event");
+        assert_eq!(
+            store.get_event(second).expect("still there").title,
+            "Standup"
+        );
+    }
+
     #[test]
     fn event_store_get() {
         let mut store = EventStore::new();
@@ -3243,6 +3288,109 @@ mod tests {
         let found = store.events_for_range(range_start, range_end);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].title, "B");
+    }
+
+    /// `events_for_range` treats its range as half-open, `[start, end)`, and
+    /// both ends of that had escaped the suite. Found by the reintroduction
+    /// harness (module 86, defects `G` and `H`).
+    ///
+    /// Every other fixture in this file starts its events at 09:00, 10:00,
+    /// 14:00 or 23:00 and asks about ranges that end at midnight, so no event
+    /// ever sat *on* a range boundary and neither comparison was ever
+    /// exercised at equality. Both could be relaxed to `<=`/`>=` with the
+    /// whole suite still green.
+    ///
+    /// It is not a hypothetical shape. `events_for_date` hands this function a
+    /// range of exactly one midnight to the next, and a midnight-anchored
+    /// event -- an all-day event, or anything a user typed `00:00` into -- sits
+    /// precisely on it. Relaxing either end draws that event on two days:
+    /// the day it belongs to and the neighbouring one.
+    #[test]
+    fn the_range_is_half_open_at_both_ends() {
+        let mut store = EventStore::new();
+        let range_start = date_to_timestamp(2024, 6, 12, 0, 0, 0).expect("valid");
+        let range_end = date_to_timestamp(2024, 6, 13, 0, 0, 0).expect("valid");
+
+        // Abutting the range exactly, on each side. Neither overlaps it.
+        add(
+            &mut store,
+            make_event(
+                "ends where the range begins",
+                range_start - 3600,
+                range_start,
+            ),
+        );
+        add(
+            &mut store,
+            make_event("begins where the range ends", range_end, range_end + 3600),
+        );
+        // And two that overlap by a single second, which must be kept. Without
+        // these a "fix" that made *both* ends exclusive would pass.
+        add(
+            &mut store,
+            make_event(
+                "ends one second inside",
+                range_start - 3600,
+                range_start + 1,
+            ),
+        );
+        add(
+            &mut store,
+            make_event("begins one second inside", range_end - 1, range_end + 3600),
+        );
+
+        let found = store.events_for_range(range_start, range_end);
+        let titles: Vec<&str> = found.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["ends one second inside", "begins one second inside"],
+            "the range must include exactly the events that overlap its interior"
+        );
+    }
+
+    /// The same half-open rule for the *recurring* branch, which reaches the
+    /// range end through `expand_recurrence`'s loop guard rather than through
+    /// the overlap test above. Found by the reintroduction harness (module 86,
+    /// defect `P`).
+    ///
+    /// The recurrence fixtures all anchor at 10:00 or 14:00 and ask about
+    /// ranges ending at midnight, so no occurrence ever started exactly on a
+    /// range end and the guard could be relaxed from `>=` to `>` unnoticed.
+    /// Anchoring at midnight is what makes the two differ -- and a daily
+    /// all-day event is anchored at midnight by construction, so it would have
+    /// shown one extra day at the end of every range it was drawn in.
+    #[test]
+    fn a_recurring_series_is_half_open_at_the_end_too() {
+        let mut store = EventStore::new();
+        let start = date_to_timestamp(2024, 6, 1, 0, 0, 0).expect("valid");
+        add(
+            &mut store,
+            CalendarEvent {
+                id: 0,
+                title: "Midnight Daily".to_string(),
+                start_timestamp: start,
+                end_timestamp: start + 1800,
+                all_day: false,
+                repeat: Some(Recurrence::Daily),
+                color: None,
+                description: String::new(),
+            },
+        );
+
+        // June 1-5: the range ends at the 6th's midnight, which is exactly
+        // when the sixth occurrence begins. Five, not six.
+        let range_start = date_to_timestamp(2024, 6, 1, 0, 0, 0).expect("valid");
+        let range_end = date_to_timestamp(2024, 6, 6, 0, 0, 0).expect("valid");
+        let found = store.events_for_range(range_start, range_end);
+        assert_eq!(
+            found.len(),
+            5,
+            "an occurrence starting exactly at the range end is outside it"
+        );
+
+        // And the day cell that occurrence *does* belong to still shows it,
+        // so the guard cannot be satisfied by dropping the occurrence entirely.
+        assert_eq!(store.events_for_date(2024, 6, 6).len(), 1);
     }
 
     /// The sort at the end of `events_for_range` had no test at all: every
@@ -3567,6 +3715,74 @@ mod tests {
         // Both should fire at or before t=1000.
         let due = rm.due_reminders(1000);
         assert_eq!(due.len(), 2);
+    }
+
+    /// `multiple_reminders_same_event` establishes that two reminders on one
+    /// event -- a day-before and an hour-before -- is a supported arrangement,
+    /// but it never dismisses either, and every fixture that *does* dismiss
+    /// has one reminder per event. So `dismiss`'s `break` had nothing holding
+    /// it in place: removing it, and cancelling the whole event's reminders at
+    /// a stroke, left the suite green. Found by the reintroduction harness
+    /// (module 86, defect `W`).
+    ///
+    /// The two-reminder arrangement is the one where it matters. Waving away
+    /// the day-before notice must not also cancel the hour-before one, which
+    /// is the notice that actually gets the user to the meeting.
+    #[test]
+    fn dismissing_one_reminder_leaves_the_others_for_that_event_alone() {
+        let mut rm = ReminderManager::new();
+        rm.set_reminder(1, "Meeting", 100_000, 24 * 60);
+        rm.set_reminder(1, "Meeting", 100_000, 60);
+        assert_eq!(rm.active_count(), 2);
+
+        rm.dismiss(1);
+        assert_eq!(
+            rm.active_count(),
+            1,
+            "dismissing one notice must not cancel the event's other notices"
+        );
+
+        // And the survivor is the one that had not been dealt with: the
+        // remaining reminder is the later of the two.
+        let due = rm.due_reminders(100_000);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].fire_at, 100_000 - 3600);
+
+        // A second dismissal reaches it, so `dismiss` is still able to
+        // retire every reminder one call at a time.
+        rm.dismiss(1);
+        assert_eq!(rm.active_count(), 0);
+    }
+
+    /// `snooze` skips dismissed reminders, and nothing tested that: no fixture
+    /// dismissed a reminder and then snoozed the same event. Found by the
+    /// reintroduction harness (module 86, defect `V`).
+    ///
+    /// The filter is load-bearing because the loop stops at its first match.
+    /// A dismissed reminder standing earlier in the list would swallow the
+    /// snooze, leaving the live one exactly where it was -- so the user
+    /// presses "snooze 5 minutes" and the alert reappears immediately, with no
+    /// way to make it stop short of dismissing it.
+    #[test]
+    fn a_snooze_moves_the_live_reminder_not_the_dismissed_one() {
+        let mut rm = ReminderManager::new();
+        // The day-before notice, already dealt with, sits ahead of the
+        // hour-before one in the list.
+        rm.set_reminder(7, "Review", 100_000, 24 * 60);
+        rm.set_reminder(7, "Review", 100_000, 60);
+        rm.dismiss(7);
+        assert_eq!(rm.active_count(), 1);
+
+        let before = rm.due_reminders(100_000)[0].fire_at;
+        rm.snooze(7, SnoozeDuration::FiveMinutes);
+
+        assert!(
+            rm.due_reminders(before).is_empty(),
+            "the live reminder must have moved forward, not the dismissed one"
+        );
+        let due = rm.due_reminders(before + SnoozeDuration::FiveMinutes.secs());
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].fire_at, before + SnoozeDuration::FiveMinutes.secs());
     }
 
     // ========================================================================
@@ -3923,6 +4139,54 @@ description: Just a test";
         assert!(
             text.contains("color: F38BA8"),
             "Expected hex color in export, got: {text}"
+        );
+    }
+
+    /// Every colour in this file's fixtures -- F38BA8, A6E3A1, F9E2AF, 89B4FA
+    /// -- has all three channels at 0x10 or above, so `{:02X}`'s padding never
+    /// had anything to do and could be written `{:X}` with the suite still
+    /// green. Found by the reintroduction harness (module 86, defect `O`).
+    ///
+    /// The failure it hides is not a cosmetic one. `parse_hex_color` refuses
+    /// any string that is not exactly six characters, so an unpadded dark
+    /// colour is written to the file and then *rejected on the way back in*:
+    /// the event silently reverts to the renderer's default, and the next save
+    /// writes that default out as though the user had chosen it. Dark accent
+    /// colours are exactly the ones a user picks for a dark theme.
+    #[test]
+    fn a_dark_colour_keeps_its_leading_zeros_through_the_file() {
+        let mut store = EventStore::new();
+        // One channel below 0x10 in each position, so a missing pad anywhere
+        // in the format string is visible.
+        let dark = Color::from_hex(0x0A_0B_0C);
+        add(
+            &mut store,
+            CalendarEvent {
+                id: 0,
+                title: "Night Shift".to_string(),
+                start_timestamp: 0,
+                end_timestamp: 100,
+                all_day: false,
+                repeat: None,
+                color: Some(dark),
+                description: String::new(),
+            },
+        );
+
+        let text = store.export_text();
+        assert!(
+            text.contains("color: 0A0B0C"),
+            "each channel is two digits wide however small it is, got: {text}"
+        );
+
+        // The round trip is the reason the padding matters: six characters is
+        // the only length `parse_hex_color` accepts.
+        let mut reloaded = EventStore::new();
+        assert_eq!(reloaded.import_text(&text), 1);
+        assert_eq!(
+            reloaded.all_events()[0].color,
+            Some(dark),
+            "a dark colour must survive the file, not fall back to the default"
         );
     }
 

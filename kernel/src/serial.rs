@@ -278,10 +278,23 @@ fn with_serial(emit: impl FnOnce(&mut SerialPort)) {
         {
             let mut guard = SERIAL.lock();
             emit(&mut guard);
-            // Clear before the guard drops, so the flag is never observably
-            // stale while another CPU could already hold the lock.
-            busy.store(false, Ordering::Relaxed);
+            // Release the lock *first*, then lower the flag — the flag must
+            // outlive the guard, never the other way round. The condition it
+            // encodes is "this CPU is inside the critical section", and this
+            // CPU is still inside it until `guard` is gone; clearing first
+            // would leave a window holding `SERIAL` with the escape hatch
+            // down, which is precisely the state a nested exception must
+            // never find (it would take the normal path and spin on a lock
+            // only the frame below it can release).
+            //
+            // An earlier version cleared first, reasoning that the flag
+            // should not look stale "while another CPU could already hold
+            // the lock". No other CPU ever reads this slot: `IN_PRINT` is
+            // indexed only by `current_cpu_index()`, as its own doc comment
+            // below states. The concern was unreachable and the window it
+            // bought was real.
             drop(guard);
+            busy.store(false, Ordering::Relaxed);
         }
     });
 }

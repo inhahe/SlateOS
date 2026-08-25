@@ -32730,6 +32730,39 @@ thing that is much cheaper to design in than to retrofit, because they change
 **Where.** `gui/compositor/src/keymap.rs` — the `key_for_scancode` table, and
 `Modifiers` in `gui/toolkit/src/event.rs:185` for the AltGr gap.
 
+**Update 2026-08-24 — (1), (2) and (5) are done; (3) and (4) remain.** The
+layouts now live in `gui/keylayout`, a dependency-free crate both the
+compositor and the desktop shell read; see `design-decisions.md` §549.
+
+- **(1) Layout selection** — `inputsettings`' `keyboard.layout` names a layout
+  by id, `Compositor::set_input_settings` resolves it through
+  `keylayout::by_id` on every reload, and `keymap::key_for_layout` translates
+  with it. An id this build does not know leaves the layout already in force
+  alone rather than leaving the user with no keyboard, and the name is
+  preserved verbatim in the file so a settings file written by a later build
+  survives a round trip through this one.
+- **(2) More tables** — eight: `us-qwerty`, `uk-qwerty`, `dvorak`, `colemak`,
+  `workman`, `de-qwertz`, `fr-azerty`, `es-qwerty`. Each is eight row strings,
+  checkable against a photograph of the board. The three alternate English
+  layouts are pinned by a test proving them exact rearrangements of US QWERTY's
+  own character multiset, so a mistyped row cannot pass as a layout.
+- **(5) AltGr as a level shift** — done, and without changing `Modifiers`,
+  which is constructed as a literal 99 times across 33 files including one
+  lane-A file. A keystroke that resolves through the third level *clears*
+  `modifiers.alt` instead of setting a new flag: the case that matters is a
+  German user typing `@` (AltGr+Q), which previously reached every application
+  as Alt+Q with the menu bar answering first.
+
+**(3) Dead keys and (4) compose sequences are still open, and are still the
+part that is cheaper to design in than to retrofit.** Both need state carried
+between two key events, and `Layout::character` is still a pure function of one
+scancode and one level. Nothing offered today needs them — the eight layouts
+above were chosen partly for that — but German's `´`, French's `^` and
+Spanish's `´` are all *present as ordinary characters* on their boards, which
+is a real difference from how those keyboards behave. That is the shape of the
+remaining debt: not a missing feature so much as three layouts that type a
+standalone accent where a real one would compose.
+
 ## A-JOB-CONTROL-SELF-STOP-LOST-A-RACING-SIGCONT (lane A, 2026-08-17) - **fixed**
 
 **In short:** when a program stopped itself for job control (what a shell does
@@ -55085,7 +55118,7 @@ misleads the next person to read it into thinking the persistence exists and
 merely needs wiring.
 ---
 
-### TD-C-THE-SHELL-KEEPS-FIVE-KEYBOARD-LAYOUTS-THAT-NOTHING-TYPES-WITH — 2026-08-24 — OPEN
+### TD-C-THE-SHELL-KEEPS-FIVE-KEYBOARD-LAYOUTS-THAT-NOTHING-TYPES-WITH — 2026-08-24 — RESOLVED 2026-08-24 (see the closing note)
 
 **In short.** The shell has a keyboard-layout switcher: a tray chip reading
 `EN`, a pop-up preview of the key caps, five built-in layouts (US QWERTY,
@@ -55164,6 +55197,39 @@ letters stay wrong — rather than concluding, correctly, that layout switching
 was never implemented. The duplicated row tables also guarantee the two copies
 drift: a fix to the compositor's QWERTY table will not reach the preview, so
 the picture the user is shown will stop matching what they get.
+
+**RESOLVED 2026-08-24.** Fixed as the entry prescribed — the row tables moved
+to a crate both sides depend on (`gui/keylayout`, chosen over the compositor
+itself so that reading the layouts does not oblige the shell to link a display
+server), `key_for_scancode` gained a layout-aware sibling `key_for_layout`, and
+`InputMethodManager` is now a selector holding no table of its own. Full
+reasoning in `design-decisions.md` §549; the compositor half is recorded under
+`TD-ONLY-ONE-KEYBOARD-LAYOUT`'s 2026-08-24 update.
+
+The four decorative fields went four different ways, which is the part worth
+remembering:
+
+| Field | Outcome |
+|---|---|
+| `rows_shifted` | **wired up.** It was unread because the thing that would read it did not exist; now Shift, Caps Lock and AltGr all select a face through `Layout::character`. |
+| `has_dead_keys` | **deleted.** It was set on German and French and consulted by one assertion. A flag saying a layout needs a facility nothing implements reads as support for that facility; the absence is now stated in prose, in the module doc and in `TD-ONLY-ONE-KEYBOARD-LAYOUT` (3). |
+| `is_rtl` | **deleted, and this entry's suggested fix was wrong.** "Honour it in the preview" would have mirrored the caps — but Arabic and Hebrew boards put their letters on physically standard positions (ض and / are both on the key engraved `Q`), so mirroring would draw a keyboard that does not exist. RTL is a fact about the text a layout writes, not about where its caps sit. See §549. |
+| `language` | **kept, and given a reader.** It separates "a rearrangement of English" from "a national layout", which is the precondition of a real invariant: only the English layouts must reach the whole alphabet from the plain level. |
+
+The per-application memory and the config file survived as the entry
+recommended, and the parser got better in passing: `apply_config_text` now
+honours the `layout_N=` lines that `to_config_text` has always written, since
+there is finally a catalogue to resolve a name against. Each name is looked up
+among the installed layouts *before* the catalogue, so a layout a user wrote
+themselves survives a save/reload the built-ins have never heard of.
+
+One thing the entry asked for is still true and still worth noting: **nothing
+constructs an `InputMethodManager`.** `grep -rn 'InputMethodManager' gui apps`
+still finds only `pub mod input_method;`. The switcher is now correct rather
+than a lie, but it is not yet reachable — that belongs with
+`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` and the taskbar's tray, and is what
+would turn "the compositor can type Dvorak" into "the user can choose Dvorak
+without editing a YAML file by hand".
 ---
 
 ### B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS, AND LIBC'S DOC COMMENTS EXPLAIN IT WITH A REASON THAT STOPPED BEING TRUE — 2026-08-21 — OPEN

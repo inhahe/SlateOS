@@ -74720,7 +74720,28 @@ and `tac` all delegate to the file form when the argument names a file and have
 no failure mode left on the pipe path; `paste`, `tr`, `column` and `grep`
 already set a status. `cmd_tr_input` is the model the `sed`/`awk` fix followed.
 
-#### TD-A-FIVE-PIPE-FORMS-SILENTLY-DISCARD-A-FILE-OPERAND (lane A, 2026-08-24) — **open**
+#### TD-A-FIVE-PIPE-FORMS-SILENTLY-DISCARD-A-FILE-OPERAND (lane A, 2026-08-24) — ✅ **FIXED same day (`bb9787783`, boot-verified `eba6d16ce`)**
+
+> **Fixed as described below, with one deliberate departure and one addition.**
+>
+> * **`mapfile` delegates rather than rejecting a second word.** The plan below
+>   argued for rejection on the grounds that bash's `mapfile` takes no file
+>   operand at all. That reasoning does not survive contact with the fact that
+>   *this shell's* `cmd_mapfile` does take one — the operand is our own
+>   extension, so refusing it in the pipe half would invent a third behaviour
+>   rather than remove a disagreement. Consistency with `cmd_mapfile` beats
+>   consistency with a bash spelling bash does not have.
+> * **`sed`'s share was done as a refactor, not a patch.** Both halves now call
+>   one `classify_sed_args`; the duplicated argument loop is gone. The two
+>   copies had *already* drifted — that drift is precisely how `-i` came to be
+>   parsed in one half and ignored in the other — so removing the duplication is
+>   what stops the next flag doing the same thing.
+> * Covered by self-test rung 34, which pipes one token while naming a file
+>   containing a different one, so the two possible answers are distinguishable.
+>   It also asserts that a pipe with *no* file named still reads the pipe, so
+>   that "the file wins" cannot have been implemented as "the pipe never wins".
+>
+> The original entry follows unchanged.
 
 **In short:** `cat a.txt | cut -f1 b.txt` cuts fields out of `a.txt` and ignores
 `b.txt` entirely — no error, no warning, exit 0. On Linux the named file wins

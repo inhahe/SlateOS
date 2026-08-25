@@ -113,6 +113,13 @@ cd "$fixtures" || exit 1
 #                both sides rather than whatever the Windows host had.
 #   ctx          eight numbered lines with two well-separated hits, so -A, -B
 #                and -C have room to overlap or not
+#   ctxtop       a hit on the *first* line, which is the only way to ask
+#                whether a file's opening group takes a `--` when it is already
+#                adjacent to the top of the file (it does: a new file is never
+#                adjacent to the previous one)
+#   run3         three consecutive hits, so that `-m` can be satisfied while
+#                trailing context is still owed — the lines that follow print
+#                as context even though they match
 printf 'a\nb\nc\n'                              > abc
 printf 'foo bar\nbaz foo foo\nqux\nfoofoo\n'    > words
 printf 'a{b}\n{b}a\na{}\nab\na\naaa\na{1,2}\n'  > braces
@@ -124,6 +131,8 @@ printf 'foo\0bar\0foo bar\0'                    > zsep
 printf 'foo\n\nqux\n'                           > pats
 printf 'caf\303\251\nCAF\303\211\ncafe\n'       > accent
 printf '1\n2\nHIT\n4\n5\n6\nHIT\n8\n'           > ctx
+printf 'HIT\n2\n3\n'                            > ctxtop
+printf 'HIT\nHIT\nHIT\n'                        > run3
 
 # The recursion fixtures. `sub` is the plain tree; `symdir` exists because -r
 # and -R differ over exactly one thing — a symlink met *during* the walk, which
@@ -451,6 +460,14 @@ grep -e -a braces
 grep -ivn a mixed
 grep -in a mixed
 grep -Z a abc
+# A long option's value may be the next argv entry, not just the text after an
+# `=`. getopt_long accepts both and so must we; ours took only the `=` form
+# until 2026-08-25, which rejected every one of these as a missing argument.
+grep --regexp foo words
+grep --regexp=foo words
+grep --file pats words
+grep --max-count 1 foo words
+grep --group-separator XX -C 1 HIT ctx
 ?ours is `unknown option: --zzz`; GNU is `unrecognized option '--zzz'` plus the usage summary (TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE)|grep --zzz a abc
 ?ours names the offending value (`invalid max count: x`); GNU's message does not|grep -m x foo words
 
@@ -569,20 +586,87 @@ grep -q ary binfile
 # `ctx` has its two hits six lines apart so that -C 1 leaves a gap and -C 3
 # closes it: the `--` separator between non-adjacent groups, and its absence
 # when the groups touch, is the part of this that is easy to get wrong.
-?context selection (-A -B -C) is not implemented|grep -A 1 HIT ctx
-?context selection (-A -B -C) is not implemented|grep -B 1 HIT ctx
-?context selection (-A -B -C) is not implemented|grep -C 1 HIT ctx
-?context selection (-A -B -C) is not implemented|grep -C 3 HIT ctx
-?context selection (-A -B -C) is not implemented|grep -A 99 HIT ctx
-?context selection (-A -B -C) is not implemented|grep -C 0 HIT ctx
-?context selection (-A -B -C) is not implemented|grep -nC 1 HIT ctx
-?context selection (-A -B -C) is not implemented|grep -A 1 HIT ctx ctx
-?context selection (-A -B -C) is not implemented|grep -cC 1 HIT ctx
-?context selection (-A -B -C) is not implemented|grep -vC 1 HIT ctx
-?context selection (-A -B -C) is not implemented|grep -A1 HIT ctx
-?context selection (-A -B -C) is not implemented|grep -A 1 -m 1 HIT ctx
-?context selection (-A -B -C) is not implemented|grep --group-separator=XX -C 1 HIT ctx
-?context selection (-A -B -C) is not implemented|grep --no-group-separator -C 1 HIT ctx
+grep -A 1 HIT ctx
+grep -B 1 HIT ctx
+grep -C 1 HIT ctx
+grep -C 3 HIT ctx
+grep -A 99 HIT ctx
+grep -B 99 HIT ctx
+grep -C 0 HIT ctx
+grep -A 0 HIT ctx
+grep -B 0 HIT ctx
+grep -nC 1 HIT ctx
+grep -A 1 HIT ctx ctx
+grep -cC 1 HIT ctx
+grep -vC 1 HIT ctx
+grep -A1 HIT ctx
+grep -A 1 -m 1 HIT ctx
+grep --group-separator=XX -C 1 HIT ctx
+grep --no-group-separator -C 1 HIT ctx
+
+# The long spellings, and the `=`-less forms that take the next argv entry.
+grep --after-context=1 HIT ctx
+grep --before-context=1 HIT ctx
+grep --context=1 HIT ctx
+grep --context 1 HIT ctx
+# `--group-separator=` with an empty value is a *blank line* between groups,
+# which is a different answer from --no-group-separator and is the reason the
+# separator cannot be modelled as an Option<Vec<u8>>.
+grep --group-separator= -C 1 HIT ctx
+
+# The digit shorthand. `-1` is `-C 1`; the digits of `-12` accumulate rather
+# than the last one winning; and a non-digit ends the run, so `-1n` is
+# `-C 1 -n` and not a context length of one followed by nothing.
+grep -1 HIT ctx
+grep -3 HIT ctx
+grep -12 HIT ctx
+grep -1n HIT ctx
+grep -n1 HIT ctx
+
+# -A and -B each keep their own value and fall back to -C's only if unset, so
+# these two are the same command however they are ordered. Written as a plain
+# `usize` field the later flag would clobber the earlier one and they would not
+# be.
+grep -A 3 -C 1 -n HIT ctx
+grep -C 1 -A 3 -n HIT ctx
+grep -B 3 -C 1 -n HIT ctx
+
+# A bad context length is grep's own diagnostic, not the family's `invalid
+# number`, and it exits 2. `-A -1` is not the digit shorthand: -A demands an
+# argument, so `-1` is consumed as one and then refused.
+grep -A x HIT ctx
+grep -B x HIT ctx
+grep -C x HIT ctx
+grep -A -1 HIT ctx
+grep --context=x HIT ctx
+
+# The separator between *files*: a file's first group is never adjacent to the
+# previous file's last, even when it starts at line 1.
+grep -A 1 HIT ctxtop ctx
+grep -A 1 HIT ctx ctxtop
+grep -C 1 -H HIT ctx ctxtop
+# An empty operand between two matching ones prints nothing and no separator.
+grep -C 1 HIT ctx empty ctx
+
+# -m satisfied while trailing context is still owed: the lines that follow
+# print as context (`-`), not as matches, even though they match.
+grep -n -m 1 -A 2 HIT run3
+grep -n -m 2 -A 2 HIT run3
+grep -n -m 1 -B 2 HIT run3
+
+# -o prints the matching part, and a context line has none — so it prints
+# nothing at all, prefix included. The grouping still applies to the lines it
+# printed nothing for, which is why -oA1 gets a separator and -oC2 does not.
+grep -oA 1 HIT ctx
+grep -oC 2 HIT ctx
+grep -oC 3 HIT ctx
+grep -onC 1 HIT ctx
+
+# Context is ignored outright by the options that answer a question about the
+# file rather than about its lines.
+grep -lC 1 HIT ctx
+grep -LC 1 zzz ctx
+grep -qC 1 HIT ctx
 
 # --- byte offsets and the other output decorations ---
 ?-b is not implemented|grep -b a abc

@@ -224,7 +224,20 @@ def mentions(line):
 # still be unreachable if it had one?  `apps/diskimager`'s `load_image` was
 # the second kind -- its `handle_event` ran in every test and had no binding
 # that reached the image loader -- and that is the kind worth a person's time.
-ENTRY_POINTS = ("main", "handle_event", "render")
+#
+# `on_event` and `tick_interval` are the same two roots for an app that has
+# actually been converted: they are `oswindow::app::App`'s method names, and
+# the harness -- not this file -- is what calls them.  They must be listed
+# because a converted `main` is one line handing the app to `launch`, so
+# following calls out of `main` leaves the crate and stops.
+#
+# Getting this list wrong is silent in the direction that matters.  Converting
+# `apps/metronome` renamed `handle_event` to `on_event`, and until these two
+# names were added the scan reported it as newly *worse* -- 37% reached, its
+# whole input layer stranded -- for an app that had just been wired up for the
+# first time.  A root list that lags the code turns every improvement into a
+# regression report, which is how a scan stops being read.
+ENTRY_POINTS = ("main", "handle_event", "render", "on_event", "tick_interval")
 
 
 def reachable_from(graph, roots):

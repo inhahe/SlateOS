@@ -44432,9 +44432,16 @@ impl Shell {
     }
 
     fn builtin_pwd(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
-        // bash's pwd accepts -L (logical, default), -P (physical: resolve
-        // symlinks), and -W (Cygwin/Windows path); any other letter is a usage
-        // error. Flags may be clustered; the last of -L/-P wins.
+        // bash's pwd accepts -L (logical, default) and -P (physical: resolve
+        // symlinks); any other letter is a usage error. Flags may be clustered;
+        // the last of -L/-P wins.
+        //
+        // There is no -W. Cygwin's bash has one -- it prints the Win32 spelling
+        // of the directory -- and this builtin accepted it, because it was
+        // written against a Cygwin bash. A path with a drive letter in it is not
+        // something SlateOS has, so there was never an implementation to go with
+        // the letter: all -W ever did here was appear in the usage message and
+        // suppress the error that the option deserves.
         let mut physical = false;
         for a in args {
             if a.as_slice() == b"--" {
@@ -44443,15 +44450,11 @@ impl Shell {
             let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) else {
                 break;
             };
-            if let Some(c) = flags.iter().find(|c| !matches!(c, b'L' | b'P' | b'W')) {
-                return self.builtin_invalid_option("pwd", &[b'-', *c], "pwd [-LPW]");
+            if let Some(c) = flags.iter().find(|c| !matches!(c, b'L' | b'P')) {
+                return self.builtin_invalid_option("pwd", &[b'-', *c], "pwd [-LP]");
             }
             for c in flags {
-                match c {
-                    b'L' => physical = false,
-                    b'P' => physical = true,
-                    _ => {} // -W: accepted, no effect here.
-                }
+                physical = *c == b'P';
             }
         }
         let cwd = self.cwd.clone();
@@ -61621,7 +61624,7 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
     ),
     (
         "pwd",
-        "pwd [-LPW]",
+        "pwd [-LP]",
         "Print the name of the current working directory.",
     ),
     (
@@ -62758,7 +62761,6 @@ const HELP_BODIES: &[(&str, &str)] = &[
       -L	print the value of $PWD if it names the current working
     		directory
       -P	print the physical directory, without any symbolic links
-      -W	print the Win32 value of the physical directory
     
     By default, `pwd' behaves as if `-L' were specified.
     
@@ -86936,7 +86938,7 @@ st=1
         );
         // `-s` prints only the "NAME: usage" line, no description.
         let out = run("help -s pwd").0;
-        assert_eq!(out, "pwd: pwd [-LPW]\n");
+        assert_eq!(out, "pwd: pwd [-LP]\n");
         // `-d` prints only the short description.
         assert_eq!(
             run("help -d true").0,
@@ -102199,11 +102201,7 @@ st=1
                 "cd: -Z: invalid option",
                 "cd: usage: cd [-L|[-P [-e]] [-@]]",
             ),
-            (
-                "pwd -Z",
-                "pwd: -Z: invalid option",
-                "pwd: usage: pwd [-LPW]",
-            ),
+            ("pwd -Z", "pwd: -Z: invalid option", "pwd: usage: pwd [-LP]"),
             (
                 "alias -Z",
                 "alias: -Z: invalid option",

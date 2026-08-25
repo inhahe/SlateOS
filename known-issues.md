@@ -78068,3 +78068,63 @@ runs, module by module.
 That is the audit closed. One duplicated list removed, one class of duplicated
 list gated, and the remaining class handed back to the instrument that was
 already detecting it.
+
+### Lesson 44: check what the compiler catches by breaking it and reading the line number
+
+The audit above turned up a third shape, and it is the one worth generalising,
+because it is not about tests at all.
+
+`Palette::roles()` in `gui/appearance/src/lib.rs` returns
+`[(&'static str, Color); 21]` -- one entry per colour field of `Palette` -- and
+three sweeps consume it: the two-mode divergence check, the 4.5:1 legibility
+floor, and the shell's conversion sweep that asserts a module draws only from
+the palette it was handed. Its doc comment said:
+
+> The array's length is part of the signature so that adding a field without
+> adding it here fails to compile.
+
+That is false, and it had been false for as long as the comment existed. An
+array of 21 entries is a valid `[_; 21]` however many fields the struct has;
+the length in the signature only catches the *reverse* mistake, an entry added
+to the array without the count being changed. Adding a twenty-second `Color` to
+`Palette` produces exactly two errors, both `E0063`, both at the struct literals
+in `for_mode` -- and none at `roles`. So the compiler does stop the commit, just
+in the wrong place: the author fills in the two literals, the compiler falls
+silent, and the new colour is in the palette and in none of the sweeps.
+
+The field the crate added most recently, `teal`, carries a doc comment that says
+"a sweep that silently skips a field is the failure those sweeps exist to
+catch." The hazard was understood, written down next to the code, and still not
+guarded -- because everyone including its author believed the sentence in
+`roles`.
+
+**The lesson is the method, not the bug.** Twice in one session a claim about
+what the compiler enforces was settled by breaking the code and reading the
+error's line number rather than by reasoning about it, and reasoning would have
+been wrong both times, in opposite directions:
+
+| Claim | Reasoned | Measured |
+|---|---|---|
+| "the array length makes a new field fail to compile *here*" | plausible | false -- E0063 at `for_mode`, nothing at `roles` |
+| "an exhaustive `match` elsewhere means a stale `ALL` list gets noticed" | plausible | true that it errors, false that it errors anywhere useful |
+| "`assert!(ALL.len() == variant_count::<T>())` would fix it" | plausible | `E0658`, still unstable on 1.95.0 |
+
+The measurement costs one `cargo check` against a deliberately broken tree,
+which is under a minute, and it is the only thing that distinguishes "the
+compiler is watching this" from "the compiler is watching something nearby."
+Where a comment claims a compile-time guarantee, break it once and confirm the
+error lands where the comment says it does. If it lands somewhere else, the
+comment is describing a different guarantee than the one the reader will assume.
+
+**A guarantee documented but not enforced is worse than none, because it is the
+reason nobody looks.** An unguarded list at least looks unguarded.
+
+The remedy here was in-language and available on stable: a struct pattern with
+no `..` is exhaustive, so `roles` now destructures `*self` and a new field is
+`E0027: pattern does not mention field` at the destructure itself. The two
+non-colour fields are named and discarded (`panel_alpha: _, light: _`) rather
+than swept up by `..`, so the decision that they are not roles is on the record
+and a future non-colour cannot slip in behind them. Prefer this to a check
+script wherever the shape allows it -- an error at the omission beats a report
+about it, which is the same reason `check-variant-lists.py` documents its own
+deletion for the day `variant_count` stabilises.

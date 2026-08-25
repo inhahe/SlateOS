@@ -42127,19 +42127,20 @@ impl Shell {
     /// directory — an `$include` names a file relative to the shell, not to the
     /// file including it (measured).
     ///
-    /// A directory reads as nothing rather than as a failure, which is what
-    /// bash does with `bind -f` on one (measured: status 0, no message). There
-    /// a POSIX `open` of a directory succeeds and the read that follows finds
-    /// no bytes; Windows refuses the open outright, so the emptiness has to be
-    /// supplied here for the two hosts to agree.
+    /// A directory is a failure, not an empty file: POSIX lets `open` succeed on
+    /// one and then fails the `read` with `EISDIR`, so glibc bash answers
+    /// `bind -f adir` with `bind: adir: cannot read: Is a directory` and status
+    /// 1. This once returned emptiness and status 0, from a measurement taken
+    /// against a Cygwin bash, where the open is refused before the read and the
+    /// builtin swallows it.
+    ///
+    /// Windows refuses the open outright and calls it `ERROR_ACCESS_DENIED`, so
+    /// [`open_error`] is what makes the development host say `EISDIR` too.
     fn read_inputrc_file(&mut self, path: &[u8]) -> std::io::Result<Str> {
         let expanded = self.tilde_expand(path);
         let host = self.host_path(&expanded);
         let host = bytes::bytes_to_path(&host);
-        if host.is_dir() {
-            return Ok(Str::new());
-        }
-        std::fs::read(host)
+        std::fs::read(&host).map_err(|e| open_error(&host, e))
     }
 
     /// The live bindings that run readline's function `name`.

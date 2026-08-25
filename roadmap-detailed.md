@@ -3156,8 +3156,15 @@ options with warnings" decision.)_
 ### 5.2 Input
 
 - [ ] Mouse pointer style
-- [ ] Mouse pointer speed
-- [ ] Keyboard repeat speed
+- [x] Mouse pointer speed — Settings → Mouse writes `input.yaml`; a `ReloadInput`
+  request makes the compositor re-read it, and `Server::run_with` polls
+  `Compositor::input_settings` each tick and pushes any change through
+  `Present::reload_input` into `EvdevInput`, so speed, acceleration, button
+  mapping and scroll direction take effect at once rather than at the next
+  login. See `design-decisions.md` §548 and
+  `scripts/reintro-input-settings.py`.
+- [x] Keyboard repeat speed — same file, same live-reload route; applied by
+  `EvdevInput`'s repeat clock (`design-decisions.md` §544).
 - [ ] Keyboard layout customizer: arbitrary remap from any starting layout, save as named layout
 - [ ] Include optimized keyboard layouts (Dvorak, Colemak, others)
 

@@ -1403,6 +1403,33 @@ fn setting_bounds_through_the_trait_reaches_the_pointer() {
     assert_eq!(moves(&input.poll_at(Instant::now())), vec![(99, 99)]);
 }
 
+#[test]
+fn reloading_settings_through_the_trait_changes_how_far_the_pointer_travels() {
+    // The last link of the chain the Settings panel's speed slider runs along:
+    // the panel writes `input.yaml`, the compositor reads it, `run_with`
+    // notices the change and calls `Present::reload_input`, `Paired` hands it
+    // to the source — and *here* is where a number becomes a distance. A
+    // forward that stopped one call short of this would look plumbed and move
+    // the pointer exactly as far as before.
+    let (mut input, device) = one_device();
+    let mut faster = plain();
+    faster.mouse.speed = 10;
+    InputSource::reload_input(&mut input, &faster);
+
+    // From the centre of 800x600, so x starts at 400. The assertion is that the
+    // delta is now worth more than the stock speed makes it, not the exact
+    // multiplier — that belongs to `speed_multiplier`'s own tests.
+    device.feed(&[rel(REL_X, 20), syn()]);
+    let moved = moves(&input.poll_at(Instant::now()));
+    assert_eq!(moved.len(), 1, "one motion event");
+    assert!(
+        moved[0].0 > 420,
+        "the pointer reached x={} — no further than a stock speed carries it, \
+         so the reload never became a distance",
+        moved[0].0
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Which keys repeat
 // ---------------------------------------------------------------------------

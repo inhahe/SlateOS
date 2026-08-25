@@ -33728,13 +33728,16 @@ here changes when that grant lands** — the code path is the one the tests
 exercise, with `sys::Devices` in place of the fake. Reply to lane A:
 `requests/c-a-the-compositor-now-reads-your-evdev-nodes-and-is-waiting-only-on-the-capability.md`.
 
-**Still open, and tracked separately:** a `ReloadInput` request reaches
-`Compositor::reload_input`, which adopts only `double_click_ms` — it has no way
+**Tracked separately, and since closed:** a `ReloadInput` request reached
+`Compositor::reload_input`, which adopted only `double_click_ms` — it had no way
 to reach `EvdevInput::set_settings`, so a pointer-speed change made in Settings
-does not take effect until the next login. See
-`TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER`.
+did not take effect until the next login. See
+`TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER`. *(Closed later the
+same day: `Server::run_with` now polls `Compositor::input_settings` and pushes
+any change through `Present::reload_input` into the device —
+`design-decisions.md` §548.)*
 
-## TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER (lane C, 2026-08-24)
+## TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER (lane C, 2026-08-24) — **fixed 2026-08-24**
 
 **In short:** the Settings → Mouse page can change the pointer speed, the
 acceleration profile, the button mapping and the key-repeat rate, and the file
@@ -33787,6 +33790,33 @@ honoured at the next start — so this is a latency bug, not a data bug. But a
 slider that appears to do nothing is indistinguishable to a user from a slider
 that is broken, and it is the *second* time this exact shape has been found in
 this area (`TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING` was the first).
+
+### 2026-08-24 — fixed, polled rather than told, and one thing the plan above got wrong
+
+The chain now runs end to end: `Compositor::set_input_settings` keeps the whole
+`InputSettings` (applying the one it is itself the consumer of),
+`Server::reconcile_input` polls `Compositor::input_settings` once a tick and
+pushes any *change* into `Present::reload_input`, `Paired` forwards that to its
+input half, and `EvdevInput::reload_input` calls the `set_settings` that had
+been sitting there with no caller. `main` no longer reads `input.yaml` a second
+time; it takes the compositor's copy, so the file is read once.
+
+**The plan above said "call it when the tick reports that a `ReloadInput` was
+handled". That is not what landed, and deliberately.** A flag or a queue saying
+"a reload happened" is a second description of the settings, and a second
+description is a thing that can disagree with the first — a dropped
+notification is a preference that silently never arrives, and a display
+attached mid-session starts stale unless someone remembers to re-arm the flag.
+`present.rs` already documents the alternative for `Present::monitors`: polled,
+idempotent, `None` meaning "no opinion". Using a push for input settings and a
+poll for monitor hotplug — two problems of identical shape, three lines apart
+in the same loop body — would have been two mechanisms where one does. The
+reasoning, including the cost (a `PartialEq` on a small struct per frame,
+forever) and why `None` must not be spelled `InputSettings::default()`, is
+`design-decisions.md` §548.
+
+**Proved by `scripts/reintro-input-settings.py`** — ten one-line defects, one
+per link in the chain, all caught, all restored by SHA-256.
 
 ## TD-COMPOSITOR-COPIES-EVERY-FRAME-TWICE (lane C, 2026-08-21)
 

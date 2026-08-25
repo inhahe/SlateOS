@@ -1040,6 +1040,10 @@ impl<S: EventSys> InputSource for EvdevInput<S> {
     fn set_bounds(&mut self, width: u32, height: u32) {
         self.pointer.set_bounds(width, height);
     }
+
+    fn reload_input(&mut self, settings: &InputSettings) {
+        self.set_settings(settings.clone());
+    }
 }
 
 #[cfg(target_os = "linux")]

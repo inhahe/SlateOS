@@ -435,12 +435,20 @@ fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
             // `Server::run_with` polls input *before* it shows the first frame:
             // a pointer that waited for a frame to learn where the edges are
             // would spend its first tick not knowing.
+            //
+            // The settings come from the compositor, which read `input.yaml`
+            // in `make_compositor`, rather than from a second `load()` here.
+            // Two reads of one file is two answers to one question the moment
+            // the user saves between them, and the compositor's copy is the one
+            // `Server::run_with` will go on pushing from — so starting from a
+            // different one would mean the first push was a *correction*.
+            // `unwrap_or_default` cannot fire in practice (`make_compositor`
+            // always reloads) but says the harmless thing if it ever does: the
+            // stock settings, which is what a machine with no `input.yaml` gets
+            // anyway.
             let (composed_w, composed_h) = compositor.frame_size();
-            match EvdevInput::open(
-                inputsettings::InputFile::load().settings,
-                composed_w,
-                composed_h,
-            ) {
+            let settings = compositor.input_settings().cloned().unwrap_or_default();
+            match EvdevInput::open(settings, composed_w, composed_h) {
                 Ok(input) => {
                     for (index, name) in input.devices() {
                         eprintln!(

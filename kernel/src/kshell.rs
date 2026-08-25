@@ -14431,7 +14431,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "two undecodable bytes differ");
         assert_output_contains("the differing line is removed", &out, b"-\xff\n");
         assert_output_contains("and the other added", &out, b"+\xfe\n");
-        assert_output_lacks("and is not reported as shared context", &out, b" \xff\n");
+        // Forbid the replacement character itself, not ` \xff\n`. Forbidding
+        // the latter would have been the natural way to write "not reported as
+        // shared context" and could never have failed: the broken build never
+        // emitted `\xff` at all, it emitted U+FFFD. Naming the three bytes a
+        // decoder invents states the actual invariant -- every byte of this
+        // diff was copied from one of the two files.
+        assert_output_lacks("no byte of the diff was invented", &out, b"\xef\xbf\xbd");
 
         // The fallback itself, now derived rather than assumed. This is the one
         // state that genuinely is only the final newline, and it should still
@@ -14454,9 +14460,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         write(a, b"zz_common\n\xfe\n")?;
         write(b, b"zz_common\n\xff\n")?;
         let out = capture_command(&alloc::format!("comm -12 {a} {b}"));
-        assert_output_contains("the genuinely shared line is common", &out, b"zz_common\n");
-        assert_output_lacks("and two different bytes are not", &out, b"\xfe\n");
-        assert_output_lacks("in either direction", &out, b"\xff\n");
+        // Whole-output equality, not `contains` plus two `lacks`. The obvious
+        // spelling -- forbid `\xfe` and `\xff` in the common column -- is an
+        // assertion that **cannot fail under the bug it names**: the decode
+        // turned both bytes into U+FFFD, so the wrong output contained
+        // `\xef\xbf\xbd`, and neither forbidden string was ever going to be
+        // there. It would have passed against the broken build and read as
+        // coverage. Equality has no such gap: it pins what the third column
+        // holds and, by exhausting the output, that nothing else does.
+        assert_eq!(
+            out.as_slice(),
+            b"zz_common\n",
+            "only the genuinely identical line is common to both"
+        );
 
         // ...and the ordering half, which is `comm`'s alone. `comm` is a merge
         // and only correct on sorted input. Under the decode, U+FFFD is the

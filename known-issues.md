@@ -72350,6 +72350,179 @@ be resolved first. A coverage report computed against a list containing 56
 entries that no longer apply would have overstated the proved set by exactly
 those 56, and been wrong in a way that is very hard to see.
 
+**RE-MEASURED 2026-08-25, and three faults in the harness itself found on the
+way.** The figures moved because the dead-key work added tests, but the run
+that produced them only became trustworthy after fixing three bugs in
+`reintro-palette.py` — every one of which made the harness *understate* a
+problem, which is the direction that matters:
+
+```
+2935 tests in the swept packages, 2473 unproved (15.7% proved),
+0 dangling, 84 single-prover
+```
+
+- **The dangling universe was the wrong set.** `COVERED_DIRS` was doing double
+  duty: it is the denominator for *unproved*, which is a deliberately narrow
+  set of directories, and it was also being used to answer "does this declared
+  test name exist?" — a strictly wider question, because a defect may patch a
+  crate that is not swept. Fifteen live tests in `gui/toolkit` were reported as
+  dangling on that basis. Fixed by splitting `tests_in_tree()` (the sweep set)
+  from a new `names_in_tree()` (the existence set), the latter **derived from
+  the `DEFECTS` list** so the next crate a defect reaches widens it by itself
+  rather than reintroducing the same false alarm.
+- **Patterns were never normalised for line endings.** Git here runs
+  `core.autocrlf=input`, which normalises on commit but never on checkout, so a
+  file once written by something CRLF-aware stays CRLF in the working tree
+  while its committed bytes are LF. Every pattern in `DEFECTS` is spelled with
+  `\n`, so in such a file *every multi-line pattern silently stops matching*
+  and reports as `PATTERN NOT FOUND` — indistinguishable from the genuine
+  rename this script exists to catch. Three of the four stale defects were
+  purely this — `Y`, `PPPP…` and `QQQQ…`, all three in
+  `gui/desktop/src/run_dialog.rs`. Note *how selectively* it strikes:
+  `gui/desktop/src/lib.rs` is CRLF as well and was completely unaffected,
+  because its defects happen to be single-line patterns. The bug hides only
+  the multi-line defects, and only in files that happen to be CRLF — which is
+  why it survived so long. `reintro-keylayout.py` had already learned the
+  lesson; the fix here is a shared `source()` helper used by *both* the
+  preflight and `apply_to`, because those two had duplicate copies of the
+  matching logic and fixing only one changed nothing.
+- **A stale defect was tallied twice.** The preflight `break`s on the first
+  missing pattern, which leaves the text untouched — which is exactly what a
+  self-cancelling defect looks like, so the no-op check fired as well. One
+  fault arrived as two, and the misleading half was the no-op line, which
+  claims the edits undo each other when in fact none of them ran. This is why
+  the stale and no-op counts moved in lockstep (4/4, then 1/1) and looked like
+  a correlation rather than a duplicate.
+
+Only the fourth stale defect was real: the tray's layout label had gone from
+`.unwrap_or("??")` to `self.active_layout().map_or("??", |l| l.short_label)`
+when the accessor became fallible. It is retargeted. The list is once again
+**1722 defects, 0 stale, 0 ambiguous, 0 no-op** (1737 after module 82 below).
+
+**All four were then re-run for real, not left at preflight-green** — which is
+the whole point of this harness applied to itself. A defect that merely
+*matches* again has proved nothing; it has to go in, make the right tests fail,
+and come back out. All four now do:
+
+| defect | verdict |
+|---|---|
+| `Y` (run dialog focus border) | caught by 1 |
+| `PPPP…` (arrows step by string) | caught by 2 |
+| `QQQQ…` (caret slices on byte offset) | caught by 2 |
+| `BBBB…` (tray label fallback) | caught by 2 |
+
+`4 caught, 0 escaped, 0 never asked, 0 under-caught, 0 under-declared`, each
+run ending in `restored: all files match their recorded SHA-256` — which also
+confirms the newline round-trip is lossless, since `run_dialog.rs` is the CRLF
+file and its restore is byte-compared, not text-compared.
+
+The shape of all three is the same and worth naming, because it will recur:
+each was a case of the harness answering a *slightly different question* from
+the one asked — a narrower directory set, an LF file that is really CRLF, a
+skipped loop that looks like a cancelled one — and reporting the answer as if
+it were to the original. A harness that exists to stop tests being trusted on
+faith is the last place that should be trusted on faith itself; every one of
+these fixes is therefore a permanent check rather than a repair to one entry.
+
+**MODULE 82, 2026-08-25 — the first tranche aimed at *logic* rather than
+colour, and it found three genuinely broken tests.** Target chosen by
+measurement rather than taste: `gui/desktop/src/calendar.rs` was the largest
+single hole in the tree — **102 of its 113 tests unproved**. The reason turned
+out to be structural and worth recording, because it holds for every file
+converted in the colour campaign: calendar.rs already *had* 49 defects, and
+every one of them was a palette defect. The colour half of the file was
+thoroughly proved and the logic half — recurrence expansion, timestamp
+arithmetic, range queries, search, sorting — had never been asked a single
+question. **A file is not "covered" because it appears in the defect list; it
+is covered in the dimension the defects were written along.**
+
+Fifteen defects (`A`…`O`, labelled with 82-character runs per the
+run-length-is-the-module-number convention). Final sweep, 708 s:
+
+```
+15 defects: 15 caught, 0 escaped, 0 never asked, 0 under-caught,
+0 under-declared
+restored: all files match their recorded SHA-256
+```
+
+That clean line is the *second* run. The first exposed four problems, three of
+which were faults in the production tests rather than in the defects, and all
+three were fixed in the tests rather than by weakening or dropping the defect:
+
+- **Lesson 26: a count-only assertion cannot tell a monthly series from a
+  30-day one.** `recurring_monthly` asserted `events.len() == 6` and nothing
+  else, so defect `B` (monthly recurrence steps a flat 30 days) reported
+  `[MISSING: recurring_monthly]` — stepping 30 days also produces six hits
+  across six months. It just walks them off the 15th, one or two days further
+  each time. Landing on the same day of each month is the *entire point* of
+  anchoring a recurrence to the original date instead of repeatedly adding to
+  the previous occurrence, so that is what the test now asserts: every
+  occurrence is `(2024, i+1, 15, 09:00)`. The general form — **a length check
+  proves a series has the right number of elements, never that they are the
+  right elements** — applies to every `assert_eq!(x.len(), n)` in the suite.
+- **Lesson 27: a case-insensitivity test whose every query is lower-case
+  constrains only half the rule.** Defect `K` deleted `query.to_lowercase()`
+  from `EventStore::search` and escaped outright. `search_case_insensitive`
+  passed only lower-case queries in, and the haystack is lower-cased too — so
+  it tested the haystack half and was blind to the query half. Three
+  assertions were added with capitals in the query (`"MEETING"`, `"Team"`,
+  `"ENGINEERING"`), and note the ordinary path to them is a user typing a
+  proper noun, not an exotic input. A test named for a symmetric property must
+  exercise **both** sides of the symmetry or it has tested one.
+- **Lesson 28: a sort with no interleaved fixture has no test at all.** Defect
+  `O` deleted `result.sort_by_key(|e| e.start_timestamp)` from
+  `events_for_range` and the entire 2936-test suite stayed green. Every other
+  caller either stores its events already in order or gets exactly one back, so
+  the sort was load-bearing in production and unobserved in test. Order is not
+  cosmetic here: the day cells, the detail card and the `N more` overflow all
+  render the list front-to-back, so an unsorted result puts a 5pm meeting above
+  a 9am one and hides the *later* event behind the overflow.
+  `events_come_back_in_time_order_whatever_order_they_were_stored_in` now
+  stores four events latest-first and interleaved across two days — so neither
+  insertion order nor a per-day grouping would pass — and states the
+  non-decreasing invariant as well as the exact list, so a future event added
+  to the fixture cannot quietly weaken it.
+- **Lesson 29: a `match` arm can be the type-pinning site, so a defect that
+  adds a method call there fails to compile instead of proving anything.**
+  Defect `D` was first written as `Recurrence::Daily =>
+  anchor.add_days(step.saturating_mul(2))` and produced two
+  `error[E0689]: can't call method saturating_mul on ambiguous numeric type
+  {integer}`. The Daily arm is where `step`'s integer type gets fixed for the
+  *whole* `match`; calling a method there makes every arm's literal ambiguous
+  at once. Retargeted to `anchor.add_days(step + 1)` — "a daily event skips its
+  own first day" — which needs no method resolution. The general rule: a
+  reintroduced defect must be spelled in operations that do not depend on
+  inference the defect itself removes, or `DID NOT COMPILE` replaces the
+  verdict you were after.
+
+Two further defects were wrong about *where* the behaviour lives, which is the
+ordinary cost of writing declarations before seeing them fire:
+
+- `C` (yearly recurrence) escaped when written as `add_years` → `add_months`,
+  because a monthly step still hits the anniversary on the way past and never
+  lands on the day after. Retargeted to a flat 365-day step, which drifts to
+  2024-03-13 because 2024 is a leap year — the failure exists only because the
+  fixture happens to cross a leap year, which is the sort of thing to choose
+  deliberately rather than notice afterwards.
+- `E` (the range guard `occ_end > range_start` opened to `>=`) was declared
+  against `events_for_date_spanning_midnight`, but the guard lives inside
+  `expand_recurrence`, which a *non-recurring* event never reaches. Re-declared
+  against `recurring_yearly`, where an all-day occurrence ends exactly where
+  the queried day starts.
+
+Two defects declare unusually long catcher lists on purpose: `I` (the minute
+component read off the day's remainder rather than divided by 60) declares
+**12** and `N` (the day window is an hour long) declares **8**. Those lists are
+not padding — they *measure* how central `timestamp_parts` and the day window
+are to the module, and a future refactor that shrinks either list is telling
+you something about the file.
+
+Net effect on the campaign: unproved **2473 → 2442**, proved **15.7 % →
+16.8 %**, `0 dangling`, single-prover 84 → 113, on `1737 defects, 0 stale, 0
+ambiguous, 0 no-op`. The single-prover rise is expected and is not a
+regression: fifteen new defects against a module with one view of each
+behaviour produce mostly-sole catchers, exactly as `blur.rs` did.
+
 ### BUG-C-GUITK-CONTRAST_TEXT-PICKS-WHITE-WHERE-BLACK-IS-FOUR-TIMES-MORE-LEGIBLE
 
 **Status: FIXED** 2026-08-24, the same day it was found — see §537. Kept here
@@ -76188,14 +76361,397 @@ Covered by self-test rung 39, which asserts whole byte strings rather than
 searching them: the failures here are about *where* the breaks fall and *which*
 bytes survive, and only a byte comparison can see either.
 
-**Left standing:** `-b` still cannot read input that is not valid UTF-8, because
-the pipe is narrowed to `&str` before `fold` sees it (`shell_bytes_as_str`, the
-`char`-oriented arm of `dispatch_with_input`). That is the shared byte-clean
-issue, not a `fold` one; what `-b` changes here is where the breaks fall, which
-is the reason people reach for it (`fold -b -w76` over base64), and that case is
-exact.
+**Resolution, part two — the same bug, by the other door (`c4fbbd776`).**
+
+The paragraph that stood here said `-b` could not read input that was not
+valid UTF-8, called it "the shared byte-clean issue, not a `fold` one", and
+left it. Re-reading the finished rewrite, that was wrong twice over.
+
+It was wrong about *scope*: the rewrite's whole subject is a `fold` that
+answers a question it could not read, and `fold_run` still contained
+
+```rust
+let text = core::str::from_utf8(&data).unwrap_or("");
+```
+
+for every named file. A file `fold` could not decode was folded as the empty
+string — no output, exit 0. That is not the shared narrowing at all; it is a
+fresh instance of this entry's own bug class, arriving from the file half
+instead of the pipe half, and strictly worse than the pipe's behaviour, which
+at least *said* it could not cope.
+
+And it was wrong about *cost*: making the pipe half byte-clean was not the
+"shared issue" either, because the narrowing at `dispatch_with_input` is
+per-command — the comment there says so — and `fold` no longer needed it.
+
+So `fold` is now byte-clean end to end: `fold_units` takes `&[u8]`,
+`fold_process` splits with `split_inclusive(|&b| b == b'\n')` and
+`strip_suffix(b"\n")`, `fold_run` passes the VFS bytes straight through, and
+`"fold"` moved up into the byte-clean arm of `dispatch_with_input`.
+
+In `-b` nothing changed: every byte was already one unit. In column mode the
+bytes are decoded incrementally — `from_utf8`, then `valid_up_to()` and
+`error_len()` on the error — and each byte that belongs to no valid character
+becomes a one-column unit of its own. That is what GNU does in the C locale,
+and it is the only option that leaves the bytes alone: dropping the byte loses
+data, and substituting U+FFFD *changes* it, in a program whose entire job is to
+insert newlines and change nothing else. A sequence cut short by the end of
+input (`error_len()` returns `None`) is written back as the bytes it is. The
+loop always consumes at least one byte — `error_len()` is never `Some(0)`, and
+a `None` only arises when something follows the valid prefix — so it cannot
+spin.
+
+Rung 39 grew four cases: `\xff\xfe\xfd\xfc` folds at width 2 and exits 0;
+`\xff` followed by α at width 1 proves the decoder resynchronises and keeps α
+whole; `zz\xce` proves a truncated sequence survives; and a *file* of
+undecodable bytes folds rather than reporting itself empty — the case the
+`unwrap_or("")` answered with silence and success.
+
+**Left standing:** the same `from_utf8(&data).unwrap_or("")` is still live at
+seven other sites in `kshell.rs`, each turning an undecodable file into an
+empty one and exiting 0:
+
+| function | command |
+|---|---|
+| `cut_run` | `cut` |
+| `cmd_tr` (twice — the two-file and one-file paths) | `tr` |
+| `cmd_mapfile` | `mapfile` / `readarray` |
+| `cmd_base64` | `base64 -d` only — encoding already passes the bytes through |
+| `cmd_sed` | `sed` |
+| `cmd_awk` | `awk` |
+
+They are all the same bug as this entry's and want the same treatment, command
+by command; the `dispatch_with_input` narrowing is deliberately per-command so
+each arm can move up as it converts.
+
+`base64 -d` is the odd one out and the one to take first, because the
+`unwrap_or("")` is the *smaller* of two faults sitting next to each other —
+see `TD-A-BASE64-D-DESCRIBES-ITS-OUTPUT-INSTEAD-OF-WRITING-IT`.
 
 **Noticed in passing:** `parse_cut_args` does not bundle short options, so
 `cut -sd: -f1` is refused as an unrecognized option where getopt would accept
 it. The fix is `parse_fold_args`'s flag loop. Not urgent — a refusal is honest,
 not a silent guess — but it is a gratuitous difference from every other `cut`.
+
+#### TD-A-BASE64-D-DESCRIBES-ITS-OUTPUT-INSTEAD-OF-WRITING-IT (lane A, 2026-08-25) — ✅ FIXED (`4ddcbd9d9`)
+
+**In short:** `base64 -d` is supposed to write the decoded bytes. Ours writes
+an English sentence about them — `<binary: 4096 bytes>` — whenever the result
+is not valid text. So `base64 f | base64 -d > g` cannot reproduce `f`, which is
+the one thing base64 exists to do. Exit status is 0 either way.
+
+**Where.** `kernel/src/kshell.rs`, `cmd_base64`, the `if decode` arm
+(around line 119560).
+
+```rust
+let text = core::str::from_utf8(&data).unwrap_or("");
+match base64_decode(text) {
+    Ok(decoded) => {
+        // Print as text if valid UTF-8, otherwise show hex summary.
+        if let Ok(s) = core::str::from_utf8(&decoded) {
+            shell_println!("{}", s);
+        } else {
+            shell_println!("<binary: {} bytes>", decoded.len());
+        }
+    }
+    ...
+```
+
+**Three faults, in order of severity.**
+
+1. **The decoded bytes are replaced by a description of themselves.** The
+   whole point of base64 is to carry data that is not text; the branch that
+   handles that case is the branch that throws the data away. `shell_write_bytes`
+   is right there — `fold`, `tee`, `sort` and the rest already use it — so this
+   is a two-line fix, not a design problem.
+2. **`shell_println!` adds a newline the input never had.** Even for the
+   valid-text path, decoding `YWJj` (`abc`, no newline) writes `abc\n`. Same
+   class as the `sed` and `fold` trailing-newline drift.
+3. **`from_utf8(&data).unwrap_or("")` makes an undecodable input into an empty
+   one.** Base64 text is ASCII by construction, so an input that fails to
+   decode as UTF-8 is not base64 at all and deserves a diagnostic. Instead the
+   empty string decodes successfully to zero bytes, and `base64 -d` prints a
+   blank line and exits **0** — a wrong answer reported as success, the class
+   `TD-A-FOLD-GUESSED-AT-EVERY-ARGUMENT-IT-COULD-NOT-READ` is about.
+
+**Proper fix.** Take the file bytes undecoded; reject a non-ASCII input with a
+diagnostic and exit 1 (GNU: `base64: invalid input`); on success write the
+decoded bytes with `shell_write_bytes` and add nothing. Cover it with a
+self-test rung that asserts a genuine round trip over bytes that are not valid
+UTF-8 — the assertion the current code cannot pass and the reason the fault
+survived: nothing yet checks that `base64 -d` produces *bytes*.
+
+**Noticed while** making `fold` byte-clean and auditing the remaining
+`from_utf8(&data).unwrap_or("")` sites in `kshell.rs`.
+
+**Resolution (`4ddcbd9d9`).** All three faults, plus the argument handling they
+were sitting on top of, which turned out to be the same silent-guess shape as
+`fold`'s.
+
+The decoded bytes now go out through `shell_write_bytes` with nothing appended,
+so `base64 f | base64 -d` reproduces `f`. The input is read as `&[u8]` and
+`base64_decode` refuses what is not base64 instead of decoding the empty string
+and reporting success.
+
+`parse_base64_args` replaces "look at the first word": `-d`/`--decode`,
+`-i`/`--ignore-garbage`, `-w N`/`--wrap=N` (0 = never wrap) and `--help`, with
+getopt-style bundling, `--` to end the options, and `-` or no operand naming the
+pipe. `base64` also joins the byte-clean arm of `dispatch_with_input`, which it
+had never been in at all — `cat f | base64` used to print a usage message and
+fail.
+
+The decoder tightened where it used to guess (`Xy=z` is refused rather than
+read as `Xy==`; nothing may follow the padding; a partial group is an error)
+and stayed lenient in the one place compatibility demands it (trailing bits,
+and line breaks as structure). Those two calls are argued in
+design-decisions §292.
+
+Covered by self-test rung 40, which leads with the round trip: ten bytes that
+are not valid UTF-8, encoded, fed back through `base64 -d`, and required back
+byte for byte.
+
+**Noticed in passing:** there is a *second* `base64_encode` in the kernel, at
+`kernel/src/net/http.rs:1271`, with its own tests at `:1652`. Two encoders of
+the same format is the duplication class `sed`'s two transform loops belong to
+— one of them will drift. Neither is wrong today, so this is tech debt rather
+than a bug: the fix is for `net::http` and `kshell` to share one, most
+naturally in a small `base64` module, and the `net/websocket.rs` caller at
+`:193` moves with it.
+
+#### TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH (lane A, 2026-08-25) — filed, blocked on `ere` going `no_std`
+
+**In short:** `awk '/^err/ {print}'` in the kernel shell does not match lines
+that *start* with `err`. It matches lines that *contain* the four characters
+`^err`, which almost nothing does — and it exits 0, so the empty output looks
+like an honest "no matches". Lane B fixed exactly this in the userspace `awk`
+months ago and built a shared engine so it could not come back; the kernel
+shell has its own copy of `awk` that was never wired to that engine.
+
+**Where.** `kernel/src/kshell.rs`, `awk_pattern_matches` (~122305). Its own
+comment states the fault:
+
+```rust
+// /regex/ pattern — literal string match.
+if pattern.starts_with('/') && pattern.ends_with('/') && pattern.len() >= 2 {
+    let pat = &pattern[1..pattern.len() - 1];
+    return line.contains(pat);
+}
+```
+
+`sed_addr_matches` (~121581) has the same shape for `sed`'s addresses.
+
+**What it costs.** Every metacharacter is read as itself, and every row exits 0:
+
+| written | what it matches | what awk means |
+|---|---|---|
+| `/^err/` | the literal `^err`, anywhere in the line | lines beginning `err` |
+| `/a.c/` | the literal `a.c` | `abc`, `axc`, `a c`, … |
+| `/x*/` | the literal `x*` | every line — `x*` matches the empty string |
+| `/err$/` | the literal `err$` | lines ending `err` |
+
+The third row is the worst of them: a pattern that in awk matches *everything*
+here matches almost nothing, so a filter that should be a no-op silently
+discards the whole input.
+
+**Why it is still open.** This is the same bug as
+`B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-str::contains`, and it has
+the same right answer: use the `ere` crate lane B wrote for it. But `ere`
+cannot be linked into the kernel today —
+
+```toml
+bstr = { version = "1.13.0", default-features = false, features = ["std"] }
+```
+
+— and `userspace/**` is lane B's tree. Filed as
+`requests/a-b-ere-is-std-only-so-the-kernel-shell-still-matches-regexes-with-contains.md`,
+asking for a `no_std` + `alloc` build of the crate. `ere` wants `bstr` for one
+function (`char_indices`), which `bstr` offers under `alloc`, so the change may
+be a feature flag and some `std::` → `core::`/`alloc::` paths.
+
+**Why not just write one here.** A second ERE in `kernel/` is the outcome the
+`ere` crate exists to prevent — its Cargo.toml says so directly — and two
+engines that must agree about `[[:alpha:]]`, leftmost-longest and backreference
+semantics will not agree for long. A kernel-resident copy would also have to be
+re-verified against gawk independently, duplicating `scripts/awk-diff.sh`.
+
+**The fallback, if lane B declines.** Refuse rather than guess: any `/.../`
+pattern containing a metacharacter reports `awk: regular expressions are not
+supported in the kernel shell` and exits 2. Worse for the user, but a refusal
+is detectable and a wrong answer is not.
+
+**Not `grep`.** `kshell`'s `grep` matches by substring too (`grep_matches`,
+~96861), but it advertises "search for pattern in files", has no `-E`, and a
+fixed-string search is a defensible reading of that. It is left alone
+deliberately; only `awk` and `sed`, where the syntax itself promises a regex,
+are counted here.
+
+#### TD-A-AWK-DEMANDED-A-FILE-FOR-A-PROGRAM-THAT-READS-NO-INPUT (lane A, 2026-08-25) — ✅ FIXED (`908043883`)
+
+**In short:** `awk 'BEGIN{print "hi"}'` — the way almost everyone first uses
+awk — refused to run in the kernel shell, because it insisted on being given a
+file even for a program that reads nothing. Four other things it did wrong were
+worse, because they *did* run and exited 0: a file it could not decode came out
+empty, `-F':'` silently made `$1` the entire line, and a Windows-style text file
+quietly lost a character off its last field. All fixed, and pinned by a
+self-test rung.
+
+**Where.** `kernel/src/kshell.rs`: `cmd_awk` and `cmd_awk_input`, replaced by
+one `awk_run`; `parse_awk_args`, `awk_field_sep`, `awk_records`,
+`awk_split_fields`, `awk_exec_action`, `awk_format_print`, `awk_eval_expr`.
+
+**The refusal.** `cmd_awk` checked `files.is_empty()` and returned before the
+BEGIN loop:
+
+```rust
+if files.is_empty() {
+    shell_println!("awk: no input file specified");
+    set_exit(1);
+    return;
+}
+```
+
+POSIX is explicit that awk reads input only if the program has a rule that
+still needs it. A `BEGIN`-only program is finished when BEGIN is; an `END`
+block, by contrast, *does* need input, because it reports the final `NR`. The
+driver now asks `rules.iter().any(|r| !r.is_begin)` and reads only then.
+
+**The four silent ones.** Every row exited 0:
+
+| written | what it did | what it looks like |
+|---|---|---|
+| `awk '{print}' some.png` | printed nothing | the file was empty |
+| `awk -F':' '{print $2}' f` | printed a blank line per record | field 2 did not exist |
+| `awk -F'[,;]' '{print $2}' f` | printed the whole record as `$1`, blank for `$2` | ditto |
+| `awk '{print $NF}'` on CRLF | dropped the `\r` from the last field | the file had no `\r` |
+| `awk 'BEGIN{print "a   b"}'` | printed `a b` | the program said one space |
+
+- **The undecodable file** is the shared `from_utf8(&data).unwrap_or("")` fault,
+  the same one `fold` and `base64 -d` had. Records and fields are now `&[u8]`
+  slices of the input and `print` writes them back through
+  `shell_write_bytes`, so `awk` moves up into the byte-clean arm of
+  `dispatch_with_input`. The *program* is still `&str` — it came from the
+  command line, which is — but the data never is.
+- **`-F':'`** kept the quotes the shell had left on it, so the separator was
+  the three characters `':'`; `awk_split_fields` answered a separator it could
+  not use with `alloc::vec![line]`, one field holding everything. The argument
+  line now goes through `split_words`, which honours quotes — the same
+  function `fold` and `base64` use.
+- **The rejoin.** The old parse ran `split_whitespace` over the raw argument
+  line and then rebuilt a quoted program by pushing words back with a *single*
+  space between them. Runs of spaces inside a string literal did not survive
+  that, so `print "a   b"` printed `a b`.
+- **A multi-character `-F`** is an extended regular expression in POSIX (a
+  single character is always literal, which is why `-F.` splits on dots). With
+  no regex engine there are two readings, and the old code picked neither. It
+  now splits **literally where the two readings cannot differ** — no
+  metacharacter in the separator, which covers the overwhelmingly common
+  `-F', '` — and **refuses, with exit 2**, where they can. A refusal is
+  detectable; a whole record in `$1` is not.
+- **The carriage return.** Records came from `str::lines`, which strips a `\r`
+  that precedes the `\n`, and fields from `split_whitespace`, which breaks on
+  one. awk treats `\r` as ordinary data, so `$NF == "ok"` was true on a CRLF
+  file where awk says false. Records now split on `\n` alone (`awk_records`,
+  which also declines to invent a trailing empty record), and the default `FS`
+  is space/tab/newline as POSIX says, rather than every Unicode space.
+
+**The duplication.** `cmd_awk` and `cmd_awk_input` carried a copy each of the
+BEGIN/record/END driver — the class recorded as
+`TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP` — and they had already
+drifted: only the file copy did anything about a read error, and the pipe copy
+delegated wholesale to `cmd_awk` the moment any operand was named, which threw
+the pipe away even when `-` asked for it. There is now one
+`awk_run(spec, stdin)`; `-` names the pipe; every operand is attempted and the
+worst status is reported, so a readable second file cannot erase an unreadable
+first.
+
+Covered by self-test rung 41, which asserts whole byte strings rather than
+searching them.
+
+**Left standing:** `/re/` is still a substring match — see
+`TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`, blocked on
+`ere` gaining a `no_std` build — and the statement executor still ignores
+anything it cannot run, below.
+
+#### TD-A-AWK-IGNORES-EVERY-STATEMENT-IT-CANNOT-RUN (lane A, 2026-08-25) — ✅ FIXED
+
+**Fixed** by the parse-time refusal described under "What the fix looks like",
+plus the pattern half of the same fault, which this entry did not originally
+cover. `awk_validate_program` walks the parsed rules before any of them runs and
+refuses the whole program with `awk: unsupported statement: '…'` or
+`awk: unsupported pattern: '…'` and exit 2. Rationale and the decision not to
+implement the missing language instead: design-decisions §294. Pinned by
+`kshell::self_test` rung 42, which asserts all four rows of the table below plus
+the pattern case.
+
+Three things came with it:
+
+- **The pattern fallback is gone.** `awk_pattern_matches` used to end in
+  "treat as a literal substring match", so `awk '$1 > 5 { print }'` searched
+  each record for the seven characters `$1 > 5` and printed nothing. It is now
+  `awk_pattern_eval`, returning `Option<bool>`, and `None` is a refusal.
+- **`NF` gained the three comparison operators it was missing.** The `NR` and
+  `NF` chains were separate copies and had drifted — `NR` handled all six
+  operators, `NF` only `>=`, `>` and `==` — so `awk 'NF < 3'` fell out of the
+  bottom and became a substring search. One `awk_compare` now serves both. This
+  is `TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP` in a second place.
+- **A bare word in `print` is refused rather than echoed.** `print total`
+  printed the five characters `total`; awk prints the value of the variable
+  `total`, which here is empty. An *integer* literal is still supported, because
+  that is the one case where echoing the text and evaluating it provably agree
+  — a decimal is not, since awk formats `5.0` through `OFMT` and prints `5`.
+
+**Still not refused: `/pattern/`**, which remains a substring match. That is the
+separate `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`,
+blocked on the `ere` crate gaining a `no_std` build; refusing every `/…/` with
+a metacharacter is the documented fallback if that request is declined, and is
+not done pre-emptively because it would break working invocations while the
+request is open.
+
+The original entry follows.
+
+**In short:** the kernel shell's `awk` understands exactly one statement,
+`print`. Anything else — an assignment, an `if`, a function call — is skipped
+in silence and the program reports success. So a program that does real work in
+a real awk does *nothing* here, and says it worked.
+
+**Where.** `kernel/src/kshell.rs`, `awk_exec_action`:
+
+```rust
+} else {
+    // Unknown statement — ignore.
+}
+```
+
+**What it costs.**
+
+| written | what it does | what awk does |
+|---|---|---|
+| `awk '{ n = n + 1 } END { print n }'` | prints an empty line | prints the count |
+| `awk '{ if ($1 > 5) print }'` | prints nothing, ever | prints the matching records |
+| `awk '{ printf "%s\n", $1 }'` | prints nothing | prints field 1 |
+| `awk '{ sub(/a/, "b"); print }'` | prints the record unchanged | prints it substituted |
+
+Each exits 0. The last row is the shape that matters most: the output *looks*
+like plausible awk output, so nothing downstream can tell the substitution
+never happened.
+
+**What the fix looks like.** Report and stop, rather than skip:
+`awk: unsupported statement: '<stmt>'` on stderr with exit 2, checked once when
+the program is parsed rather than per record — gawk reports a syntax error
+before reading any input, and reporting per record would emit one line per
+input line. `parse_awk_program` already walks every rule, so the check belongs
+there.
+
+**Why it was not done with `908043883`.** That commit fixed the driver — which
+sources are read, and what the bytes are — and this is about the *language*.
+Bundling them would have made one commit that could not be reverted in halves,
+and the refusal needs a decision the driver fix did not: whether a program
+using an unimplemented statement should fail at parse time (gawk's behaviour,
+and it means `awk '{n=1} {print}'` stops printing) or fail only when the
+statement is reached. Parse-time is almost certainly right, but it is a
+user-visible behaviour change to a command that currently "works", so it wants
+its own commit and its own rung.
+
+**Not a regression.** This has been true since the command was written; the
+`908043883` rewrite neither caused it nor made it worse. It is recorded now
+because the rewrite is what made it visible.

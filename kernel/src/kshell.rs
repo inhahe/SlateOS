@@ -1376,12 +1376,20 @@ fn remove_quotes(s: &str) -> String {
 /// exactly the fact that quote removal destroys. [`cmd_trap`] has always had
 /// a correct quote-aware parser; it simply never received a quote.
 ///
+/// `awk`, `fold` and `base64` are here because each now parses its own line
+/// with [`split_words`], which both respects quotes and removes them. For
+/// `awk` the quoting is not a nicety: the program is one argument whose
+/// interior spaces are load-bearing, so `awk 'BEGIN{print "hi"}'` arrives
+/// dequoted as `BEGIN{print hi}` — two words, an unterminated brace block,
+/// and an action of `print` that prints an empty record. For `fold` and
+/// `base64` it is the ordinary case of a file name with a space in it.
+///
 /// The list is the migration path, not a special case: a command moves onto
 /// it when it learns to parse quotes, and when everything is on it this
 /// function and [`remove_quotes`] both go away in favour of a real argv.
 /// See `known-issues.md` → `TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV`.
 fn command_parses_own_quotes(cmd: &str) -> bool {
-    matches!(cmd, "trap")
+    matches!(cmd, "trap" | "awk" | "fold" | "base64")
 }
 
 /// Expand a `${...}` brace expression.
@@ -6869,6 +6877,19 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         "tac" => cmd_tac_input(args, input),
         "tee" => cmd_tee_input(args, input),
         "paste" => cmd_paste_input(args, input),
+        // `fold` reads bytes and writes the same bytes with newlines inserted.
+        // In column mode it decodes incrementally and treats a byte that is
+        // part of no valid character as one column of its own, so an
+        // undecodable pipe folds rather than being refused — and `fold -b -w76`
+        // over base64, the reason people reach for `-b`, is exact.
+        "fold" => cmd_fold_input(args, input),
+        // Encoding data that is *not* text is base64's whole purpose, so its
+        // input was never text to begin with, and its decoded output is bytes.
+        "base64" => cmd_base64_input(args, input),
+        // `awk`'s records and fields are byte slices of the input, and `print`
+        // writes them back unchanged. The *program* is still `&str` -- it came
+        // from the command line, which is -- but the data never is.
+        "awk" => cmd_awk_input(args, input),
         "cat" if args.is_empty() => {
             // `cat` with no args reads from pipe.
             shell_write_bytes(input);
@@ -6880,15 +6901,14 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         // cope with it. Converting one more of these is a matter of moving its
         // arm up into the block above.
         //
-        // `grep`, `cut`, `tr` and `fold` are `char`-oriented (character
-        // classes, field indices, display width); `sed` and `awk` are real
-        // text interpreters; `xargs` and `column` re-parse into words and
-        // measure display width. `mapfile` is blocked on something else rather
-        // than on itself — it stores its lines as `String`s in the shell
-        // environment, which is still a `String` map, so converting it here
-        // would only move the decode one call deeper.
-        "grep" | "mapfile" | "readarray" | "cut" | "tr" | "fold" | "xargs" | "column" | "sed"
-        | "awk" => {
+        // `grep`, `cut` and `tr` are `char`-oriented (character classes, field
+        // indices, display width); `sed` is a real text interpreter;
+        // `xargs` and `column` re-parse into words and measure display width.
+        // `mapfile` is blocked on something else rather than on itself — it
+        // stores its lines as `String`s in the shell environment, which is
+        // still a `String` map, so converting it here would only move the
+        // decode one call deeper.
+        "grep" | "mapfile" | "readarray" | "cut" | "tr" | "xargs" | "column" | "sed" => {
             let Some(text) = shell_bytes_as_str(input, cmd) else {
                 set_exit(1);
                 return;
@@ -6898,11 +6918,9 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
                 "mapfile" | "readarray" => cmd_mapfile_input(args, text),
                 "cut" => cmd_cut_input(args, text),
                 "tr" => cmd_tr_input(args, text),
-                "fold" => cmd_fold_input(args, text),
                 "xargs" => cmd_xargs_input(args, text),
                 "column" => cmd_column_input(args, text),
                 "sed" => cmd_sed_input(args, text),
-                "awk" => cmd_awk_input(args, text),
                 // Unreachable: the outer arm lists exactly these names.
                 _ => dispatch(line),
             }
@@ -7910,7 +7928,7 @@ fn cmd_help() {
     shell_println!("  dpkg -I|-c|-x F.deb [-d DIR]  Inspect/list/extract Debian package");
     shell_println!("  zip [-0] [-r] F.zip FILE..  Create ZIP archive (deflate or stored)");
     shell_println!("  crc32 FILE    Compute CRC32C checksum");
-    shell_println!("  base64 [-d] F Encode file to Base64 (or -d to decode)");
+    shell_println!("  base64 [-di] [-w N] [F]  Base64 encode/decode (- or no F: stdin)");
     shell_println!("  checksum [-t sha256|crc32] FILE  Compute file checksum");
     shell_println!("  wipe FILE     Secure delete (zero-fill + remove)");
     shell_println!("  sed [-i] [-n] 's/old/new/[g]' FILE  Stream editor (substitute/delete/print)");
@@ -10061,8 +10079,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // awk — a string literal and the comma splitter, both byte-indexed
         // over ASCII delimiters.
-        assert_eq!(awk_eval_expr("\"café\"", "", &[], 1, 0), "café");
-        assert_eq!(awk_eval_expr("\"a\\tcafé\"", "", &[], 1, 0), "a\tcafé");
+        assert_eq!(
+            awk_eval_expr("\"café\"", b"", &[], 1, 0).as_deref(),
+            Some(&b"caf\xc3\xa9"[..])
+        );
+        assert_eq!(
+            awk_eval_expr("\"a\\tcafé\"", b"", &[], 1, 0).as_deref(),
+            Some(&b"a\tcaf\xc3\xa9"[..])
+        );
         assert_eq!(
             awk_split_print_args("\"café\",\"→\""),
             alloc::vec![
@@ -12290,6 +12314,39 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "-b counts bytes, so three bytes is `zz` plus the first byte of alpha"
         );
 
+        // Input that is not valid UTF-8 is folded, not refused and not
+        // silently emptied. `fold` used to be narrowed through
+        // `shell_bytes_as_str` before it ever saw the pipe, so this whole
+        // group was a diagnostic and exit 1; the file half was worse still,
+        // with `from_utf8(&data).unwrap_or("")` turning an undecodable file
+        // into an empty one and reporting success.
+        let out = piped("fold -w2", b"\xff\xfe\xfd\xfc");
+        assert_eq!(
+            out.as_slice(),
+            b"\xff\xfe\n\xfd\xfc",
+            "a byte that is part of no character counts one column and is written back as itself"
+        );
+        assert_eq!(last_exit(), 0, "and folding it is success, not a refusal");
+
+        // The decoder resynchronises after an undecodable byte: alpha is still
+        // one unit, so a width of 1 puts it on its own line whole rather than
+        // splitting it.
+        let out = piped("fold -w1", b"\xff\xce\xb1\n");
+        assert_eq!(
+            out.as_slice(),
+            b"\xff\n\xce\xb1\n",
+            "a bad byte does not derail the character that follows it"
+        );
+
+        // A sequence cut short by the end of input is written back as the bytes
+        // it is -- neither dropped nor completed with a replacement character.
+        let out = piped("fold -w2", b"zz\xce");
+        assert_eq!(
+            out.as_slice(),
+            b"zz\n\xce",
+            "a truncated sequence at end of input survives as its own bytes"
+        );
+
         // A tab advances to the next multiple of 8 rather than counting as one
         // column -- unless `-b` was asked for, where every byte is one column.
         let out = piped("fold -w8", b"zz\tzz\n");
@@ -12437,8 +12494,528 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
         assert_eq!(last_exit(), 1, "and it is a failure");
 
+        // The file half must be as byte-clean as the pipe half. This is the
+        // case `from_utf8(&data).unwrap_or("")` answered with *nothing at all*
+        // and an exit status of 0 -- a file silently reported as empty, which
+        // is the worst shape a wrong answer can take because the caller has no
+        // way to tell it from a file that really was empty.
+        let bad = "/tmp/zz_fold_bad";
+        assert!(
+            crate::fs::Vfs::write_file(bad, b"\xff\xfe\xfd\xfc\n").is_ok(),
+            "writing the undecodable fold fixture must succeed"
+        );
+        let out = plain(&alloc::format!("fold -w2 {bad}"));
+        assert_eq!(
+            out.as_slice(),
+            b"\xff\xfe\n\xfd\xfc\n",
+            "a file of undecodable bytes is folded, not silently emptied"
+        );
+        assert_eq!(last_exit(), 0, "and reading it is success");
+
         let _ = crate::fs::Vfs::remove(a);
         let _ = crate::fs::Vfs::remove(b);
+        let _ = crate::fs::Vfs::remove(bad);
+    }
+
+    serial_println!("  kshell::self_test 40: base64 -d writes its output instead of describing it");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+        fn plain(cmd: &str) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch(cmd);
+            capture.finish()
+        }
+
+        // The bug this rung exists for. `base64 -d` printed the decoded bytes
+        // only when they happened to be valid UTF-8; otherwise it printed
+        // `<binary: N bytes>` -- a description of the output in place of the
+        // output -- and exited 0. So the one thing base64 exists to do, carry
+        // bytes that are not text, was the case it could not do.
+        let bin = "/tmp/zz_b64_bin";
+        let raw: &[u8] = b"\x00\x01\xff\xfe\x80\x7f\nz\r\x00";
+        assert!(
+            crate::fs::Vfs::write_file(bin, raw).is_ok(),
+            "writing the binary base64 fixture must succeed"
+        );
+        let encoded = plain(&alloc::format!("base64 {bin}"));
+        assert_eq!(last_exit(), 0, "encoding a binary file is success");
+        let decoded = piped("base64 -d", &encoded);
+        assert_eq!(
+            decoded.as_slice(),
+            raw,
+            "`base64 f | base64 -d` must reproduce f exactly, byte for byte"
+        );
+        assert_eq!(last_exit(), 0, "and decoding it is success");
+
+        // Known vectors from RFC 4648, and the newline that ends the encoding.
+        let out = piped("base64", b"foo");
+        assert_eq!(
+            out.as_slice(),
+            b"Zm9v\n",
+            "three bytes encode without padding"
+        );
+        let out = piped("base64", b"fo");
+        assert_eq!(
+            out.as_slice(),
+            b"Zm8=\n",
+            "two bytes take one padding character"
+        );
+        let out = piped("base64", b"f");
+        assert_eq!(out.as_slice(), b"Zg==\n", "one byte takes two");
+        let out = piped("base64", b"");
+        assert_eq!(
+            out.as_slice(),
+            b"",
+            "nothing in, nothing out -- not a bare newline"
+        );
+
+        // Decoding adds no newline of its own. `shell_println!` used to invent
+        // one, so even the valid-text case failed to round-trip.
+        let out = piped("base64 -d", b"Zm9v\n");
+        assert_eq!(
+            out.as_slice(),
+            b"foo",
+            "the decoded bytes are the output; nothing is appended to them"
+        );
+
+        // Wrapping: 60 bytes encode to 80 characters, which is past the
+        // default 76. `-w0` asks for one unbroken line. Both used to be
+        // impossible to ask for -- `-w` was unimplemented, so `base64 -w0 f`
+        // opened a file named `-w0`.
+        let sixty = [b'z'; 60];
+        let out = piped("base64", &sixty);
+        assert_eq!(
+            out.len(),
+            82,
+            "80 characters wrap into 76 + 4 with a newline after each"
+        );
+        // 'z' repeated encodes as "enp6" repeated, so column 77 -- the first
+        // character of the second line -- is another 'e'.
+        assert_eq!(
+            out.get(76..78).unwrap_or(b""),
+            b"\ne",
+            "the break falls after column 76"
+        );
+        let out = piped("base64 -w0", &sixty);
+        assert_eq!(out.len(), 81, "-w0 is one line of 80 plus its newline");
+        let out = piped("base64 --wrap=0", &sixty);
+        assert_eq!(out.len(), 81, "and the long spelling means the same");
+
+        // Input that is not base64 is refused. It used to be narrowed with
+        // `from_utf8(&data).unwrap_or("")`, so an undecodable file became the
+        // empty string, decoded to zero bytes, and reported success.
+        let out = piped("base64 -d", b"\xff\xfe\xfd\xfc");
+        assert_output_contains("a non-base64 input is reported", &out, b"invalid input");
+        assert_eq!(last_exit(), 1, "and it is a failure, not an empty success");
+
+        let out = piped("base64 -d", b"Zm9v!!!!");
+        assert_output_contains("so is a stray character", &out, b"invalid input");
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        // `-i` is how you ask for the old leniency, and now it has to be asked
+        // for rather than being the only behaviour available.
+        let out = piped("base64 -di", b"Zm 9v!!");
+        assert_eq!(
+            out.as_slice(),
+            b"foo",
+            "-i skips everything outside the alphabet"
+        );
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        // Padding rules. `Xy=z` used to decode as if it read `Xy==`, silently
+        // ignoring the `z`; a group cut short used to be caught, but only by a
+        // length check that whitespace stripping could defeat.
+        let out = piped("base64 -d", b"Zm=v");
+        assert_output_contains(
+            "padding in third place demands it in fourth",
+            &out,
+            b"invalid input",
+        );
+        let out = piped("base64 -d", b"Zg==Zg==");
+        assert_output_contains("nothing may follow the padding", &out, b"invalid input");
+        let out = piped("base64 -d", b"Zm9");
+        assert_output_contains(
+            "a group of three is a truncated group",
+            &out,
+            b"invalid input",
+        );
+
+        // A newline inside the data is structure, not garbage, so a wrapped
+        // encoding decodes without `-i`.
+        let out = piped("base64 -d", b"Zm\n9v\r\n");
+        assert_eq!(out.as_slice(), b"foo", "line breaks are skipped without -i");
+
+        // Argument faults are refused rather than guessed at.
+        let out = plain(&alloc::format!("base64 {bin} /tmp/zz_b64_other"));
+        assert_output_contains("a second operand is reported", &out, b"extra operand");
+        assert_eq!(last_exit(), 1, "and it is a failure, not a silent skip");
+
+        let out = piped("base64 -w abc", b"foo");
+        assert_output_contains(
+            "an unreadable wrap is reported",
+            &out,
+            b"invalid wrap size: 'abc'",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        let out = piped("base64 -w", b"foo");
+        assert_output_contains(
+            "-w with nothing after it is reported",
+            &out,
+            b"requires an argument",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        let out = piped("base64 -q", b"foo");
+        assert_output_contains(
+            "an unknown flag is reported",
+            &out,
+            b"invalid option -- 'q'",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        let out = piped("base64 --nope", b"foo");
+        assert_output_contains(
+            "so is an unknown long option",
+            &out,
+            b"unrecognized option '--nope'",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        // A flag is a flag wherever it stands. `base64 f -d` used to *encode*,
+        // because only the first word was examined.
+        let b64 = "/tmp/zz_b64_text";
+        assert!(
+            crate::fs::Vfs::write_file(b64, b"Zm9v\n").is_ok(),
+            "writing the base64 text fixture must succeed"
+        );
+        let out = plain(&alloc::format!("base64 {b64} -d"));
+        assert_eq!(
+            out.as_slice(),
+            b"foo",
+            "-d after the operand decodes, rather than encoding the encoding"
+        );
+
+        // `--` reaches a file whose name begins with a dash.
+        let out = plain(&alloc::format!("base64 -d -- {b64}"));
+        assert_eq!(out.as_slice(), b"foo", "`--` ends the options");
+
+        // Nothing to read at all is an error, not an empty success.
+        let out = plain("base64");
+        assert_output_contains(
+            "no operand and no pipe is reported",
+            &out,
+            b"no file operand",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        // `--help` is real, which is what makes the "Try 'base64 --help'"
+        // line the diagnostics print an honest suggestion.
+        let out = plain("base64 --help");
+        assert_output_contains("--help explains the options", &out, b"--ignore-garbage");
+        assert_eq!(last_exit(), 0, "and asking for help is not a failure");
+
+        let _ = crate::fs::Vfs::remove(bin);
+        let _ = crate::fs::Vfs::remove(b64);
+    }
+
+    serial_println!("  kshell::self_test 41: awk runs BEGIN without a file, and reads bytes");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+        fn plain(cmd: &str) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch(cmd);
+            capture.finish()
+        }
+
+        // The bug this rung exists for. A program made only of BEGIN blocks
+        // needs no input at all, and POSIX says so; ours demanded a file and
+        // exited 1 before BEGIN ever ran, so the single most common one-liner
+        // in awk -- using it as a calculator or a here-string -- was refused.
+        let out = plain("awk 'BEGIN{print \"hi\"}'");
+        assert_eq!(
+            out.as_slice(),
+            b"hi\n",
+            "a BEGIN-only program runs with no input and prints exactly its output"
+        );
+        assert_eq!(last_exit(), 0, "and it is a success");
+
+        // END is the other half of the same rule: it *does* need input, because
+        // it reports the final NR.
+        let out = piped("awk 'END{print NR}'", b"a\nb\nc\n");
+        assert_eq!(out.as_slice(), b"3\n", "END still reads input, to count it");
+
+        // Input that is not valid UTF-8. This used to be
+        // `from_utf8(&data).unwrap_or("")`, so the whole file became the empty
+        // string: `awk '{print}' some.png` printed nothing and exited 0, which
+        // is what an empty file looks like.
+        let bad = "/tmp/zz_awk_bin";
+        assert!(
+            crate::fs::Vfs::write_file(bad, b"\xff\xfe ok\n\xc3\x28 two\n").is_ok(),
+            "writing the undecodable awk fixture must succeed"
+        );
+        let out = plain(&alloc::format!("awk '{{print}}' {bad}"));
+        assert_eq!(
+            out.as_slice(),
+            b"\xff\xfe ok\n\xc3\x28 two\n",
+            "an undecodable file passes through byte for byte"
+        );
+        assert_eq!(last_exit(), 0, "and reading it is a success");
+        let out = plain(&alloc::format!("awk '{{print $2}}' {bad}"));
+        assert_eq!(
+            out.as_slice(),
+            b"ok\ntwo\n",
+            "and its fields split around the bytes that do not decode"
+        );
+
+        // `-F` used to keep the quotes the shell left on it, so `-F':'` was a
+        // three-character separator, which the splitter answered by returning
+        // the whole record as field 1 -- and exiting 0.
+        let csv = "/tmp/zz_awk_csv";
+        assert!(
+            crate::fs::Vfs::write_file(csv, b"a:b:c\n").is_ok(),
+            "writing the awk -F fixture must succeed"
+        );
+        let out = plain(&alloc::format!("awk -F':' '{{print $2}}' {csv}"));
+        assert_eq!(
+            out.as_slice(),
+            b"b\n",
+            "a quoted single-character -F splits"
+        );
+
+        // A multi-character separator is a regular expression in POSIX. Where
+        // the literal and regex readings agree -- no metacharacter -- the
+        // literal split is used; where they differ, the split is refused
+        // rather than guessed at.
+        let csv2 = "/tmp/zz_awk_csv2";
+        assert!(
+            crate::fs::Vfs::write_file(csv2, b"a, b, c\n").is_ok(),
+            "writing the multi-character -F fixture must succeed"
+        );
+        let out = plain(&alloc::format!("awk -F', ' '{{print $2}}' {csv2}"));
+        assert_eq!(
+            out.as_slice(),
+            b"b\n",
+            "`-F', '` has no metacharacter, so literal and regex agree"
+        );
+        let out = plain(&alloc::format!("awk -F'[,;]' '{{print $2}}' {csv2}"));
+        assert_output_contains(
+            "a separator that only a regex could read is refused, not guessed",
+            &out,
+            b"regular expression",
+        );
+        assert_eq!(last_exit(), 2, "and refusing is a distinct status");
+
+        // `-F` with nothing after it.
+        let out = plain("awk -F");
+        assert_output_contains(
+            "a bare -F is reported rather than treated as the program",
+            &out,
+            b"option requires an argument",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        // `-` names the pipe, so both sources can be read, in order.
+        let f = "/tmp/zz_awk_op";
+        assert!(
+            crate::fs::Vfs::write_file(f, b"zz_from_file\n").is_ok(),
+            "writing the awk operand fixture must succeed"
+        );
+        let out = piped(&alloc::format!("awk '{{print}}' - {f}"), b"zz_from_pipe\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_from_pipe\nzz_from_file\n",
+            "`-` reads the pipe, in the position it was written"
+        );
+
+        // Every operand is attempted, and the worst status is what is reported:
+        // a readable second file must not erase an unreadable first one.
+        let out = plain(&alloc::format!("awk '{{print}}' /tmp/zz_awk_missing {f}"));
+        assert_output_contains(
+            "the later readable file is still read",
+            &out,
+            b"zz_from_file",
+        );
+        assert_eq!(last_exit(), 1, "but the missing one sets the status");
+
+        // A carriage return is data to awk, and part of the last field. The
+        // old splitter went through `str::lines` (which strips a `\r` before
+        // the `\n`) and `split_whitespace` (which breaks on one), so a CRLF
+        // file's last field silently lost its `\r` and `$NF == "ok"` was true
+        // where awk says it is false.
+        let out = piped("awk '{print $NF}'", b"a ok\r\n");
+        assert_eq!(
+            out.as_slice(),
+            b"ok\r\n",
+            "the carriage return stays in the field it was written in"
+        );
+
+        // An empty record has no fields, whatever FS is.
+        let out = piped("awk '{print NF}'", b"\n\na\n");
+        assert_eq!(out.as_slice(), b"0\n0\n1\n", "NF is 0 for an empty record");
+
+        // The argument line is split with `split_words`, which honours quotes,
+        // rather than by `split_whitespace` and a rejoin with single spaces --
+        // which silently collapsed runs of spaces *inside a string literal*.
+        let out = plain("awk 'BEGIN{print \"a   b\"}'");
+        assert_eq!(
+            out.as_slice(),
+            b"a   b\n",
+            "spaces inside a string literal are not collapsed"
+        );
+
+        // Nothing to read at all is still an error -- but now it is one only
+        // when a rule actually wanted input.
+        let out = plain("awk '{print}'");
+        assert_output_contains(
+            "a program that needs input and has none says so",
+            &out,
+            b"no input to read",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        let _ = crate::fs::Vfs::remove(bad);
+        let _ = crate::fs::Vfs::remove(csv);
+        let _ = crate::fs::Vfs::remove(csv2);
+        let _ = crate::fs::Vfs::remove(f);
+    }
+
+    serial_println!("  kshell::self_test 42: awk refuses a program it cannot run whole");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+        let data: &[u8] = b"1 alpha\n7 beta\n";
+
+        // The four rows of `TD-A-AWK-IGNORES-EVERY-STATEMENT-IT-CANNOT-RUN`.
+        // Each of these used to exit 0 having quietly dropped the statement it
+        // could not run, so the output looked like a legitimate result.
+        for (program, fragment) in [
+            ("awk '{n = n + 1} END {print n}'", &b"n = n + 1"[..]),
+            ("awk '{if ($1 > 5) print}'", b"if ($1 > 5) print"),
+            ("awk '{printf \"%s\\n\", $1}'", b"printf"),
+            ("awk '{sub(/a/, \"b\"); print}'", b"sub(/a/, \"b\")"),
+        ] {
+            let out = piped(program, data);
+            assert_output_contains(
+                "an unrunnable statement is named, not skipped",
+                &out,
+                b"unsupported statement",
+            );
+            assert_output_contains("and the fragment is quoted back", &out, fragment);
+            assert_eq!(
+                last_exit(),
+                2,
+                "a program that cannot be run is fatal to the invocation, not per-operand"
+            );
+        }
+
+        // The refusal is whole-program: the `{print}` rule here is perfectly
+        // runnable, and is still not run. Running it would emit output that
+        // looks like a complete result.
+        let out = piped("awk '{n = 1} {print}'", data);
+        assert_output_contains(
+            "one bad rule refuses the program",
+            &out,
+            b"unsupported statement",
+        );
+        assert!(
+            !out.windows(5).any(|w| w == b"alpha"),
+            "and no record is printed by the rules that would have worked"
+        );
+        assert_eq!(last_exit(), 2, "still exit 2");
+
+        // The pattern half of the same fault: this used to fall through to a
+        // substring search for the seven characters `$1 > 5`, which matches no
+        // record, so the filter printed nothing and reported success.
+        let out = piped("awk '$1 > 5 {print}'", data);
+        assert_output_contains(
+            "an unevaluable pattern is named too",
+            &out,
+            b"unsupported pattern",
+        );
+        assert_output_contains("with its own text", &out, b"$1 > 5");
+        assert_eq!(last_exit(), 2, "exit 2");
+
+        // A bare word in `print` used to be echoed as literal text, so
+        // `print total` printed `total` where awk prints the (empty) variable.
+        let out = piped("awk '{print total}'", data);
+        assert_output_contains(
+            "a variable reference is refused, not echoed",
+            &out,
+            b"unsupported statement",
+        );
+        assert!(
+            !out.windows(6).any(|w| w == b"total\n"),
+            "and the source text is not printed as if it were data"
+        );
+
+        // What must keep working. `NF` now takes all six operators, not the
+        // three the duplicated copy had; `NF < 3` used to become a substring
+        // search for `NF < 3`.
+        let out = piped("awk 'NF < 3 {print $2}'", data);
+        assert_eq!(
+            out.as_slice(),
+            b"alpha\nbeta\n",
+            "NF takes the operators NR always had"
+        );
+        assert_eq!(last_exit(), 0, "and a runnable program is a success");
+
+        let out = piped("awk 'NR != 1 {print $2}'", data);
+        assert_eq!(out.as_slice(), b"beta\n", "NR != N still works");
+
+        // An integer literal is the one case the old bare-word fallback got
+        // right, and it is kept as an explicit arm.
+        let out = piped("awk 'NR == 1 {print 42, $2}'", data);
+        assert_eq!(out.as_slice(), b"42 alpha\n", "an integer literal prints");
+
+        // A decimal is *not* kept, because awk would print `5` for `5.0` via
+        // OFMT and echoing the text would print `5.0` -- the two readings
+        // differ, so the refusal applies. See design-decisions §294.
+        let out = piped("awk 'NR == 1 {print 5.0}'", data);
+        assert_output_contains(
+            "a decimal literal is refused rather than echoed",
+            &out,
+            b"unsupported statement",
+        );
+
+        // An out-of-range field is a *value* (the empty string), not an
+        // unrecognised expression: this must not be refused.
+        let out = piped("awk '{print $9}'", data);
+        assert_eq!(
+            out.as_slice(),
+            b"\n\n",
+            "a missing field is empty, and does not refuse the program"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // The invariant that makes validating with a dummy record sound:
+        // whether a pattern or an expression can be evaluated is a function of
+        // the program text alone. Same fragments, two unlike records.
+        for pattern in ["", "/alpha/", "NR > 2", "NF == 2", "$1 > 5", "junk"] {
+            assert_eq!(
+                awk_pattern_eval(pattern, b"", 0, 0).is_some(),
+                awk_pattern_eval(pattern, b"7 beta", 9, 2).is_some(),
+                "pattern recognition must not depend on the record"
+            );
+        }
+        for expr in ["\"s\"", "NR", "NF", "$0", "$NF", "$9", "42", "5.0", "total"] {
+            assert_eq!(
+                awk_format_print(expr, b"", &[], 0, 0).is_some(),
+                awk_format_print(expr, b"7 beta", &[b"7", b"beta"], 9, 2).is_some(),
+                "expression recognition must not depend on the record"
+            );
+        }
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -107889,33 +108466,101 @@ fn parse_fold_args(args: &str) -> Result<FoldSpec, FoldParseError> {
     })
 }
 
+/// One whole character, classified: written as itself, and moving the column
+/// the way GNU's `adjust_column` moves it.
+///
+/// Written once, rather than inline in [`fold_units`], because the three
+/// special cases are the sort of table that drifts when it exists twice — see
+/// `TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP`.
+fn fold_char_unit(c: char) -> FoldUnit {
+    FoldUnit {
+        piece: FoldPiece::Ch(c),
+        adj: match c {
+            '\t' => FoldAdj::Tab,
+            '\u{8}' => FoldAdj::Backspace,
+            '\r' => FoldAdj::Return,
+            _ => FoldAdj::Plain,
+        },
+        blank: c == ' ' || c == '\t',
+    }
+}
+
+/// One byte, standing for itself and counting one column.
+///
+/// Used for every byte under `-b`, and in column mode for a byte that is not
+/// part of any valid character.
+fn fold_byte_unit(b: u8) -> FoldUnit {
+    FoldUnit {
+        piece: FoldPiece::Byte(b),
+        // One column, tabs included: that is what `-b` means, and an
+        // undecodable byte has no width anyone can know.
+        adj: FoldAdj::Plain,
+        // A tab is still a blank, so `-bs` may break after one. No UTF-8
+        // continuation byte can be confused for one: they are all >= 0x80.
+        blank: b == b' ' || b == b'\t',
+    }
+}
+
 /// Split one input line into the units `fold` may not break apart.
-fn fold_units(line: &str, count_bytes: bool) -> Vec<FoldUnit> {
+///
+/// The line arrives as bytes, not as `&str`, because a file is bytes and a
+/// pipe is bytes. Narrowing to `&str` first is how `fold` used to turn a file
+/// it could not decode into an *empty* one — `from_utf8(&data).unwrap_or("")`,
+/// reported as success. That is the same silent-guess failure the rest of this
+/// rewrite removed, arriving by a different door.
+///
+/// In column mode the bytes are decoded incrementally, and a byte that is part
+/// of no valid character becomes a one-column unit of its own. That is what
+/// GNU does in the C locale: the byte is neither dropped nor replaced with
+/// U+FFFD, both of which would change the bytes on the way through a program
+/// whose job is to insert newlines and nothing else.
+fn fold_units(line: &[u8], count_bytes: bool) -> Vec<FoldUnit> {
     let mut units = Vec::new();
     if count_bytes {
-        for &b in line.as_bytes() {
-            units.push(FoldUnit {
-                piece: FoldPiece::Byte(b),
-                // `-b` counts every byte as one column, tabs included...
-                adj: FoldAdj::Plain,
-                // ...but a tab is still a blank, so `-bs` may break after one.
-                // No UTF-8 continuation byte can be confused for one: they are
-                // all >= 0x80.
-                blank: b == b' ' || b == b'\t',
-            });
+        for &b in line {
+            units.push(fold_byte_unit(b));
         }
-    } else {
-        for c in line.chars() {
-            units.push(FoldUnit {
-                piece: FoldPiece::Ch(c),
-                adj: match c {
-                    '\t' => FoldAdj::Tab,
-                    '\u{8}' => FoldAdj::Backspace,
-                    '\r' => FoldAdj::Return,
-                    _ => FoldAdj::Plain,
-                },
-                blank: c == ' ' || c == '\t',
-            });
+        return units;
+    }
+
+    let mut rest = line;
+    while !rest.is_empty() {
+        match core::str::from_utf8(rest) {
+            Ok(s) => {
+                for c in s.chars() {
+                    units.push(fold_char_unit(c));
+                }
+                break;
+            }
+            Err(e) => {
+                let good = e.valid_up_to();
+                // Infallible in practice — `valid_up_to` is by definition a
+                // character boundary — but written so a wrong answer here
+                // cannot silently drop the prefix.
+                if let Some(s) = rest.get(..good).and_then(|b| core::str::from_utf8(b).ok()) {
+                    for c in s.chars() {
+                        units.push(fold_char_unit(c));
+                    }
+                }
+                // `error_len() == None` means the input simply ended inside a
+                // sequence. Everything left is then undecodable, and is written
+                // back as the bytes it is.
+                let bad = match e.error_len() {
+                    Some(n) => n,
+                    None => rest.len().saturating_sub(good),
+                };
+                let bad_end = good.saturating_add(bad);
+                for &b in rest.get(good..bad_end).unwrap_or(&[]) {
+                    units.push(fold_byte_unit(b));
+                }
+                // Both arms above give `bad >= 1`: `error_len` is never
+                // `Some(0)`, and a `None` only happens when at least one byte
+                // follows the valid prefix. So this loop always consumes.
+                match rest.get(bad_end..) {
+                    Some(r) => rest = r,
+                    None => break,
+                }
+            }
         }
     }
     units
@@ -107950,7 +108595,7 @@ fn fold_flush(out: &mut Vec<u8>, pending: &[FoldUnit]) {
 /// standing lesson in what two copies of one loop become
 /// (`TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP`).
 ///
-/// Lines are split on `\n` alone, with [`str::split_inclusive`] rather than
+/// Lines are split on `\n` alone, with `split_inclusive` rather than
 /// [`str::lines`], for two reasons: `lines` also strips a `\r`, which GNU
 /// treats as data *and* as a column reset; and it cannot tell `"a\nb"` from
 /// `"a\nb\n"`, so a loop built on it invents a final newline for input that had
@@ -107959,11 +108604,11 @@ fn fold_flush(out: &mut Vec<u8>, pending: &[FoldUnit]) {
 /// The break rule is GNU's `fold_file` restated without its `goto`: measure the
 /// next unit, and if it would overrun the width, end the line and measure that
 /// same unit again against the fresh column.
-fn fold_process(text: &str, spec: &FoldSpec) -> Vec<u8> {
+fn fold_process(text: &[u8], spec: &FoldSpec) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
 
-    for chunk in text.split_inclusive('\n') {
-        let (line, newline) = match chunk.strip_suffix('\n') {
+    for chunk in text.split_inclusive(|&b| b == b'\n') {
+        let (line, newline) = match chunk.strip_suffix(b"\n") {
             Some(l) => (l, true),
             None => (chunk, false),
         };
@@ -108031,7 +108676,7 @@ fn fold_process(text: &str, spec: &FoldSpec) -> Vec<u8> {
 /// `stdin` is `None` when there is no pipe feeding this command, which is a
 /// different thing from an empty pipe: the first has nothing to read and should
 /// say so, the second has read everything there was.
-fn fold_run(spec: &FoldSpec, stdin: Option<&str>) {
+fn fold_run(spec: &FoldSpec, stdin: Option<&[u8]>) {
     if spec.files.is_empty() {
         match stdin {
             Some(text) => shell_write_bytes(&fold_process(text, spec)),
@@ -108057,10 +108702,10 @@ fn fold_run(spec: &FoldSpec, stdin: Option<&str>) {
         }
         let resolved = resolve_path(path);
         match crate::fs::Vfs::read_file(&resolved) {
-            Ok(data) => {
-                let text = core::str::from_utf8(&data).unwrap_or("");
-                shell_write_bytes(&fold_process(text, spec));
-            }
+            // Straight from the VFS, undecoded. This used to be
+            // `from_utf8(&data).unwrap_or("")`, which turned a file `fold`
+            // could not decode into an empty one and exited 0.
+            Ok(data) => shell_write_bytes(&fold_process(&data, spec)),
             Err(e) => {
                 // Every operand is attempted and the worst status reported: a
                 // later readable file must not erase an earlier missing one.
@@ -108091,7 +108736,7 @@ fn cmd_fold(args: &str) {
 /// `fold` on piped input. A named file wins over the pipe, as in GNU and as in
 /// every other paired command here; a `-` operand names the pipe, so
 /// `cat a | fold - b` reads both, in that order.
-fn cmd_fold_input(args: &str, input: &str) {
+fn cmd_fold_input(args: &str, input: &[u8]) {
     match parse_fold_args(args) {
         Ok(spec) => fold_run(&spec, Some(input)),
         Err(e) => {
@@ -119359,109 +120004,395 @@ fn b64_decode_char(c: u8) -> Option<u8> {
     }
 }
 
-/// Decode Base64 to bytes.
-#[allow(clippy::arithmetic_side_effects)]
-fn base64_decode(input: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
-    // Strip whitespace.
-    let clean: alloc::vec::Vec<u8> = input
-        .bytes()
-        .filter(|&b| !b.is_ascii_whitespace())
-        .collect();
+/// Decode one group of four alphabet-or-padding bytes, appending 1-3 bytes.
+///
+/// Returns whether the group was padded, which ends the stream: nothing may
+/// follow a `=`.
+///
+/// Trailing bits that the padding says are absent are **not** rejected — `Zh==`
+/// decodes to `f`, discarding the low four bits of `h`, exactly as GNU's does.
+/// See design-decisions §292 for why compatibility wins over RFC 4648's
+/// optional canonical-form check.
+fn base64_group(quantum: &[u8; 4], out: &mut Vec<u8>) -> Result<bool, ()> {
+    // `=` is not in the alphabet, so `b64_decode_char` rejects a group that
+    // starts with padding — `=Zm9` and `Z=m9` are both refused here.
+    let c0 = b64_decode_char(*quantum.first().ok_or(())?).ok_or(())?;
+    let c1 = b64_decode_char(*quantum.get(1).ok_or(())?).ok_or(())?;
+    let q2 = *quantum.get(2).ok_or(())?;
+    let q3 = *quantum.get(3).ok_or(())?;
 
-    if !clean.len().is_multiple_of(4) {
-        return Err("invalid base64 length");
-    }
+    out.push((c0 << 2) | (c1 >> 4));
 
-    let mut out = alloc::vec::Vec::with_capacity(clean.len() / 4 * 3);
-
-    let mut i = 0;
-    while i < clean.len() {
-        let c0 = b64_decode_char(clean[i]).ok_or("invalid base64 character")?;
-        let c1 = b64_decode_char(clean[i + 1]).ok_or("invalid base64 character")?;
-
-        out.push((c0 << 2) | (c1 >> 4));
-
-        if clean[i + 2] != b'=' {
-            let c2 = b64_decode_char(clean[i + 2]).ok_or("invalid base64 character")?;
-            out.push(((c1 & 0x0F) << 4) | (c2 >> 2));
-
-            if clean[i + 3] != b'=' {
-                let c3 = b64_decode_char(clean[i + 3]).ok_or("invalid base64 character")?;
-                out.push(((c2 & 0x03) << 6) | c3);
-            }
+    if q2 == b'=' {
+        // `Xy==` — one byte. A third place of `=` demands a fourth: `Xy=z`
+        // used to decode as if it read `Xy==`, silently ignoring the `z`.
+        if q3 != b'=' {
+            return Err(());
         }
+        return Ok(true);
+    }
+    let c2 = b64_decode_char(q2).ok_or(())?;
+    out.push(((c1 & 0x0F) << 4) | (c2 >> 2));
 
-        i += 4;
+    if q3 == b'=' {
+        return Ok(true);
+    }
+    let c3 = b64_decode_char(q3).ok_or(())?;
+    out.push(((c2 & 0x03) << 6) | c3);
+    Ok(false)
+}
+
+/// Decode Base64 to bytes, or say the input is not Base64.
+///
+/// Takes bytes, not `&str`: `cmd_base64` used to narrow the file through
+/// `from_utf8(&data).unwrap_or("")`, so a file that was not valid UTF-8 became
+/// the empty string, decoded to zero bytes, and reported success.
+///
+/// Line breaks are structure rather than data — our own encoder inserts one
+/// every 76 columns, and MIME wraps with CRLF — so `\n` and `\r` are skipped
+/// whatever else is asked for. Everything else outside the alphabet is an
+/// error unless `ignore_garbage` was requested, which is what `-i` means. The
+/// old decoder skipped *all* ASCII whitespace unconditionally, so
+/// `base64 -d` accepted input GNU rejects and had no way to be told not to.
+fn base64_decode(input: &[u8], ignore_garbage: bool) -> Result<alloc::vec::Vec<u8>, ()> {
+    let mut out = alloc::vec::Vec::with_capacity(input.len() / 4 * 3);
+    let mut quantum = [0u8; 4];
+    let mut held = 0usize;
+    // Set once a padded group is decoded. Base64 ends there; anything after it
+    // is a second message glued to the first, which is not something to guess
+    // about.
+    let mut padded = false;
+
+    for &b in input {
+        if b == b'\n' || b == b'\r' {
+            continue;
+        }
+        if b64_decode_char(b).is_none() && b != b'=' {
+            if ignore_garbage {
+                continue;
+            }
+            return Err(());
+        }
+        if padded {
+            return Err(());
+        }
+        *quantum.get_mut(held).ok_or(())? = b;
+        held = held.saturating_add(1);
+        if held == 4 {
+            padded = base64_group(&quantum, &mut out)?;
+            held = 0;
+        }
     }
 
+    // Base64 comes in whole groups of four. A partial group at the end is an
+    // input that was cut short, and decoding what arrived would be answering a
+    // question that was never finished being asked.
+    if held != 0 {
+        return Err(());
+    }
     Ok(out)
 }
 
-/// `base64 [-d] FILE` — encode or decode Base64.
+/// A `base64` invocation that has been fully understood.
+struct Base64Spec {
+    decode: bool,
+    /// `-i`: when decoding, skip bytes outside the alphabet instead of
+    /// refusing the input.
+    ignore_garbage: bool,
+    /// Columns to wrap encoded output at. 0 means never wrap, as in GNU.
+    wrap: usize,
+    /// The single operand. `None`, and a `-` operand, both name the pipe.
+    file: Option<String>,
+    /// `--help` was asked for; print usage and succeed.
+    help: bool,
+}
+
+/// Why a `base64` argument list could not be honoured.
 ///
-/// Without -d: read file, output Base64 (76-char line wrap).
-/// With -d: read Base64 text file, decode to binary and write to stdout.
-#[allow(clippy::arithmetic_side_effects)]
-fn cmd_base64(args: &str) {
-    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
-    if parts.is_empty() {
-        shell_println!("Usage: base64 [-d] <file>");
-        shell_println!("  -d   Decode (input is Base64 text)");
-        set_exit(1);
+/// `cmd_base64` used to have none of these. It looked at the *first* word to
+/// decide whether `-d` had been given, took the next word as the file name,
+/// and ignored everything else — the silent-guess shape that
+/// `TD-A-FOLD-GUESSED-AT-EVERY-ARGUMENT-IT-COULD-NOT-READ` catalogues:
+///
+/// | written | what it did | what it looks like |
+/// |---|---|---|
+/// | `base64 -w0 f` | opened a file named `-w0` | `-w` was unimplemented, and so was the error |
+/// | `base64 f g` | encoded `f`, ignored `g` | both operands were read |
+/// | `base64 f -d` | **encoded** `f` | `-d` was recognised only in first place |
+/// | `cat f \| base64` | usage message, exit 1 | there was no pipe support at all |
+/// | `base64 -d f` where `f` is binary | printed a blank line, exit 0 | an empty decode |
+enum Base64ParseError {
+    /// `-w`/`--wrap` with nothing after it. Holds the option as written.
+    MissingArg(String),
+    InvalidWrap(String),
+    /// A second operand. GNU takes exactly one file.
+    ExtraOperand(String),
+    UnknownOption(String),
+}
+
+impl Base64ParseError {
+    /// Print the diagnostic, in GNU's wording.
+    fn report(&self) {
+        match *self {
+            Self::MissingArg(ref opt) => {
+                if let Some(long) = opt.strip_prefix("--") {
+                    shell_println!("base64: option '--{}' requires an argument", long);
+                } else {
+                    shell_println!(
+                        "base64: option requires an argument -- '{}'",
+                        opt.trim_start_matches('-')
+                    );
+                }
+            }
+            Self::InvalidWrap(ref s) => {
+                shell_println!("base64: invalid wrap size: '{}'", s);
+            }
+            Self::ExtraOperand(ref s) => {
+                shell_println!("base64: extra operand '{}'", s);
+            }
+            Self::UnknownOption(ref opt) => {
+                if opt.starts_with("--") {
+                    shell_println!("base64: unrecognized option '{}'", opt);
+                } else {
+                    shell_println!(
+                        "base64: invalid option -- '{}'",
+                        opt.trim_start_matches('-')
+                    );
+                }
+            }
+        }
+        // Honest only because `--help` is implemented below. A command that
+        // points at help it does not have is worse than one that stays quiet.
+        shell_println!("Try 'base64 --help' for more information.");
+    }
+}
+
+/// Read a `-w` value. Zero is legal and means "never wrap".
+fn base64_wrap(value: &str) -> Result<usize, Base64ParseError> {
+    value
+        .parse::<usize>()
+        .map_err(|_| Base64ParseError::InvalidWrap(String::from(value)))
+}
+
+/// Parse `base64`'s arguments, or say why they cannot be honoured.
+///
+/// Short options bundle as getopt's do (`-diw0` is `-d -i -w 0`), long options
+/// take `--wrap=N` or `--wrap N`, and `--` ends the options so a file really
+/// named `-d` can be reached.
+fn parse_base64_args(args: &str) -> Result<Base64Spec, Base64ParseError> {
+    let words = split_words(args);
+    let mut spec = Base64Spec {
+        decode: false,
+        ignore_garbage: false,
+        wrap: 76,
+        file: None,
+        help: false,
+    };
+    let mut only_operands = false;
+
+    let mut i = 0usize;
+    while let Some(word) = words.get(i) {
+        i = i.saturating_add(1);
+        let w = word.as_str();
+
+        // A lone `-` is the conventional name for standard input, not an
+        // option.
+        if only_operands || w == "-" || !w.starts_with('-') {
+            if spec.file.is_some() {
+                return Err(Base64ParseError::ExtraOperand(String::from(w)));
+            }
+            spec.file = Some(String::from(w));
+            continue;
+        }
+
+        if w == "--" {
+            only_operands = true;
+            continue;
+        }
+
+        if let Some(long) = w.strip_prefix("--") {
+            let (name, inline) = match long.split_once('=') {
+                Some((n, v)) => (n, Some(v)),
+                None => (long, None),
+            };
+            match name {
+                "decode" => spec.decode = true,
+                "ignore-garbage" => spec.ignore_garbage = true,
+                "help" => spec.help = true,
+                "wrap" => {
+                    let value = match inline {
+                        Some(v) => String::from(v),
+                        None => {
+                            let next = words
+                                .get(i)
+                                .ok_or_else(|| Base64ParseError::MissingArg(String::from(w)))?;
+                            i = i.saturating_add(1);
+                            next.clone()
+                        }
+                    };
+                    spec.wrap = base64_wrap(&value)?;
+                }
+                _ => return Err(Base64ParseError::UnknownOption(String::from(w))),
+            }
+            continue;
+        }
+
+        // Bundled short flags, left to right. `-w` takes the rest of the word
+        // if there is any and the next word otherwise, and ends the bundle.
+        let mut rest = w.get(1..).unwrap_or("");
+        while let Some(flag) = rest.chars().next() {
+            rest = rest.get(flag.len_utf8()..).unwrap_or("");
+            match flag {
+                'd' => spec.decode = true,
+                'i' => spec.ignore_garbage = true,
+                'w' => {
+                    let value = if rest.is_empty() {
+                        let next = words
+                            .get(i)
+                            .ok_or_else(|| Base64ParseError::MissingArg(String::from("-w")))?;
+                        i = i.saturating_add(1);
+                        next.clone()
+                    } else {
+                        String::from(rest)
+                    };
+                    spec.wrap = base64_wrap(&value)?;
+                    rest = "";
+                }
+                _ => {
+                    let mut opt = String::from("-");
+                    opt.push(flag);
+                    return Err(Base64ParseError::UnknownOption(opt));
+                }
+            }
+        }
+    }
+
+    Ok(spec)
+}
+
+/// Encode `data`, wrapped at `wrap` columns, and return exactly the bytes
+/// `base64` should write.
+///
+/// A wrap of 0 means one unbroken line. Either way the output ends with a
+/// newline unless there was nothing to encode, which is GNU's behaviour and
+/// what makes `base64 f | base64 -d` round-trip.
+fn base64_encode_wrapped(data: &[u8], wrap: usize) -> Vec<u8> {
+    let encoded = base64_encode(data);
+    let bytes = encoded.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len().saturating_add(bytes.len() / 64 + 1));
+
+    if bytes.is_empty() {
+        return out;
+    }
+    if wrap == 0 {
+        out.extend_from_slice(bytes);
+        out.push(b'\n');
+        return out;
+    }
+
+    let mut off = 0usize;
+    while off < bytes.len() {
+        let end = off.saturating_add(wrap).min(bytes.len());
+        out.extend_from_slice(bytes.get(off..end).unwrap_or(&[]));
+        out.push(b'\n');
+        off = end;
+    }
+    out
+}
+
+/// Print what `base64 --help` promises.
+fn base64_help() {
+    shell_println!("Usage: base64 [OPTION]... [FILE]");
+    shell_println!("Base64 encode or decode FILE, or standard input, to standard output.");
+    shell_println!();
+    shell_println!("With no FILE, or when FILE is -, read standard input.");
+    shell_println!();
+    shell_println!("  -d, --decode          decode data");
+    shell_println!("  -i, --ignore-garbage  when decoding, ignore non-alphabet characters");
+    shell_println!("  -w, --wrap=COLS       wrap encoded lines after COLS character (default 76).");
+    shell_println!("                          Use 0 to disable line wrapping");
+    shell_println!("      --help            display this help and exit");
+}
+
+/// Run a parsed `base64` over its operand, with `stdin` standing in for `-`.
+fn base64_run(spec: &Base64Spec, stdin: Option<&[u8]>) {
+    if spec.help {
+        base64_help();
         return;
     }
 
-    let decode = parts[0] == "-d" || parts[0] == "--decode";
-    let file_arg = if decode {
-        if parts.len() < 2 {
-            shell_println!("base64: missing file argument");
-            set_exit(1);
-            return;
-        }
-        parts[1]
-    } else {
-        parts[0]
-    };
-
-    let path = resolve_path(file_arg);
-    let data = match crate::fs::Vfs::read_file(&path) {
-        Ok(d) => d,
-        Err(e) => {
-            shell_println!("base64: '{}': {:?}", path.display(), e);
-            set_exit(1);
-            return;
-        }
-    };
-
-    if decode {
-        // Input is Base64 text — decode and write binary to stdout.
-        let text = core::str::from_utf8(&data).unwrap_or("");
-        match base64_decode(text) {
-            Ok(decoded) => {
-                // Print as text if valid UTF-8, otherwise show hex summary.
-                if let Ok(s) = core::str::from_utf8(&decoded) {
-                    shell_println!("{}", s);
-                } else {
-                    shell_println!("<binary: {} bytes>", decoded.len());
+    // Read the input as bytes and keep them that way. Encoding a file that is
+    // not text is the ordinary case, not the exception.
+    let owned;
+    let data: &[u8] = match spec.file.as_deref() {
+        None | Some("-") => match stdin {
+            Some(bytes) => bytes,
+            None => {
+                shell_println!("base64: no file operand and no input to read");
+                set_exit(1);
+                return;
+            }
+        },
+        Some(path) => {
+            let resolved = resolve_path(path);
+            match crate::fs::Vfs::read_file(&resolved) {
+                Ok(d) => {
+                    owned = d;
+                    &owned
+                }
+                Err(e) => {
+                    shell_println!("base64: {}: {:?}", path, e);
+                    set_exit(1);
+                    return;
                 }
             }
-            Err(e) => {
-                shell_println!("base64: decode error: {}", e);
+        }
+    };
+
+    if spec.decode {
+        match base64_decode(data, spec.ignore_garbage) {
+            // The decoded bytes, written as bytes. This used to print
+            // `<binary: N bytes>` — a description of the output in place of the
+            // output — whenever the result was not valid UTF-8, so
+            // `base64 f | base64 -d` could not reproduce `f`, which is the one
+            // thing base64 exists to do. And `shell_println!` added a newline
+            // the data never had, so even the text case did not round-trip.
+            Ok(decoded) => shell_write_bytes(&decoded),
+            Err(()) => {
+                shell_println!("base64: invalid input");
                 set_exit(1);
             }
         }
     } else {
-        // Encode file content to Base64 with 76-char line wrapping.
-        let encoded = base64_encode(&data);
-        let line_width = 76;
-        let bytes = encoded.as_bytes();
-        let mut offset = 0;
-        while offset < bytes.len() {
-            let end = (offset + line_width).min(bytes.len());
-            if let Ok(line) = core::str::from_utf8(&bytes[offset..end]) {
-                shell_println!("{}", line);
-            }
-            offset = end;
+        shell_write_bytes(&base64_encode_wrapped(data, spec.wrap));
+    }
+}
+
+/// `base64 [-di] [-w COLS] [FILE]` — encode or decode Base64.
+///
+/// - `-d`, `--decode`: decode rather than encode
+/// - `-i`, `--ignore-garbage`: when decoding, skip bytes outside the alphabet
+/// - `-w COLS`, `--wrap=COLS`: wrap encoded lines at COLS (default 76, 0 = never)
+/// - `--help`: usage
+/// - no FILE, or `-`: read the pipe
+fn cmd_base64(args: &str) {
+    match parse_base64_args(args) {
+        Ok(spec) => base64_run(&spec, None),
+        Err(e) => {
+            e.report();
+            set_exit(1);
+        }
+    }
+}
+
+/// `base64` on piped input. A named file wins over the pipe, as in GNU and as
+/// in every other paired command here; a `-` operand names the pipe.
+fn cmd_base64_input(args: &str, input: &[u8]) {
+    match parse_base64_args(args) {
+        Ok(spec) => base64_run(&spec, Some(input)),
+        Err(e) => {
+            e.report();
+            set_exit(1);
         }
     }
 }
@@ -121328,157 +122259,410 @@ fn sed_replace_all(text: &str, pattern: &str, replacement: &str) -> alloc::strin
 // awk — pattern scanning and text processing (subset)
 // ---------------------------------------------------------------------------
 
+/// What `awk` was asked to do, as parsed from its argument line.
+///
+/// Modelled on [`FoldSpec`] and [`Base64Spec`]: the parse produces a value or
+/// an error, and a single `awk_run` then does the work for both the file and
+/// the pipe form. `cmd_awk` and `cmd_awk_input` used to carry a copy each of
+/// the whole BEGIN/record/END driver, which is the duplication class recorded
+/// as `TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP` — two copies of a loop
+/// drift, and these two already had: only the file copy honoured a named
+/// operand's read error, and only the pipe copy could reach `END` on empty
+/// input.
+struct AwkSpec {
+    /// The field separator exactly as written, before escape processing.
+    fs: alloc::string::String,
+    /// The awk program text.
+    program: alloc::string::String,
+    /// Operands. `-` names the pipe.
+    files: alloc::vec::Vec<alloc::string::String>,
+}
+
+/// A field separator, resolved from `-F` into the thing the splitter needs.
+enum AwkFs {
+    /// The default: runs of space, tab or newline, with leading and trailing
+    /// runs ignored. This is what POSIX gives `FS == " "`, and it is *not* the
+    /// same as splitting on a literal space.
+    Whitespace,
+    /// A literal byte sequence.
+    Literal(alloc::vec::Vec<u8>),
+}
+
+/// Why an `awk` argument line could not be turned into an [`AwkSpec`].
+enum AwkParseError {
+    /// `-F` with nothing after it.
+    MissingFs,
+    /// No program text at all.
+    MissingProgram,
+    /// A multi-character `-F` that POSIX reads as a regular expression, and
+    /// whose literal reading would differ. See [`awk_field_sep`].
+    RegexFs(alloc::string::String),
+}
+
+impl AwkParseError {
+    /// Print the diagnostic, in gawk's wording where gawk has one.
+    fn report(&self) {
+        match self {
+            Self::MissingFs => {
+                shell_println!("awk: option requires an argument -- 'F'");
+                shell_println!("Usage: awk [-F sep] 'program' [file ...]");
+            }
+            Self::MissingProgram => {
+                shell_println!("awk: no program specified");
+                shell_println!("Usage: awk [-F sep] 'program' [file ...]");
+            }
+            Self::RegexFs(fs) => {
+                shell_println!("awk: -F '{}': a multi-character separator is a", fs);
+                shell_println!(
+                    "     regular expression, and the kernel shell has no regex engine."
+                );
+                shell_println!("     Use a single-character separator.");
+            }
+        }
+    }
+}
+
+/// Parse `awk`'s argument line.
+///
+/// Uses [`split_words`], which honours quotes, rather than the previous
+/// `split_whitespace` plus a hand-rolled search for a closing `'`. That scan
+/// was lossy in two ways that both exited 0:
+///
+/// - It rejoined the program's words with a *single* space, so
+///   `awk '{print "a   b"}'` printed `a b` — three spaces inside a string
+///   literal silently became one.
+/// - `-F'|'` kept its quotes, giving a three-character separator, which
+///   `awk_split_fields` then answered by returning the whole record as one
+///   field. `$1` was the entire line and nothing said so.
+fn parse_awk_args(args: &str) -> Result<AwkSpec, AwkParseError> {
+    let words = split_words(args);
+    let mut fs = alloc::string::String::from(" ");
+    let mut program: Option<alloc::string::String> = None;
+    let mut files: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    let mut end_of_options = false;
+
+    let mut i = 0usize;
+    while let Some(word) = words.get(i) {
+        i = i.saturating_add(1);
+
+        if !end_of_options && program.is_none() {
+            if word == "--" {
+                end_of_options = true;
+                continue;
+            }
+            if word == "-F" {
+                let Some(next) = words.get(i) else {
+                    return Err(AwkParseError::MissingFs);
+                };
+                fs = next.clone();
+                i = i.saturating_add(1);
+                continue;
+            }
+            if let Some(rest) = word.strip_prefix("-F") {
+                fs = alloc::string::String::from(rest);
+                continue;
+            }
+        }
+
+        if program.is_none() {
+            program = Some(word.clone());
+        } else {
+            files.push(word.clone());
+        }
+    }
+
+    let Some(program) = program else {
+        return Err(AwkParseError::MissingProgram);
+    };
+    if program.trim().is_empty() {
+        return Err(AwkParseError::MissingProgram);
+    }
+
+    Ok(AwkSpec { fs, program, files })
+}
+
+/// Resolve a `-F` argument into an [`AwkFs`].
+///
+/// Escape sequences are processed as awk processes them (`\t`, `\n`, `\\`),
+/// so `-F'\t'` separates on a tab rather than on the two characters `\` `t`.
+///
+/// The multi-character case is the interesting one. POSIX says an `FS` longer
+/// than one character is an *extended regular expression*; a single character
+/// is always literal, even if it is a metacharacter, which is why `-F.` splits
+/// on dots. The kernel shell has no regex engine (see
+/// `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`), so for
+/// a multi-character separator there are two possible readings and this used
+/// to pick neither — `awk_split_fields` returned the whole record as a single
+/// field and exited 0.
+///
+/// Where the two readings *agree* — a separator with no metacharacter in it,
+/// such as the extremely common `-F', '` — the literal split is used, because
+/// that is also what the regex would produce. Where they disagree, the split
+/// is refused rather than guessed.
+fn awk_field_sep(fs: &str) -> Result<AwkFs, AwkParseError> {
+    let mut resolved: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let bytes = fs.as_bytes();
+    let mut i = 0usize;
+    while let Some(&b) = bytes.get(i) {
+        if b == b'\\' {
+            match bytes.get(i.saturating_add(1)) {
+                Some(b't') => resolved.push(b'\t'),
+                Some(b'n') => resolved.push(b'\n'),
+                Some(b'r') => resolved.push(b'\r'),
+                Some(b'\\') => resolved.push(b'\\'),
+                // An unrecognised escape keeps both characters, as awk does.
+                Some(&other) => {
+                    resolved.push(b'\\');
+                    resolved.push(other);
+                }
+                None => resolved.push(b'\\'),
+            }
+            i = i.saturating_add(2);
+            continue;
+        }
+        resolved.push(b);
+        i = i.saturating_add(1);
+    }
+
+    if resolved.as_slice() == b" " {
+        return Ok(AwkFs::Whitespace);
+    }
+    if resolved.is_empty() {
+        // `-F ''` splits every character into its own field in gawk. Nothing
+        // here needs that, and a zero-length separator would loop the splitter,
+        // so it is refused rather than silently treated as the default.
+        return Err(AwkParseError::RegexFs(alloc::string::String::from(fs)));
+    }
+
+    // How many *characters* is that? A single character is literal however it
+    // is spelled, including a multi-byte one.
+    let chars = core::str::from_utf8(&resolved).map(|s| s.chars().count());
+    if chars == Ok(1) || resolved.len() == 1 {
+        return Ok(AwkFs::Literal(resolved));
+    }
+
+    // Multi-character: literal only where the regex reading cannot differ.
+    // A backslash has already been consumed above, so any that remain stand
+    // for themselves in both readings.
+    const META: &[u8] = b".[]()*+?{}|^$";
+    if resolved.iter().any(|b| META.contains(b)) {
+        return Err(AwkParseError::RegexFs(alloc::string::String::from(fs)));
+    }
+    Ok(AwkFs::Literal(resolved))
+}
+
+/// Split input into awk records: `\n`-terminated, with the terminator removed.
+///
+/// Not `str::lines`, for the reason recorded against `fold`: `lines` strips a
+/// `\r` that precedes the `\n`, which awk treats as ordinary data — so
+/// `$NF` of a CRLF file silently lost its last character. A final record with
+/// no trailing newline still counts, as it does in gawk, but a trailing
+/// newline does not invent an extra empty one.
+fn awk_records(data: &[u8]) -> alloc::vec::Vec<&[u8]> {
+    if data.is_empty() {
+        return alloc::vec::Vec::new();
+    }
+    let body = data.strip_suffix(b"\n").unwrap_or(data);
+    body.split(|&b| b == b'\n').collect()
+}
+
+/// Run every rule over one source's records, advancing `nr` across sources.
+///
+/// `nr` is threaded rather than reset per file because awk's `NR` counts
+/// records over the whole run; `FNR` (per-file) is not implemented.
+fn awk_feed(data: &[u8], rules: &[AwkRule], fs: &AwkFs, nr: &mut usize) {
+    for record in awk_records(data) {
+        *nr = nr.saturating_add(1);
+        let fields = awk_split_fields(record, fs);
+        let nf = fields.len();
+        for rule in rules {
+            if rule.is_begin || rule.is_end {
+                continue;
+            }
+            // `unwrap_or(false)` is unreachable for a validated program:
+            // `awk_validate_program` has already refused every pattern this
+            // returns `None` for. A rule that somehow escaped it is skipped
+            // rather than substring-matched, which is the honest reading of
+            // "cannot evaluate".
+            if awk_pattern_eval(&rule.pattern, record, *nr, nf).unwrap_or(false) {
+                awk_exec_action(&rule.action, record, &fields, *nr, nf);
+            }
+        }
+    }
+}
+
+/// The one `awk` driver, shared by the file and pipe forms.
+///
+/// Two faults lived in the two copies this replaces:
+///
+/// - **A program made only of `BEGIN` blocks demanded a file.**
+///   `awk 'BEGIN{print "hi"}'` printed `awk: no input file specified` and
+///   exited 1, where every awk prints `hi` and exits 0. POSIX is explicit:
+///   input is read only if the program has a rule that needs it — a main rule
+///   or an `END` — because `END` must see the final `NR`.
+/// - **An undecodable file became an empty one.** The read was
+///   `from_utf8(&data).unwrap_or("")`, so `awk '{print}' some.png` printed
+///   nothing and exited 0, indistinguishable from a genuinely empty file.
+///   Records are now bytes end to end.
+fn awk_run(spec: &AwkSpec, stdin: Option<&[u8]>) {
+    let fs = match awk_field_sep(&spec.fs) {
+        Ok(fs) => fs,
+        Err(e) => {
+            e.report();
+            set_exit(2);
+            return;
+        }
+    };
+
+    let rules = parse_awk_program(&spec.program);
+
+    // Before anything runs, and before any file is opened: a program with a
+    // statement or pattern this shell cannot execute is refused whole. Running
+    // the recognised parts would produce output that looks like a result — see
+    // design-decisions §294.
+    if let Err(e) = awk_validate_program(&rules) {
+        e.report();
+        set_exit(2);
+        return;
+    }
+
+    let mut nr: usize = 0;
+
+    for rule in &rules {
+        if rule.is_begin {
+            awk_exec_action(&rule.action, b"", &[], nr, 0);
+        }
+    }
+
+    // Read input only if some rule can still use it. A BEGIN-only program is
+    // finished; an END-only program is not, because END reports NR.
+    let needs_input = rules.iter().any(|r| !r.is_begin);
+    let mut worst: u8 = 0;
+
+    if needs_input {
+        if spec.files.is_empty() {
+            match stdin {
+                Some(data) => awk_feed(data, &rules, &fs, &mut nr),
+                None => {
+                    shell_println!("awk: no file operand and no input to read");
+                    worst = worst.max(1);
+                }
+            }
+        } else {
+            for path in &spec.files {
+                if path == "-" {
+                    match stdin {
+                        Some(data) => awk_feed(data, &rules, &fs, &mut nr),
+                        None => {
+                            shell_println!("awk: -: no input to read");
+                            worst = worst.max(1);
+                        }
+                    }
+                    continue;
+                }
+                let resolved = resolve_path(path);
+                match crate::fs::Vfs::read_file(&resolved) {
+                    // Straight from the VFS, undecoded.
+                    Ok(data) => awk_feed(&data, &rules, &fs, &mut nr),
+                    Err(e) => {
+                        // Every operand is attempted and the worst status
+                        // reported: a later readable file must not erase an
+                        // earlier missing one.
+                        shell_println!("awk: {}: {:?}", path, e);
+                        worst = worst.max(1);
+                    }
+                }
+            }
+        }
+    }
+
+    for rule in &rules {
+        if rule.is_end {
+            awk_exec_action(&rule.action, b"", &[], nr, 0);
+        }
+    }
+
+    set_exit(worst);
+}
+
+/// Print `awk`'s usage. Shared so the two entry points cannot disagree.
+fn awk_usage(piped: bool) {
+    if piped {
+        shell_println!("Usage: cmd | awk [-F sep] 'program' [file ...]");
+    } else {
+        shell_println!("Usage: awk [-F sep] 'program' [file ...]");
+    }
+    shell_println!("  Fields: $0 (line), $1..$N, $NF (last)");
+    shell_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
+    shell_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
+    shell_println!("  Stmts:  print, print <expr>[, <expr>...] -- and nothing else");
+    shell_println!("  Pttrns: empty, /text/, NR <op> N, NF <op> N (<op>: > >= < <= == !=)");
+    shell_println!("  A program outside that set is refused, not partly run (exit 2).");
+    shell_println!("  `-` as an operand names the pipe.");
+}
+
 /// `awk` command — pattern-action text processing.
 ///
 /// Supported features:
 ///   - Field splitting: `$0` (whole line), `$1`, `$2`, ... `$NF`
 ///   - `-F SEP` field separator (default: whitespace)
 ///   - `{ print }`, `{ print $1, $3 }`
-///   - `/pattern/ { action }` — pattern matching
+///   - `/pattern/ { action }` — see the caveat below
 ///   - `BEGIN { ... }` and `END { ... }` blocks
-///   - `NR` (record number), `NF` (field count), `FS` (separator)
-///   - Pipe input support
+///   - `NR` (record number), `NF` (field count), compared against an integer
+///   - Pipe input support; `-` as an operand names the pipe
+///
+/// **That list is exhaustive, and it is enforced.** `print` is the only
+/// statement; there are no variables, no assignment, no arithmetic, no `if`,
+/// no `printf`, and no functions. A program using any of them is refused
+/// before it runs — `awk: unsupported statement: '…'`, exit 2 — rather than
+/// having the unrecognised parts skipped, which is what it used to do while
+/// still reporting success. See design-decisions §294 for why refusal beats a
+/// partial implementation here, and `awk_validate_program` for the check.
+///
+/// **`/pattern/` is a substring match, not a regular expression.** The kernel
+/// shell has no regex engine, so `/^err/` matches the literal `^err`. This is
+/// tracked as `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`
+/// and is blocked on the `ere` crate gaining a `no_std` build. It is the one
+/// wrong answer the refusal above deliberately leaves in place, because the fix
+/// is the engine, not a refusal.
 ///
 /// Examples:
 ///   awk '{ print $1 }' file.txt            First field of each line
 ///   awk -F: '{ print $1, $3 }' /etc/passwd User and UID
-///   awk '/error/ { print NR, $0 }' log     Matching lines with number
 ///   awk 'NR > 5 { print }' file            Skip first 5 lines
 ///   awk 'BEGIN { print "header" } { print $1 } END { print NR, "lines" }' file
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 fn cmd_awk(args: &str) {
     if args.trim().is_empty() {
-        shell_println!("Usage: awk [-F sep] 'program' [file ...]");
-        shell_println!("  Fields: $0 (line), $1..$N, $NF (last)");
-        shell_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
-        shell_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
+        awk_usage(false);
         set_exit(1);
         return;
     }
-
-    // Parse -F flag and program.
-    let (fs_char, program, files) = parse_awk_args(args);
-
-    if program.is_empty() {
-        shell_println!("awk: no program specified");
-        set_exit(1);
-        return;
-    }
-
-    let rules = parse_awk_program(&program);
-
-    // Process files.
-    if files.is_empty() {
-        shell_println!("awk: no input file specified");
-        set_exit(1);
-        return;
-    }
-
-    let mut nr: usize = 0;
-
-    // Run BEGIN blocks.
-    for rule in &rules {
-        if rule.is_begin {
-            awk_exec_action(&rule.action, "", &[], nr, 0, &fs_char);
-        }
-    }
-
-    for file in &files {
-        let path = resolve_path(file);
-        let data = match crate::fs::Vfs::read_file(&path) {
-            Ok(d) => d,
-            Err(e) => {
-                shell_println!("awk: '{}': {:?}", path.display(), e);
-                set_exit(1);
-                continue;
-            }
-        };
-
-        let text = core::str::from_utf8(&data).unwrap_or("");
-        for line in text.lines() {
-            nr = nr.wrapping_add(1);
-            let fields = awk_split_fields(line, &fs_char);
-            let nf = fields.len();
-
-            for rule in &rules {
-                if rule.is_begin || rule.is_end {
-                    continue;
-                }
-                if awk_pattern_matches(&rule.pattern, line, nr, nf) {
-                    awk_exec_action(&rule.action, line, &fields, nr, nf, &fs_char);
-                }
-            }
-        }
-    }
-
-    // Run END blocks.
-    for rule in &rules {
-        if rule.is_end {
-            awk_exec_action(&rule.action, "", &[], nr, 0, &fs_char);
+    match parse_awk_args(args) {
+        Ok(spec) => awk_run(&spec, None),
+        Err(e) => {
+            e.report();
+            set_exit(1);
         }
     }
 }
 
-/// `awk` pipe-input variant.
+/// `awk` on piped input.
 ///
-/// Rejects a missing program with the same status [`cmd_awk`] does. As with
-/// `cmd_sed_input`, this form used to print the input verbatim and exit 0, so
-/// `cat log | awk` was a silent `cat` that claimed to have run a program.
-#[allow(clippy::arithmetic_side_effects)]
-fn cmd_awk_input(args: &str, input: &str) {
+/// A named file wins over the pipe, as in GNU and as in every other paired
+/// command here; a `-` operand names the pipe, so `cat a | awk '{print}' - b`
+/// reads both, in that order.
+fn cmd_awk_input(args: &str, input: &[u8]) {
     if args.trim().is_empty() {
-        shell_println!("Usage: cmd | awk [-F sep] 'program'");
-        shell_println!("  Fields: $0 (line), $1..$N, $NF (last)");
-        shell_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
-        shell_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
+        awk_usage(true);
         set_exit(1);
         return;
     }
-
-    let (fs_char, program, files) = parse_awk_args(args);
-
-    // Named files win over the pipe, as in GNU. This used to bind them to
-    // `_files` and drop them, so `cat a | awk '{print}' b` printed `a`.
-    if !files.is_empty() {
-        cmd_awk(args);
-        return;
-    }
-
-    if program.is_empty() {
-        shell_println!("awk: no program specified");
-        set_exit(1);
-        return;
-    }
-
-    let rules = parse_awk_program(&program);
-    let mut nr: usize = 0;
-
-    // BEGIN blocks.
-    for rule in &rules {
-        if rule.is_begin {
-            awk_exec_action(&rule.action, "", &[], nr, 0, &fs_char);
-        }
-    }
-
-    for line in input.lines() {
-        nr = nr.wrapping_add(1);
-        let fields = awk_split_fields(line, &fs_char);
-        let nf = fields.len();
-
-        for rule in &rules {
-            if rule.is_begin || rule.is_end {
-                continue;
-            }
-            if awk_pattern_matches(&rule.pattern, line, nr, nf) {
-                awk_exec_action(&rule.action, line, &fields, nr, nf, &fs_char);
-            }
-        }
-    }
-
-    // END blocks.
-    for rule in &rules {
-        if rule.is_end {
-            awk_exec_action(&rule.action, "", &[], nr, 0, &fs_char);
+    match parse_awk_args(args) {
+        Ok(spec) => awk_run(&spec, Some(input)),
+        Err(e) => {
+            e.report();
+            set_exit(1);
         }
     }
 }
@@ -121489,70 +122673,6 @@ struct AwkRule {
     action: alloc::string::String,
     is_begin: bool,
     is_end: bool,
-}
-
-/// Parse awk command-line arguments: -F, program, files.
-fn parse_awk_args(
-    args: &str,
-) -> (
-    alloc::string::String,
-    alloc::string::String,
-    alloc::vec::Vec<alloc::string::String>,
-) {
-    let mut fs = alloc::string::String::from(" ");
-    let mut program = alloc::string::String::new();
-    let mut files: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
-
-    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
-    let mut i = 0;
-    let mut got_program = false;
-
-    while i < parts.len() {
-        if parts[i] == "-F" && i + 1 < parts.len() {
-            fs = alloc::string::String::from(parts[i + 1]);
-            i += 2;
-            continue;
-        }
-        if parts[i].starts_with("-F") {
-            fs = alloc::string::String::from(&parts[i][2..]);
-            i += 1;
-            continue;
-        }
-
-        if !got_program {
-            // The program may be quoted — find matching quote.
-            let part = parts[i];
-            if let Some(rest) = part.strip_prefix('\'') {
-                // Collect until closing quote.
-                let mut prog = alloc::string::String::from(rest);
-                if prog.ends_with('\'') {
-                    prog.pop();
-                    program = prog;
-                } else {
-                    i += 1;
-                    while i < parts.len() {
-                        prog.push(' ');
-                        let p = parts[i];
-                        if let Some(stripped) = p.strip_suffix('\'') {
-                            prog.push_str(stripped);
-                            break;
-                        }
-                        prog.push_str(p);
-                        i += 1;
-                    }
-                    program = prog;
-                }
-            } else {
-                program = alloc::string::String::from(part);
-            }
-            got_program = true;
-        } else {
-            files.push(alloc::string::String::from(parts[i]));
-        }
-        i += 1;
-    }
-
-    (fs, program, files)
 }
 
 /// Parse an awk program into rules.
@@ -121669,93 +122789,180 @@ fn extract_brace_block(program: &str, pos: &mut usize) -> alloc::string::String 
     alloc::string::String::from(program[start..end].trim())
 }
 
-/// Split a line into fields using the given separator.
-fn awk_split_fields<'a>(line: &'a str, fs: &str) -> alloc::vec::Vec<&'a str> {
-    if fs == " " {
-        // Whitespace splitting (default): split on runs of whitespace.
-        line.split_whitespace().collect()
-    } else if fs.len() == 1 {
-        line.split(fs.as_bytes()[0] as char).collect()
-    } else {
-        alloc::vec![line]
+/// Whether `hay` contains `needle` anywhere. Byte-exact; no decode.
+fn awk_bytes_contain(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    needle.len() <= hay.len() && hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Split a record into fields on a literal byte sequence, keeping empty fields.
+///
+/// `sep` is never empty — [`awk_field_sep`] refuses a zero-length separator,
+/// which would otherwise make this loop forever.
+fn awk_split_literal<'a>(record: &'a [u8], sep: &[u8]) -> alloc::vec::Vec<&'a [u8]> {
+    let mut out: alloc::vec::Vec<&[u8]> = alloc::vec::Vec::new();
+    if sep.is_empty() {
+        out.push(record);
+        return out;
+    }
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i.saturating_add(sep.len()) <= record.len() {
+        if record.get(i..i.saturating_add(sep.len())) == Some(sep) {
+            out.push(record.get(start..i).unwrap_or(&[]));
+            i = i.saturating_add(sep.len());
+            start = i;
+        } else {
+            i = i.saturating_add(1);
+        }
+    }
+    out.push(record.get(start..).unwrap_or(&[]));
+    out
+}
+
+/// Split a record into fields using the resolved separator.
+///
+/// An empty record has no fields at all — `NF` is 0 whatever `FS` is — which
+/// is POSIX and is why the literal split is not simply allowed to yield one
+/// empty field.
+///
+/// The default split is on space, tab and newline only. It used to be
+/// `str::split_whitespace`, which also splits on `\r`, `\x0b`, `\x0c` and
+/// every Unicode space; the visible consequence was that a CRLF file's last
+/// field silently lost its `\r`, so `$NF == "ok"` was true where awk says
+/// false.
+fn awk_split_fields<'a>(record: &'a [u8], fs: &AwkFs) -> alloc::vec::Vec<&'a [u8]> {
+    if record.is_empty() {
+        return alloc::vec::Vec::new();
+    }
+    match fs {
+        AwkFs::Whitespace => record
+            .split(|&b| b == b' ' || b == b'\t' || b == b'\n')
+            .filter(|f| !f.is_empty())
+            .collect(),
+        AwkFs::Literal(sep) => awk_split_literal(record, sep),
     }
 }
 
-/// Check if a pattern matches the current line.
-#[allow(clippy::arithmetic_side_effects)]
-fn awk_pattern_matches(pattern: &str, line: &str, nr: usize, nf: usize) -> bool {
+/// Evaluate `<var> <op> <integer>`, where the variable's value is already
+/// resolved, or `None` if `rest` is not a comparison this shell can evaluate.
+///
+/// One chain serves both `NR` and `NF`. There used to be two, and they had
+/// already drifted: the `NR` copy handled all six operators and the `NF` copy
+/// only `>=`, `>` and `==`, so `awk 'NF < 3'` fell out of the bottom of the
+/// matcher and became a substring search for the text `NF < 3`. That is the
+/// duplicated-loop failure recorded in
+/// `TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP`, in a second place.
+///
+/// The two-character operators are tested before the one-character ones, so
+/// `>=` is never read as `>` followed by a stray `=`.
+fn awk_compare(value: usize, rest: &str) -> Option<bool> {
+    let rest = rest.trim();
+    for op in [">=", "<=", "==", "!=", ">", "<"] {
+        let Some(n_str) = rest.strip_prefix(op) else {
+            continue;
+        };
+        let n = n_str.trim().parse::<usize>().ok()?;
+        return Some(match op {
+            ">=" => value >= n,
+            "<=" => value <= n,
+            "==" => value == n,
+            "!=" => value != n,
+            ">" => value > n,
+            _ => value < n,
+        });
+    }
+    None
+}
+
+/// Evaluate a pattern against the current record, or `None` if this shell
+/// cannot evaluate it at all.
+///
+/// The `None` arm is the point of the function. It used to be a fall-through
+/// to a substring search, so `awk '$1 > 5 { print }'` searched each record for
+/// the seven characters `$1 > 5`, found none, printed nothing, and exited 0 —
+/// a filter that silently matched nothing rather than saying it could not run.
+///
+/// **Invariant:** whether this returns `Some` depends on `pattern` alone; the
+/// record, `nr` and `nf` affect only the value inside. That is what lets
+/// [`awk_validate_program`] ask the question with a dummy record before any
+/// rule has run, and `kshell::self_test` rung 42 pins it by evaluating the same
+/// patterns against two unlike records and comparing only `is_some()`.
+///
+/// The `/.../` arm is a **substring** match, not a regular expression; see
+/// `cmd_awk`'s doc comment and
+/// `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`.
+fn awk_pattern_eval(pattern: &str, line: &[u8], nr: usize, nf: usize) -> Option<bool> {
     if pattern.is_empty() {
-        return true; // No pattern — match all.
+        return Some(true); // No pattern — match all.
     }
 
     // /regex/ pattern — literal string match.
     if pattern.starts_with('/') && pattern.ends_with('/') && pattern.len() >= 2 {
-        let pat = &pattern[1..pattern.len() - 1];
-        return line.contains(pat);
+        let pat = pattern
+            .get(1..pattern.len().saturating_sub(1))
+            .unwrap_or("");
+        return Some(awk_bytes_contain(line, pat.as_bytes()));
     }
 
-    // NR comparisons: NR > N, NR < N, NR == N, NR >= N, NR <= N, NR != N
-    if let Some(after_nr) = pattern.strip_prefix("NR") {
-        let rest = after_nr.trim();
-        if let Some(n_str) = rest.strip_prefix(">=") {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nr >= n;
-            }
-        }
-        if let Some(n_str) = rest.strip_prefix("<=") {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nr <= n;
-            }
-        }
-        if let Some(n_str) = rest.strip_prefix("!=") {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nr != n;
-            }
-        }
-        if let Some(n_str) = rest.strip_prefix("==") {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nr == n;
-            }
-        }
-        if let Some(n_str) = rest.strip_prefix('>') {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nr > n;
-            }
-        }
-        if let Some(n_str) = rest.strip_prefix('<') {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nr < n;
-            }
-        }
+    if let Some(rest) = pattern.strip_prefix("NR") {
+        return awk_compare(nr, rest);
+    }
+    if let Some(rest) = pattern.strip_prefix("NF") {
+        return awk_compare(nf, rest);
     }
 
-    // NF comparisons.
-    if let Some(after_nf) = pattern.strip_prefix("NF") {
-        let rest = after_nf.trim();
-        if let Some(n_str) = rest.strip_prefix(">=") {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nf >= n;
-            }
-        }
-        if let Some(n_str) = rest.strip_prefix('>') {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nf > n;
-            }
-        }
-        if let Some(n_str) = rest.strip_prefix("==") {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nf == n;
-            }
-        }
-    }
-
-    // Fallback: treat as a literal substring match.
-    line.contains(pattern)
+    None
 }
 
-/// Execute an awk action for a line.
-#[allow(clippy::arithmetic_side_effects)]
-fn awk_exec_action(action: &str, line: &str, fields: &[&str], nr: usize, nf: usize, _fs: &str) {
+/// The statements this shell's `awk` can run.
+///
+/// The enum exists so that [`awk_exec_action`] and [`awk_validate_program`]
+/// cannot disagree about what is supported: both go through
+/// [`awk_classify_stmt`], and adding a variant is the only way to widen the
+/// set. A separate `is_supported` predicate beside the executor's `match` arms
+/// would be a second copy of the same list, which is the shape that drifted in
+/// [`awk_compare`].
+enum AwkStmt<'a> {
+    /// `print` / `print $0` — the whole record, byte for byte.
+    PrintRecord,
+    /// `print <expr>[, <expr>…]` — the argument list, unparsed.
+    PrintExpr(&'a str),
+}
+
+/// Recognise one awk statement, or `None` if this shell cannot run it.
+///
+/// `None` is a refusal, not a no-op: [`awk_validate_program`] turns it into
+/// `awk: unsupported statement: '…'` and exit 2 before any rule runs. See
+/// design-decisions §294 for why the whole program is refused rather than the
+/// recognised parts being run.
+fn awk_classify_stmt(stmt: &str) -> Option<AwkStmt<'_>> {
+    if stmt == "print" || stmt == "print $0" {
+        return Some(AwkStmt::PrintRecord);
+    }
+    if let Some(expr) = stmt
+        .strip_prefix("print ")
+        .or_else(|| stmt.strip_prefix("print\t"))
+    {
+        return Some(AwkStmt::PrintExpr(expr.trim()));
+    }
+    None
+}
+
+/// Execute an awk action for a record.
+///
+/// Output goes through [`shell_write_bytes`] rather than `shell_println!`,
+/// because `$0` and the fields are now bytes: a record that is not valid UTF-8
+/// is printed as it was read instead of being replaced or dropped.
+///
+/// Every statement here has already been accepted by [`awk_validate_program`],
+/// so the unrecognised arms are unreachable for any program that gets this far.
+/// They are still written as skips rather than panics: a panic in the kernel
+/// shell takes the kernel with it, and an escape from the validator should cost
+/// a missing line, not a halt.
+fn awk_exec_action(action: &str, line: &[u8], fields: &[&[u8]], nr: usize, nf: usize) {
     // Split action by `;` for multiple statements.
     for stmt in action.split(';') {
         let stmt = stmt.trim();
@@ -121763,39 +122970,109 @@ fn awk_exec_action(action: &str, line: &str, fields: &[&str], nr: usize, nf: usi
             continue;
         }
 
-        if stmt == "print" || stmt == "print $0" {
-            shell_println!("{}", line);
-        } else if stmt.starts_with("print ") || stmt.starts_with("print\t") {
-            let expr = stmt[6..].trim();
-            let output = awk_format_print(expr, line, fields, nr, nf);
-            shell_println!("{}", output);
-        } else {
-            // Unknown statement — ignore.
+        match awk_classify_stmt(stmt) {
+            Some(AwkStmt::PrintRecord) => {
+                shell_write_bytes(line);
+                shell_write_bytes(b"\n");
+            }
+            Some(AwkStmt::PrintExpr(expr)) => {
+                if let Some(output) = awk_format_print(expr, line, fields, nr, nf) {
+                    shell_write_bytes(&output);
+                    shell_write_bytes(b"\n");
+                }
+            }
+            None => {}
         }
     }
 }
 
+/// Why a program cannot be run, carrying the fragment that caused it.
+enum AwkUnsupported {
+    Pattern(alloc::string::String),
+    Statement(alloc::string::String),
+}
+
+impl AwkUnsupported {
+    /// Report the refusal, naming the fragment so the user can see which part
+    /// of a multi-rule program is at fault.
+    fn report(&self) {
+        match self {
+            Self::Pattern(p) => shell_println!("awk: unsupported pattern: '{}'", p),
+            Self::Statement(s) => shell_println!("awk: unsupported statement: '{}'", s),
+        }
+    }
+}
+
+/// Check that every rule in a parsed program can actually be run.
+///
+/// This runs once, before any rule executes, so the verdict depends only on the
+/// program text — a program that would have been mis-run on some inputs is
+/// refused on all of them, including the inputs where the wrong answer would
+/// have looked right. See design-decisions §294.
+///
+/// Patterns are checked by evaluating them against a dummy empty record and
+/// asking only whether the answer exists. That is sound because of
+/// [`awk_pattern_eval`]'s documented invariant: whether it returns `Some`
+/// depends on the pattern alone. The same holds for [`awk_format_print`].
+fn awk_validate_program(rules: &[AwkRule]) -> Result<(), AwkUnsupported> {
+    for rule in rules {
+        // BEGIN and END carry no pattern of their own; `rule.pattern` is empty
+        // for both, and an empty pattern is always evaluable, so checking it
+        // unconditionally is correct as well as simpler.
+        if awk_pattern_eval(&rule.pattern, b"", 0, 0).is_none() {
+            return Err(AwkUnsupported::Pattern(alloc::string::String::from(
+                rule.pattern.as_str(),
+            )));
+        }
+        for stmt in rule.action.split(';') {
+            let stmt = stmt.trim();
+            if stmt.is_empty() {
+                continue;
+            }
+            match awk_classify_stmt(stmt) {
+                Some(AwkStmt::PrintRecord) => {}
+                Some(AwkStmt::PrintExpr(expr)) => {
+                    if awk_format_print(expr, b"", &[], 0, 0).is_none() {
+                        return Err(AwkUnsupported::Statement(alloc::string::String::from(stmt)));
+                    }
+                }
+                None => {
+                    return Err(AwkUnsupported::Statement(alloc::string::String::from(stmt)));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Evaluate a print expression, expanding $N, NR, NF, and string literals.
+///
+/// `None` if any argument is an expression this shell cannot evaluate. Like
+/// [`awk_pattern_eval`], whether the answer is `Some` depends on `expr` alone,
+/// which is what lets [`awk_validate_program`] ask with a dummy record.
+///
+/// The arguments are joined with a single space, which is `OFS`'s default and
+/// the only value this shell supports; assigning `OFS` is an unsupported
+/// statement, so it cannot be anything else.
 #[allow(clippy::arithmetic_side_effects)]
 fn awk_format_print(
     expr: &str,
-    line: &str,
-    fields: &[&str],
+    line: &[u8],
+    fields: &[&[u8]],
     nr: usize,
     nf: usize,
-) -> alloc::string::String {
-    let mut result = alloc::string::String::new();
+) -> Option<alloc::vec::Vec<u8>> {
+    let mut result: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let parts = awk_split_print_args(expr);
 
     for (i, part) in parts.iter().enumerate() {
         if i > 0 {
-            result.push(' ');
+            result.push(b' ');
         }
-        let val = awk_eval_expr(part.trim(), line, fields, nr, nf);
-        result.push_str(&val);
+        result.extend_from_slice(&awk_eval_expr(part.trim(), line, fields, nr, nf)?);
     }
 
-    result
+    Some(result)
 }
 
 /// Split print arguments by commas (respecting quotes).
@@ -121832,15 +123109,26 @@ fn awk_split_print_args(expr: &str) -> alloc::vec::Vec<alloc::string::String> {
     parts
 }
 
-/// Evaluate a single awk expression.
+/// Evaluate a single awk expression to bytes, or `None` if this shell cannot.
+///
+/// The `None` arm replaces a "bare word — treat as literal" fallback, under
+/// which `awk '{ print total }'` printed the five characters `total` where awk
+/// prints the value of the variable `total` (empty, since this shell has no
+/// variables). Both are wrong; one of them said so.
+///
+/// **Invariant:** whether this returns `Some` depends on `expr` alone. Every
+/// arm below is recognised by the expression's own text; the record, fields,
+/// `nr` and `nf` only supply the value. An out-of-range `$9` is `Some(empty)`,
+/// not `None`, because awk says a missing field is the empty string — that is a
+/// value, not an unrecognised expression.
 #[allow(clippy::arithmetic_side_effects)]
 fn awk_eval_expr(
     expr: &str,
-    line: &str,
-    fields: &[&str],
+    line: &[u8],
+    fields: &[&[u8]],
     nr: usize,
     nf: usize,
-) -> alloc::string::String {
+) -> Option<alloc::vec::Vec<u8>> {
     let expr = expr.trim();
 
     // String literal: "..."
@@ -121874,41 +123162,65 @@ fn awk_eval_expr(
                 i += 1;
             }
         }
-        return finish_ascii_scan(result, "awk string literal");
+        // The literal came from the program, which is `&str`, so it is already
+        // valid UTF-8; it is returned as bytes only because everything else
+        // `print` concatenates is.
+        return Some(result);
     }
 
     // Built-in variables.
     if expr == "NR" {
-        return alloc::format!("{}", nr);
+        return Some(alloc::format!("{}", nr).into_bytes());
     }
     if expr == "NF" {
-        return alloc::format!("{}", nf);
+        return Some(alloc::format!("{}", nf).into_bytes());
     }
     if expr == "$0" {
-        return alloc::string::String::from(line);
+        return Some(line.to_vec());
     }
     if expr == "$NF" {
-        return fields.last().map_or(alloc::string::String::new(), |f| {
-            alloc::string::String::from(*f)
-        });
+        return Some(
+            fields
+                .last()
+                .map_or_else(alloc::vec::Vec::new, |f| f.to_vec()),
+        );
     }
 
     // Field reference: $N
     if let Some(field_num) = expr.strip_prefix('$') {
         if let Ok(n) = field_num.parse::<usize>() {
             if n == 0 {
-                return alloc::string::String::from(line);
+                return Some(line.to_vec());
             }
-            return fields
-                .get(n.wrapping_sub(1))
-                .map_or(alloc::string::String::new(), |f| {
-                    alloc::string::String::from(*f)
-                });
+            return Some(
+                fields
+                    .get(n.wrapping_sub(1))
+                    .map_or_else(alloc::vec::Vec::new, |f| f.to_vec()),
+            );
         }
     }
 
-    // Bare word — treat as literal.
-    alloc::string::String::from(expr)
+    // An integer literal prints as its own digits. This is the one case where
+    // the old "bare word — treat as literal" fallback was right, and it is kept
+    // as an explicit arm for the reason §293 gives for a literal `-F`: the two
+    // readings provably coincide, so choosing one is a proof rather than a
+    // guess. A *decimal* literal is not here, because they do not coincide —
+    // awk formats `print 5.0` through `OFMT` (`%.6g`) and prints `5`, where
+    // echoing the text would print `5.0`.
+    if !expr.is_empty()
+        && expr
+            .strip_prefix('-')
+            .unwrap_or(expr)
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+        && expr != "-"
+    {
+        return Some(expr.as_bytes().to_vec());
+    }
+
+    // Anything else — a variable, a function call, arithmetic — this shell
+    // cannot evaluate, and says so rather than echoing the source text.
+    None
 }
 
 /// `invariant` — check kernel invariants (system-wide consistency).

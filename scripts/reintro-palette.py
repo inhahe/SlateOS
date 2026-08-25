@@ -21031,8 +21031,10 @@ DEFECTS = [
         'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the tray falls back to an empty label instead of ??',
         IM,
         [
-            ('            .unwrap_or("??")',
-             '            .unwrap_or("")'),
+            # Was `.unwrap_or("??")` until the accessor became fallible and
+            # the chain collapsed into one `map_or`.
+            ('self.active_layout().map_or("??", |l| l.short_label)',
+             'self.active_layout().map_or("", |l| l.short_label)'),
         ],
         ["desktop"],
         [
@@ -23114,6 +23116,288 @@ DEFECTS = [
             'the_mask_has_one_mark_per_character_not_per_byte',
         ],
     ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a weekly event recurs daily",
+        CAL,
+        [
+            ('            Recurrence::Weekly => anchor.add_days(step.saturating_mul(7)),',
+             '            Recurrence::Weekly => anchor.add_days(step),'),
+        ],
+        ["desktop"],
+        [
+            # The `saturating_mul(7)` is the only thing making Weekly weekly;
+            # the loop bound that justifies it lives in the header, which is
+            # exactly the arrangement the source comment warns is easy to break
+            # by editing one of the two.
+            'recurring_weekly',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a monthly event steps 30 days instead of a month, so the anchored day decays",
+        CAL,
+        [
+            ('            Recurrence::Monthly => anchor.add_months(step),',
+             '            Recurrence::Monthly => anchor.add_days(step.saturating_mul(30)),'),
+        ],
+        ["desktop"],
+        [
+            # This is the exact bug the anchor rewrite existed to kill: a fixed-
+            # length step cannot express `the 31st of every month`, so the
+            # series slides off the date it was anchored on and February stops
+            # clamping to the 29th.
+            'recurring_monthly',
+            'recurring_monthly_day31_clamped',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a yearly event is 365 days long, so it drifts across a leap year",
+        CAL,
+        [
+            ('            Recurrence::Yearly => anchor.add_years(step),',
+             '            Recurrence::Yearly => anchor.add_days(step.saturating_mul(365)),'),
+        ],
+        ["desktop"],
+        [
+            # First written as `add_years` -> `add_months`, which escaped: the
+            # test asks whether an anniversary four years on is present and
+            # whether the day after it is absent, and a monthly series answers
+            # both correctly -- it hits the anniversary on the way past. A
+            # fixed 365-day step is the version that actually separates them,
+            # and it is the more realistic bug besides: 2020-03-14 plus 4x365
+            # days is 2024-03-13, because 2024 is a leap year.
+            'recurring_yearly',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: a daily event skips its own first day",
+        CAL,
+        [
+            ('            Recurrence::Daily => anchor.add_days(step),',
+             '            Recurrence::Daily => anchor.add_days(step + 1),'),
+        ],
+        ["desktop"],
+        [
+            # `step.saturating_mul(2)` was the first attempt and would not
+            # build: this arm is what pins `step`'s integer type for the whole
+            # `match`, so calling a method on it there leaves every arm's
+            # literal ambiguous -- two E0689s, and a defect that never reaches
+            # a test binary proves nothing. `step + 1` needs no method
+            # resolution, so the type still falls out of `add_days`.
+            'recurring_daily',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: an occurrence that merely ends where the range begins is counted inside it",
+        CAL,
+        [
+            ('        if occ_end > range_start {',
+             '        if occ_end >= range_start {'),
+        ],
+        ["desktop"],
+        [
+            # A half-open range is the only reading under which a day owns each
+            # instant exactly once. Closing the low end makes an event finishing
+            # at midnight belong to both days.
+            #
+            # Declared against the midnight test at first, which was simply the
+            # wrong branch: this guard is inside `expand_recurrence`, so a
+            # non-recurring event never reaches it. The all-day Pi Day series
+            # is what notices -- each occurrence is exactly one day long, so
+            # the previous year's ends precisely where the queried day starts
+            # and a closed low end returns two events for one date.
+            'recurring_yearly',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the five-minute snooze lasts fifteen",
+        CAL,
+        [
+            ('            Self::FiveMinutes => 5 * SECS_PER_MIN,',
+             '            Self::FiveMinutes => 15 * SECS_PER_MIN,'),
+        ],
+        ["desktop"],
+        [
+            'reminder_snooze',
+            'reminder_snooze_durations',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the one-hour snooze lasts a minute",
+        CAL,
+        [
+            ('            Self::OneHour => SECS_PER_HOUR,',
+             '            Self::OneHour => SECS_PER_MIN,'),
+        ],
+        ["desktop"],
+        [
+            'reminder_snooze_durations',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a Monday-start week is labelled starting on Sunday",
+        CAL,
+        [
+            ('        FirstDayOfWeek::Monday => ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"],',
+             '        FirstDayOfWeek::Monday => ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"],'),
+        ],
+        ["desktop"],
+        [
+            # The headers are the only part of the Monday setting a user can
+            # read directly, so a grid that starts on Monday under Sunday
+            # captions is worse than either setting applied consistently.
+            'dow_headers_monday_start',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the minute is read off the whole day's remainder instead of the hour's",
+        CAL,
+        [
+            ('    let min = u32::try_from(within.div_euclid(60).rem_euclid(60)).unwrap_or(0);',
+             '    let min = u32::try_from(within.rem_euclid(60)).unwrap_or(0);'),
+        ],
+        ["desktop"],
+        [
+            # `within` is seconds into the day, so dropping the `div_euclid`
+            # yields the *second* twice and loses the minute entirely -- visible
+            # only at times where the two happen to differ, which is almost all
+            # of them.
+            #
+            # The long list is the point rather than clutter: `timestamp_parts`
+            # is what every clock reading in the shell is decomposed by, so the
+            # taskbar and the world-clock rows go wrong together. Twelve
+            # catchers for a two-token edit is a fair measure of how central it
+            # is -- and of how little any one of them was proving alone.
+            'an_unresolvable_zone_falls_back_to_utc_rather_than_inventing_an_offset',
+            'clock_24h_format',
+            'clock_24h_with_seconds',
+            'clock_follows_a_daylight_saving_transition',
+            'clock_timezone_offset',
+            'the_date_and_weekday_switches_reach_the_taskbar_clock',
+            'the_show_seconds_setting_reaches_the_taskbar_clock',
+            'the_taskbar_clock_reads_in_the_configured_zone_not_utc',
+            'the_taskbar_date_crosses_midnight_with_the_zone',
+            'the_taskbar_reading_crosses_midnight_with_the_zone',
+            'the_taskbar_reading_follows_the_switches',
+            'timestamp_with_time',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: an event's duration is measured backwards, so every duration is zero",
+        CAL,
+        [
+            ('        self.end_timestamp.saturating_sub(self.start_timestamp)',
+             '        self.start_timestamp.saturating_sub(self.end_timestamp)'),
+        ],
+        ["desktop"],
+        [
+            # Saturating, so the reversal neither panics nor wraps -- it
+            # silently reports every event as instantaneous, which is the
+            # failure mode a plain `-` would at least have crashed on.
+            #
+            # `recurring_yearly` joins in because an all-day series takes each
+            # occurrence's length from this same subtraction, and a
+            # zero-length occurrence no longer overlaps the day it falls on.
+            'event_duration',
+            'recurring_yearly',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: search is case-sensitive again",
+        CAL,
+        [
+            ('        let q = query.to_lowercase();',
+             '        let q = query.to_string();'),
+        ],
+        ["desktop"],
+        [
+            # The haystack is still lowercased, so this is worse than a
+            # consistently case-sensitive search: any capital in the query
+            # matches nothing at all.
+            #
+            # This escaped on its first run, and the test was the reason: every
+            # query in it was already lower-case, so it constrained only the
+            # half of the rule that lower-cases the *haystack*. Three
+            # capitalised queries were added to it; the name had been true in
+            # spirit and vacuous in fact.
+            'search_case_insensitive',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a hex colour longer than six digits is accepted and silently truncated",
+        CAL,
+        [
+            ('    if s.len() != 6 {',
+             '    if s.len() < 6 {'),
+        ],
+        ["desktop"],
+        [
+            'parse_hex_color_invalid_length',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a hex colour's blue channel reads the green digits",
+        CAL,
+        [
+            ('    let b = u8::from_str_radix(s.get(4..6)?, 16).ok()?;',
+             '    let b = u8::from_str_radix(s.get(2..4)?, 16).ok()?;'),
+        ],
+        ["desktop"],
+        [
+            # Every colour comes back on the blue-green diagonal. It still
+            # parses and still round-trips through `export_text`, so nothing
+            # short of a value assertion notices -- though in practice the
+            # import path notices too, since a colour written out and read
+            # back no longer matches what went in.
+            'export_import_roundtrip',
+            'import_single_event',
+            'parse_hex_color_valid',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: a day is an hour long when its events are gathered",
+        CAL,
+        [
+            ('        let day_end = day_start.saturating_add(SECS_PER_DAY);',
+             '        let day_end = day_start.saturating_add(SECS_PER_HOUR);'),
+        ],
+        ["desktop"],
+        [
+            # Anything after 01:00 vanishes from the day it falls on. Every
+            # per-day reading in the calendar funnels through this one line,
+            # so the dots, the detail card and the popup's own height all fail
+            # together -- which is the useful shape of it: the day window is a
+            # single point of truth, and eight tests stand behind it.
+            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
+            'events_for_date_non_recurring',
+            'events_for_date_spanning_midnight',
+            'every_month_view_site_draws_the_role_it_claims',
+            'recurring_monthly_day31_clamped',
+            'render_event_dots_shown',
+            'render_selected_date_shows_detail',
+            'the_event_card_hangs_below_the_frame_and_still_counts_as_the_popup',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: occurrences come back in storage order rather than in time order",
+        CAL,
+        [
+            ('        result.sort_by_key(|e| e.start_timestamp);\n',
+             ''),
+        ],
+        ["desktop"],
+        [
+            # A recurring event expands into a contiguous run, so the list is
+            # only ever mis-ordered when two events interleave -- the normal
+            # case for a real diary and never the case for a store holding one
+            # event.
+            #
+            # Which is why this escaped: `events_for_range` had three events
+            # and a range containing exactly one of them, so deleting the sort
+            # outright left the entire suite green. The sort had no test at
+            # all. The catcher below was written for it.
+            'events_come_back_in_time_order_whatever_order_they_were_stored_in',
+        ],
+    ),
 ]
 def run_tests(pkg):
     r = subprocess.run(
@@ -23140,6 +23424,28 @@ def run_tests(pkg):
     return failed, out
 
 
+def source(snap, path):
+    """The snapshotted file as LF-only text, whatever it is on disk.
+
+    Git here runs `core.autocrlf=input`, which normalises line endings on
+    commit but never on checkout, so a file once written by something
+    CRLF-aware stays CRLF in the working tree while the committed bytes are LF.
+    Every pattern in `DEFECTS` is spelled with `\\n`, so in such a file *every
+    multi-line pattern silently stops matching* -- and reports as PATTERN NOT
+    FOUND, which is indistinguishable from the rename this script exists to
+    catch. Three of the four defects reported stale on 2026-08-25 were exactly
+    this -- `Y`, `PPPP...` and `QQQQ...`, all three in `gui/desktop/run_dialog.rs`,
+    the one CRLF file here that any *multi-line* pattern points at. Only the
+    fourth was a real rename. (`gui/desktop/lib.rs` is CRLF too but was
+    unaffected: its defects are all single-line, which is what makes this bug
+    so quiet -- it hides only some of the defects in only some of the files.)
+
+    So every pattern is spelled LF, matched against LF, and the file's own
+    convention is put back on write. `reintro-keylayout.py` learned this first.
+    """
+    return snap[path].decode("utf-8").replace("\r\n", "\n")
+
+
 def check(snap):
     """Report every defect whose pattern no longer matches, without building.
 
@@ -23155,7 +23461,7 @@ def check(snap):
     amb = 0
     noop = 0
     for name, path, edits, _pkgs, _expect in DEFECTS:
-        text = snap[path].decode("utf-8")
+        text = source(snap, path)
         original = text
         # A defect may list the same edit twice on purpose, to wound both of an
         # identical pair; only an ambiguity the defect does *not* acknowledge
@@ -23163,17 +23469,19 @@ def check(snap):
         listed = {}
         for old, _new in edits:
             listed[old] = listed.get(old, 0) + 1
+        stale = False
         for i, (old, new) in enumerate(edits):
             if old not in text:
                 print(f"PATTERN NOT FOUND  {name}\n    edit {i} in {path}")
                 bad += 1
+                stale = True
                 break
             # Reported once per defect, on the first edit, against the
             # untouched file: an unacknowledged second match means the defect
             # silently patches whichever copy happens to come first, and will
             # move to the other one the day someone reorders the module.
             if i == 0:
-                n = snap[path].decode("utf-8").count(old)
+                n = source(snap, path).count(old)
                 if n > listed[old]:
                     print(f"AMBIGUOUS ({n} matches, {listed[old]} listed)  {name}")
                     amb += 1
@@ -23194,7 +23502,13 @@ def check(snap):
         # unanswered one. Checking it here rather than mid-run also means the
         # authoring mistake surfaces in the seconds-long preflight instead of
         # after the run it invalidates.
-        if text == original:
+        #
+        # Skipped when an edit went missing, because the loop above `break`s on
+        # the first stale pattern and so leaves `text` untouched — which looks
+        # exactly like a self-cancelling defect. Reporting both makes one fault
+        # arrive as two, and the no-op line is the misleading half: it says the
+        # edits undo each other when in fact none of them ran.
+        if not stale and text == original:
             print(f"NO-OP  {name}\n    every edit was undone by a later one")
             noop += 1
     print(f"\n{len(DEFECTS)} defects, {bad} stale, {amb} ambiguous, {noop} no-op")
@@ -23211,29 +23525,69 @@ _FN = re.compile(r"^\s*(?:async\s+)?fn\s+([A-Za-z0-9_]+)\s*\(")
 # The two packages this harness sweeps. A test in guitk or the compositor is
 # not unproven-by-this-harness; it is simply out of scope, and listing it would
 # bury the finding in noise.
+#
+# This is the denominator for *unproved* only. It must not be used to decide
+# whether a declared name exists: defects legitimately patch `gui/toolkit`
+# (the contrast work of design-decisions.md §537 does), and the tests those
+# defects name live there. Judging existence against these two directories
+# reported fifteen perfectly healthy guitk tests as dangling -- a false alarm
+# in the one category the report treats as unambiguously a mistake, which is
+# the fastest way to teach a reader to ignore it. See `names_in_tree`.
 COVERED_DIRS = ("gui/desktop/src", "gui/appearance/src")
 
 
+def _tests_in(directory):
+    """`{path: [test names]}` for every `#[test] fn` under `directory`."""
+    found = {}
+    for p in sorted((ROOT / directory).rglob("*.rs")):
+        if "target" in p.parts:
+            continue
+        names = []
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        for i, ln in enumerate(lines):
+            if not _TEST_ATTR.match(ln):
+                continue
+            for nxt in lines[i + 1:]:
+                if _ATTR.match(nxt) or not nxt.strip():
+                    continue
+                m = _FN.match(nxt)
+                if m:
+                    names.append(m.group(1))
+                break
+        if names:
+            found[p.relative_to(ROOT).as_posix()] = names
+    return found
+
+
 def tests_in_tree():
-    """`{path: [test names]}` for every `#[test] fn` in the swept packages."""
+    """`{path: [test names]}` for the packages this harness sweeps.
+
+    The denominator for *unproved*, and nothing else.
+    """
     found = {}
     for d in COVERED_DIRS:
-        for p in sorted((ROOT / d).rglob("*.rs")):
-            names = []
-            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-            for i, ln in enumerate(lines):
-                if not _TEST_ATTR.match(ln):
-                    continue
-                for nxt in lines[i + 1:]:
-                    if _ATTR.match(nxt) or not nxt.strip():
-                        continue
-                    m = _FN.match(nxt)
-                    if m:
-                        names.append(m.group(1))
-                    break
-            if names:
-                found[p.relative_to(ROOT).as_posix()] = names
+        found.update(_tests_in(d))
     return found
+
+
+def names_in_tree():
+    """Every test name in every crate any defect patches.
+
+    The universe for *dangling* and *single-prover*, which is a strictly wider
+    question than the one `tests_in_tree` answers. A defect that patches
+    `gui/toolkit/src/theme.rs` names tests that live in `gui/toolkit`, so
+    asking whether those names exist against `COVERED_DIRS` alone answers a
+    question nobody posed and answers it wrongly.
+
+    Derived from the defect list rather than hard-coded, so a defect aimed at
+    a new crate widens this by itself. Otherwise the next crate to be patched
+    reintroduces the same false alarm, and the fix would have been a one-off.
+    """
+    crates = {pathlib.PurePath(*pathlib.PurePath(d[1]).parts[:2]).as_posix()
+              for d in DEFECTS}
+    crates.update(pathlib.PurePath(*pathlib.PurePath(d).parts[:2]).as_posix()
+                  for d in COVERED_DIRS)
+    return {t for c in sorted(crates) for ts in _tests_in(c).values() for t in ts}
 
 
 def coverage():
@@ -23259,7 +23613,10 @@ def coverage():
        ever asked it anything.
     2. **Dangling** -- a declared name matching no test in the tree, i.e. a
        test renamed out from under a defect. Today this surfaces only as a
-       `[MISSING: ...]` at the end of a run that takes hours.
+       `[MISSING: ...]` at the end of a run that takes hours. Judged against
+       every crate any defect patches (`names_in_tree`), not against the two
+       swept for (1) -- those are different questions and conflating them
+       reported fifteen live guitk tests as dangling.
     3. **Single-prover** -- a test exactly one defect names. These are the
        fragile ones: one refactor from becoming unproved, which is precisely
        what happened to touchpad's erasure sweep when the empty-fill guard
@@ -23271,7 +23628,7 @@ def coverage():
             provers.setdefault(t, []).append(path)
 
     in_tree = tests_in_tree()
-    everywhere = {t for names in in_tree.values() for t in names}
+    everywhere = names_in_tree()
 
     unproved = {
         f: [t for t in names if t not in provers]
@@ -23327,8 +23684,12 @@ def apply_to(snap, path, edits):
     They are reported apart rather than together because they mean different
     things to whoever fixes them: a missing pattern is source that moved under
     the defect, while a no-op is the defect arguing with itself (lesson 18).
+
+    Matches on LF-normalised text (see `source`) and puts the file's own
+    newline convention back on the way out.
     """
-    original = snap[path].decode("utf-8")
+    crlf = b"\r\n" in snap[path]
+    original = source(snap, path)
     text = original
     for old, new in edits:
         if old not in text:
@@ -23336,7 +23697,11 @@ def apply_to(snap, path, edits):
         text = text.replace(old, new, 1)
     if text == original:
         return None, "*** PATCH IS A NO-OP ***"
-    return text, None
+    # Back into the file's own convention, so a patched file differs from its
+    # snapshot only where the patch touched it. A whole-file newline flip would
+    # make any accidental leftover invisible in `git diff` under
+    # `autocrlf=input`, which is exactly when you most want to see it.
+    return (text.replace("\n", "\r\n") if crlf else text), None
 
 
 def cargo_check(pkg):

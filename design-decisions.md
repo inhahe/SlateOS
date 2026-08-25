@@ -43195,3 +43195,220 @@ The reproducibility argument wins because the pause is per-directory and
 proportional to a directory people rarely have, while the shuffled output is
 paid on every multi-file run by everyone. If a profile ever shows the sort
 mattering, the fix is to sort lazily in chunks, not to abandon the order.
+
+## §292 — `base64 -d` matches GNU's leniency about trailing bits, and its own encoder about line breaks
+
+**Date:** 2026-08-25
+**Decided by:** Claude (autonomous)
+
+**In short:** When you decode base64, some inputs are technically malformed but
+still decodable. We had to pick how fussy to be. The rule chosen: refuse
+anything that would make us *guess* what the sender meant, and accept
+everything that has exactly one possible meaning — even where the standard says
+we may refuse it. Concretely, `Zh==` still decodes to `f`, and a base64 file
+with line breaks in it still decodes without extra flags.
+
+**Background.** Base64 encodes three bytes as four characters from a 64-letter
+alphabet, padding the last group with `=` when the input did not divide evenly.
+Decoding is mechanical, but real inputs arrive with line breaks in them, with
+stray characters, and occasionally with bits set that the padding claims are
+not there. Every decoder has to say what it does with each.
+
+The rewrite of `cmd_base64` (`TD-A-BASE64-D-DESCRIBES-ITS-OUTPUT-INSTEAD-OF-WRITING-IT`)
+forced the question, because the old decoder answered it by skipping all ASCII
+whitespace unconditionally and checking almost nothing else.
+
+**The three calls.**
+
+| case | chosen | why |
+|---|---|---|
+| **Trailing bits** — `Zh==`: `h` carries four bits that one decoded byte cannot hold | **Accept**, discarding them, and decode to `f` | RFC 4648 §3.5 says a decoder *may* reject this; GNU, OpenSSL and Python's `binascii` all accept it. There is exactly one plausible intent, and refusing input that every other base64 accepts is a gratuitous incompatibility in a format whose entire purpose is interoperation. |
+| **Line breaks** — `\n` and `\r` inside the data | **Skip**, always, with no flag needed | They are structure, not content: our own encoder inserts a `\n` every 76 columns, and MIME wraps with CRLF. A decoder that cannot read its own encoder's output is not a decoder. GNU's skips `\n` for the same reason; `\r` is added here because CRLF-wrapped base64 is at least as common as LF-wrapped, and no encoder emits a bare `\r` as data. |
+| **Anything else outside the alphabet** — a space, a `!`, a byte ≥ 0x80 | **Refuse**, with `base64: invalid input` and exit 1, unless `-i` was given | This is where the old behaviour was actually wrong rather than merely lenient. Skipping a stray byte means decoding a *different message* from the one that arrived and reporting success for it. `-i`/`--ignore-garbage` exists precisely so the leniency can be asked for. |
+
+**Alternatives considered.**
+
+- **Canonical-form checking (reject `Zh==`).** More correct in the narrow
+  sense, and it would catch a class of corrupt input. Rejected because the
+  input is unambiguous, so refusing it buys no correctness for the *data* —
+  only for the encoder that produced it, which is not our business — while
+  costing compatibility with every base64 in existence. A user whose file
+  decodes everywhere else and fails here would reasonably call that our bug.
+- **Skip only `\n`, as GNU does.** Rejected as a gratuitous failure mode: a
+  CRLF-wrapped MIME body would need `-i`, and `-i` would then also mask real
+  garbage in the same file. Widening to `\r` costs nothing, since no encoder
+  emits a lone `\r` as payload.
+- **Keep skipping all ASCII whitespace.** This is the old behaviour, and it is
+  the one that was actually harmful: it is not leniency about *structure* but
+  about *content*, it could not be turned off, and it made `base64 -d`
+  succeed on inputs that were not base64 at all.
+
+**What this could cost later.** If a caller ever needs strict canonical
+decoding — verifying a signature over the encoded form, say — this decoder will
+not provide it. The fix then is a `--strict` flag checking the trailing bits in
+`base64_group`, which is three lines and one branch; it is not a design that
+would have to be unwound. That is why the lenient default is safe to choose
+now.
+
+**Where:** `kernel/src/kshell.rs`, `base64_decode` and `base64_group`. Pinned by
+self-test rung 40.
+
+## §293 — A multi-character `awk -F` splits literally where a regex could not disagree, and is refused where it could
+
+**Date:** 2026-08-25
+**Decided by:** Claude (autonomous)
+
+**In short:** `awk -F', '` means "split each line on comma-space". In real awk
+a separator longer than one character is a *regular expression* — a pattern
+language where `.` means "any character", `[a-z]` means "any of these", and so
+on — and the kernel shell has no engine that can evaluate one. Rather than
+guess, it now splits on the exact characters you typed when that is provably
+the same answer a regex would give, and refuses outright when it is not. So
+`-F', '` works; `-F'[,;]'` says it cannot and exits 2.
+
+**Background.** POSIX defines awk's field separator `FS` in two halves. A
+**single** character is used literally, always — which is why `-F.` splits on
+dots even though `.` is a regex metacharacter. Anything **longer** than one
+character is an extended regular expression. `-F', '` is therefore, strictly, a
+two-character regex — one that happens to match exactly the two characters
+`,` and ` `, because neither is special.
+
+The kernel shell's `awk` cannot evaluate a regex at all: it has no engine
+(`TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`), and
+adding one would mean a second copy of `userspace/ere` living in the kernel,
+which is the outcome that crate exists to prevent.
+
+**What it did before.** Neither of the two readings. `awk_split_fields` ended:
+
+```rust
+} else {
+    alloc::vec![line]
+}
+```
+
+— one field holding the whole record, and exit 0. So `awk -F', ' '{print $2}'`
+printed a blank line per record, which is exactly what a file whose records
+genuinely have no second field looks like.
+
+### The options
+
+| Option | *What changes* |
+|---|---|
+| Keep returning the whole record as `$1` | nothing; `$2` stays silently empty |
+| Refuse every multi-character `-F` | `-F', '` stops working, and it is the common case |
+| **Literal where unambiguous, refuse where not** ✓ | `-F', '` works; `-F'[,;]'` prints an error and exits 2 |
+| Implement a regex engine in the kernel | everything works, and there are two engines to keep in agreement |
+
+**Why the third.** The test is mechanical and it is *sound*: a separator
+containing none of `.[]()*+?{}|^$` matches, as a regex, exactly itself — so the
+literal split and the regex split are the same function, and choosing the
+literal one is not a guess but a proof. When a metacharacter is present the two
+readings genuinely differ, and there is no basis for preferring either; that is
+the case that gets refused.
+
+The split matters because the two halves are not equally common. Separators
+people actually write — `', '`, `' | '`, `'::'`, `'\t\t'` — are almost all
+metacharacter-free. Separators that need a real regex are rare and are, in this
+shell, unsupportable. Refusing both would make awk useless for the common case
+to be honest about the rare one; accepting both would be the silent guess this
+whole series of fixes is about removing.
+
+**Exit 2, not 1.** `awk` already uses 1 for "a file could not be read", which
+is a per-operand condition that other operands may survive. A separator that
+cannot be evaluated is a property of the *invocation*: nothing will be read at
+all. gawk likewise reserves 2 for a fatal error before processing. Keeping them
+distinct means `awk -F'[,;]' … || retry-with-another-file` cannot mistake one
+for the other.
+
+**What this could cost later.** If `ere` gains a `no_std` build and the shell
+gets a real engine, the refusal becomes dead code and the metacharacter test
+goes away — `awk_field_sep` returns `AwkFs::Regex(compiled)` instead. Nothing
+else has to change: `awk_split_fields` already dispatches on the `AwkFs` enum,
+so the third variant slots in beside `Whitespace` and `Literal`. No user-facing
+behaviour that works today would change, because everything that works today
+works for the reason that its literal and regex readings coincide.
+
+**A smaller call inside this one.** `-F ''` — a zero-length separator — splits
+every character into its own field in gawk. It is refused here rather than
+supported or silently treated as the default, because the literal splitter
+would loop forever on it and nothing in the tree asks for it. That is a
+limitation, and it says so.
+
+## §294 — The kernel shell's `awk` refuses a program it cannot run whole, rather than running the parts it recognises
+
+**Date**: 2026-08-25
+**Decided by**: Claude (autonomous)
+
+**In short:** The kernel's built-in `awk` only knows how to do one thing —
+print. Faced with anything else it has been quietly skipping that part of the
+program and carrying on, so `awk '{ n = n + 1 } END { print n }'` printed a
+blank line and reported success: the counting step was dropped and nothing
+said so. The choice was between teaching it the rest of the awk language and
+making it say plainly that it cannot. It now says so: a program containing
+anything outside the supported set is refused before it runs, with the exact
+fragment quoted, and exits 2.
+
+**The state before.** `awk_exec_action` split the action on `;` and handled
+`print`, `print $0` and `print <list>`. Its `else` arm was a bare comment
+reading "Unknown statement — ignore." `awk_pattern_matches` had the same shape
+one level up: after the `NR`/`NF` comparisons it fell through to
+"treat as a literal substring match", so `awk '$1 > 5 { print }'` searched each
+record for the seven characters `$1 > 5`, found none, and printed nothing.
+
+Both are the silent-guess shape this series exists to remove: not a refusal, an
+answer, and the wrong one. They are worse than most, because the *shape* of the
+output is right. A blank line where a count was expected, or no lines where a
+filter was expected, both look like a legitimate result on data that happened
+not to match.
+
+| written | before | now |
+|---|---|---|
+| `awk '{ n = n + 1 } END { print n }'` | prints an empty line, exit 0 | `awk: unsupported statement: 'n = n + 1'`, exit 2 |
+| `awk '{ if ($1 > 5) print }'` | prints nothing, ever, exit 0 | `awk: unsupported statement: 'if ($1 > 5) print'`, exit 2 |
+| `awk '$1 > 5 { print }'` | prints nothing, exit 0 | `awk: unsupported pattern: '$1 > 5'`, exit 2 |
+| `awk '{ printf "%s\n", $1 }'` | prints nothing, exit 0 | `awk: unsupported statement: 'printf "%s\n", $1'`, exit 2 |
+
+**The alternative was to implement the language.** What is missing is
+assignment, arithmetic, user variables, `if`, `printf`, `sub`/`gsub`,
+`substr`/`length`, `next`, `exit` and `getline` — which is to say, most of awk.
+Two reasons not to:
+
+- **Userspace already has one.** A second awk in the kernel would have to agree
+  with the userspace one forever, and would not, for the same reason a second
+  regex engine would not. That is the divergence the `ere` crate exists to
+  prevent, and the argument does not change because the duplicate is an
+  interpreter rather than a matcher.
+- **`kshell` is a pre-userspace debugging tool.** Its job is to be correct about
+  a small set of things, early, with no dependencies. A small correct subset
+  serves that; a large approximate one does not.
+
+**Why refusal is not merely the cheaper option.** A refusal is checkable. The
+validator runs over the parsed rules *before any rule executes*, so the verdict
+depends only on the program text and not on the data — a program that would
+have been mis-run on some inputs is refused on all of them, including the
+inputs where the wrong answer would have looked right. That is the property
+that makes the refusal worth more than a partial implementation: there is no
+input for which the shell quietly does the wrong thing.
+
+**Exit 2, matching `-F`.** As in §293: 1 is `awk`'s per-operand status for a
+file it could not read, and other operands may still succeed. A program it
+cannot run is a property of the invocation — nothing will be read at all — so
+it takes the invocation-fatal 2, which is also where gawk puts a fatal error
+raised before processing begins.
+
+**The refusal is a floor, not a ceiling.** Every statement listed above can be
+added later, and each addition is then a deliberate widening of a stated subset
+rather than another silent hole. The order this suggests, by how often each
+appears in the shell's own scripts: `printf`, `exit`, `next`, assignment with
+integer arithmetic, `if`. `getline` and the string functions are further off
+and may never be worth it.
+
+**One thing this deliberately does not refuse.** A `/pattern/` is still matched
+as a substring rather than as a regular expression. That is a wrong answer of
+exactly the kind this entry removes elsewhere, and it is left in place only
+because the fix is a real regex engine, which is filed as
+`requests/a-b-ere-is-std-only-so-the-kernel-shell-still-matches-regexes-with-contains.md`
+and tracked as `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`.
+Refusing every `/…/` with a metacharacter would be consistent, and is the
+documented fallback if that request is declined; it is not done pre-emptively
+because it would break working invocations while the request is still open.

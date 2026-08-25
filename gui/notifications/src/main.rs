@@ -818,6 +818,18 @@ impl NotificationDaemon {
                 self.set_viewport(*width as f32, *height as f32);
                 None
             }
+            // Toasts age out and animate on the clock, and this was falling
+            // into the `_ => None` arm below, so `tick` -- correct, and with
+            // tests -- was reached from nothing but those tests.  A toast
+            // that never ages is a toast that never leaves the screen; see
+            // known-issues.md lesson 45.
+            //
+            // No `DaemonAction`: expiry is the daemon's own business, unlike
+            // a click, which the caller may need to act on.
+            Event::Tick { elapsed_ms } => {
+                self.tick(*elapsed_ms);
+                None
+            }
             _ => None,
         }
     }
@@ -2164,6 +2176,27 @@ mod tests {
         // Low priority = 3000ms timeout.
         daemon.tick(3001);
         assert!(daemon.toasts[0].dismissing);
+    }
+
+    /// A real `Event::Tick` reaches the toast clock.
+    ///
+    /// Through `handle_event`, not `tick`: `tick` was correct and tested
+    /// while `handle_event` dropped the event into its `_ => None` arm, so a
+    /// test that calls `tick` directly cannot tell a daemon whose toasts
+    /// expire from one whose toasts stay on screen forever.  Falsified by
+    /// deleting the `Event::Tick` arm and confirming this test, and only it,
+    /// fails.
+    #[test]
+    fn a_tick_event_expires_a_toast() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let notif = make_test_notification(0, NotificationPriority::Low);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        // Low priority = 3000ms timeout.
+        daemon.handle_event(&Event::Tick { elapsed_ms: 3001 });
+        assert!(
+            daemon.toasts[0].dismissing,
+            "Event::Tick did not reach the toast clock"
+        );
     }
 
     #[test]

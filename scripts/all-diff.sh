@@ -57,11 +57,18 @@ for h in scripts/*-diff.sh; do
     out=$(sh "$h" 2>&1 | tail -1)
     printf '%-12s %s\n' "$name" "$out"
     # The harnesses do not share a summary wording -- most end "N passed, 0
-    # differed, M differ on purpose", `extfloat` ends "no differences". Both
-    # are green, and matching only the first would report a passing harness as
-    # a failure, which is the way an aggregate runner stops being believed.
+    # differed, M differ on purpose", `extfloat` ends "no differences", and
+    # `osh` ends "N matched, M waived, 0 failed" because its corpus is shell
+    # scripts rather than argv cases. All three are green, and matching only
+    # some of them would report a passing harness as a failure, which is the
+    # way an aggregate runner stops being believed.
+    #
+    # Each pattern anchors on the count being zero, so a wording that changes
+    # underneath this stops matching and is reported red. That is the safe
+    # direction to be wrong in: a false red gets looked at, a false green does
+    # not.
     case "$out" in
-        *" 0 differed"* | "no differences") ;;
+        *" 0 differed"* | *" 0 failed" | "no differences") ;;
         *) rc=1 ;;
     esac
 done

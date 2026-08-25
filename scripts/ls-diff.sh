@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Compare our `ls` against GNU's, case for case, inside WSL.
 #
 # `ls` is the second utility that cannot be measured from the development host,

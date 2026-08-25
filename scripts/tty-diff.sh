@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # tty-diff.sh — compare our `tty` against the real GNU one, inside WSL.
 #
 # ## What this is checking
@@ -48,6 +48,7 @@
 # discriminates: it should report every xfail as XPASS and nothing else.
 set -u
 
+# shellcheck disable=SC2209  # the subject's *name*, not a call to tty(1)
 DIFF_PROG=tty
 DIFF_NEED=script
 # shellcheck source=diff-wsl.sh
@@ -166,6 +167,15 @@ pty_compare() {
   # status the child's, -c gives the command, and /dev/null discards the
   # typescript. Its stdout is redirected too, or the pty's echo would land in
   # the harness's output.
+  # shellcheck disable=SC2016  # see below: these single quotes are literal
+  #
+  # The whole of the next two lines is one double-quoted string, so `'` in it is
+  # an ordinary character and `$o_bin` *does* expand -- the quotes are there for
+  # the inner shell `script` spawns, not for this one. Checked: with `redir`
+  # empty, `${redir:->'$o_bin'}` yields `>'/tmp/OUT'`. SC2016 fires only on the
+  # two inside `${...:-...}`, where its parser loses track of the enclosing
+  # double quotes; the dozen other `'$var'` occurrences in this file do not
+  # trip it.
   script -qec "\
 env PATH='$bindir/ours' tty$qa ${redir:->'$o_bin'} $e_ours; echo \$? >'$o_rcf'; \
 env PATH='$bindir/gnu'  tty$qa ${redir:->'$g_bin'} $e_gnu; echo \$? >'$g_rcf'" \

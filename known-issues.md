@@ -5478,7 +5478,32 @@ not cover it.
 
 ---
 
-### TD-OILS-SIGNAL-NUMBERS-ARE-LINUXS-AND-CANNOT-BE-CHECKED-AGAINST-MSYS. `kill -l` and `trap` model Linux's signal table; the development host's bash uses a BSD-ish MSYS one — 2026-08-04 — OPEN (unverifiable on this host)
+### TD-OILS-SIGNAL-NUMBERS-ARE-LINUXS-AND-CANNOT-BE-CHECKED-AGAINST-MSYS. `kill -l` and `trap` model Linux's signal table; the development host's bash uses a BSD-ish MSYS one — 2026-08-04 — **VERIFIED CORRECT 2026-08-25**; the premise "unverifiable on this host" is retired
+
+> **Measured against glibc bash, 2026-08-25.** `scripts/osh-diff.sh` compares
+> osh against `/usr/bin/bash` inside WSL, so the table below is now checkable
+> and has been checked. **osh's numbering for signals 1–31 is identical to
+> glibc bash's, name for name and number for number** — including the three
+> this entry called out as differing under MSYS:
+>
+> | signal | osh | glibc bash | MSYS bash (the old reference) |
+> |---|---|---|---|
+> | `SIGBUS` | 7 | **7** | 10 |
+> | `SIGUSR1` | 10 | **10** | — |
+> | `SIGUSR2` | 12 | **12** | — |
+> | `SIGSYS` | 31 | **31** | 12 |
+> | `SIGEMT` | rejected | **rejected** | 7 |
+>
+> Both shells reject `SIGEMT` with the same wording (`kill: EMT: invalid signal
+> specification`), so the agreement extends to the error path. Nothing here was
+> ever an osh defect, and it is no longer unverifiable — it is verified.
+>
+> **One real gap did surface**, which is what a correct reference is for:
+> osh's table stops at 31, while glibc bash exposes the 31 real-time signals
+> 34–64. `kill -l RTMIN` answers `34` in bash and `invalid signal
+> specification` in osh. That is an osh limitation rather than a reference
+> artifact, and it is tracked separately as
+> `TD-OILS-NO-REAL-TIME-SIGNALS` below.
 
 **Where:** `userspace/oils/src/interp.rs` — the signal name/number table behind
 `kill`, `trap` and `$?`'s 128+n encoding.
@@ -5528,6 +5553,64 @@ that was already installed by the host.
 **Why not waived instead.** An `# EXPECT-DIFF` would pin the artifact into the
 corpus as if it were behaviour. There is nothing to assert here: the host cannot
 represent the input the test wants.
+
+> **Gone as of 2026-08-25 — the host was the whole problem, and the host has
+> changed.** `scripts/osh-diff.sh` runs both shells inside WSL on ext4, where
+> mode bits are real. Re-measured:
+>
+> | shell | `test -x w.sh` after `chmod +x` | `type -a w.sh` |
+> |---|---|---|
+> | osh | `yes` | `w.sh is /tmp/…/w.sh` |
+> | glibc bash | `yes` | `w.sh is /tmp/…/w.sh` |
+>
+> Identical. **`type -a` is now usable in corpus cases**, including on files the
+> case creates itself, and the restriction this entry imposed on case authors is
+> lifted. `tests/corpus/path-prefix-assignment-search.sh`'s header still warns
+> against it; that warning is now stale and should be dropped when the file is
+> next touched.
+>
+> The WONTFIX stands as a judgement about osh — there was never a bug here — but
+> the *measurement* is no longer blocked.
+
+### TD-OILS-NO-REAL-TIME-SIGNALS. osh's signal table stops at 31; bash exposes SIGRTMIN..SIGRTMAX (34–64) — 2026-08-25 — OPEN
+
+**In short:** POSIX systems have two kinds of signal. The classic ones
+(`SIGINT`, `SIGTERM`, …) are numbered 1–31 and osh handles all of them
+correctly. Linux adds a second block, the *real-time* signals — 31 extra
+numbered slots (34–64) that programs use to send each other application-defined
+notifications. osh does not know they exist. A script that says `kill -RTMIN+2
+$pid` works under bash and fails under osh.
+
+**Found by** the reference-shell migration: this was invisible while the corpus
+measured against MSYS bash, whose own table is BSD-shaped and disagreed with
+osh's in so many places that the real-time block was lost in the noise. Against
+glibc bash the 1–31 range agrees exactly, which is what makes the tail visible.
+
+**Where:** `userspace/oils/src/interp.rs` — the signal name/number table behind
+`kill`, `trap` and `$?`'s 128+n encoding.
+
+**Measured:**
+
+```
+$ osh  -c 'kill -l RTMIN'   →  kill: RTMIN: invalid signal specification
+$ bash -c 'kill -l RTMIN'   →  34
+```
+
+`kill -l` output is identical up to `31) SIGSYS`, after which bash continues
+with 34–64 and osh stops.
+
+**Proper fix.** Extend the table with `SIGRTMIN` (34) through `SIGRTMAX` (64),
+and accept the `RTMIN+n` / `RTMAX-n` name forms in `kill`, `trap` and `kill -l`,
+which is how they are almost always written. Note that glibc reserves 32 and 33
+for its own threading use and bash lists neither, so the block genuinely starts
+at 34 — the numbers are not simply "32 onwards".
+
+**Risk of leaving it.** Low but real: real-time signals are rare in shell
+scripts, but a script that uses one fails with a confusing "invalid signal
+specification" rather than doing nothing, and the failure is at the point of
+use rather than at startup.
+
+---
 
 ### TD-OILS-PRINTF-Q-HIGH-BYTES. `%q`/`@Q` deliberately disagree with the reference bash about which *characters* are printable — 2026-08-03 — ⚠️ **KNOWN DEVIATION, NOT A BUG** — narrowed 2026-08-07
 
@@ -7102,7 +7185,30 @@ and the disagreement will close on its own.
 regenerate. Do not special-case the 74; they are a symptom of the granularity,
 not the rule.
 
-### TD-OILS-A-NON-UTF-8-ARGUMENT-IS-REPLACED-ON-THE-WINDOWS-HOST. A child spawned by osh sees `\xef\xbf\xbd` where bash's child sees `\xff` — 2026-08-08 — OPEN (host-only)
+### TD-OILS-A-NON-UTF-8-ARGUMENT-IS-REPLACED-ON-THE-WINDOWS-HOST. A child spawned by osh sees `\xef\xbf\xbd` where bash's child sees `\xff` — 2026-08-08 — **NOT REPRODUCIBLE OFF WINDOWS (confirmed 2026-08-25)**; the host-only claim is now measured rather than argued
+
+> **The "why it is host-only" section below was reasoning; this is the
+> measurement.** The `x86_64-unknown-linux-gnu` osh that `scripts/osh-diff.sh`
+> builds hands a child an argv vector, exactly as SlateOS will, and the bytes
+> survive. A child was given `\xff` three different ways and printed each byte
+> it received:
+>
+> | how the byte reached the child | osh | glibc bash |
+> |---|---|---|
+> | `showarg $(printf "\xff")` | `[ff]` | `[ff]` |
+> | `showarg $'\xff'` | `[ff]` | `[ff]` |
+> | `v=$(printf "\xff"); showarg "$v"` | `[ff]` | `[ff]` |
+>
+> No replacement character anywhere, and identical to bash in all three shapes.
+> So the corruption is confined to `wincmd.rs` and the Windows `CreateProcess`
+> command line, as argued — and the argument is now backed by a run rather than
+> by inspection of the spawn path.
+>
+> **The corpus restriction is lifted.** "Corpus cases must not route a byte that
+> is no character through a child's argv" was a rule imposed by the measuring
+> apparatus. Under `scripts/osh-diff.sh` such a case is legitimate and would
+> pass; keep it in mind only if a case is ever run against the Windows host
+> build directly.
 
 **Where:** `userspace/oils/src/wincmd.rs` and the `std::process::Command` spawn
 path in `userspace/oils/src/interp.rs` — Windows takes a UTF-16 command line,
@@ -7920,7 +8026,33 @@ and thread the shell start instant through so `%(…)T -2` is exact. Deferred:
 UTC formatting is correct and deterministic, and scripts that need a
 specific zone can compute the offset explicitly.
 
-### TD-OILS-HOST-ARGV0. External commands see the resolved absolute path as `argv[0]` on the *Windows host build* instead of the command word as typed (correct on the slateos/unix target) — NOT-A-BUG on target / host-only test artifact — 2026-07-20
+### TD-OILS-HOST-ARGV0. External commands see the resolved absolute path as `argv[0]` on the *Windows host build* instead of the command word as typed (correct on the slateos/unix target) — NOT-A-BUG on target / host-only test artifact — 2026-07-20 — **`cfg(unix)` path now measured, 2026-08-25**
+
+> **"Validate argv[0] behavior on the slateos target when a ring-3 exec
+> self-test exists" — partly discharged, sooner and more cheaply than that.**
+> `scripts/osh-diff.sh` builds osh for `x86_64-unknown-linux-gnu`, where
+> `cfg(unix)` is true, so the `CommandExt::arg0` override below is *compiled in
+> and exercised* — the same code the slateos target uses. Every host-only claim
+> in this entry, including the `exec -a`/`-l`/`-c` paragraph, was re-measured
+> against glibc bash:
+>
+> | probe | osh | glibc bash |
+> |---|---|---|
+> | `cat /nope` | `cat: /nope: No such file or directory` | identical |
+> | `sh -c 'echo $0'` | `sh` | identical |
+> | `exec -a myname sh -c 'echo $0'` | `myname` | identical |
+> | `exec -l sh -c 'echo $0'` | `-sh` | identical |
+> | `exec -c env` | (empty) | identical |
+>
+> So `argv[0]` is the word as typed, `exec -a` chooses it, `exec -l` prefixes
+> the `-`, and `exec -c` really does clear the environment. All five were
+> unobservable under the old apparatus and all five are correct.
+>
+> **What this does not prove:** slateos is not Linux, and the ring-3 exec
+> self-test is still the thing that would test *slateos'* exec. What is now
+> settled is that the code is right and the Windows host was the only thing
+> hiding it — the remaining risk is in the target's exec implementation, not in
+> osh's use of it.
 
 **Where:** `userspace/oils/src/interp.rs` (`exec_external`, the `PCommand`
 construction ~line 5664). The `arg0` override is `#[cfg(unix)]`.
@@ -8077,7 +8209,48 @@ an expansion. The only observable cost is this one blank-vs-`\` cell in the
 astronomically rare case of a range deliberately spanning `\`. No real script
 relies on it; no action needed.
 
-### TD-OILS10. `osh` `time` keyword / `times` builtin: user/sys CPU times are always reported as 0.00 — 2026-08-03 — ✅ **RESOLVED 2026-08-03 on Windows hosts** (still zero on other hosts, see below)
+### TD-OILS10. `osh` `time` keyword / `times` builtin: user/sys CPU times are always reported as 0.00 — 2026-08-03 — ✅ **RESOLVED**: Windows 2026-08-03, Linux/SlateOS 2026-08-25
+
+**Resolved on Linux too (2026-08-25),** which is the half that mattered, since
+SlateOS's target is Linux-flavoured (`toolchain/x86_64-slateos.json` sets
+`os = "linux"`, family `unix`) and the shell's reference comparisons now run
+against a glibc bash. The gap was invisible while the only host was Windows and
+surfaced the moment the unit suite was first run under Linux:
+`time_charges_cpu_to_the_command_that_used_it` reported `0.00` for a loop that
+burned **20.9 s of real time** — measured with `TIMEFORMAT=%3R/%3U/%3S`, osh
+`20.941/0.000/0.000` against bash's `0.551/0.601/0.000` on the same loop.
+
+The premise that had to go was "osh does not link libc's `rusage` bindings".
+osh already declares libc functions where it needs them — `parent_pid` has an
+`unsafe extern "C" { fn getppid() -> i32; }` a few hundred lines above — so
+`getrusage` is declared the same way, with `struct rusage` spelled as the two
+`timeval`s plus the fourteen `long` counters that follow them (named as a block
+and never read, but present, because the kernel writes the whole structure).
+
+**The two platforms now use the source each one actually keeps**, which is a
+real structural difference and not a portability shim:
+
+* **Windows** charges a *process*, and keeps the charge only while a handle to
+  it is open — so the shell must read each child as it reaps it and add up the
+  total itself. That is what `CHILD_USER_NS`/`CHILD_SYS_NS` and `account_child`
+  are, and they are now `#[cfg(windows)]`.
+* **Linux** keeps the running total in the kernel and hands it over on demand:
+  `getrusage(RUSAGE_CHILDREN)` *is* the total over children already waited for,
+  which is exactly the set `reap_child` has reaped. It is also the only route
+  available, because `std` reaps with `waitpid` and discards the `rusage` a
+  `wait4` would have returned — so there is nothing per-child to accumulate.
+
+`RUSAGE_SELF` is the right class for the shell's own line because it sums every
+thread in the process, and osh's subshells and pipeline stages *are* threads; a
+per-thread figure would miss most of what a `time` is asked about.
+
+**On SlateOS this is `posix`'s own `getrusage`** (`posix/src/resource.rs`),
+which fills the two times for `RUSAGE_SELF` from the kernel's aggregate CPU
+counters and leaves `RUSAGE_CHILDREN` zeroed until per-child accounting exists
+there. The shell asks the same question on both, so SlateOS's answer improves
+as the kernel's does with nothing in the shell to change.
+
+The historical Windows-only account follows.
 
 **Resolved:** the premise — "no per-child CPU accounting exists" — was only true
 of `std`. Windows exposes it: `GetProcessTimes` answers for the current process
@@ -8105,7 +8278,8 @@ totals its parent accumulated, where a forked bash's subshell starts from zero.
 And on non-Windows hosts `self_cpu_secs`/`child_cpu_times` still return zero:
 `getrusage` needs libc bindings osh does not have, and the SlateOS answer is
 the process-accounting syscall described under "Proper fix" below. Both are
-marked in the source.
+marked in the source. *(The second of those was closed on 2026-08-25 — see the
+head of this entry. The first still stands.)*
 
 **Where:** `userspace/oils/src/interp.rs` (`Shell::format_time_report`, called
 from `exec_pipeline` when a pipeline is prefixed with `time`; and
@@ -71634,12 +71808,13 @@ all three output formats, the escaping, every option error and prefix
 ambiguity, and the whole of `--check` including the layout latch, the
 `WARNING:` lines with their singular/plural forms, and the exit statuses.
 
-Run `PROG=md5sum OURS=/usr/bin/md5sum ./scripts/digest-diff.sh` to confirm the
-harness still discriminates; it reports the two xfails as XPASS and nothing
-else, which is what says the remaining 113 are comparisons and not
-coincidences. (`OURS` replaces a single binary, so the harness refuses it
-without a `PROG` saying which — rather than applying it to whichever program
-happened to run first.)
+Run `OURS=/usr/bin ./scripts/digest-diff.sh` to confirm the harness still
+discriminates; it reports all four xfails as XPASS and nothing else, which is
+what says the remaining 226 are comparisons and not coincidences. (`OURS` names
+a *directory*, as in every family harness here, so one run covers both
+programs. It named a single binary until 2026-08-25, which meant it also needed
+a `PROG=` beside it to say which — and so the discrimination check could only
+ever cover one of the two programs at a time.)
 
 ### What our own tests caught that the harness could not have
 
@@ -79261,3 +79436,194 @@ Python startup and reading 372 files.
   what the author thought to write down. Comparing old and new `inspect()` on
   all 372 `.rs` files under the gate's roots — full per-file results, not the
   summary line — says it did not break what they did not.
+
+---
+
+### TOOL-DIFF-WSL-LIB-FRESHNESS-CHECK-IS-CURRENTLY-INERT. `diff_lib_artifacts` cannot tell "this package has no library" from "this package's library is gone", and today it answers the second with the first — 2026-08-25 — FIXED
+
+> **Correction, same day, before the fix landed.** This entry was filed with the
+> right symptom and the wrong cause. It blamed the missing `deps/` directory on
+> "the second occurrence" of an unexplained 2026-08-24 deletion. There was no
+> deletion: **cargo 1.100.0-nightly (e8cb624d5 2026-08-22) does not create
+> `deps/`**, and the original text is kept below with the correction marked, so
+> that the reasoning error stays visible rather than being quietly overwritten.
+> The corrected diagnosis, the evidence, and the fix as shipped are at the end.
+
+**In short:** the coreutils harnesses build their subject and then check that the
+build really happened. Part of that check — the part added specifically because
+a stale library once made a harness report sixteen differences against a fix
+that was correct and in the tree — is silently doing nothing at the moment. It
+looks for a file inside a directory that does not exist, finds nothing, and
+reads "nothing" as "nothing to worry about."
+
+**Where:** `scripts/diff-wsl.sh`, `diff_lib_artifacts` (~line 297) and its caller
+`diff_first_stale` (~line 336).
+
+```sh
+diff_lib_artifacts() {
+  for diff_p in $DIFF_PKG; do
+    ls -t "$target_dir/x86_64-unknown-linux-gnu/debug/deps/lib${diff_p}-"*.rlib \
+      2>/dev/null | head -1
+  done
+}
+```
+
+**Two independent faults, same shape.**
+
+*Fault 1 — the name is guessed from the package, not read from the target.*
+`lib${diff_p}` assumes a package's library artifact is named after the package.
+That holds only when `Cargo.toml` has no `[lib] name`:
+
+| package | `[lib] name` | actual artifact | guessed | matches |
+|---|---|---|---|---|
+| `coreutils` | absent | `libcoreutils-*.rlib` | `libcoreutils-*` | yes |
+| `dc` | no library at all | — | `libdc-*` | vacuously |
+| `oils` | `osh` | `libosh-*.rlib` | `liboils-*` | **no** |
+
+`oils` is the first package a harness has pointed `DIFF_PKG` at whose library is
+renamed, and it arrived today with `scripts/osh-diff.sh`. Left alone, that
+harness would carry a freshness check that can never fire.
+
+*Fault 2 — a missing artifact is indistinguishable from an absent one.* `ls …
+2>/dev/null` prints nothing both when the package legitimately has no library
+(`dc`) and when the library the build was supposed to produce is not there. Only
+the second is a problem, and it is exactly the problem the function was written
+for. Measured 2026-08-25, twice, once with a `cargo build` actively running
+against the directory:
+
+```
+$ ls -d $HOME/.cache/slateos-diff-target/x86_64-unknown-linux-gnu/debug/*/
+build/  examples/  incremental/
+deps exists? NO      fingerprint exists? NO
+```
+
+So `deps/` is gone — and with it every `*.rlib` the check reads — while `debug/`
+still holds 40-odd finished binaries (they survive as hardlinks when the
+`deps/` names are removed). That is verbatim the state `diff-wsl.sh`'s own
+comment records from 2026-08-24: *"a `debug/` full of finished binaries and no
+`deps/` at all, so something had removed the intermediates and left the
+fingerprints."* This is its second occurrence, and the cause is still not known.
+It is not disk space: the WSL root had 892 GiB free.
+
+> ~~**CORRECTED.**~~ Everything in the paragraph above after the first sentence
+> is wrong. `deps/` was never "gone"; this toolchain never makes one. See
+> **The corrected diagnosis** below.
+
+**Why it matters that the detector is the thing that broke.** The check exists
+because a green harness is the only evidence anyone reads, so a check that
+cannot fail is worse than no check — it is a green light wired to nothing.
+Both faults produce silence, and silence is this function's success signal.
+
+**What the proper fix looks like.** Do not add a knob for the harness author to
+set, because a knob is a second copy of a fact the tree already states, and a
+second copy is the one that drifts. Read it instead:
+
+1. For each package in `DIFF_PKG`, take the library target's name from
+   `userspace/<pkg>/Cargo.toml` — the `name` under `[lib]`, falling back to the
+   package name — so `oils` resolves to `osh` without anyone saying so.
+2. Decide whether a library is *expected* from whether `userspace/<pkg>/src/lib.rs`
+   exists. `dc` has none, so nothing is expected of it; `coreutils` and `oils`
+   both do.
+3. When one is expected and no artifact is found, report it as stale with the
+   existing `<the build left nothing here>` wording, which already routes into
+   `cargo clean -p` + rebuild + refuse. That path is correct; it is only never
+   reached.
+
+**Consolation, and the reason this is not urgent.** With `.fingerprint/` gone,
+cargo cannot judge anything fresh, so every harness in a sweep is currently
+doing a full from-scratch rebuild. Results gathered in this state are the
+*freshest* possible, not the stalest — the bug's cost is a check that would not
+warn if the directory returned to a half-populated state, not a wrong answer
+today. That is also why the sweep takes about a minute per harness.
+
+> ~~**CORRECTED.**~~ Also wrong, and wrong in the comforting direction, which is
+> why it is worth keeping. Cargo judges *everything* fresh: `cargo build -v`
+> reports all 12 crates `Fresh` and 0 `Compiling`. Nothing is being rebuilt from
+> scratch, so the "results are the freshest possible" consolation was unearned —
+> had the library genuinely been stale, this entry would have talked the reader
+> out of worrying about it. The minute per harness is 9p/DrvFs stat traffic
+> against `/mnt/d`, not compilation.
+
+**Risk of leaving it.** The 2026-08-24 incident cost a day of chasing sixteen
+imaginary differences in `interleave-diff.sh`. The check that was written so it
+could not happen twice is, as of today, not running.
+
+## The corrected diagnosis — 2026-08-25
+
+**In short:** the check looked for the library in `debug/deps/`, under a name
+built from the package name. Both halves were wrong at once. The folder is
+wrong because the current cargo puts libraries somewhere else entirely, and the
+name is wrong for `oils`, whose library is called `osh`. Two wrong inputs, one
+silent "found nothing", and a check that reported everything fine.
+
+**`deps/` was not deleted; this cargo does not create it.** Established by
+measurement, in this order, each step ruling out the previous explanation:
+
+| Step | Result |
+|---|---|
+| `CARGO_*` env overriding the layout? | none set |
+| `~/.cargo/config.toml`, or one in a parent dir? | neither exists |
+| Does `deps/` appear *during* a build? (polled every 4 s for 45 s) | never appears |
+| `cargo build -v` on the repo | 12 × `Fresh`, 0 × `Compiling` |
+| **Clean `cargo build` of a fresh hello-world** | produces `build/ examples/ incremental/ <bin> <bin>.d` — **no `deps/`, no `.fingerprint/`** |
+| `cargo build -v` on that hello-world | `--out-dir …/target/debug/build/layoutprobe/<hash>/out` |
+
+The last line is the whole answer. Cargo `1.100.0-nightly (e8cb624d5 2026-08-22)`
+emits units to `debug/build/<pkg>/<hash>/out/`, so a library artifact lives at
+`debug/build/<pkg>/<hash>/out/lib<libname>-<hash>.rlib`. Confirmed in the shared
+target dir:
+
+```
+debug/build/coreutils/a051f900598d42ca/out/libcoreutils-a051f900598d42ca.rlib
+debug/build/coreutils/49c74fa47cb46b3f/out/libcoreutils-49c74fa47cb46b3f.rlib
+debug/build/oils/d51545b5b76655c2/out/libosh-d51545b5b76655c2.rlib
+```
+
+It also retires the 2026-08-24 mystery as a mystery: the "no `deps/` at all"
+observation that was read as evidence of a deletion carried no information,
+because there was never going to be one. *What made cargo call a stale library
+fresh that day is still unexplained* — the correction removes a wrong answer, it
+does not supply a right one. The freshness check is the response to that, and it
+fires on the symptom, which is all anyone gets.
+
+**A near-miss worth recording.** The fix makes "a library was expected and the
+build produced none" fatal. Written against the belief that `deps/` had been
+deleted, the natural next step was to assume a rebuild would restore it — and
+shipping on that assumption would have made all 46 harnesses refuse to run,
+since no `deps/*.rlib` was ever going to exist again. What prevented it was
+holding the fix back for one decisive experiment (the hello-world build) instead
+of acting on a plausible story. A wrong diagnosis that predicts the same symptom
+is only distinguishable by an experiment that *could* have come out the other
+way.
+
+**Fixed as shipped.** `diff_lib_artifacts` is replaced by three functions in
+`scripts/diff-wsl.sh`:
+
+- `diff_manifest` — finds `<pkg>/Cargo.toml` with a *one-level* glob
+  (`$root/*/<pkg>/Cargo.toml`). Not a recursive search: `userspace/` holds
+  several thousand package directories and walking it costs minutes, far more
+  than the check it serves.
+- `diff_lib_name` — applies cargo's own two rules, in cargo's order: an explicit
+  `[lib] name` wins; failing that a package has a library iff `src/lib.rs`
+  exists, named after the package with dashes turned to underscores. Read from
+  the manifest rather than taken as a harness knob, because a knob is a second
+  copy of a fact the tree already states, and `oils` is the standing proof that
+  the copy nobody rereads is the one that goes wrong.
+- `diff_lib_artifact` — **searches** beneath `debug/` for `lib<libname>-*.rlib`
+  and takes the newest, rather than asserting a directory. Returns 0 with a path
+  when found, 0 with no output when the package has no library, 1 when a library
+  is expected and absent, and 2 when the package has no manifest at all. The
+  last two both route into the existing `cargo clean -p` + rebuild + refuse path,
+  which was always correct and merely never reached.
+
+Searching rather than naming is the actual lesson: a layout the next toolchain
+invents costs nothing as long as the file keeps its name, and if it ever does
+stop being found, the answer is now a refusal rather than a silent pass.
+
+Verified against all four cases before shipping — `coreutils` (implicit lib,
+newest of two hashes), `dc` (no library, correctly exempt), `oils` (`libosh`,
+the one the old code could never have matched), and a nonexistent package
+(rc=2 rather than a silent skip) — then end-to-end: `wc-diff.sh` 116 passed,
+0 differed.
+
+---

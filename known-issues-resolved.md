@@ -28447,6 +28447,40 @@ one readline quirk that only shows on a busy function: `-P` and `-q` list at
 most five key sequences, closing with a full stop — but a sixth turns the tail
 into `"a", "b", "c", "d", "e", ...` with no full stop at all.
 
+**Every number above is superseded** (2026-08-25). They were measured against
+the MSYS bash that happened to be on the developer's PATH, and two separate
+things about that reference were wrong — see
+TD-B-THE-SHELL-HARNESS-STILL-MEASURES-AGAINST-MSYS-BASH for the migration that
+found them. Re-measured against the glibc bash 5.2.21 SlateOS actually targets,
+under `INPUTRC=/dev/null` **and** `LC_ALL=C.UTF-8`: `-l` **173** function names,
+`-p` **487**, `-P` **174**, `-v`/`-V` 46, `-s`/`-S`/`-X` empty, `bind -lpvsPVSX`
+**926**; per-keymap `-p` emacs/emacs-standard 487, emacs-meta 224, emacs-ctlx
+199, vi/vi-move/vi-command 220, vi-insert 421; and `/etc/inputrc` moves `-p` to
+**494** while leaving `bind -s` **empty** rather than at 10.
+
+* **The 174th name was `paste-from-clipboard`**, a Windows clipboard call that
+  only a Cygwin readline is configured with. That is the one genuine platform
+  difference in these tables, and it had been transcribed into osh as if it
+  were readline's.
+* **The locale was never pinned, and it decides `convert-meta`.** readline's
+  `_rl_init_eightbit` takes the eight-bit branch for any `LC_CTYPE` that is not
+  exactly `C` or `POSIX` (nls.c:168-186), which turns `convert-meta` *off*, and
+  that variable decides whether a listing names the escape sub-map after the
+  modifier it stands for (`\M-b`) or writes the byte as itself (`\eb`). This is
+  *not* a platform difference, though it was once recorded here as one:
+  measured four ways, MSYS bash and glibc bash agree with each other in each
+  locale and disagree with themselves across the two. The committed table was
+  the worst of both — its variables had been hand-corrected to the eight-bit
+  set while its key sequences were still C-locale captures, so the file
+  described one locale in its variables and the other in its tables.
+
+`scripts/gen-oils-bind-tables.py` now **refuses** a capture that meets neither
+condition rather than warning about it — it asks the reference shell for its
+`$MACHTYPE` and stops unless it says `linux`, and it reads `convert-meta` back
+out of the capture rather than trusting that `LC_ALL` took effect. The output is
+committed and nobody re-derives it, so a warning would be read once and the
+wrong table would live in the tree.
+
 **`suspend` was the other half of this gap and is now closed** (2026-08-02).
 It is implemented as the refusal, because every path through it is one: osh has
 no job control (TD-OILS13), so it answers bash's own

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # write-error-diff.sh — one question, asked of every utility that answers it:
 # what happens when standard output or standard error cannot be written?
 #
@@ -93,9 +93,15 @@
 # harness comparing something against itself by accident.
 set -u
 
+# `DIFF_NO_REF=1`, because a family has no single reference to name: each
+# binary's counterpart is found by its own name, which `diff-wsl.sh` does while
+# building `$bindir` — one directory per side, each holding every utility under
+# its bare name, so `argv[0]`, and therefore the `prog: ` prefix on every
+# diagnostic, is identical on both sides. `DIFF_NO_BINDIR` is deliberately *not*
+# set: that is exactly the arrangement this harness wants, and it used to build
+# an equivalent one by hand.
 DIFF_PROG=write-error
 DIFF_NO_REF=1
-DIFF_NO_BINDIR=1
 DIFF_NEED="timeout"
 DIFF_BINS="basename cat comm dirname echo expand fold head join logname md5sum
            nice nl nohup paste printf pwd seq sha256sum tsort tty unexpand wc
@@ -103,29 +109,7 @@ DIFF_BINS="basename cat comm dirname echo expand fold head join logname md5sum
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
-pass=0; fail=0; xfail=0; skipped=
-
-# --- the two sides ------------------------------------------------------------
-# One directory per side, each holding every utility under its bare name, so
-# `argv[0]` — and therefore the `prog: ` prefix on every diagnostic — is
-# identical on both sides. `OURS`, when set, names a *directory* here rather
-# than a binary, since this harness has no single subject.
-mkdir -p "$bindir/ours" "$bindir/gnu"
-for prog in $DIFF_BINS; do
-  # `command -v` finds the shell's builtin for `echo`, `printf` and `true`,
-  # which is not what is being compared. Look on the filesystem instead.
-  gnu_bin=
-  for cand in /usr/bin/$prog /bin/$prog; do
-    [ -x "$cand" ] && { gnu_bin=$cand; break; }
-  done
-  if [ -n "${OURS:-}" ]; then our_bin=$OURS/$prog; else our_bin=$(diff_ours "$prog"); fi
-  if [ -z "$gnu_bin" ] || [ ! -x "$our_bin" ]; then
-    skipped="$skipped $prog"
-    continue
-  fi
-  ln -s "$our_bin" "$bindir/ours/$prog"
-  ln -s "$gnu_bin" "$bindir/gnu/$prog"
-done
+pass=0; fail=0; xfail=0
 
 have() { [ -e "$bindir/ours/$1" ]; }
 
@@ -320,7 +304,7 @@ sweep echo       --version
 
 # --- what could not be asked --------------------------------------------------
 printf '\n'
-[ -n "$skipped" ] && printf 'not compared (no reference or no build):%s\n' "$skipped"
+[ -n "$DIFF_SKIPPED" ] && printf 'not compared (no reference or no build):%s\n' "$DIFF_SKIPPED"
 
 printf '%d passed, %d differed, %d differ on purpose\n' "$pass" "$fail" "$xfail"
 [ "$fail" -eq 0 ]

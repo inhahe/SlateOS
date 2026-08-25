@@ -63,7 +63,10 @@ bind -m vi-insert -q yank
 # ... and `-m` put the keymap back.
 bind -v | grep -a 'set keymap'
 
-echo "=== a file that cannot be opened is the builtin's failure, a directory is not"
+# A directory is the second of these and not a third thing: POSIX lets `open`
+# succeed on one and fails the `read`, so what the builtin sees is a read error
+# like any other, reported with `strerror(EISDIR)` in the same sentence.
+echo "=== a file the builtin cannot read is its failure, whichever way it fails"
 bind -f /nosuch/file; echo "  missing   rc=$?"
 mkdir adir
 bind -f adir; echo "  directory rc=$?"

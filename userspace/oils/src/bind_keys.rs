@@ -1153,7 +1153,7 @@ impl Maps {
 /// One name per readline *function*, so two names for the same function
 /// compare equal.
 ///
-/// readline's funmap holds some C functions under two names — `\M-.` is listed
+/// readline's funmap holds some C functions under two names — `\e.` is listed
 /// by `bind -p` under both `yank-last-arg` and `insert-last-argument` — and a
 /// listing walks names, so an aliased function is printed once for each. A
 /// table keyed by key sequence has one entry there, not two, so the aliases
@@ -1221,13 +1221,29 @@ mod tests {
     use super::{Meta, Target, cmp_seq, decode, encode, table_entry as table_seq};
     use crate::bind_tables::KEYMAPS;
 
+    /// The spelling [`KEYMAPS`] is written in.
+    ///
+    /// Not a constant, because it is not a fact about escapes but about one
+    /// variable: `convert-meta` decides whether the escape sub-map is named
+    /// after the modifier (`\M-b`) or written as the byte it is (`\eb`), and
+    /// it is *live* — `bind 'set convert-meta on'` flips every listing in the
+    /// same shell (measured, both bashes). The tables and the seeded variables
+    /// come from one capture, so asking the seeded variables is by
+    /// construction asking for the spelling the tables were captured in;
+    /// hardcoding [`Meta::Prefix`] here instead is what made these tests fail
+    /// the moment the capture moved to a UTF-8 locale, where the default is
+    /// `off`.
+    fn table_meta() -> Meta {
+        super::Maps::seeded().meta()
+    }
+
     #[test]
     fn every_readline_binding_survives_a_round_trip() {
         for map in &KEYMAPS {
             for (text, func) in map.bindings {
                 let (seq, is_prefix) = table_seq(text);
                 assert!(!seq.is_empty(), "{}: {text} decoded to nothing", func);
-                let back = encode(&seq, is_prefix, Meta::Prefix);
+                let back = encode(&seq, is_prefix, table_meta());
                 assert_eq!(
                     String::from_utf8_lossy(&back),
                     *text,
@@ -1252,7 +1268,7 @@ mod tests {
                     .iter()
                     .any(|o| o.len() > seq.len() && o.starts_with(seq));
                 assert_eq!(
-                    String::from_utf8_lossy(&encode(seq, derived, Meta::Prefix)),
+                    String::from_utf8_lossy(&encode(seq, derived, table_meta())),
                     *text,
                     "{}/{func}",
                     map.names.first().copied().unwrap_or("?")
@@ -1394,7 +1410,7 @@ mod tests {
                 .entries(name)
                 .iter()
                 .map(|e| {
-                    String::from_utf8_lossy(&encode(e.seq, e.is_prefix, Meta::Prefix)).into_owned()
+                    String::from_utf8_lossy(&encode(e.seq, e.is_prefix, table_meta())).into_owned()
                 })
                 .collect();
             let mut want: Vec<String> = captured
@@ -1403,7 +1419,7 @@ mod tests {
                 .map(|(t, _)| (*t).to_string())
                 .collect();
             want.sort_by(|a, b| cmp_seq(&table_seq(a).0, &table_seq(b).0));
-            // An aliased function is captured once per name — `\M-.` is listed
+            // An aliased function is captured once per name — `\e.` is listed
             // as both `yank-last-arg` and `insert-last-argument` — but it is
             // one key and so one row of the live table.
             want.dedup();

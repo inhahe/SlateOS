@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # logname-diff.sh — compare our `logname` against the real GNU one, inside WSL.
 #
 # ## What this is checking
@@ -40,6 +40,7 @@
 # still discriminates: it should report every xfail as XPASS and nothing else.
 set -u
 
+# shellcheck disable=SC2209  # the subject's *name*, not a call to logname(1)
 DIFF_PROG=logname
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"

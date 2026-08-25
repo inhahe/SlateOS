@@ -1,3 +1,6 @@
+# shellcheck shell=sh
+# shellcheck disable=SC3043  # `local`; see "Which dialect" below.
+#
 # Shared preamble for a differential harness that runs both sides inside WSL.
 #
 # Sourced, not run. It does the six things every such harness was doing for
@@ -30,6 +33,29 @@
 # The build lands in `$HOME/.cache/slateos-diff-target` inside WSL, shared
 # between harnesses and kept out of the repository's `target/` so the Linux and
 # Windows builds do not invalidate each other (design-decisions.md §374).
+#
+# ## Which dialect
+#
+# `sh`, not `bash`. A sourced file has no shebang of its own, so shellcheck
+# cannot infer one and checks nothing at all until told -- and what it should
+# be told is the *most restrictive* shell that sources this, not the most
+# common one. 45 of the 46 harnesses are bash; `osh-diff.sh` is `#!/bin/sh`,
+# and declaring bash here would pass a bashism that breaks it, which is the
+# failure a dialect declaration exists to prevent.
+#
+# One harness got that wrong in the other direction and the check found it:
+# `ls-diff.sh` said `#!/bin/sh` while using process substitution, so `dash -n`
+# rejected the whole file -- it could not have run under the shell it named.
+# Its shebang now says bash, which is what it always was.
+#
+# The one POSIX rule this then breaks on purpose is `local`, which is not in
+# the standard. `/bin/sh` in the WSL images these harnesses run under is dash,
+# which implements it, as does bash. The alternative is to drop the three uses
+# and let those variables leak into whichever harness sourced the file: the
+# `diff_` prefix they carry makes a collision unlikely, but "unlikely" is a
+# weaker guarantee than a scope, and this file is read by every harness that
+# sources it. So the extension is kept and SC3043 is disabled at the top,
+# rather than the scoping being given up to satisfy a shell nobody runs.
 #
 # ## Why the subject is built, every run
 #
@@ -86,7 +112,7 @@
 # | `DIFF_REF`       | (none) | candidate paths for the reference, tried in order, instead of looking on `PATH`. `echo` needs this: `command -v echo` finds the shell builtin, which is not what is being compared. Single-binary harnesses only |
 # | `DIFF_NEED`      | (none) | other commands that must exist inside WSL, or the run is skipped rather than run without them |
 # | `DIFF_NO_REF`    | (unset) | do not look for a reference; the harness finds its own |
-# | `DIFF_NO_BINDIR` | (unset) | do not build the `PATH` directories; the harness makes its own |
+# | `DIFF_NO_BINDIR` | (unset) | do not build the `PATH` directories; the harness makes its own. See below — this is almost never what a harness wants |
 #
 # Afterwards it has set:
 #
@@ -109,7 +135,37 @@
 #
 # `OURS=/usr/bin/<prog>` overrides the build with the reference itself, which
 # is how a harness is checked for still being able to tell the two apart: it
-# should then report every xfail as an XPASS and nothing else.
+# should then report every xfail as an XPASS and nothing else. For a *family*
+# harness `OURS` names the directory instead — `/usr/bin` — since there is no
+# single subject for it to name.
+#
+# ## `DIFF_NO_BINDIR` is for three situations, and none is "I have a family"
+#
+# Three harnesses set it and then rebuilt this file's multi-binary `$bindir`
+# by hand, name for name (`interleave-diff.sh`, `digest-diff.sh`,
+# `write-error-diff.sh`, all converted 2026-08-25). Every one of the three had
+# drifted from the copy here in the same direction: it took `OURS` as a
+# directory without checking it *is* one, so a mistyped `OURS` skipped every
+# name in silence rather than saying so. Two copies of one judgement is one
+# copy that is wrong, and the wrong one is the one nobody rereads.
+#
+# The situations the knob is actually for:
+#
+# * **The subject has no same-named counterpart to symlink beside.**
+#   `extfloat-diff.sh`: its subject is a `--example`, and its reference is a C
+#   program it compiles itself.
+# * **The reference is not known yet when this file runs.** `ls-diff.sh` builds
+#   GNU coreutils 9.5 from source, because the 9.4 WSL ships lays out columns
+#   differently; the symlinks cannot be made until that build has finished.
+# * **The two sides must keep their own distinct names.** `osh-diff.sh`
+#   compares `osh` against `bash`, and its harness strips each shell's *own*
+#   name from that shell's diagnostics before comparing them, so that it
+#   compares the message rather than the program. It can only do that if it
+#   knows which name to strip; a `$bindir` that called both sides `osh` would
+#   defeat the normalisation it was meant to serve.
+#
+# Anything else — including "my harness compares a family" — wants `DIFF_BINS`
+# with more than one name in it and no `DIFF_NO_BINDIR` at all.
 
 if [ -z "${DIFF_PROG:-}" ]; then
   echo "diff-wsl.sh: DIFF_PROG is not set" >&2
@@ -230,10 +286,17 @@ diff_ours_example() {
 # while its artifacts told a different story: every binary that called a
 # function added to `coreutils::stdfd` that morning failed to compile with
 # `cannot find function `close_stdout` in module `stdfd``, and `cargo clean -p
-# coreutils` was the whole fix. The directory had a `debug/` full of finished
-# binaries and no `deps/` at all, so something had removed the intermediates
-# and left the fingerprints -- a disk that filled, or a kill during a write;
-# the cause was not recoverable after the fact.
+# coreutils` was the whole fix.
+#
+# This comment used to add that the directory "had a `debug/` full of finished
+# binaries and no `deps/` at all, so something had removed the intermediates"
+# -- a disk that filled, or a kill during a write. That inference was wrong and
+# is withdrawn (2026-08-25): cargo 1.100.0-nightly does not create `deps/` at
+# all. It puts every unit under `debug/build/<pkg>/<hash>/out/`, as a clean
+# build of a hello-world confirms. The missing directory was therefore evidence
+# of nothing, and what actually let cargo call a stale library fresh is still
+# unexplained. Which is the argument for the check below, not against it: it
+# fires on the symptom, and the symptom is all anyone gets.
 #
 # A compile error is the *lucky* shape of that bug. The unlucky shape is a
 # harness whose subject compiles against a stale library and passes, certifying
@@ -265,32 +328,100 @@ diff_newer_than() {
        -name '*.rs' -newer "$1" -print -quit 2>/dev/null
 }
 
-# One library artifact per package in `DIFF_PKG`, or nothing for a package that
-# has no library.
+# The manifest for package $1, or nothing.
 #
-# `deps/` holds one per build hash; the newest is the one the binaries above
-# were just linked against.
-diff_lib_artifacts() {
-  for diff_p in $DIFF_PKG; do
-    ls -t "$target_dir/x86_64-unknown-linux-gnu/debug/deps/lib${diff_p}-"*.rlib \
-      2>/dev/null | head -1
+# One glob level, not a recursive search: `userspace/` alone holds several
+# thousand package directories, and walking it costs minutes -- far more than
+# the check it exists to serve. A package somewhere this does not reach is
+# *reported*, never skipped; see `diff_lib_artifact`.
+diff_manifest() {
+  for diff_m in "$root"/*/"$1"/Cargo.toml "$root/$1/Cargo.toml"; do
+    if [ -f "$diff_m" ]; then
+      printf '%s\n' "$diff_m"
+      return 0
+    fi
   done
+  return 1
 }
 
-# Print `ARTIFACT|NEWER-FILE` and succeed if $1 is stale; fail silently if not.
+# The library target name for the package manifested at $1, or nothing if that
+# package has no library at all.
+#
+# These are cargo's own two rules, in cargo's order: an explicit `[lib] name`
+# wins, and failing that a package has a library if and only if `src/lib.rs`
+# exists, named after the package with dashes turned into underscores.
+#
+# Read from the manifest rather than taken as a knob, because a knob would be a
+# second copy of something the tree already states -- and `oils`, whose library
+# is named `osh`, is the standing proof that the copy nobody rereads is the one
+# that goes wrong. Guessing the library name from the package name is precisely
+# the bug this replaces.
+diff_lib_name() {
+  diff_explicit=$(awk '
+    /^[ \t]*\[/ { diff_in = ($0 ~ /^[ \t]*\[lib\]/); next }
+    diff_in && /^[ \t]*name[ \t]*=/ {
+      sub(/^[^=]*=[ \t]*/, ""); sub(/[ \t]*(#.*)?$/, ""); gsub(/["'\'']/, "")
+      print; exit
+    }
+  ' "$1")
+  if [ -n "$diff_explicit" ]; then
+    printf '%s\n' "$diff_explicit"
+    return 0
+  fi
+  [ -f "${1%/Cargo.toml}/src/lib.rs" ] || return 0
+  basename "${1%/Cargo.toml}" | tr - _
+}
+
+# The newest library artifact of package $1.
+#
+# Prints the path and returns 0; prints nothing and returns 0 when the package
+# has no library; returns 1 when it has one and the build produced no artifact,
+# and 2 when the package could not be found at all.
+#
+# ## Why this searches instead of naming a directory
+#
+# It named one until 2026-08-25: `debug/deps/lib<pkg>-*.rlib`, which was right
+# when it was written and is now right nowhere. Cargo 1.100.0-nightly moved
+# intermediates to `debug/build/<pkg>/<hash>/out/`, and `deps/` no longer
+# exists; a clean build of a hello-world produces no such directory. Both of
+# this check's inputs were therefore wrong at once -- the wrong folder and, for
+# `oils`, the wrong filename -- so it matched nothing, found nothing to
+# complain about, and passed. A check that cannot fail is not a check.
+#
+# So it asks where the artifact *is* rather than asserting where it should be.
+# A layout the next toolchain invents costs nothing here as long as the file
+# keeps its name, and if it ever stops being found the answer is a refusal to
+# run, not a silent pass.
+diff_lib_artifact() {
+  diff_manifest_path=$(diff_manifest "$1") || return 2
+  diff_libname=$(diff_lib_name "$diff_manifest_path")
+  [ -z "$diff_libname" ] && return 0
+
+  diff_found=$(find "$target_dir/x86_64-unknown-linux-gnu/debug" \
+      -name "lib${diff_libname}-*.rlib" -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | head -1)
+  [ -z "$diff_found" ] && return 1
+  printf '%s\n' "${diff_found#* }"
+}
+
+# Print `SUBJECT|COMPLAINT` and succeed if $1 is stale; fail silently if not.
+#
+# The right-hand side is a whole predicate rather than just the offending
+# filename, because there are now four ways to be stale and only one of them is
+# "something is newer than this". `diff_assert_fresh` prints it verbatim.
 diff_stale_one() {
   local diff_late
   if [ ! -f "$1" ]; then
-    printf '%s|<the build left nothing here>\n' "$1"
+    printf '%s|was not produced by the build at all\n' "$1"
     return 0
   fi
   diff_late=$(diff_newer_than "$1")
   [ -z "$diff_late" ] && return 1
-  printf '%s|%s\n' "$1" "$diff_late"
+  printf '%s|is older than %s\n' "$1" "$diff_late"
   return 0
 }
 
-# `BINARY|NEWER-FILE` for the first stale artifact, or nothing.
+# `SUBJECT|COMPLAINT` for the first stale artifact, or nothing.
 # An artifact the build did not produce at all counts as stale.
 #
 # ## The library is checked first, and that is the point
@@ -310,11 +441,25 @@ diff_stale_one() {
 # says when it was linked and nothing about how old the code inside it is. So
 # the artifact that actually holds the shared code is checked on its own.
 diff_first_stale() {
-  local diff_b diff_bin diff_late diff_lib
-  for diff_lib in $(diff_lib_artifacts); do
+  local diff_b diff_bin diff_late diff_lib diff_p diff_rc
+  for diff_p in $DIFF_PKG; do
+    diff_lib=$(diff_lib_artifact "$diff_p")
+    diff_rc=$?
+    if [ "$diff_rc" = 2 ]; then
+      printf '%s|%s\n' "the package \`$diff_p\`" \
+        "has no Cargo.toml anywhere under $root -- is DIFF_PKG right?"
+      return 0
+    fi
+    if [ "$diff_rc" != 0 ]; then
+      printf '%s|%s\n' "\`$diff_p\`'s library" \
+        "is declared in its Cargo.toml, but the build produced no .rlib for it"
+      return 0
+    fi
+    # Empty: the package has no library, so there is nothing here to be stale.
+    [ -z "$diff_lib" ] && continue
     diff_late=$(diff_newer_than "$diff_lib")
     if [ -n "$diff_late" ]; then
-      printf '%s|%s\n' "$diff_lib" "$diff_late"
+      printf '%s|%s\n' "$diff_lib" "is older than $diff_late"
       return 0
     fi
   done
@@ -335,7 +480,7 @@ diff_assert_fresh() {
   [ -z "$diff_stale" ] && return 0
 
   echo "$DIFF_PROG-diff: ${diff_stale%%|*}" >&2
-  echo "  is older than ${diff_stale#*|} -- the build cache is stale. Cleaning." >&2
+  echo "  ${diff_stale#*|} -- the build cache is stale. Cleaning." >&2
   for diff_p in $DIFF_PKG; do
     ( cd "$root" && cargo clean -p "$diff_p" \
         --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2
@@ -347,7 +492,7 @@ diff_assert_fresh() {
   diff_stale=$(diff_first_stale)
   [ -z "$diff_stale" ] && return 0
   echo "$DIFF_PROG-diff: ${diff_stale%%|*}" >&2
-  echo "  is STILL older than ${diff_stale#*|} after a clean rebuild." >&2
+  echo "  STILL ${diff_stale#*|}, after a clean rebuild." >&2
   echo "  Refusing to run: the comparison would be against a binary nobody built." >&2
   return 1
 }
@@ -468,6 +613,12 @@ if [ -z "${DIFF_NO_BINDIR:-}" ]; then
       # out loud which ones did not run. That is the opposite of the
       # single-binary rule below, where no reference means there is nothing
       # left for the harness to do at all.
+      #
+      # The reference is looked for on the *filesystem*, not with `command -v`,
+      # and that is not a stylistic preference: `command -v echo` -- and
+      # `printf`, and `true` -- answers with the shell's own builtin, which is
+      # not the program being compared and has neither its options nor its
+      # diagnostics. `write-error-diff.sh` carries all three in `DIFF_BINS`.
       for diff_b in $DIFF_BINS; do
         diff_gnu=
         for diff_cand in "/usr/bin/$diff_b" "/bin/$diff_b"; do

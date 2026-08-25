@@ -9,10 +9,10 @@
 #
 #   1. a bad option or a missing argument — the offending letter, then the
 #      synopsis on its own unprefixed line, at status 2, and nothing else runs;
-#   2. `-m`'s keymap name — so `bind -l -m nosuchmap` prints not one of the 174
+#   2. `-m`'s keymap name — so `bind -l -m nosuchmap` prints not one of the
 #      function names, even though `-l` came first;
 #   3. the listings, `-l` among them;
-#   4. `-f`'s file — so `bind -f /nosuch -l` prints all 174 *and then* fails;
+#   4. `-f`'s file — so `bind -f /nosuch -l` prints them all *and then* fails;
 #   5. `-u`, then `-q`, each rejecting an unknown function name;
 #   6. `-r`, then `-x`, which is the one option bash parses itself.
 #

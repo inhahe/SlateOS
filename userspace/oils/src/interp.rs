@@ -1174,16 +1174,21 @@ fn shell_script_indirection(path: &std::path::Path) -> Option<Interposed> {
     if head.starts_with(b"MZ") || head_is_binary(head) {
         return None;
     }
-    if head.starts_with(b"#!") {
+    // A line that *names* an interpreter is the OS's business wherever the OS
+    // reads one; only a host that would not read it needs the shell to stand in.
+    // A `#!` naming no interpreter is not that case: [`shebang`] returns `None`
+    // exactly where the kernel answers `ENOEXEC`, and `ENOEXEC` is a
+    // fall-through rather than a refusal — the same one a file with no line at
+    // all takes. So the parse has to be consulted *before* deferring to the OS,
+    // on every host. Returning `None` for any `#!` at all on unix left
+    // `#!\necho hi` unrunnable there while bash runs it (measured, bash 5.2.21).
+    if head.starts_with(b"#!")
+        && let Some((program, arg)) = shebang(head)
+    {
         if cfg!(unix) {
             return None;
         }
-        if let Some((program, arg)) = shebang(head) {
-            return Some(Interposed::Interpreter { program, arg });
-        }
-        // A `#!` naming no interpreter is `ENOEXEC` on a kernel that reads the
-        // line, which is the same fall-through as a file with no line at all:
-        // the text goes to the shell.
+        return Some(Interposed::Interpreter { program, arg });
     }
     own_binary().map(Interposed::Shell)
 }
@@ -41741,7 +41746,7 @@ impl Shell {
         // The rest runs in bash's fixed phase order, not the order the options
         // were written. The keymap is checked *before* any listing — `bind -l -m
         // nosuchmap` prints not one function name — while `-f` and the name
-        // queries come *after* it, so `bind -f /nosuch -l` still prints all 174.
+        // queries come *after* it, so `bind -f /nosuch -l` still prints them all.
         //
         // `-m`, `-f` and `-u` return the moment they fail. `-q` and `-x` do not:
         // they assign the status rather than or-ing into it, so a later phase
@@ -42127,19 +42132,20 @@ impl Shell {
     /// directory — an `$include` names a file relative to the shell, not to the
     /// file including it (measured).
     ///
-    /// A directory reads as nothing rather than as a failure, which is what
-    /// bash does with `bind -f` on one (measured: status 0, no message). There
-    /// a POSIX `open` of a directory succeeds and the read that follows finds
-    /// no bytes; Windows refuses the open outright, so the emptiness has to be
-    /// supplied here for the two hosts to agree.
+    /// A directory is a failure, not an empty file: POSIX lets `open` succeed on
+    /// one and then fails the `read` with `EISDIR`, so glibc bash answers
+    /// `bind -f adir` with `bind: adir: cannot read: Is a directory` and status
+    /// 1. This once returned emptiness and status 0, from a measurement taken
+    /// against a Cygwin bash, where the open is refused before the read and the
+    /// builtin swallows it.
+    ///
+    /// Windows refuses the open outright and calls it `ERROR_ACCESS_DENIED`, so
+    /// [`open_error`] is what makes the development host say `EISDIR` too.
     fn read_inputrc_file(&mut self, path: &[u8]) -> std::io::Result<Str> {
         let expanded = self.tilde_expand(path);
         let host = self.host_path(&expanded);
         let host = bytes::bytes_to_path(&host);
-        if host.is_dir() {
-            return Ok(Str::new());
-        }
-        std::fs::read(host)
+        std::fs::read(&host).map_err(|e| open_error(&host, e))
     }
 
     /// The live bindings that run readline's function `name`.
@@ -44432,9 +44438,16 @@ impl Shell {
     }
 
     fn builtin_pwd(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
-        // bash's pwd accepts -L (logical, default), -P (physical: resolve
-        // symlinks), and -W (Cygwin/Windows path); any other letter is a usage
-        // error. Flags may be clustered; the last of -L/-P wins.
+        // bash's pwd accepts -L (logical, default) and -P (physical: resolve
+        // symlinks); any other letter is a usage error. Flags may be clustered;
+        // the last of -L/-P wins.
+        //
+        // There is no -W. Cygwin's bash has one -- it prints the Win32 spelling
+        // of the directory -- and this builtin accepted it, because it was
+        // written against a Cygwin bash. A path with a drive letter in it is not
+        // something SlateOS has, so there was never an implementation to go with
+        // the letter: all -W ever did here was appear in the usage message and
+        // suppress the error that the option deserves.
         let mut physical = false;
         for a in args {
             if a.as_slice() == b"--" {
@@ -44443,15 +44456,11 @@ impl Shell {
             let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) else {
                 break;
             };
-            if let Some(c) = flags.iter().find(|c| !matches!(c, b'L' | b'P' | b'W')) {
-                return self.builtin_invalid_option("pwd", &[b'-', *c], "pwd [-LPW]");
+            if let Some(c) = flags.iter().find(|c| !matches!(c, b'L' | b'P')) {
+                return self.builtin_invalid_option("pwd", &[b'-', *c], "pwd [-LP]");
             }
             for c in flags {
-                match c {
-                    b'L' => physical = false,
-                    b'P' => physical = true,
-                    _ => {} // -W: accepted, no effect here.
-                }
+                physical = *c == b'P';
             }
         }
         let cwd = self.cwd.clone();
@@ -61621,7 +61630,7 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
     ),
     (
         "pwd",
-        "pwd [-LPW]",
+        "pwd [-LP]",
         "Print the name of the current working directory.",
     ),
     (
@@ -62758,7 +62767,6 @@ const HELP_BODIES: &[(&str, &str)] = &[
       -L	print the value of $PWD if it names the current working
     		directory
       -P	print the physical directory, without any symbolic links
-      -W	print the Win32 value of the physical directory
     
     By default, `pwd' behaves as if `-L' were specified.
     
@@ -62872,7 +62880,6 @@ const HELP_BODIES: &[(&str, &str)] = &[
               hashall      same as -h
               histexpand   same as -H
               history      enable command history
-              igncr        on Cygwin, ignore \r in line endings
               ignoreeof    the shell will not exit upon reading EOF
               interactive-comments
                            allow comments to appear in interactive commands
@@ -63023,6 +63030,9 @@ const HELP_BODIES: &[(&str, &str)] = &[
     
       FILE1 -ef FILE2  True if file1 is a hard link to file2.
     
+    All file operators except -h and -L are acting on the target of a symbolic
+    link, not on the symlink itself, if FILE is a symbolic link.
+    
     String operators:
     
       -z STRING      True if string is empty.
@@ -63055,6 +63065,9 @@ const HELP_BODIES: &[(&str, &str)] = &[
     Arithmetic binary operators return true if ARG1 is equal, not-equal,
     less-than, less-than-or-equal, greater-than, or greater-than-or-equal
     than ARG2.
+    
+    See the bash manual page bash(1) for the handling of parameters (i.e.
+    missing parameters).
     
     Exit Status:
     Returns success if EXPR evaluates to true; fails if EXPR evaluates to
@@ -65079,7 +65092,17 @@ fn parent_pid() -> u32 {
 /// times before the handle closes. That also means a `( … )` sees the totals its
 /// parent had accumulated, where a forked bash's subshell would start from zero
 /// — the same approximation osh already makes for `$SECONDS` and for wall time.
+///
+/// Windows-only, because the two systems keep this total in different places.
+/// Windows charges a *process* and keeps the charge only while some handle to
+/// it is open, so the shell has to read each child as it reaps it and do the
+/// adding up itself. Linux keeps the running total in the kernel and hands it
+/// over on demand — that is what `RUSAGE_CHILDREN` is — and there it is the
+/// only route available, because `std` reaps with `waitpid` and discards the
+/// `rusage` that a `wait4` would have returned.
+#[cfg(windows)]
 static CHILD_USER_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(windows)]
 static CHILD_SYS_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Add one just-exited child's CPU consumption to the running totals.
@@ -65088,6 +65111,7 @@ static CHILD_SYS_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// dropped: on Windows the kernel keeps the accounting alive only as long as
 /// some handle to the process does. Call it exactly once per child — every
 /// reaping site funnels through [`reap_child`] for that reason.
+#[cfg(windows)]
 fn account_child(child: &std::process::Child) {
     let (user, sys) = child_cpu_times(child);
     CHILD_USER_NS.fetch_add(user, std::sync::atomic::Ordering::Relaxed);
@@ -65097,9 +65121,11 @@ fn account_child(child: &std::process::Child) {
 /// Wait for a child, account for its CPU time, and return its exit status.
 ///
 /// The single place children are reaped, so the totals above cannot
-/// double-count one child or miss another.
+/// double-count one child or miss another. Elsewhere the accounting is the
+/// kernel's own and this is a plain `wait` — see [`CHILD_USER_NS`].
 fn reap_child(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
     let status = child.wait();
+    #[cfg(windows)]
     if status.is_ok() {
         account_child(child);
     }
@@ -65107,6 +65133,7 @@ fn reap_child(child: &mut std::process::Child) -> std::io::Result<std::process::
 }
 
 /// Reaped children's CPU totals, `(user, system)` in seconds.
+#[cfg(windows)]
 fn children_cpu_secs() -> (f64, f64) {
     let ns = |a: &std::sync::atomic::AtomicU64| {
         // Precision is not at issue: 2^53 ns is over three months of CPU.
@@ -65116,6 +65143,24 @@ fn children_cpu_secs() -> (f64, f64) {
         }
     };
     (ns(&CHILD_USER_NS), ns(&CHILD_SYS_NS))
+}
+
+/// Reaped children's CPU totals, `(user, system)` in seconds — the kernel's own
+/// running total, which is what `RUSAGE_CHILDREN` means.
+///
+/// It counts only children that have been *waited for*, which is exactly the
+/// set [`reap_child`] has reaped, so the figure means the same thing here as
+/// the hand-kept one does on Windows.
+#[cfg(target_os = "linux")]
+fn children_cpu_secs() -> (f64, f64) {
+    rusage_secs(RUSAGE_CHILDREN)
+}
+
+/// No CPU accounting on a host that is neither: report zero rather than fail to
+/// build. See TD-OILS10.
+#[cfg(not(any(windows, target_os = "linux")))]
+fn children_cpu_secs() -> (f64, f64) {
+    (0.0, 0.0)
 }
 
 /// A Windows `FILETIME` pair as nanoseconds. `FILETIME` counts 100 ns ticks, and
@@ -65203,19 +65248,95 @@ fn child_cpu_times(child: &std::process::Child) -> (u64, u64) {
     process_cpu_times(child.as_raw_handle().cast())
 }
 
-/// Unix / SlateOS shell CPU query. `getrusage(RUSAGE_SELF)` is the portable
-/// answer and osh does not link libc's `rusage` bindings yet, so this reports
-/// zero until the SlateOS process-accounting syscall it should use exists.
-/// See TD-OILS10.
-#[cfg(not(windows))]
-fn self_cpu_secs() -> (f64, f64) {
-    (0.0, 0.0)
+/// `struct timeval`, the unit `getrusage` reports CPU in — seconds and *micro*
+/// seconds, not nanoseconds, which is the one thing about it worth stating
+/// twice, since the sibling Windows path counts in 100 ns ticks.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Timeval {
+    sec: i64,
+    usec: i64,
 }
 
-/// Per-child CPU accounting on non-Windows hosts — see [`self_cpu_secs`].
-#[cfg(not(windows))]
-fn child_cpu_times(_child: &std::process::Child) -> (u64, u64) {
-    (0, 0)
+#[cfg(target_os = "linux")]
+impl Timeval {
+    fn secs(self) -> f64 {
+        // Precision is not at issue: a `f64` holds whole microseconds exactly
+        // up to 2^53 of them, which is over two centuries of CPU time.
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.sec as f64 + self.usec as f64 / 1e6
+        }
+    }
+}
+
+/// `struct rusage`, as much of it as osh reads.
+///
+/// The fourteen counters after the two times — `ru_maxrss` through
+/// `ru_nivcsw` — are named here only as a block, because nothing reads them;
+/// but they cannot be *omitted*, because the kernel writes the whole structure
+/// and a short one would be a buffer overrun. They are `long` on every
+/// LP64 system, which both targets here are.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Rusage {
+    utime: Timeval,
+    stime: Timeval,
+    counters: [i64; 14],
+}
+
+/// `getrusage`'s `who`: this process, all its threads together.
+#[cfg(target_os = "linux")]
+const RUSAGE_SELF: i32 = 0;
+/// `getrusage`'s `who`: every child that has already been waited for.
+#[cfg(target_os = "linux")]
+const RUSAGE_CHILDREN: i32 = -1;
+
+#[cfg(target_os = "linux")]
+// SAFETY: the standard POSIX signature. The call writes one `struct rusage`
+// through the pointer given and returns 0 or -1, touching nothing else.
+unsafe extern "C" {
+    fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+}
+
+/// `(user, system)` seconds for one `getrusage` class, or `(0.0, 0.0)` if the
+/// call fails — a missing figure is reported as zero rather than being allowed
+/// to fail a `time`, which is the same choice the Windows path makes.
+///
+/// On SlateOS itself this is `posix`'s own `getrusage`, which fills the two
+/// times for `RUSAGE_SELF` from the kernel's aggregate CPU counters and leaves
+/// `RUSAGE_CHILDREN` zeroed until per-child accounting exists there. So the
+/// shell asks the same question on both, and SlateOS's answer improves as the
+/// kernel's does, with nothing here to change.
+#[cfg(target_os = "linux")]
+fn rusage_secs(who: i32) -> (f64, f64) {
+    let mut usage = Rusage::default();
+    // SAFETY: `usage` is a live, correctly-typed local of exactly the size the
+    // call writes; the call only writes into it. A non-zero return means it may
+    // have written nothing, and the zero-initialised local is then the answer.
+    if unsafe { getrusage(who, &raw mut usage) } != 0 {
+        return (0.0, 0.0);
+    }
+    (usage.utime.secs(), usage.stime.secs())
+}
+
+/// The shell process's own CPU consumption, `(user, system)` in seconds.
+///
+/// `RUSAGE_SELF` is per *process* and sums every thread in it, which is what
+/// this has to be: osh's subshells and its pipeline stages are threads, so a
+/// per-thread figure would miss most of the work a `time` is asked about.
+#[cfg(target_os = "linux")]
+fn self_cpu_secs() -> (f64, f64) {
+    rusage_secs(RUSAGE_SELF)
+}
+
+/// No CPU accounting on a host that is neither Windows nor Linux-flavoured:
+/// report zero rather than fail to build. See TD-OILS10.
+#[cfg(not(any(windows, target_os = "linux")))]
+fn self_cpu_secs() -> (f64, f64) {
+    (0.0, 0.0)
 }
 
 /// An inputrc's `$include` names a file for the shell to find, so the shell is
@@ -68307,6 +68428,17 @@ fn file_cmp(cwd: BStr<'_>, op: BStr<'_>, l: BStr<'_>, r: BStr<'_>) -> bool {
 mod tests {
     use super::*;
     use crate::parser::parse;
+
+    /// How many function names `bind -l` prints.
+    ///
+    /// Derived rather than written, because the number is a property of the
+    /// reference readline and not of this shell: it was 174 while the tables
+    /// were captured from a Cygwin bash, whose readline carries an extra
+    /// `paste-from-clipboard` — a Windows clipboard call — and is 173 on the
+    /// Linux readline SlateOS targets. Nine assertions spelled the number out,
+    /// so re-capturing the tables broke them all at once while saying nothing
+    /// about which of the two counts was right.
+    const FUNCTION_COUNT: usize = crate::bind_tables::FUNCTION_NAMES.len();
 
     /// Every `help` topic has a long body, and no body is orphaned.
     ///
@@ -85361,7 +85493,7 @@ st=1
         assert_eq!(run("compgen -A binding zzz").1, 1);
         // The whole list is the whole list, warning and all.
         let (names, _) = run("compgen -A binding");
-        assert_eq!(names.lines().count(), 174);
+        assert_eq!(names.lines().count(), FUNCTION_COUNT);
         assert_eq!(names, run("bind -l 2>/dev/null").0);
         // `binding` sorts before `builtin` in the action table, so its names
         // come first whichever way round the two are written.
@@ -85501,23 +85633,52 @@ st=1
         let base = dir.slashed();
         let g = |rest: &str| run(&format!("cd {base}\ncompgen {rest}"));
 
+        // These three `-o` sources are readline's filename completion, which
+        // hands entries back in *directory* order: readline sorts only when it
+        // draws a column list, and `compgen` is not that. So the order is the
+        // filesystem's, and asserting a literal one asserts a fact about the
+        // host. NTFS keeps its index sorted, which is how `a1\nadir\n` came to
+        // be written here as if it were a rule; ext4's hashed order puts `adir`
+        // first, and bash on Linux prints exactly that (measured, bash 5.2.21).
+        // Reading the order back from the directory is what keeps the assertion
+        // about `compgen` rather than about the filesystem under it.
+        let listing = |keep: &dyn Fn(&str, bool) -> bool| {
+            let mut out = String::new();
+            for e in std::fs::read_dir(&dir.path).expect("read_dir") {
+                let e = e.expect("dir entry");
+                let name = e.file_name().to_string_lossy().into_owned();
+                let is_dir = e.file_type().expect("file type").is_dir();
+                if keep(&name, is_dir) {
+                    out.push_str(&name);
+                    out.push('\n');
+                }
+            }
+            out
+        };
+        let a_all = listing(&|n, _| n.starts_with('a'));
+        let a_dirs = listing(&|n, d| d && n.starts_with('a'));
+        let all_dirs = listing(&|_, d| d);
+
         // plusdirs adds directories to whatever the compspec found, after the
         // decoration and past the filter.
-        assert_eq!(g("-o plusdirs -W 'aw' -P '<' -S '>' a").0, "<aw>\nadir\n");
-        assert_eq!(g("-o plusdirs -W 'aw' -X 'a*' a").0, "adir\n");
+        assert_eq!(
+            g("-o plusdirs -W 'aw' -P '<' -S '>' a").0,
+            format!("<aw>\n{a_dirs}")
+        );
+        assert_eq!(g("-o plusdirs -W 'aw' -X 'a*' a").0, a_dirs);
         // …and it counts, so an answer it fills is not an empty one.
-        assert_eq!(g("-o default -o plusdirs a").0, "adir\n");
-        assert_eq!(g("-o plusdirs -W 'zz' a"), ("adir\n".to_string(), 0));
+        assert_eq!(g("-o default -o plusdirs a").0, a_dirs);
+        assert_eq!(g("-o plusdirs -W 'zz' a"), (a_dirs.clone(), 0));
         // default and dirnames step in only for an answer that came out empty —
         // even one the filter emptied — and directories win over filenames.
-        assert_eq!(g("-o default a").0, "a1\nadir\n");
-        assert_eq!(g("-o dirnames a").0, "adir\n");
-        assert_eq!(g("-W 'a1' -o default -X '*' a").0, "a1\nadir\n");
-        assert_eq!(g("-o default -o dirnames a").0, "adir\n");
-        assert_eq!(g("-o default -P '<' -S '>' a").0, "a1\nadir\n");
+        assert_eq!(g("-o default a").0, a_all);
+        assert_eq!(g("-o dirnames a").0, a_dirs);
+        assert_eq!(g("-W 'a1' -o default -X '*' a").0, a_all);
+        assert_eq!(g("-o default -o dirnames a").0, a_dirs);
+        assert_eq!(g("-o default -P '<' -S '>' a").0, a_all);
         // An empty word reaches the whole directory; a word nothing starts with
         // reaches nothing, and that is the ordinary empty answer.
-        assert_eq!(g("-o dirnames ''").0, "adir\nbdir\n");
+        assert_eq!(g("-o dirnames ''").0, all_dirs);
         assert_eq!(g("-o default -o plusdirs zz"), (String::new(), 1));
         // An -o that says nothing about candidates still asks for a compspec,
         // so it gets the empty-answer status rather than the silent success.
@@ -86936,7 +87097,7 @@ st=1
         );
         // `-s` prints only the "NAME: usage" line, no description.
         let out = run("help -s pwd").0;
-        assert_eq!(out, "pwd: pwd [-LPW]\n");
+        assert_eq!(out, "pwd: pwd [-LP]\n");
         // `-d` prints only the short description.
         assert_eq!(
             run("help -d true").0,
@@ -93731,8 +93892,15 @@ st=1
         // whole before any of it runs.
         // (Every capture wraps the whole thing in a group: the report goes to
         // the *shell's* stderr, not the timed command's.)
+        //
+        // `PATH=` is what makes "goes looking for an external `time`" observable
+        // as a fixed answer rather than as a fact about the machine: a Linux
+        // host has GNU `time` in `/usr/bin`, so the search *succeeds* there and
+        // `time -p echo hi` prints `hi` and exits 0. Emptying the path is not
+        // arranging for the failure — the search happening at all is the thing
+        // under test, and only its outcome is pinned.
         for w in ["-p echo hi", "-- echo hi", "-x echo hi", "-"] {
-            let (o, rc) = run(&format!("set -o posix\n{{ time {w} ; }} 2>&1"));
+            let (o, rc) = run(&format!("set -o posix\nPATH=\n{{ time {w} ; }} 2>&1"));
             assert_eq!(rc, 127, "time {w}: {o:?}");
             assert!(o.contains("time: command not found"), "time {w}: {o:?}");
         }
@@ -93740,7 +93908,7 @@ st=1
         // forms keep the reserved word and time a command named `-p`.
         for w in ["\"-p\"", "\\-p", "$D"] {
             let (o, rc) = run(&format!(
-                "set -o posix\nD=-p\n{{ time {w} echo hi ; }} 2>&1"
+                "set -o posix\nPATH=\nD=-p\n{{ time {w} echo hi ; }} 2>&1"
             ));
             assert_eq!(rc, 127, "time {w}: {o:?}");
             assert!(o.contains("-p: command not found"), "time {w}: {o:?}");
@@ -100629,11 +100797,11 @@ st=1
         let (out, code) = run("bind -l 2>&1 >/dev/null");
         assert_eq!(code, 0);
         assert_eq!(out, "osh: bind: warning: line editing not enabled\n");
-        // `-l` is readline's function list: 174 names, sorted, one per line.
+        // `-l` is readline's function list: every name, sorted, one per line.
         let (out, code) = run("bind -l 2>/dev/null");
         assert_eq!(code, 0);
         let names: Vec<&str> = out.lines().collect();
-        assert_eq!(names.len(), 174);
+        assert_eq!(names.len(), FUNCTION_COUNT);
         assert_eq!(names.first(), Some(&"abort"));
         assert_eq!(names.last(), Some(&"yank-pop"));
         // An unknown letter names itself, then the synopsis *unprefixed* —
@@ -100666,12 +100834,18 @@ st=1
             "got {out:?}"
         );
         // A known keymap is accepted, attached to the letter or not.
-        assert_eq!(run("bind -m vi -l 2>/dev/null").0.lines().count(), 174);
-        assert_eq!(run("bind -mvi -l 2>/dev/null").0.lines().count(), 174);
+        assert_eq!(
+            run("bind -m vi -l 2>/dev/null").0.lines().count(),
+            FUNCTION_COUNT
+        );
+        assert_eq!(
+            run("bind -mvi -l 2>/dev/null").0.lines().count(),
+            FUNCTION_COUNT
+        );
         // `-f` runs *after* the listing, so both happen.
         let (out, code) = run("bind -f /nosuch/file -l 2>/dev/null");
         assert_eq!(code, 1);
-        assert_eq!(out.lines().count(), 174);
+        assert_eq!(out.lines().count(), FUNCTION_COUNT);
         let (out, _) = run("bind -f /nosuch/file 2>&1 >/dev/null");
         assert!(
             out.contains("bind: /nosuch/file: cannot read: No such file"),
@@ -100761,13 +100935,24 @@ st=1
     /// the whole reason `bind_tables` is captured rather than transcribed.
     #[test]
     fn bind_listings_come_from_readlines_tables() {
+        // The tables are only readline's own if the startup inputrc adds
+        // nothing to them, and that read happens before the first `bind`
+        // answers whether or not there is a line editor — so on a host that
+        // ships an `/etc/inputrc`, as every Debian-family one does, these
+        // listings are that machine's and not readline's: 494 emacs lines
+        // rather than 487 (measured, bash 5.2.21). Exporting `INPUTRC` at a
+        // file with nothing in it is the same guard every corpus `bind` case
+        // opens with, and it is what makes these counts a fact about the
+        // captured tables rather than about the machine running the test.
+        let run = |script: &str| run(&format!("export INPUTRC=/dev/null\n{script}"));
         // Each listing has a fixed size, and `-s`, `-S` and `-X` are empty
         // because a pristine readline has no macros and no `-x` bindings.
         for (opt, want) in [
-            ("l", 174),
-            // `-p` and `-P` both open with a blank line of readline's own.
-            ("p", 488),
-            ("P", 175),
+            ("l", FUNCTION_COUNT),
+            // `-p` and `-P` both open with a blank line of readline's own,
+            // which is why `-P` is one more than there are functions.
+            ("p", 487),
+            ("P", 1 + FUNCTION_COUNT),
             ("v", 46),
             ("V", 46),
             ("s", 0),
@@ -100782,20 +100967,20 @@ st=1
         // in any, and together they are just the parts end to end.
         let (both, code) = run("bind -lpvsPVSX 2>/dev/null");
         assert_eq!(code, 0);
-        assert_eq!(both.lines().count(), 929);
+        assert_eq!(both.lines().count(), 926);
         assert_eq!(run("bind -pv 2>/dev/null").0, run("bind -vp 2>/dev/null").0);
         // Every keymap `-m` accepts has its own bindings; several names are
-        // aliases and so share one table. `-P` names all 174 functions whatever
+        // aliases and so share one table. `-P` names every function whatever
         // the keymap, because it lists the unbound ones too.
         for (map, want) in [
-            ("emacs", 488),
-            ("emacs-standard", 488),
-            ("emacs-meta", 225),
-            ("emacs-ctlx", 200),
-            ("vi", 221),
-            ("vi-move", 221),
-            ("vi-command", 221),
-            ("vi-insert", 422),
+            ("emacs", 487),
+            ("emacs-standard", 487),
+            ("emacs-meta", 224),
+            ("emacs-ctlx", 199),
+            ("vi", 220),
+            ("vi-move", 220),
+            ("vi-command", 220),
+            ("vi-insert", 421),
         ] {
             let (out, code) = run(&format!("bind -m {map} -p 2>/dev/null"));
             assert_eq!(code, 0, "{map}");
@@ -100810,7 +100995,7 @@ st=1
                     .0
                     .lines()
                     .count(),
-                175,
+                1 + FUNCTION_COUNT,
                 "{map}"
             );
         }
@@ -102199,11 +102384,7 @@ st=1
                 "cd: -Z: invalid option",
                 "cd: usage: cd [-L|[-P [-e]] [-@]]",
             ),
-            (
-                "pwd -Z",
-                "pwd: -Z: invalid option",
-                "pwd: usage: pwd [-LPW]",
-            ),
+            ("pwd -Z", "pwd: -Z: invalid option", "pwd: usage: pwd [-LP]"),
             (
                 "alias -Z",
                 "alias: -Z: invalid option",

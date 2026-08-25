@@ -61,9 +61,16 @@ eval 'time -p -p f10[1' 2>/dev/null; echo "10 rc=$?"
 eval 'echo time f11[1';   echo "11 rc=$?"
 
 echo "=== and not after a pipe, where time is an ordinary word ==="
+# Being an ordinary word, it reaches /usr/bin/time, whose default report counts
+# elapsed hundredths and minor page faults -- host weather that differs between
+# two runs of the *same* shell. `$TIME` is GNU time's own format string, so a
+# fixed one makes the report deterministic while keeping the message that
+# precedes it, which is the part that says the word was run as a command.
+export TIME='[external time ran]'
 eval 'true | time f12[1';   echo "12 rc=$?"
 eval 'true |& time f13[1';  echo "13 rc=$?"
 eval $'true |\ntime f14[1'; echo "14 rc=$?"
+unset TIME
 
 echo "=== a case arm's ) begins a command ==="
 eval 'case x in y) f15[1'

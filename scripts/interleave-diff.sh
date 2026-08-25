@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # interleave-diff.sh — one question, asked of every utility that answers it:
 # when output and diagnostics go to the same place, do they arrive in the same
 # order GNU's do?
@@ -67,34 +67,19 @@
 # no single subject.
 set -u
 
+# `DIFF_NO_REF=1`, because a family has no single reference to name: each
+# binary's counterpart is found by its own name, which `diff-wsl.sh` does while
+# building `$bindir`. That is also why `DIFF_NO_BINDIR` is *not* set — the
+# multi-binary `$bindir`, one symlink per side per name, is exactly what this
+# harness needs, and it used to build a byte-identical one of its own.
 DIFF_PROG=interleave
 DIFF_NO_REF=1
-DIFF_NO_BINDIR=1
 DIFF_BINS="cat comm expand fold head join md5sum nl paste sha256sum tsort
            unexpand wc"
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
-pass=0; fail=0; na=0; vacuous=0; skipped=
-
-# --- the two sides ------------------------------------------------------------
-# One directory per side, each holding every utility under its bare name, so
-# `argv[0]` — and therefore the `prog: ` prefix on every diagnostic — is
-# identical on both sides.
-mkdir -p "$bindir/ours" "$bindir/gnu"
-for prog in $DIFF_BINS; do
-  gnu_bin=
-  for cand in /usr/bin/$prog /bin/$prog; do
-    [ -x "$cand" ] && { gnu_bin=$cand; break; }
-  done
-  if [ -n "${OURS:-}" ]; then our_bin=$OURS/$prog; else our_bin=$(diff_ours "$prog"); fi
-  if [ -z "$gnu_bin" ] || [ ! -x "$our_bin" ]; then
-    skipped="$skipped $prog"
-    continue
-  fi
-  ln -s "$our_bin" "$bindir/ours/$prog"
-  ln -s "$gnu_bin" "$bindir/gnu/$prog"
-done
+pass=0; fail=0; na=0; vacuous=0
 
 have() { [ -e "$bindir/ours/$1" ]; }
 
@@ -119,8 +104,8 @@ VERDICT=na; REPORT=
 # `compare PROG ARGS…` sets `VERDICT` to one of: pass, fail, na, vacuous.
 compare() {
   local prog="$1"; shift
-  local side dir o_rc g_rc m_o_rc m_g_rc rc
-  local d=$DIFF_TMP/case
+  local side o_rc g_rc m_o_rc m_g_rc rc
+  local d="$DIFF_TMP/case"
   rm -rf "$d"; mkdir -p "$d"
 
   # Step 1: separate, to establish that the content agrees at all.
@@ -255,7 +240,7 @@ fi
 
 # --- what could not be asked --------------------------------------------------
 printf '\n'
-[ -n "$skipped" ] && printf 'not compared (no reference or no build):%s\n' "$skipped"
+[ -n "$DIFF_SKIPPED" ] && printf 'not compared (no reference or no build):%s\n' "$DIFF_SKIPPED"
 
 printf '%d passed, %d differed, %d not applicable, %d vacuous\n' \
   "$pass" "$fail" "$na" "$vacuous"

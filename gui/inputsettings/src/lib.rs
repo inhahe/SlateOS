@@ -188,12 +188,29 @@ yaml_enum!(ButtonMapping {
 });
 
 // ============================================================================
-// Keyboard repeat settings
+// Keyboard settings
 // ============================================================================
 
-/// Keyboard repeat-rate configuration.
+/// Keyboard configuration: which layout, and how a held key repeats.
+///
+/// Named for the keyboard rather than for the repeat rate, which is what it
+/// held first. The layout belongs in the same struct and travels the same
+/// route: both are things a user changes in Settings and expects to take
+/// effect on the next keystroke, and both are read by whoever turns a scancode
+/// into a letter.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KeyboardRepeatConfig {
+pub struct KeyboardConfig {
+    /// Id of the keyboard layout — `"us-qwerty"`, `"dvorak"`, `"de-qwertz"`.
+    /// See [`keylayout::builtins`] for the catalogue.
+    ///
+    /// Stored as written and **not** validated against that catalogue, on
+    /// purpose. A layout id this build does not recognise is far more likely
+    /// to be one a newer build added — or one the user is about to install —
+    /// than a typo, and rewriting it to `us-qwerty` on the next save would
+    /// destroy the setting rather than fall back from it. Falling back is the
+    /// reader's job, and [`keylayout::by_id`] returning `None` is where it
+    /// happens.
+    pub layout: String,
     /// Delay before repeat starts, in milliseconds (150–2000).
     pub repeat_delay_ms: u32,
     /// Interval between repeated keystrokes, in milliseconds (10–500).
@@ -202,9 +219,10 @@ pub struct KeyboardRepeatConfig {
     pub enabled: bool,
 }
 
-impl Default for KeyboardRepeatConfig {
+impl Default for KeyboardConfig {
     fn default() -> Self {
         Self {
+            layout: keylayout::DEFAULT_ID.to_string(),
             repeat_delay_ms: 500,
             repeat_interval_ms: 30,
             enabled: true,
@@ -212,7 +230,7 @@ impl Default for KeyboardRepeatConfig {
     }
 }
 
-impl KeyboardRepeatConfig {
+impl KeyboardConfig {
     /// Set the delay before a held key starts repeating, clamped to 150–2000 ms.
     pub fn set_delay(&mut self, ms: u32) {
         self.repeat_delay_ms = ms.clamp(150, 2000);
@@ -373,8 +391,8 @@ impl MouseConfig {
 pub struct InputSettings {
     /// Everything about the pointer.
     pub mouse: MouseConfig,
-    /// Everything about key repeat.
-    pub keyboard: KeyboardRepeatConfig,
+    /// Everything about the keyboard: the layout, and how a held key repeats.
+    pub keyboard: KeyboardConfig,
 }
 
 impl InputSettings {
@@ -391,7 +409,7 @@ impl InputSettings {
 
     /// Restore the keyboard half to its defaults, leaving the mouse alone.
     pub fn reset_keyboard(&mut self) {
-        self.keyboard = KeyboardRepeatConfig::default();
+        self.keyboard = KeyboardConfig::default();
     }
 
     /// Restore everything to its defaults.
@@ -512,6 +530,17 @@ impl InputSettings {
                 .and_then(|v| u32::try_from(v).ok())
         );
 
+        read_into!(
+            s.keyboard.layout,
+            doc.get_str(&["keyboard", "layout"])
+                // An empty value means "the key is present but says nothing",
+                // which is not the same as naming a layout called "". Taking
+                // it literally would leave the reader with an id that can
+                // never resolve, so it is treated as absent and the default
+                // stands.
+                .filter(|v| !v.trim().is_empty())
+                .map(|v| v.trim().to_string())
+        );
         read_into!(s.keyboard.enabled, doc.get_bool(&["keyboard", "repeat"]));
         read_into!(
             s.keyboard.repeat_delay_ms,
@@ -568,6 +597,7 @@ impl InputSettings {
             i64::from(self.mouse.trail_length),
         );
 
+        doc.set_str(&["keyboard", "layout"], &self.keyboard.layout);
         doc.set_bool(&["keyboard", "repeat"], self.keyboard.enabled);
         doc.set_i64(
             &["keyboard", "delay_ms"],
@@ -726,7 +756,7 @@ mod tests {
         m.set_accel_threshold(9999);
         assert_eq!(m.accel_threshold, 50);
 
-        let mut k = KeyboardRepeatConfig::default();
+        let mut k = KeyboardConfig::default();
         k.set_delay(0);
         assert_eq!(k.repeat_delay_ms, 150);
         k.set_interval(0);
@@ -751,6 +781,7 @@ mod tests {
         settings.mouse.hide_while_typing = true;
         settings.mouse.show_trail = true;
         settings.mouse.trail_length = 6;
+        settings.keyboard.layout = "dvorak".to_string();
         settings.keyboard.enabled = false;
         settings.keyboard.repeat_delay_ms = 250;
         settings.keyboard.repeat_interval_ms = 15;
@@ -758,6 +789,46 @@ mod tests {
         let mut doc = Document::new();
         settings.write_into(&mut doc);
         assert_eq!(InputSettings::read_from(&doc), settings);
+    }
+
+    #[test]
+    fn a_layout_this_build_does_not_know_survives_a_round_trip_unchanged() {
+        // The setting is a *name*, and this crate is not the catalogue. An id
+        // from a newer build, or one whose layout is not installed yet, must
+        // come back out of the file exactly as it went in — rewriting it to
+        // the default on the next save would quietly discard the user's
+        // choice, and they would find out by watching Settings forget it.
+        let mut settings = InputSettings::default();
+        settings.keyboard.layout = "kl-invented".to_string();
+
+        let mut doc = Document::new();
+        settings.write_into(&mut doc);
+        let mut read = InputSettings::read_from(&doc);
+        read.validate();
+
+        assert_eq!(read.keyboard.layout, "kl-invented");
+    }
+
+    #[test]
+    fn a_blank_layout_name_is_treated_as_absent_rather_than_as_a_layout() {
+        // `layout:` with nothing after it is a user who cleared the field, not
+        // a user who named a layout called "". Taken literally it would be an
+        // id nothing can ever resolve, and the keyboard would fall back on
+        // every keystroke instead of once.
+        let mut doc = Document::new();
+        doc.set_str(&["keyboard", "layout"], "   ");
+        assert_eq!(
+            InputSettings::read_from(&doc).keyboard.layout,
+            keylayout::DEFAULT_ID
+        );
+    }
+
+    #[test]
+    fn the_default_layout_is_one_that_exists() {
+        // The point of taking the dependency on `keylayout` rather than
+        // spelling the id here: a default naming a layout the catalogue does
+        // not contain would leave a fresh install falling back on every key.
+        assert!(keylayout::by_id(&KeyboardConfig::default().layout).is_some());
     }
 
     #[test]

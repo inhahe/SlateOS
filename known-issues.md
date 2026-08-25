@@ -32730,6 +32730,39 @@ thing that is much cheaper to design in than to retrofit, because they change
 **Where.** `gui/compositor/src/keymap.rs` — the `key_for_scancode` table, and
 `Modifiers` in `gui/toolkit/src/event.rs:185` for the AltGr gap.
 
+**Update 2026-08-24 — (1), (2) and (5) are done; (3) and (4) remain.** The
+layouts now live in `gui/keylayout`, a dependency-free crate both the
+compositor and the desktop shell read; see `design-decisions.md` §549.
+
+- **(1) Layout selection** — `inputsettings`' `keyboard.layout` names a layout
+  by id, `Compositor::set_input_settings` resolves it through
+  `keylayout::by_id` on every reload, and `keymap::key_for_layout` translates
+  with it. An id this build does not know leaves the layout already in force
+  alone rather than leaving the user with no keyboard, and the name is
+  preserved verbatim in the file so a settings file written by a later build
+  survives a round trip through this one.
+- **(2) More tables** — eight: `us-qwerty`, `uk-qwerty`, `dvorak`, `colemak`,
+  `workman`, `de-qwertz`, `fr-azerty`, `es-qwerty`. Each is eight row strings,
+  checkable against a photograph of the board. The three alternate English
+  layouts are pinned by a test proving them exact rearrangements of US QWERTY's
+  own character multiset, so a mistyped row cannot pass as a layout.
+- **(5) AltGr as a level shift** — done, and without changing `Modifiers`,
+  which is constructed as a literal 99 times across 33 files including one
+  lane-A file. A keystroke that resolves through the third level *clears*
+  `modifiers.alt` instead of setting a new flag: the case that matters is a
+  German user typing `@` (AltGr+Q), which previously reached every application
+  as Alt+Q with the menu bar answering first.
+
+**(3) Dead keys and (4) compose sequences are still open, and are still the
+part that is cheaper to design in than to retrofit.** Both need state carried
+between two key events, and `Layout::character` is still a pure function of one
+scancode and one level. Nothing offered today needs them — the eight layouts
+above were chosen partly for that — but German's `´`, French's `^` and
+Spanish's `´` are all *present as ordinary characters* on their boards, which
+is a real difference from how those keyboards behave. That is the shape of the
+remaining debt: not a missing feature so much as three layouts that type a
+standalone accent where a real one would compose.
+
 ## A-JOB-CONTROL-SELF-STOP-LOST-A-RACING-SIGCONT (lane A, 2026-08-17) - **fixed**
 
 **In short:** when a program stopped itself for job control (what a shell does
@@ -55085,7 +55118,7 @@ misleads the next person to read it into thinking the persistence exists and
 merely needs wiring.
 ---
 
-### TD-C-THE-SHELL-KEEPS-FIVE-KEYBOARD-LAYOUTS-THAT-NOTHING-TYPES-WITH — 2026-08-24 — OPEN
+### TD-C-THE-SHELL-KEEPS-FIVE-KEYBOARD-LAYOUTS-THAT-NOTHING-TYPES-WITH — 2026-08-24 — RESOLVED 2026-08-24 (see the closing note)
 
 **In short.** The shell has a keyboard-layout switcher: a tray chip reading
 `EN`, a pop-up preview of the key caps, five built-in layouts (US QWERTY,
@@ -55164,6 +55197,39 @@ letters stay wrong — rather than concluding, correctly, that layout switching
 was never implemented. The duplicated row tables also guarantee the two copies
 drift: a fix to the compositor's QWERTY table will not reach the preview, so
 the picture the user is shown will stop matching what they get.
+
+**RESOLVED 2026-08-24.** Fixed as the entry prescribed — the row tables moved
+to a crate both sides depend on (`gui/keylayout`, chosen over the compositor
+itself so that reading the layouts does not oblige the shell to link a display
+server), `key_for_scancode` gained a layout-aware sibling `key_for_layout`, and
+`InputMethodManager` is now a selector holding no table of its own. Full
+reasoning in `design-decisions.md` §549; the compositor half is recorded under
+`TD-ONLY-ONE-KEYBOARD-LAYOUT`'s 2026-08-24 update.
+
+The four decorative fields went four different ways, which is the part worth
+remembering:
+
+| Field | Outcome |
+|---|---|
+| `rows_shifted` | **wired up.** It was unread because the thing that would read it did not exist; now Shift, Caps Lock and AltGr all select a face through `Layout::character`. |
+| `has_dead_keys` | **deleted.** It was set on German and French and consulted by one assertion. A flag saying a layout needs a facility nothing implements reads as support for that facility; the absence is now stated in prose, in the module doc and in `TD-ONLY-ONE-KEYBOARD-LAYOUT` (3). |
+| `is_rtl` | **deleted, and this entry's suggested fix was wrong.** "Honour it in the preview" would have mirrored the caps — but Arabic and Hebrew boards put their letters on physically standard positions (ض and / are both on the key engraved `Q`), so mirroring would draw a keyboard that does not exist. RTL is a fact about the text a layout writes, not about where its caps sit. See §549. |
+| `language` | **kept, and given a reader.** It separates "a rearrangement of English" from "a national layout", which is the precondition of a real invariant: only the English layouts must reach the whole alphabet from the plain level. |
+
+The per-application memory and the config file survived as the entry
+recommended, and the parser got better in passing: `apply_config_text` now
+honours the `layout_N=` lines that `to_config_text` has always written, since
+there is finally a catalogue to resolve a name against. Each name is looked up
+among the installed layouts *before* the catalogue, so a layout a user wrote
+themselves survives a save/reload the built-ins have never heard of.
+
+One thing the entry asked for is still true and still worth noting: **nothing
+constructs an `InputMethodManager`.** `grep -rn 'InputMethodManager' gui apps`
+still finds only `pub mod input_method;`. The switcher is now correct rather
+than a lie, but it is not yet reachable — that belongs with
+`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` and the taskbar's tray, and is what
+would turn "the compositor can type Dvorak" into "the user can choose Dvorak
+without editing a YAML file by hand".
 ---
 
 ### B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS, AND LIBC'S DOC COMMENTS EXPLAIN IT WITH A REASON THAT STOPPED BEING TRUE — 2026-08-21 — OPEN
@@ -73705,6 +73771,33 @@ rule and judging it plausible. Two of the three false positives were single
 sites out of thousands, and both would have turned a working command into a
 failing one.
 
+#### 2026-08-24, later — the under-sweep is closed, by hand (lane A, `910ef26af`)
+
+All three sites now set a status. The predicate was never loosened, and should
+not be: the reasoning above still holds, and `"Network Usage:"` is still a row
+of a report. What changed is the recognition that **three is a number you fix by
+hand.** A rule that cannot safely admit three sites is a good rule; leaving the
+three sites broken because the rule cannot reach them is a separate decision,
+and it was the wrong one.
+
+Two had already been picked up by later waves (`base64: decode error:`, and the
+piped `tee` in `cmd_tee_input`) — so the count here was stale, and the entry
+still read "three unfixed sites" while only one was left. The survivor was
+`cmd_tee`, the `tee FILE TEXT` form.
+
+That one is worth recording for its shape rather than its size. `tee` is **one
+command with two implementations**, and they disagreed: the piped form set a
+status on a failed write, the two-argument form did not. Identical message,
+identical failure, opposite status — invisible in the output, visible only in
+`&&`. A per-message sweep cannot find that class at all, because nothing about
+either message is wrong; the defect is the *disagreement between two call
+paths*, which is only apparent when both are read together. Rung 32 therefore
+asserts both forms against the same bad path, and both against a good write.
+
+**Worth checking elsewhere:** any command with a piped and a non-piped
+implementation (`dispatch_with_input` vs `dispatch`) is a candidate for the same
+split-brain. This was found by hand, not by a rule.
+
 ### 2026-08-24 — the payoff: giving `syshealth` a status uncovered two real kernel bugs
 
 Fixed in `429a81bc3` and `e5c2d77df`. Recorded here because the *way* they
@@ -74849,3 +74942,201 @@ the whole reason this is worth writing down rather than just doing.
 **Severity.** Low and non-destructive as it stands — the divergence costs disk
 space and script compatibility, never data. Note that fixing it moves it *toward*
 being destructive, so the fix needs more care than the bug does.
+
+---
+
+### 2026-08-24 — the split-brain screen: what the `tee` lead actually found (lane A)
+
+The `tee` entry above closed with a lead: *"any command with a piped and a
+non-piped implementation (`dispatch_with_input` vs `dispatch`) is a candidate
+for the same split-brain."* This is what came of following it. Two of the
+findings are fixed (`0a785652a`); three are recorded below and not fixed.
+
+**How the screen was run, and why its output is not a verdict.** All 19 paired
+commands were enumerated from `dispatch_with_input`'s match arms, and a script
+counted `set_exit(1)` calls in each `cmd_X` against its `cmd_X_input`. Fourteen
+pairs came back with a non-zero count on one side and zero on the other. **Only
+two of those fourteen were bugs.** A `cmd_X_input` with no `set_exit` at all is
+usually *correct*: the file half's only failures are file-open errors, which
+have no piped analogue — the pipe supplied the bytes, so there is nothing left
+to fail at. Every one of the fourteen was read by hand against its twin before
+any verdict was reached, which is the same discipline the earlier sweeps needed
+and the reason this count is described here as a *filter* rather than a result.
+
+**Fixed: `sed` and `awk` printed the input verbatim and exited 0 for a script
+they could not run.** See `0a785652a` and self-test rung 33. This is a worse
+shape than `tee`'s — `tee` at least printed its error, whereas these produce
+plausible output, so `cat config | sed 's/old' > config.new` writes an unedited
+copy and reports success.
+
+**Correct, on inspection:** `sort`, `uniq`, `head`, `tail`, `wc`, `nl`, `rev`
+and `tac` all delegate to the file form when the argument names a file and have
+no failure mode left on the pipe path; `paste`, `tr`, `column` and `grep`
+already set a status. `cmd_tr_input` is the model the `sed`/`awk` fix followed.
+
+#### TD-A-FIVE-PIPE-FORMS-SILENTLY-DISCARD-A-FILE-OPERAND (lane A, 2026-08-24) — ✅ **FIXED same day (`bb9787783`, boot-verified `eba6d16ce`)**
+
+> **Fixed as described below, with one deliberate departure and one addition.**
+>
+> * **`mapfile` delegates rather than rejecting a second word.** The plan below
+>   argued for rejection on the grounds that bash's `mapfile` takes no file
+>   operand at all. That reasoning does not survive contact with the fact that
+>   *this shell's* `cmd_mapfile` does take one — the operand is our own
+>   extension, so refusing it in the pipe half would invent a third behaviour
+>   rather than remove a disagreement. Consistency with `cmd_mapfile` beats
+>   consistency with a bash spelling bash does not have.
+> * **`sed`'s share was done as a refactor, not a patch.** Both halves now call
+>   one `classify_sed_args`; the duplicated argument loop is gone. The two
+>   copies had *already* drifted — that drift is precisely how `-i` came to be
+>   parsed in one half and ignored in the other — so removing the duplication is
+>   what stops the next flag doing the same thing.
+> * Covered by self-test rung 34, which pipes one token while naming a file
+>   containing a different one, so the two possible answers are distinguishable.
+>   It also asserts that a pipe with *no* file named still reads the pipe, so
+>   that "the file wins" cannot have been implemented as "the pipe never wins".
+>
+> The original entry follows unchanged.
+
+**In short:** `cat a.txt | cut -f1 b.txt` cuts fields out of `a.txt` and ignores
+`b.txt` entirely — no error, no warning, exit 0. On Linux the named file wins
+and the pipe is left unread. Five commands do this: `cut`, `fold`, `sed`, `awk`
+and `mapfile`. Their piped implementations parse the file operand out of the
+arguments and then throw it away.
+
+**Where.** `kernel/src/kshell.rs`: `cmd_cut_input` (discards `parse_cut_args`'s
+fourth return value), `cmd_fold_input` (same, `parse_fold_args`), `cmd_sed_input`
+(never collects `file_args` at all), `cmd_awk_input` (binds `_files` and drops
+it), `cmd_mapfile_input` (takes only the first word as the array name).
+
+**Why it is a bug and not a design choice.** The other eleven paired commands in
+this shell — `sort`, `uniq`, `head`, `tail`, `wc`, `nl`, `rev`, `tac`, `grep`,
+`tee`, `paste` — all handle it, and they handle it two different but deliberate
+ways: eight delegate wholesale to the file form, `grep` delegates once it sees a
+second positional word, `paste` reads the file as an extra column (which is what
+GNU `paste - file` does). So there is an established convention, stated in the
+comment above the pipe-input block, and these five are simply outside it.
+
+**The `sed -i` corollary, which is the sharp edge.** `cat f | sed -i 's/a/b/'`
+parses `-i` in the file form and *silently ignores* it in the pipe form. The
+user asked for an in-place edit of a file and got a filtered pipe instead — the
+file is untouched, and exit status is 0. GNU refuses this outright (`sed: no
+input files while in-place editing`). This is the one case in the entry that
+loses work rather than merely diverging.
+
+**Proper fix.** Delegate, following `grep`'s shape rather than the blanket one:
+decide *before* flag parsing whether a file operand is present, and if so hand
+the whole argument string to the file form and leave the pipe unread. `grep`'s
+own comment explains why the order matters — the two halves do not accept the
+same flag set, so rejecting flags first would break a legitimate invocation that
+merely has a pipe attached. `mapfile` is the exception: bash's `mapfile` takes
+no file operand at all, so the right answer there is to reject a second word
+rather than delegate to a file form this shell invented.
+
+**Severity.** Medium. Silent and plausible — the output looks like a result, and
+in the `-i` case the user believes a file was edited that was not.
+
+#### TD-A-SED-ACCEPTS-AN-UNTERMINATED-SUBSTITUTION (lane A, 2026-08-24) — ✅ **FIXED same day (`da9e7a0ca`, boot-verified `6e7a6ced7`)**
+
+> **Fixed, and two more of the same shape were found in the same function
+> while fixing it.** The entry below asked only for `find_unescaped(...)?`. The
+> unterminated `s///` turned out to be one of three ways this parser answered a
+> script it could not honour by honouring it approximately:
+>
+> | Script | Old behaviour | Now |
+> |---|---|---|
+> | `s/a/b` | ran as though the delimiter were there | `unterminated command`, exit 1 |
+> | `s/a/b/i` | flag dropped; a **case-sensitive** substitution reported as success | `unknown option to 's'`, exit 1 |
+> | `-e good -e bad` | the bad one dropped by `filter_map`, the good one ran | fails, naming `expression #2` |
+>
+> The third is the one worth remembering: `parsed.is_empty()` only caught an
+> **all**-bad invocation, so a single bad `-e` standing among good ones was
+> invisible. All three are *wrong answers reported as success*, which is
+> strictly worse than missing ones — nothing downstream can detect them.
+>
+> **What changed structurally.** `parse_sed_command` returns
+> `Result<SedCmd, SedParseError>`; both halves share one `parse_sed_scripts`,
+> for the same reason `classify_sed_args` is shared (two copies of this drifted
+> once already, and that drift is what let `-i` be parsed by one half and
+> ignored by the other). The diagnostic quotes the offending script back
+> because `#1` identifies nothing when there is only one expression — the usual
+> case — and because the commonest confusion here is *which string got read as
+> a script*: `classify_sed_args` will take a bare `something` for one, since it
+> begins with `s`.
+>
+> **The entry's own prediction held.** It said tightening would *simplify*
+> rather than complicate, because the flag-suffix slice `&cmd[rep_end + 1..]`
+> already assumed a terminator. It did: the `rep_end < bytes.len()` branch is
+> gone, and so is the `bytes.len() >= 4` guard, which had been sending `s` and
+> `s/` to `unknown command` instead of `unterminated`.
+>
+> **One test-design consequence.** Quoting the script back means a token shared
+> between a script and the data makes "the message mentioned it" and "sed
+> emitted the line" the same observation. Rung 33's file content therefore moved
+> off `old`, and rung 35's witness `zz_keep` is named in none of its scripts —
+> it is asserted *absent* to prove a refused run emits neither an edit nor a
+> pass-through.
+>
+> The original entry follows unchanged.
+
+**In short:** `sed 's/old/new'` — a trailing `/` short — is an error on Linux
+(`unterminated 's' command`) and runs happily here, substituting `new` for
+`old`. Both halves of the command agree about this, so it is not a split-brain;
+it is a lenient parser.
+
+**Where.** `parse_sed_command` in `kernel/src/kshell.rs`: the replacement's end
+delimiter is found with `find_unescaped(...).unwrap_or(bytes.len())`, so a
+missing one silently means "to the end of the script".
+
+**Why it was not fixed with `0a785652a`.** That commit's whole subject was the
+two halves *disagreeing*; this is the two halves agreeing on something GNU
+rejects. Fixing it changes the behaviour of a command that currently works, for
+every caller, which is a separate change with a separate risk — a script relying
+on the leniency would start failing. Rung 33 documents the distinction inline so
+the next reader does not mistake one for the other.
+
+**Proper fix.** Require the closing delimiter (`find_unescaped(...)?`), and add
+a rung asserting `sed 's/old/new'` fails while `sed 's/old/new/'` succeeds.
+Note the flag suffix parsing already assumes a terminator is present when it
+slices `&cmd[rep_end + 1..]`, so tightening this simplifies the code rather than
+complicating it.
+
+**Severity.** Low. The current reading is the one the user almost certainly
+meant; the cost is that a genuinely truncated script runs instead of failing.
+
+#### TD-A-XARGS-REPORTS-THE-LAST-COMMANDS-STATUS-NOT-THE-WORST (lane A, 2026-08-24) — **open**
+
+**In short:** `printf 'good\nbad\n' | xargs check && deploy` runs `deploy` if
+the *last* invocation succeeded, even when an earlier one failed. GNU `xargs`
+exits 123 if any invocation exits non-zero, precisely so that a batch failure
+cannot hide behind a final success.
+
+**Where.** `cmd_xargs_input` in `kernel/src/kshell.rs` calls `execute(&full_cmd)`
+in a loop and never inspects the status, so whatever the final `execute` left in
+the exit slot is what the pipeline reports.
+
+**Proper fix.** Track the worst status across the loop and set it once at the
+end — the "batch operations must track and report the worst error, not just the
+last one" rule from `CLAUDE.md`. Whether to use GNU's 123 or a flat 1 should
+follow whatever the `cmp`/`diff` entry above settled for multi-valued statuses,
+so the shell speaks one convention rather than two.
+
+**Severity.** Medium in scripts, invisible interactively.
+
+**Two more found in the same function while reading it for the fix** (2026-08-24):
+
+* **`-n` swallows an argument it could not read.** The parse is
+  `max_args = rest.get(..end).and_then(|s| s.parse::<usize>().ok())`, and the
+  word is consumed from `rest` whether or not the parse succeeded. So
+  `xargs -n abc rm` leaves `max_args` at `None`, drops `abc` on the floor, and
+  runs **one** invocation with every input word — the opposite of what was
+  asked, reported as success. `-n 0` does the same, via the `Some(n) if n > 0`
+  guard falling through to the single-invocation arm. GNU: `xargs: invalid
+  number "abc" for -n option`, exit 1. Same family as the `sed` flag that was
+  ignored rather than refused: a wrong answer, not a missing one.
+* **Empty input runs nothing, where GNU runs the command once.** `words
+  .is_empty()` returns early, so `printf '' | xargs false` exits 0. GNU runs the
+  command once with no arguments unless `-r`/`--no-run-if-empty` is given, and
+  would exit 1 here. **BSD/macOS `xargs` does not run it** — so unlike the two
+  bugs above there is no single correct answer to match, and our behaviour is
+  already one of the two real ones. Left alone deliberately; noted so the next
+  reader does not "fix" it into GNU's shape without knowing it is a fork.

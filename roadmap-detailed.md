@@ -3165,10 +3165,30 @@ options with warnings" decision.)_
   `scripts/reintro-input-settings.py`.
 - [x] Keyboard repeat speed — same file, same live-reload route; applied by
   `EvdevInput`'s repeat clock (`design-decisions.md` §544).
-- [ ] Keyboard layout customizer: arbitrary remap from any starting layout, save as named layout
-- [ ] Include optimized keyboard layouts (Dvorak, Colemak, others)
+- [~] Keyboard layout customizer: arbitrary remap from any starting layout,
+  save as named layout — the *model* is there and a custom layout is a
+  first-class citizen (`keylayout::LayoutSpec` is public, and
+  `InputMethodManager::apply_config_text` resolves a name against the installed
+  layouts before the built-in catalogue, so a user's own layout survives a
+  save/reload). What is missing is the editor UI and a file to save it to.
+  Blocked by the same thing as the switcher: nothing constructs an
+  `InputMethodManager` yet — see `known-issues.md`
+  `TD-C-THE-SHELL-KEEPS-FIVE-KEYBOARD-LAYOUTS-THAT-NOTHING-TYPES-WITH`'s
+  closing note.
+- [x] Include optimized keyboard layouts (Dvorak, Colemak, others) — eight in
+  `gui/keylayout`: `us-qwerty`, `uk-qwerty`, `dvorak`, `colemak`, `workman`,
+  `de-qwertz`, `fr-azerty`, `es-qwerty`. Selected by
+  `inputsettings`' `keyboard.layout`, applied by the compositor, drawn by the
+  shell's preview from the same table. `design-decisions.md` §549.
 
 _Keyboard layouts: Dvorak (+ left-hand, right-hand, programmer variants), Colemak, Workman. Plus QWERTY and locale-specific. Custom remap from any starting layout._
+
+_Not yet offered, and deliberately: left-hand, right-hand and Programmer
+Dvorak, whose exact rows could not be verified here — a layout typed from
+memory is worse than an absent one, because the user cannot tell a wrong table
+from a broken keyboard. Dead keys and compose sequences are likewise absent
+(`TD-ONLY-ONE-KEYBOARD-LAYOUT` (3)-(4)), which is why the national layouts
+offered are ones that need neither._
 
 ### 5.3 Network
 

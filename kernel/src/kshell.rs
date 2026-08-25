@@ -397,6 +397,29 @@ fn assert_output_lacks(what: &str, out: &[u8], forbidden: &[u8]) {
     panic!("`{}` output contained text it must not", what);
 }
 
+/// Build a `root/d1/d2/.../dN` path two levels deeper than [`WALK_DEPTH_CAP`],
+/// for the self-test rungs that prove a recursive walk stops at the cap.
+///
+/// Two past the cap rather than one, so the walk *hits* the limit instead of
+/// merely reaching it, and the rung cannot pass on an off-by-one.
+///
+/// This exists because the fixtures used to be literal paths — 18 components
+/// for `find`'s cap of 16, 34 for `ls`'s 32. A literal is a second, silent copy
+/// of the constant: raising the cap leaves the fixture shallower than the limit
+/// it is supposed to trip, and the rung then asserts nothing while still
+/// passing. Deriving it from the constant is what keeps the two from drifting.
+///
+/// The result is built with `Vfs::mkdir_all`, which caps the whole path at
+/// [`crate::fs::vfs::MAX_MKDIR_ALL_COMPONENTS`]; the `const` assertion beside
+/// [`WALK_DEPTH_CAP`] is what holds that.
+fn deep_fixture_path(root: &str) -> String {
+    let mut path = String::from(root);
+    for level in 1..=WALK_DEPTH_CAP.saturating_add(2) {
+        path.push_str(&alloc::format!("/d{}", level));
+    }
+    path
+}
+
 // ---------------------------------------------------------------------------
 // Working directory
 // ---------------------------------------------------------------------------
@@ -11102,11 +11125,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Vfs::mkdir_all(shallow)?;
         Vfs::write_file(Path::new("/tmp/kshell_find_shallow/needle.txt"), b"x")?;
 
-        // 18 levels: two past FIND_DEPTH_CAP, so the walk is certain to hit the
-        // cap rather than merely reach it.
-        Vfs::mkdir_all(Path::new(
-            "/tmp/kshell_find_deep/d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/d11/d12/d13/d14/d15/d16/d17/d18",
-        ))?;
+        // Two levels past [`WALK_DEPTH_CAP`], so the walk is certain to hit the
+        // cap rather than merely reach it. Built in a loop rather than spelled
+        // out: this was an 18-component literal chosen when the cap was 16, and
+        // a hand-written path silently stops testing anything the day the cap
+        // moves past it -- which it just did.
+        Vfs::mkdir_all(Path::new(&deep_fixture_path("/tmp/kshell_find_deep")))?;
 
         // 0: matched. The ordinary path, asserted so the rungs below cannot pass
         // by breaking the search itself.
@@ -11203,17 +11227,22 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     {
         use crate::fs::vfs::Vfs;
 
-        // 34 levels: two past LS_DEPTH_CAP.
-        Vfs::mkdir_all(Path::new(
-            "/tmp/kshell_ls_deep/d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/d11/d12/d13/d14/d15/d16/d17\
-             /d18/d19/d20/d21/d22/d23/d24/d25/d26/d27/d28/d29/d30/d31/d32/d33/d34",
-        ))?;
+        // Two levels past [`WALK_DEPTH_CAP`]; see `deep_fixture_path` for why
+        // this is no longer a literal.
+        Vfs::mkdir_all(Path::new(&deep_fixture_path("/tmp/kshell_ls_deep")))?;
 
         let out = capture_command("ls -R /tmp/kshell_ls_deep");
         assert_output_contains("the cap is named when it bites", &out, b"recursion limit");
         // The path is the point: without it the line is unattributable, which is
-        // what it was before.
-        assert_output_contains("ls names the subtree it stopped at", &out, b"/d33");
+        // what it was before. The walk refuses at the first level *past* the
+        // cap, and the root is depth 0, so that is `d{cap+1}` -- derived rather
+        // than written out, for the same reason the fixture is.
+        let stopped_at = alloc::format!("/d{}", WALK_DEPTH_CAP.saturating_add(1));
+        assert_output_contains(
+            "ls names the subtree it stopped at",
+            &out,
+            stopped_at.as_bytes(),
+        );
         assert_eq!(last_exit(), 1, "ls: a truncated listing is incomplete");
 
         // A listing that fits under the cap is untouched by any of this. Its own
@@ -11476,6 +11505,320 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let out = capture_command("echo parser_ok");
         assert_output_starts_with("a plain command still runs", &out, b"parser_ok");
         assert_eq!(last_exit(), 0, "and still reports success");
+    }
+
+    serial_println!("  kshell::self_test 32: both spellings of `tee` agree about failure");
+    // `tee` is one command with two implementations -- `cmd_tee_input` for the
+    // piped form and `cmd_tee` for `tee FILE TEXT` -- and only the first set a
+    // status when the write failed. The messages were byte-identical, so the
+    // disagreement was invisible in the output and showed up only in `&&`.
+    //
+    // The sweep that fixed the rest of this class could not reach it: its rule
+    // required the message to be `progname: <complaint>`, and `tee: write
+    // error: {:?}` puts two words before the colon that carries the meaning.
+    // `known-issues.md` recorded three such sites as deliberately unswept; two
+    // have since been fixed by later waves, and this was the last one.
+    {
+        // Local rather than shared: the earlier rungs each define their own
+        // `piped` inside their own block, so there is nothing in scope here.
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // A directory that does not exist, so the write cannot succeed. Both
+        // forms are asked to write to the same bad path, which is what makes
+        // this a comparison rather than two independent assertions.
+        let bad = "/zzz_no_such_dir/tee_selftest.txt";
+
+        let out = capture_command(&alloc::format!("tee {} hello", bad));
+        assert_output_contains("the two-argument form reports the error", &out, b"tee: ");
+        assert_eq!(last_exit(), 1, "tee FILE TEXT: a failed write is a failure");
+
+        let out = piped(&alloc::format!("tee {}", bad), b"hello");
+        assert_output_contains("the piped form reports the error", &out, b"tee: ");
+        assert_eq!(
+            last_exit(),
+            1,
+            "tee < input: a failed write is a failure too"
+        );
+
+        // And a write that works still succeeds, in both forms -- otherwise a
+        // blanket `set_exit(1)` would satisfy the two assertions above while
+        // breaking every honest use of the command.
+        let good = "/tmp/kshell_tee_status.txt";
+        let _ = capture_command(&alloc::format!("tee {} hello", good));
+        assert_eq!(last_exit(), 0, "tee FILE TEXT: a good write is success");
+        let _ = piped(&alloc::format!("tee {}", good), b"hello");
+        assert_eq!(last_exit(), 0, "tee < input: a good write is success");
+    }
+
+    serial_println!(
+        "  kshell::self_test 33: a sed/awk script the shell cannot run is not a success"
+    );
+    // The lead rung 32 left behind -- "any command with a piped and a
+    // non-piped implementation is a candidate for the same split-brain" --
+    // found `sed` and `awk`, and their version is worse than `tee`'s.
+    //
+    // `tee` at least printed its error; these two answered a script they could
+    // not parse by **printing the input verbatim and exiting 0**. So
+    // `cat config | sed 's/old/new' > config.new` -- one slash short, the
+    // commonest sed typo there is -- wrote a file that looked edited, was
+    // byte-for-byte the original, and reported success. The file halves have
+    // always rejected the same scripts with status 1, which is why each check
+    // below asks both halves the same question instead of asserting about one.
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        let path = "/tmp/kshell_sed_status.txt";
+        crate::fs::Vfs::write_file(path, b"zz_file_marker\n")?;
+
+        // The token the failing cases are piped, chosen so that finding it in
+        // the output can only mean the input was passed through. `old` would
+        // not do: the usage banner contains the word, so a pass-through and a
+        // usage message would be indistinguishable to the assertion.
+        let marker: &[u8] = b"zz_passthru_marker\n";
+
+        // `s/nomatch` -- the pattern is opened and never closed, so
+        // `parse_sed_command` returns an error and there is nothing to run.
+        // Running nothing is not the same as running an identity transform,
+        // which is exactly what the old code could not tell apart.
+        //
+        // The script's pattern is deliberately a word that appears in neither
+        // the pipe nor the file: the diagnostic quotes the offending script
+        // back, so a pattern shared with the data would make "the message
+        // mentioned it" and "the data came through" indistinguishable -- the
+        // same trap `old` set for the marker above.
+        let out = piped("sed s/nomatch", marker);
+        assert_output_lacks(
+            "a bad script does not pass the input through",
+            &out,
+            b"zz_passthru_marker",
+        );
+        assert_eq!(last_exit(), 1, "cmd | sed: an unparseable script fails");
+
+        let out = capture_command(&alloc::format!("sed s/nomatch {}", path));
+        assert_output_lacks(
+            "nor does the file form print the file",
+            &out,
+            b"zz_file_marker",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "sed SCRIPT FILE: an unparseable script fails"
+        );
+
+        // No script at all. Only the pipe form is spelled here: `sed /abs/path`
+        // reads the path as an address command, because it starts with `/` --
+        // which is GNU's reading of it too (`unterminated address regex`), so
+        // there is no way to hand the file form a file and no script.
+        let out = piped("sed", marker);
+        assert_output_lacks(
+            "a missing script does not pass input through",
+            &out,
+            b"zz_passthru_marker",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "cmd | sed: no script at all is a usage error"
+        );
+
+        // A script that does parse still runs, in both halves -- otherwise a
+        // blanket `set_exit(1)` would satisfy every assertion above while
+        // breaking the command outright.
+        let out = piped("sed s/old/new/", b"old\n");
+        assert_output_contains("a good script still edits the pipe", &out, b"new");
+        assert_eq!(last_exit(), 0, "cmd | sed: a good script is success");
+
+        let out = capture_command(&alloc::format!("sed s/zz_file_marker/zz_edited/ {}", path));
+        assert_output_contains("and still edits the file", &out, b"zz_edited");
+        assert_eq!(last_exit(), 0, "sed SCRIPT FILE: a good script is success");
+
+        // `awk` had the same silent pass-through for a missing program.
+        let out = piped("awk", marker);
+        assert_output_lacks(
+            "no program does not pass the input through",
+            &out,
+            b"zz_passthru_marker",
+        );
+        assert_eq!(last_exit(), 1, "cmd | awk: no program is a usage error");
+
+        let out = capture_command("awk");
+        assert_output_contains("and the file form says so too", &out, b"Usage:");
+        assert_eq!(last_exit(), 1, "awk: no program is a usage error there too");
+
+        // Note this goes through `dispatch_with_input` rather than `execute`:
+        // `{print}` would otherwise meet the shell's own brace handling before
+        // awk ever saw it.
+        let out = piped("awk {print}", b"alpha\n");
+        assert_output_contains("a real program still runs", &out, b"alpha");
+        assert_eq!(last_exit(), 0, "cmd | awk: a real program is success");
+    }
+
+    serial_println!("  kshell::self_test 34: a named file wins over the pipe that feeds it");
+    // The same screen that found rung 33's bug found five commands whose piped
+    // halves parsed a file operand out of their arguments and then threw it
+    // away: `cut`, `fold`, `sed`, `awk` and `mapfile`. So `cat a | cut -f1 b`
+    // cut `a` and never opened `b` -- no error, no warning, exit 0. The other
+    // eleven paired commands all honour the operand, and so does GNU.
+    //
+    // Each check below pipes one token and names a file containing a *different*
+    // token, so the two possible answers are distinguishable in the output.
+    // Asserting only that the file's contents appear would not do it: a command
+    // that read both would pass that.
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        let file = "/tmp/kshell_operand.txt";
+        let pipe: &[u8] = b"zz_from_pipe\n";
+
+        crate::fs::Vfs::write_file(file, b"zz_from_file\n")?;
+        let out = piped(&alloc::format!("cut -c1-99 {}", file), pipe);
+        assert_output_contains("cut reads the named file", &out, b"zz_from_file");
+        assert_output_lacks("and not the pipe", &out, b"zz_from_pipe");
+
+        let out = piped(&alloc::format!("fold -w99 {}", file), pipe);
+        assert_output_contains("fold reads the named file", &out, b"zz_from_file");
+        assert_output_lacks("and not the pipe", &out, b"zz_from_pipe");
+
+        let out = piped(&alloc::format!("awk {{print}} {}", file), pipe);
+        assert_output_contains("awk reads the named file", &out, b"zz_from_file");
+        assert_output_lacks("and not the pipe", &out, b"zz_from_pipe");
+
+        // `sed` needs a script whose output distinguishes the two sources, so
+        // it substitutes on a word only the file contains.
+        let out = piped(
+            &alloc::format!("sed s/zz_from_file/zz_seen/ {}", file),
+            pipe,
+        );
+        assert_output_contains("sed reads the named file", &out, b"zz_seen");
+        assert_output_lacks("and not the pipe", &out, b"zz_from_pipe");
+
+        // `mapfile` stores rather than prints, so this reads the array back.
+        let _ = piped(&alloc::format!("mapfile -t ZZARR {}", file), pipe);
+        let out = capture_command("echo ${ZZARR[0]}");
+        assert_output_contains(
+            "mapfile fills the array from the file",
+            &out,
+            b"zz_from_file",
+        );
+        assert_output_lacks("and not from the pipe", &out, b"zz_from_pipe");
+
+        // With no file named, the pipe is still what gets read -- otherwise
+        // "the file wins" would have been implemented as "the pipe never wins".
+        let out = piped("cut -c1-99", pipe);
+        assert_output_contains(
+            "with no file, cut still reads the pipe",
+            &out,
+            b"zz_from_pipe",
+        );
+        assert_eq!(last_exit(), 0, "and that is a success");
+
+        // `sed -i` asks for a file to be rewritten. Given none, filtering the
+        // pipe and reporting success told the user a file had been edited that
+        // had not been -- the one case in this group that loses work.
+        let out = piped("sed -i s/zz_from_pipe/zz_seen/", pipe);
+        assert_output_lacks(
+            "sed -i with no file does not filter the pipe",
+            &out,
+            b"zz_seen",
+        );
+        assert_eq!(last_exit(), 1, "sed -i with nothing to edit is a failure");
+    }
+
+    serial_println!("  kshell::self_test 35: sed refuses a script it cannot honour");
+    // Rung 33 established that a script `parse_sed_command` *rejects* is a
+    // failure rather than a pass-through. This rung is about the scripts it
+    // used to *accept* while not honouring them, which is the worse half: a
+    // rejected script produces no output, but a mis-honoured one produces
+    // output that looks right.
+    //
+    // Three shapes, all of which used to succeed:
+    //
+    //   s/a/b      one delimiter short. `find_unescaped(..).unwrap_or(len)`
+    //              treated "no closing delimiter" as "closes at the end", so
+    //              the commonest sed typo there is ran as though correct.
+    //   s/a/b/i    an unimplemented flag, dropped in silence -- so a request
+    //              for a case-insensitive substitution performed a
+    //              case-sensitive one and reported success.
+    //   -e bad     one unparseable expression among good ones, dropped by
+    //              `filter_map` while the good ones ran.
+    //
+    // Each is a *wrong answer reported as success*, which is strictly worse
+    // than a missing answer: nothing downstream can detect it.
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // `zz_keep` is the witness that sed produced *any* output at all: it
+        // matches nothing, so a run that edits or a run that passes through
+        // both emit it, and only a run that refuses omits it. It is named in
+        // none of the scripts below on purpose -- the diagnostics quote the
+        // offending script back, so a token shared with a script would make
+        // "the message mentioned it" and "sed emitted the line" the same
+        // observation. That is the trap rung 33's `old` set.
+        let data: &[u8] = b"zz_keep\nzz_subject\nzz_dup zz_dup\n";
+
+        let out = piped("sed s/zz_subject/zz_hit/", data);
+        assert_output_contains("a terminated script substitutes", &out, b"zz_hit");
+        assert_output_contains("and copies the lines it does not match", &out, b"zz_keep");
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        // `g` must still be honoured -- not merely tolerated -- or the flag
+        // check below would be satisfied by a parser that rejected every flag.
+        let out = piped("sed s/zz_dup/zz_one/g", data);
+        assert_output_contains(
+            "the g flag still replaces every match",
+            &out,
+            b"zz_one zz_one",
+        );
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        // One delimiter short. GNU: `unterminated 's' command`, exit 1.
+        let out = piped("sed s/zz_subject/zz_hit", data);
+        assert_output_lacks("an unterminated s/// emits nothing", &out, b"zz_keep");
+        assert_output_contains("and says why", &out, b"unterminated command");
+        assert_eq!(last_exit(), 1, "an unterminated s/// is a failure");
+
+        // A flag that is not `g`.
+        let out = piped("sed s/zz_subject/zz_hit/i", data);
+        assert_output_lacks("an unimplemented flag emits nothing", &out, b"zz_keep");
+        assert_output_contains("and says why", &out, b"unknown option");
+        assert_eq!(last_exit(), 1, "an unimplemented s/// flag is a failure");
+
+        // One bad expression among good ones. The good one must not run
+        // either: the old behaviour ran it and reported success, so asserting
+        // only on the status would pass against a version that still applied
+        // it. The expression number is asserted too, since counting from the
+        // wrong end is the obvious way to get this wrong.
+        let out = piped("sed -e s/zz_subject/zz_hit/ -e zz_nonsense", data);
+        assert_output_lacks(
+            "a bad -e expression stops the good ones too",
+            &out,
+            b"zz_keep",
+        );
+        assert_output_contains("and names which one is bad", &out, b"expression #2");
+        assert_eq!(last_exit(), 1, "one bad -e expression fails the invocation");
+
+        // Both good expressions still run, in order -- the second sees what the
+        // first produced.
+        let out = piped("sed -e s/zz_subject/zz_mid/ -e s/zz_mid/zz_end/", data);
+        assert_output_contains("two good -e expressions both run", &out, b"zz_end");
+        assert_eq!(last_exit(), 0, "and succeed");
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -12441,18 +12784,80 @@ fn cmd_ls(args: &str) {
     );
 }
 
-/// How deep `ls -R` will descend before giving up on a subtree.
+/// How deep any of the shell's recursive directory walks will descend before
+/// giving up on a subtree: `ls -R`, `find`, and `grep -r`.
 ///
-/// A stack-safety limit against infinite recursion — a symlink loop, most
-/// obviously. Named rather than inlined because the limit is now *reported*
-/// when it bites, and the diagnostic and the check must not be able to drift
-/// apart.
-const LS_DEPTH_CAP: u32 = 32;
+/// A stack-safety limit against unbounded recursion — a symlink loop, most
+/// obviously. Named rather than inlined because the limit is *reported* when it
+/// bites, and the diagnostic and the check must not be able to drift apart.
+///
+/// # Why one constant, and why this number
+///
+/// This was three constants (`LS_DEPTH_CAP` 32, `FIND_DEPTH_CAP` 16,
+/// `MAX_GREP_DEPTH` 16) whose stated justification was, verbatim, "the shell's
+/// task stack is 64 KiB (`TASK_STACK_SIZE`)". **The shell does not run on a task
+/// stack.** Both of its entry points — `kshell::self_test` and `kshell::run` —
+/// are reached from `kernel_main`, which runs on the dedicated 2 MiB
+/// `KERNEL_BOOT_STACK`, of which 1984 KiB is usable (the low 64 KiB is the
+/// canary redzone). Every one of the three numbers was picked against a stack
+/// the code never touches.
+///
+/// So the number is derived from the frames that actually exist. Measured with
+/// `llvm-objdump` on the debug build — the profile the boot test runs, and the
+/// expensive one, since debug frames here are ~6x release:
+///
+/// | walker                  | bytes/level (debug) | at cap 48 |
+/// |-------------------------|--------------------:|----------:|
+/// | `ls_list_dir`           |                3712 |    174 KiB |
+/// | `find_recurse_filtered` |                1232 |     58 KiB |
+/// | `grep_recursive`        |                 960 |     45 KiB |
+///
+/// The cap is sized for the worst walker, so 48 costs at most 174 KiB — under
+/// 9% of the usable boot stack — leaving the rest for the non-recursive call
+/// chain beneath the innermost level (VFS, ext4), which is a constant, not
+/// multiplied by depth. Uniform rather than per-walker on purpose: "the shell
+/// descends at most 48 levels" is one fact to learn instead of three, and the
+/// worst case is the one that has to fit anyway.
+///
+/// # The second ceiling, which the stack measurement could not see
+///
+/// Stack headroom alone would allow several hundred levels, and the first
+/// version of this constant was 64 for that reason. It failed the boot test:
+/// **`Vfs::mkdir_all` refuses a path of more than 64 components** ("to prevent
+/// abuse", `fs/vfs.rs`), so the self-test fixture — which must build a tree
+/// *deeper* than the cap in order to trip it — could not be created at all, and
+/// rung 27 died with `InvalidArgument` before the walk under test ever ran.
+///
+/// The two limits are unrelated in kind: one is how deep this shell can safely
+/// *recurse*, the other is how deep the VFS will *create*. The cap belongs below
+/// both, with room for the fixture's own prefix: at 48, the deepest tree the
+/// rungs build is `/tmp/<name>/d1..d50` = 52 components, comfortably inside the
+/// VFS's 64.
+///
+/// 48 is still far past any real tree (a kernel source tree is ~12 deep, a
+/// pathological `node_modules` ~40) and is still a hard stop for a symlink loop,
+/// which is unbounded and so is caught by any finite cap.
+///
+/// If a walker's frame grows, re-measure rather than guessing: the old numbers
+/// looked deliberate and were arithmetic against the wrong stack.
+const WALK_DEPTH_CAP: u32 = 48;
+
+// The fixture in `deep_fixture_path` is `WALK_DEPTH_CAP + 2` levels under a
+// two-component prefix (`/tmp/<name>`), and it is built with `Vfs::mkdir_all`,
+// which refuses more than `MAX_MKDIR_ALL_COMPONENTS`. Raising the cap past that
+// leaves the fixture uncreatable, which is not a test failure but an
+// `InvalidArgument` from the fixture itself -- the rung dies before reaching the
+// walk it exists to check. That is exactly how this was found, so it is a build
+// error now rather than a boot-test one.
+const _: () = assert!(
+    (WALK_DEPTH_CAP as usize) + 4 <= crate::fs::vfs::MAX_MKDIR_ALL_COMPONENTS,
+    "WALK_DEPTH_CAP is too deep for the self-test fixture to build with Vfs::mkdir_all"
+);
 
 /// Internal helper for ls: list one directory and optionally recurse.
 ///
 /// `depth` guards against infinite recursion (e.g., symlink loops); the bound is
-/// [`LS_DEPTH_CAP`].
+/// [`WALK_DEPTH_CAP`].
 ///
 /// Sets a failing status itself rather than leaving it to `cmd_ls`, which is
 /// what it already does for an unreadable directory below. The usual reason a
@@ -12471,7 +12876,7 @@ fn ls_list_dir(
     recursive: bool,
     depth: u32,
 ) {
-    if depth > LS_DEPTH_CAP {
+    if depth > WALK_DEPTH_CAP {
         // Named the path and set a status, neither of which it used to do. `ls`
         // has no equivalent of `find`'s user-supplied depth, so unlike there,
         // every hit on this limit is a refusal: the directories below it exist
@@ -12481,7 +12886,7 @@ fn ls_list_dir(
         shell_println!(
             "ls: {}: recursion limit ({}) reached, not listed",
             path.display(),
-            LS_DEPTH_CAP
+            WALK_DEPTH_CAP
         );
         set_exit(1);
         return;
@@ -13823,7 +14228,7 @@ fn du_recurse(path: &Path, depth: usize, max_depth: usize, summary_only: bool) -
 /// Exits **0** when the walk completed — *including* when it matched nothing,
 /// which is a complete answer and not an error — and **1** when it could not
 /// walk something: an unreadable directory, a subtree cut off by
-/// [`FIND_DEPTH_CAP`], or a usage error. Two values, not the three
+/// [`WALK_DEPTH_CAP`], or a usage error. Two values, not the three
 /// `grep`/`cmp`/`diff` use; see [`FindTally`] for why the third would be
 /// meaningless here.
 #[allow(clippy::arithmetic_side_effects)]
@@ -13901,20 +14306,20 @@ fn cmd_find(args: &str) {
     // A `-maxdepth` deeper than the cap cannot be honoured, and pretending
     // otherwise is the same silence in a different place: the old code let the
     // user's number straight through, so `-maxdepth 200` would have recursed 200
-    // levels into the shell's 64 KiB stack if a tree that deep existed. Clamp,
-    // and say so once here rather than once per subtree below.
+    // levels if a tree that deep existed. Clamp, and say so once here rather
+    // than once per subtree below.
     let (max_depth, depth_limit_is_builtin) = match user_max_depth {
-        Some(n) if n <= FIND_DEPTH_CAP => (n, false),
+        Some(n) if n <= WALK_DEPTH_CAP => (n, false),
         Some(n) => {
             shell_println!(
                 "find: -maxdepth {}: exceeds the built-in limit of {}, using {}",
                 n,
-                FIND_DEPTH_CAP,
-                FIND_DEPTH_CAP
+                WALK_DEPTH_CAP,
+                WALK_DEPTH_CAP
             );
-            (FIND_DEPTH_CAP, true)
+            (WALK_DEPTH_CAP, true)
         }
-        None => (FIND_DEPTH_CAP, true),
+        None => (WALK_DEPTH_CAP, true),
     };
 
     let filter = FindFilter {
@@ -13941,18 +14346,6 @@ fn cmd_find(args: &str) {
     }
 }
 
-/// How deep `find` will descend before giving up on a subtree.
-///
-/// This is a stack-safety limit, not a feature: `find_recurse_filtered` recurses
-/// once per directory level, and the shell's task stack is 64 KiB
-/// ([`crate::sched::task::TASK_STACK_SIZE`]). It is emphatically *not* the same
-/// thing as the user's `-maxdepth`, even though one field used to carry both --
-/// see [`FindFilter::depth_limit_is_builtin`].
-///
-/// Named rather than inlined because the limit is now *reported* when it bites,
-/// and the diagnostic and the check must not be able to drift apart.
-const FIND_DEPTH_CAP: u32 = 16;
-
 /// Parsed find predicates.
 struct FindFilter<'a> {
     name_pattern: Option<&'a str>,
@@ -13961,7 +14354,7 @@ struct FindFilter<'a> {
     size_filter: Option<(i64, char)>,
     empty_filter: bool,
     /// The depth actually enforced: the user's `-maxdepth` if they gave one and
-    /// it fits, otherwise [`FIND_DEPTH_CAP`].
+    /// it fits, otherwise [`WALK_DEPTH_CAP`].
     max_depth: u32,
     /// Whether `max_depth` is ours or theirs.
     ///
@@ -13993,7 +14386,7 @@ struct FindTally {
     /// Paths that satisfied every predicate.
     matches: u64,
     /// Directories the walk could not read, or subtrees it was cut off from by
-    /// [`FIND_DEPTH_CAP`]. Any of these means the search was incomplete, so the
+    /// [`WALK_DEPTH_CAP`]. Any of these means the search was incomplete, so the
     /// zero-match answer is not an answer.
     unreadable: usize,
 }
@@ -95178,7 +95571,7 @@ fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, tally: &mut FindT
             shell_println!(
                 "find: {}: recursion limit ({}) reached, not searched",
                 path.display(),
-                FIND_DEPTH_CAP
+                WALK_DEPTH_CAP
             );
             tally.unreadable = tally.unreadable.saturating_add(1);
         }
@@ -95516,12 +95909,6 @@ fn cmd_hexdump(args: &str) {
 // exists here, so it was silently documenting whatever item happened to follow
 // it, which after this change would have been the depth limit.
 
-/// How deep `grep -r` will descend before giving up on a subtree.
-///
-/// Named rather than inlined because the limit is now *reported* when it bites,
-/// and the diagnostic and the check must not be able to drift apart.
-const MAX_GREP_DEPTH: usize = 16;
-
 /// Grep flags parsed from command-line arguments.
 struct GrepFlags {
     case_insensitive: bool,
@@ -95829,7 +96216,8 @@ fn grep_file(
     }
 }
 
-/// Recursively search a directory for grep matches (depth limit 16).
+/// Recursively search a directory for grep matches, bounded by
+/// [`WALK_DEPTH_CAP`].
 ///
 /// Every way this can decline to search something now says so and records it in
 /// `tally`. It previously had three bare `return`s — an unstattable path, an
@@ -95842,7 +96230,7 @@ fn grep_recursive(
     flags: &GrepFlags,
     multi_file: bool,
     tally: &mut GrepTally,
-    depth: usize,
+    depth: u32,
 ) {
     // Two unrelated stopping conditions used to share one `if`. Only one of
     // them is a failure: reaching the match cap is the ordinary, already-
@@ -95851,11 +96239,11 @@ fn grep_recursive(
     if tally.matches >= flags.max_matches {
         return;
     }
-    if depth > MAX_GREP_DEPTH {
+    if depth > WALK_DEPTH_CAP {
         shell_println!(
             "grep: {}: recursion limit ({}) reached, not searched",
             path.display(),
-            MAX_GREP_DEPTH
+            WALK_DEPTH_CAP
         );
         tally.unreadable = tally.unreadable.saturating_add(1);
         return;
@@ -106099,8 +106487,16 @@ fn cmd_cut(args: &str) {
     }
 }
 
+/// `cut` on piped input. A named file wins over the pipe, as it does in GNU
+/// and as it does for every other paired command here; this used to parse the
+/// file operand out of the arguments and then throw it away, so
+/// `cat a.txt | cut -f1 b.txt` cut `a.txt` and never opened `b.txt`.
 fn cmd_cut_input(args: &str, input: &str) {
-    let (delim, fields, chars_range, _) = parse_cut_args(args);
+    let (delim, fields, chars_range, file) = parse_cut_args(args);
+    if file.is_some() {
+        cmd_cut(args);
+        return;
+    }
     cut_process(input, delim, &fields, chars_range);
 }
 
@@ -106417,8 +106813,14 @@ fn cmd_fold(args: &str) {
     }
 }
 
+/// `fold` on piped input. As with [`cmd_cut_input`], a named file wins over
+/// the pipe rather than being parsed and discarded.
 fn cmd_fold_input(args: &str, input: &str) {
-    let (width, _) = parse_fold_args(args);
+    let (width, file) = parse_fold_args(args);
+    if file.is_some() {
+        cmd_fold(args);
+        return;
+    }
     fold_process(input, width);
 }
 
@@ -107294,11 +107696,23 @@ fn cmd_mapfile_input(args: &str, input: &str) {
         }
     }
 
-    let var_name = if rest.is_empty() {
-        "MAPFILE"
-    } else {
-        rest.split_whitespace().next().unwrap_or("MAPFILE")
-    };
+    let mut words = rest.split_whitespace();
+    let var_name = words.next().unwrap_or("MAPFILE");
+
+    // A file operand wins over the pipe, matching the rest of this shell's
+    // paired commands. This used to take only the first word and silently drop
+    // the rest, so `cat a | mapfile ARR b` filled ARR from `a`.
+    //
+    // Note bash's own `mapfile` takes no file operand at all and would reject
+    // this as "too many arguments"; the file operand is this shell's own
+    // extension, so the consistent reading of it is the one that agrees with
+    // `cmd_mapfile`, not the one that agrees with bash about a spelling bash
+    // does not have.
+    if words.next().is_some() {
+        cmd_mapfile(args);
+        return;
+    }
+
     mapfile_store(var_name, input, strip_newlines);
     set_exit(0);
 }
@@ -108083,7 +108497,13 @@ fn cmd_tee(args: &str) {
 
     // Write to the file.
     if let Err(e) = crate::fs::Vfs::write_file(path, text.as_bytes()) {
+        // The pipe form of this same command, `cmd_tee_input`, already sets a
+        // status for the byte-identical error. Same command, same failure, same
+        // message, opposite status -- so `tee /ro/f x && deploy` ran `deploy`
+        // when the two-argument form was used and did not when the piped form
+        // was, which is the kind of difference nobody thinks to test for.
         shell_println!("tee: write error: {:?}", e);
+        set_exit(1);
     }
 }
 
@@ -119096,9 +119516,68 @@ fn cmd_lz4(args: &str) {
 ///   sed '/pattern/d' file.txt          Delete matching lines
 ///   sed -n '/pattern/p' file.txt       Print matching lines (like grep)
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-fn cmd_sed(args: &str) {
+/// A `sed` argument string, classified into its four parts.
+struct SedArgs<'a> {
+    /// `-i` was given: edit the files in place rather than printing.
+    in_place: bool,
+    /// `-n` was given: print only what a `p` command asks for.
+    suppress: bool,
+    /// The script words, in the order they were given.
+    scripts: alloc::vec::Vec<alloc::string::String>,
+    /// Everything that is neither a flag nor the script: the file operands.
+    files: alloc::vec::Vec<&'a str>,
+}
+
+/// Split a `sed` argument string into flags, script and file operands.
+///
+/// Shared by [`cmd_sed`] and [`cmd_sed_input`] because they had two copies of
+/// this loop, and the copies had already drifted: the pipe copy dropped the
+/// `-i` arm and never collected files at all. So `cat f | sed -i 's/a/b/'`
+/// filtered the pipe, left `f` untouched, and reported success — the user
+/// asked for an in-place edit and got a filter. Two copies of a parser is how
+/// one command comes to disagree with itself, which is the fault this whole
+/// line of work has been chasing; one copy is the fix that stops it recurring.
+fn classify_sed_args(args: &str) -> SedArgs<'_> {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
-    if parts.is_empty() {
+    let mut out = SedArgs {
+        in_place: false,
+        suppress: false,
+        scripts: alloc::vec::Vec::new(),
+        files: alloc::vec::Vec::new(),
+    };
+    let mut i = 0usize;
+
+    while let Some(&part) = parts.get(i) {
+        match part {
+            "-i" => out.in_place = true,
+            "-n" => out.suppress = true,
+            "-e" => {
+                i = i.saturating_add(1);
+                if let Some(&script) = parts.get(i) {
+                    out.scripts.push(alloc::string::String::from(script));
+                }
+            }
+            // The first word that looks like a script is the script; a later
+            // one is a file. That is why `sed 's/a/b/' 2d` reads `2d` as a
+            // filename even though it looks like a delete command — GNU reads
+            // it the same way, and both halves of this command now do too.
+            s if s.starts_with('s') || s.starts_with('/') || s.ends_with('d') => {
+                if out.scripts.is_empty() {
+                    out.scripts.push(alloc::string::String::from(s));
+                } else {
+                    out.files.push(s);
+                }
+            }
+            _ => out.files.push(part),
+        }
+        i = i.saturating_add(1);
+    }
+
+    out
+}
+
+fn cmd_sed(args: &str) {
+    if args.split_whitespace().next().is_none() {
         shell_println!("Usage: sed [-i] [-n] [-e CMD] 's/old/new/[g]' [file]");
         shell_println!("       sed [-i] [-n] '/pattern/d' [file]");
         shell_println!("       sed [-i] [-n] 'Nd' [file]  (delete line N)");
@@ -119106,35 +119585,12 @@ fn cmd_sed(args: &str) {
         return;
     }
 
-    let mut in_place = false;
-    let mut suppress = false;
-    let mut commands: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
-    let mut file_args: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-    let mut i = 0;
-
-    while i < parts.len() {
-        match parts[i] {
-            "-i" => in_place = true,
-            "-n" => suppress = true,
-            "-e" => {
-                i += 1;
-                if i < parts.len() {
-                    commands.push(alloc::string::String::from(parts[i]));
-                }
-            }
-            s if s.starts_with('s') || s.starts_with('/') || s.ends_with('d') => {
-                if commands.is_empty() {
-                    commands.push(alloc::string::String::from(s));
-                } else {
-                    file_args.push(s);
-                }
-            }
-            _ => {
-                file_args.push(parts[i]);
-            }
-        }
-        i += 1;
-    }
+    let SedArgs {
+        in_place,
+        suppress,
+        scripts: commands,
+        files: file_args,
+    } = classify_sed_args(args);
 
     if commands.is_empty() {
         shell_println!("sed: no command specified");
@@ -119142,17 +119598,11 @@ fn cmd_sed(args: &str) {
         return;
     }
 
-    // Parse sed commands.
-    let parsed: alloc::vec::Vec<SedCmd> = commands
-        .iter()
-        .filter_map(|c| parse_sed_command(c))
-        .collect();
-
-    if parsed.is_empty() {
-        shell_println!("sed: invalid command syntax");
-        set_exit(1);
+    // Every script must parse. `filter_map` used to drop the ones that did not
+    // and run the rest, so one bad `-e` among good ones was invisible.
+    let Some(parsed) = parse_sed_scripts(&commands) else {
         return;
-    }
+    };
 
     // Process each file (or use empty content if no file given).
     if file_args.is_empty() {
@@ -119273,29 +119723,138 @@ fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &str) -> bool {
     }
 }
 
+/// Why a `sed` script could not be turned into a [`SedCmd`].
+///
+/// The parser used to answer every one of these with `None`, and both callers
+/// used to answer `None` with `filter_map` — so a bad script standing among
+/// good ones was silently *dropped* and only an all-bad script was reported at
+/// all. `sed -e 's/a/b/' -e 'nonsense' f` ran the first expression, ignored the
+/// second, and exited 0.
+///
+/// That is the same failure the pipe-form pass-through had (`0a785652a`): a
+/// script the shell cannot honour, honoured approximately, reported as success.
+/// Carrying the reason out of the parser is what lets the caller say *which*
+/// expression is wrong and *what* is wrong with it, as GNU sed does.
+enum SedParseError {
+    /// A delimiter was opened and never closed: `s/old`, `s/old/new`, `/pat`.
+    /// GNU: `unterminated 's' command` / `unterminated address regex`.
+    Unterminated,
+    /// The script does not begin with anything this parser recognises.
+    Unknown,
+    /// An `s///` flag suffix this parser cannot honour.
+    UnknownFlag(char),
+    /// Recognised in shape, but the bytes do not slice — a non-ASCII delimiter,
+    /// which this byte-wise scanner cannot walk without landing mid-character.
+    Invalid,
+}
+
+impl SedParseError {
+    /// Print the diagnostic for expression `n` (1-based, as GNU numbers them).
+    ///
+    /// The script text is quoted back because `#1` alone identifies nothing
+    /// when there is only one expression — which is the usual case. GNU prints
+    /// a character offset for the same reason; naming the expression is the
+    /// more useful half of that when the mistake is often *which string got
+    /// treated as a script* (`classify_sed_args` will read a bare `something`
+    /// as one, since it begins with `s`).
+    fn report(&self, n: usize, script: &str) {
+        match *self {
+            Self::Unterminated => {
+                shell_println!(
+                    "sed: -e expression #{}: unterminated command: {}",
+                    n,
+                    script
+                );
+            }
+            Self::Unknown => {
+                shell_println!("sed: -e expression #{}: unknown command: {}", n, script);
+            }
+            Self::UnknownFlag(c) => {
+                shell_println!(
+                    "sed: -e expression #{}: unknown option to 's': {} in {}",
+                    n,
+                    c,
+                    script
+                );
+            }
+            Self::Invalid => {
+                shell_println!(
+                    "sed: -e expression #{}: invalid command syntax: {}",
+                    n,
+                    script
+                );
+            }
+        }
+    }
+}
+
+/// Parse every script, or report the first one that cannot be parsed and fail.
+///
+/// Shared by [`cmd_sed`] and [`cmd_sed_input`] for the same reason
+/// [`classify_sed_args`] is shared: two copies of this logic drifted once
+/// already, and the drift is what let `-i` be parsed by one half and ignored by
+/// the other.
+///
+/// Returns `None` having already printed the diagnostic and set the status, so
+/// a caller's whole error path is `let Some(parsed) = … else { return };`.
+fn parse_sed_scripts(commands: &[alloc::string::String]) -> Option<alloc::vec::Vec<SedCmd>> {
+    let mut parsed = alloc::vec::Vec::with_capacity(commands.len());
+    for (idx, script) in commands.iter().enumerate() {
+        match parse_sed_command(script) {
+            Ok(cmd) => parsed.push(cmd),
+            Err(e) => {
+                e.report(idx.saturating_add(1), script);
+                set_exit(1);
+                return None;
+            }
+        }
+    }
+    Some(parsed)
+}
+
 /// Parse a sed command string into a `SedCmd`.
-fn parse_sed_command(cmd: &str) -> Option<SedCmd> {
+fn parse_sed_command(cmd: &str) -> Result<SedCmd, SedParseError> {
     let bytes = cmd.as_bytes();
 
     // Substitution: s/pattern/replacement/[g]
-    if bytes.first() == Some(&b's') && bytes.len() >= 4 {
-        let delim = bytes[1];
-        // Find pattern end.
-        let pat_start = 2;
-        let pat_end = find_unescaped(bytes, delim, pat_start)?;
-        let rep_start = pat_end + 1;
-        let rep_end = find_unescaped(bytes, delim, rep_start).unwrap_or(bytes.len());
-        let flags = if rep_end < bytes.len() {
-            &cmd[rep_end + 1..]
-        } else {
-            ""
+    if bytes.first() == Some(&b's') {
+        let Some(&delim) = bytes.get(1) else {
+            return Err(SedParseError::Unterminated);
         };
+        // The scan below walks bytes, so a multi-byte delimiter would have it
+        // stopping on a continuation byte and slicing mid-character. Refuse
+        // instead. GNU accepts any character as a delimiter; matching that
+        // needs a char-wise scanner, which this is not.
+        if !delim.is_ascii() {
+            return Err(SedParseError::Invalid);
+        }
+        let pat_start = 2;
+        let pat_end = find_unescaped(bytes, delim, pat_start).ok_or(SedParseError::Unterminated)?;
+        let rep_start = pat_end.saturating_add(1);
+        // The closing delimiter is *required*. This used to fall back to
+        // `bytes.len()`, so `s/old/new` — one delimiter short, and the
+        // commonest sed typo there is — ran as though the delimiter were
+        // present. GNU calls that `unterminated 's' command`. The user who
+        // dropped it meant something, and guessing which is not the parser's
+        // job: the guess is indistinguishable from a correct run.
+        let rep_end = find_unescaped(bytes, delim, rep_start).ok_or(SedParseError::Unterminated)?;
 
-        let pattern = alloc::string::String::from(cmd.get(pat_start..pat_end)?);
-        let replacement = alloc::string::String::from(cmd.get(rep_start..rep_end).unwrap_or(""));
+        let flags = cmd.get(rep_end.saturating_add(1)..).unwrap_or("");
+        // Only `g` is implemented, and an unrecognised flag used to be dropped
+        // in silence — so `s/a/b/i` performed a case-*sensitive* substitution
+        // and reported success. That is a wrong answer rather than a missing
+        // one, which is strictly worse: nothing downstream can detect it.
+        if let Some(c) = flags.chars().find(|c| *c != 'g') {
+            return Err(SedParseError::UnknownFlag(c));
+        }
+
+        let pattern =
+            alloc::string::String::from(cmd.get(pat_start..pat_end).ok_or(SedParseError::Invalid)?);
+        let replacement =
+            alloc::string::String::from(cmd.get(rep_start..rep_end).ok_or(SedParseError::Invalid)?);
         let global = flags.contains('g');
 
-        return Some(SedCmd::Substitute {
+        return Ok(SedCmd::Substitute {
             pattern,
             replacement,
             global,
@@ -119305,32 +119864,35 @@ fn parse_sed_command(cmd: &str) -> Option<SedCmd> {
 
     // Address commands: /pattern/d or /pattern/p
     if bytes.first() == Some(&b'/') {
-        let pat_end = find_unescaped(bytes, b'/', 1)?;
-        let pattern = alloc::string::String::from(cmd.get(1..pat_end)?);
-        let action = cmd.get(pat_end + 1..)?;
+        let pat_end = find_unescaped(bytes, b'/', 1).ok_or(SedParseError::Unterminated)?;
+        let pattern =
+            alloc::string::String::from(cmd.get(1..pat_end).ok_or(SedParseError::Invalid)?);
+        let action = cmd
+            .get(pat_end.saturating_add(1)..)
+            .ok_or(SedParseError::Invalid)?;
 
         return match action.trim() {
-            "d" => Some(SedCmd::Delete {
+            "d" => Ok(SedCmd::Delete {
                 addr: SedAddr::Pattern(pattern),
             }),
-            "p" => Some(SedCmd::Print {
+            "p" => Ok(SedCmd::Print {
                 addr: SedAddr::Pattern(pattern),
             }),
-            _ => None,
+            _ => Err(SedParseError::Unknown),
         };
     }
 
     // Line number commands: Nd
     if bytes.last() == Some(&b'd') {
-        let num_str = &cmd[..cmd.len().saturating_sub(1)];
+        let num_str = cmd.get(..cmd.len().saturating_sub(1)).unwrap_or("");
         if let Ok(n) = num_str.parse::<usize>() {
-            return Some(SedCmd::Delete {
+            return Ok(SedCmd::Delete {
                 addr: SedAddr::Line(n),
             });
         }
     }
 
-    None
+    Err(SedParseError::Unknown)
 }
 
 /// Find the position of an unescaped delimiter byte starting from `start`.
@@ -119367,41 +119929,65 @@ fn sed_replace_first(text: &str, pattern: &str, replacement: &str) -> alloc::str
 }
 
 /// `sed` pipe-input variant: processes piped text instead of a file.
+///
+/// Rejects the same malformed invocations [`cmd_sed`] rejects, with the same
+/// status. This form used to accept all of them and **print the input
+/// verbatim**, which is worse than the `tee` disagreement that led here: `tee`
+/// at least printed its error. A script this parser cannot read — `s/old`,
+/// whose pattern is never closed — produced the unedited input and exit 0, so
+/// `cat config | sed 's/old' > config.new` wrote a file that looked plausible,
+/// was not edited at all, and reported success. GNU sed calls that
+/// `unterminated 's' command` and exits 1.
+///
+/// A file operand wins over the pipe, which is what `-i` needs in order to
+/// mean anything — see [`classify_sed_args`].
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_sed_input(args: &str, input: &str) {
-    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
-    let mut suppress = false;
-    let mut commands: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
-    let mut i = 0;
-
-    while i < parts.len() {
-        match parts[i] {
-            "-n" => suppress = true,
-            "-e" => {
-                i += 1;
-                if i < parts.len() {
-                    commands.push(alloc::string::String::from(parts[i]));
-                }
-            }
-            s if s.starts_with('s') || s.starts_with('/') || s.ends_with('d') => {
-                if commands.is_empty() {
-                    commands.push(alloc::string::String::from(s));
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-
-    let parsed: alloc::vec::Vec<SedCmd> = commands
-        .iter()
-        .filter_map(|c| parse_sed_command(c))
-        .collect();
-
-    if parsed.is_empty() {
-        shell_print!("{}", input);
+    if args.split_whitespace().next().is_none() {
+        shell_println!("Usage: cmd | sed [-n] [-e CMD] 's/old/new/[g]'");
+        shell_println!("       cmd | sed [-n] '/pattern/d'");
+        shell_println!("       cmd | sed [-n] 'Nd'  (delete line N)");
+        set_exit(1);
         return;
     }
+
+    let SedArgs {
+        in_place,
+        suppress,
+        scripts: commands,
+        files,
+    } = classify_sed_args(args);
+
+    // A named file wins and the pipe is left unread, as it does for every
+    // other paired command here and as it does in GNU. `cmd_sed` re-parses the
+    // same string, which is a few microseconds and one source of truth.
+    if !files.is_empty() {
+        cmd_sed(args);
+        return;
+    }
+
+    // `-i` with nothing to edit. Silently filtering the pipe instead is the
+    // failure that made this worth fixing: the user asked for a file to be
+    // rewritten, no file was, and the status said it worked.
+    if in_place {
+        shell_println!("sed: no input files while in-place editing");
+        set_exit(1);
+        return;
+    }
+
+    if commands.is_empty() {
+        // Byte-identical to `cmd_sed`'s: the complaint is about the script,
+        // which is the same script whichever end the text arrives from.
+        shell_println!("sed: no command specified");
+        set_exit(1);
+        return;
+    }
+
+    // Same rule as the file half, from the same function: any script that does
+    // not parse fails the whole invocation.
+    let Some(parsed) = parse_sed_scripts(&commands) else {
+        return;
+    };
 
     let mut output = alloc::string::String::new();
     for (line_idx, line) in input.lines().enumerate() {
@@ -119564,11 +120150,33 @@ fn cmd_awk(args: &str) {
 }
 
 /// `awk` pipe-input variant.
+///
+/// Rejects a missing program with the same status [`cmd_awk`] does. As with
+/// `cmd_sed_input`, this form used to print the input verbatim and exit 0, so
+/// `cat log | awk` was a silent `cat` that claimed to have run a program.
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_awk_input(args: &str, input: &str) {
-    let (fs_char, program, _files) = parse_awk_args(args);
+    if args.trim().is_empty() {
+        shell_println!("Usage: cmd | awk [-F sep] 'program'");
+        shell_println!("  Fields: $0 (line), $1..$N, $NF (last)");
+        shell_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
+        shell_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
+        set_exit(1);
+        return;
+    }
+
+    let (fs_char, program, files) = parse_awk_args(args);
+
+    // Named files win over the pipe, as in GNU. This used to bind them to
+    // `_files` and drop them, so `cat a | awk '{print}' b` printed `a`.
+    if !files.is_empty() {
+        cmd_awk(args);
+        return;
+    }
+
     if program.is_empty() {
-        shell_print!("{}", input);
+        shell_println!("awk: no program specified");
+        set_exit(1);
         return;
     }
 

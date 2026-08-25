@@ -4421,10 +4421,23 @@ pub struct Compositor {
     /// Held whole rather than as the fields the compositor itself consumes, for
     /// the same reason [`Self::appearance`] is: the file has one owner
     /// (`gui/inputsettings`), and the compositor is a *carrier* for most of it.
-    /// Only [`Self::double_click_interval`] is read here; pointer speed,
-    /// acceleration, button mapping and key repeat are applied by whoever
-    /// integrates the raw device deltas, which is why they have to travel.
+    /// Only [`Self::double_click_interval`] and [`Self::layout`] are read
+    /// here; pointer speed, acceleration, button mapping and key repeat are
+    /// applied by whoever integrates the raw device deltas, which is why they
+    /// have to travel.
     input: Option<InputSettings>,
+    /// The keyboard layout in force: which letter each physical key produces.
+    ///
+    /// Resolved once, when the settings are adopted, rather than looked up per
+    /// keystroke — the id in `input.yaml` is a name, and turning a name into a
+    /// table on every key press would put a string comparison on the path
+    /// between a switch closing and a letter appearing.
+    ///
+    /// Not an `Option`: unlike [`Self::input`], "not read yet" and "US QWERTY"
+    /// are the same thing here, because this one is *used* by the compositor
+    /// rather than carried through it. A compositor with no layout at all
+    /// could not translate the keystroke that opens Settings.
+    layout: &'static keylayout::Layout,
     /// Outbound event notifications for clients (stub queue).
     pending_notifications: VecDeque<EventNotification>,
     /// Reused encoding buffer for
@@ -4501,6 +4514,7 @@ impl Compositor {
             // would be a push that overwrites the settings that source was
             // built with. Not knowing cannot overwrite anything.
             input: None,
+            layout: keylayout::default_layout(),
             pending_notifications: VecDeque::new(),
             window_list_scratch: Vec::new(),
             modifiers: ModifierState::new(),
@@ -4630,7 +4644,25 @@ impl Compositor {
     /// value is the one the input source already has.
     pub fn set_input_settings(&mut self, settings: InputSettings) {
         self.set_double_click_ms(settings.mouse.double_click_ms);
+        // An id the catalogue does not contain keeps the layout that is
+        // already in force rather than reverting to US QWERTY. A user who has
+        // chosen Dvorak and then acquires an `input.yaml` naming a layout this
+        // build has not got should not be silently moved back to QWERTY
+        // mid-session; and at startup the layout in force *is* the default, so
+        // the fresh-install case is unaffected.
+        if let Some(layout) = keylayout::by_id(&settings.keyboard.layout) {
+            self.layout = layout;
+        }
         self.input = Some(settings);
+    }
+
+    /// The keyboard layout in force.
+    ///
+    /// US QWERTY until `input.yaml` has been read and names another — see
+    /// [`Self::layout`] for why this one has no "not read yet" state.
+    #[must_use]
+    pub const fn keyboard_layout(&self) -> &'static keylayout::Layout {
+        self.layout
     }
 
     /// The input preferences currently in force, or `None` if `input.yaml` has
@@ -6329,14 +6361,34 @@ impl Compositor {
         let Some(window_id) = self.focused_window else {
             return;
         };
+
+        let level = self.modifiers.level();
+        let (key, laid_out) = keymap::key_for_layout(self.layout, scancode, level);
+        let mut modifiers = self.modifiers.modifiers();
+        if keymap::resolves_through_alt_gr(self.layout, scancode, level) {
+            // AltGr spent itself selecting a character, so it is not also an
+            // Alt chord. Without this a German user typing `@` (AltGr+Q) sends
+            // every application an Alt+Q, and the menu bar answers first.
+            // Cleared only when the layout really put a character on that
+            // level: on a US board AltGr is just the right-hand Alt, and an
+            // Alt+Q shortcut must keep working from either side.
+            modifiers.alt = self.modifiers.left_alt();
+        }
         self.pending_notifications
             .push_back(EventNotification::KeyEvent {
                 window_id,
                 scancode,
-                key: key_for_scancode(scancode),
+                key,
                 pressed,
-                modifiers: self.modifiers.modifiers(),
-                character,
+                modifiers,
+                // The source's own character wins where it has one: the host
+                // backend gets it from the *host's* layout, which is the one
+                // the person at that keyboard is actually typing on, and
+                // second-guessing it with ours would mean a US developer
+                // testing a German build typed German. Releases carry none —
+                // a key going up inserts no text, and a character there would
+                // have every text field type each letter twice.
+                character: character.or(if pressed { laid_out } else { None }),
             });
     }
 
@@ -8679,6 +8731,240 @@ mod tests {
             })
             .collect();
         assert_eq!(states, vec![true, false]);
+    }
+
+    /// A settings value that differs from the default in the layout alone.
+    ///
+    /// Built by struct update rather than by assigning into a `default()`,
+    /// so that a field added to either config later is carried by the
+    /// `..Default::default()` instead of being silently left unset here.
+    fn settings_using(layout: &str) -> InputSettings {
+        InputSettings {
+            keyboard: inputsettings::KeyboardConfig {
+                layout: layout.to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// The first key event a client is handed, decoded off the wire.
+    fn first_key(comp: &mut Compositor) -> ClientKeyEvent {
+        decode_drained(comp)
+            .into_iter()
+            .find_map(|e| match e.event {
+                ClientEvent::Key(k) => Some(k),
+                _ => None,
+            })
+            .expect("no key event reached the client")
+    }
+
+    #[test]
+    fn a_keystroke_arrives_as_the_letter_the_chosen_layout_puts_there() {
+        // The whole point of `keylayout`: the same physical key means a
+        // different letter once the user has chosen a different layout. On
+        // Dvorak the key engraved `S` types `o`, and a compositor that still
+        // consulted the physical table alone would send `s` — which is the
+        // state this replaced, where choosing a layout in Settings changed
+        // the picture of the keyboard and nothing else.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("dvorak"));
+
+        // 0x1F is the physical `S` key in scan code set 1; no character comes
+        // from the source, exactly as the evdev backend delivers it.
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1F,
+            character: None,
+        });
+
+        let k = first_key(&mut comp);
+        assert_eq!(k.key, Key::O, "Dvorak types `o` where the board says `S`");
+        assert_eq!(k.text, Some('o'), "and the text channel must agree");
+    }
+
+    #[test]
+    fn a_character_the_source_supplies_beats_the_layout() {
+        // The host backend fills `character` from the platform's own
+        // translation (`WM_CHAR` on Windows), which has already applied
+        // whatever layout the *host* is using. Re-translating it here would
+        // apply two layouts to one keystroke.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("dvorak"));
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1F,
+            character: Some('s'),
+        });
+
+        assert_eq!(first_key(&mut comp).text, Some('s'));
+    }
+
+    #[test]
+    fn alt_gr_types_a_character_rather_than_forming_an_alt_chord() {
+        // On German there is no other `@` on the board, so AltGr+Q has to
+        // produce one. It must *not* also arrive as Alt+Q: the menu bar
+        // answers Alt chords first, so a German user typing an e-mail address
+        // would open a menu instead.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0xE038, // right alt, i.e. AltGr
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x10, // Q
+            character: None,
+        });
+
+        let k = decode_drained(&mut comp)
+            .into_iter()
+            .find_map(|e| match e.event {
+                ClientEvent::Key(k) if k.key == Key::Q => Some(k),
+                _ => None,
+            })
+            .expect("no Q key event");
+        assert_eq!(
+            k.text,
+            Some('@'),
+            "AltGr+Q is the only `@` on a German board"
+        );
+        assert!(
+            !k.modifiers.alt,
+            "AltGr spent itself on the character and must not also read as Alt"
+        );
+    }
+
+    #[test]
+    fn alt_gr_still_reads_as_alt_where_the_layout_has_nothing_on_that_level() {
+        // The other half of the rule: clearing `alt` unconditionally would
+        // cost every AltGr chord an application defines for itself on a
+        // layout that puts no character on the third level.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("us-qwerty"));
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0xE038,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x10,
+            character: None,
+        });
+
+        let k = decode_drained(&mut comp)
+            .into_iter()
+            .find_map(|e| match e.event {
+                ClientEvent::Key(k) if k.key == Key::Q => Some(k),
+                _ => None,
+            })
+            .expect("no Q key event");
+        assert!(
+            k.modifiers.alt,
+            "US QWERTY has no third level to spend it on"
+        );
+    }
+
+    #[test]
+    fn a_letter_the_key_enum_cannot_name_still_types_its_character() {
+        // German puts `ü` where US QWERTY has `[`, and `guitk::Key` has no
+        // name for `ü`. The character channel carries it; `key` falls back to
+        // the physical identity so a shortcut bound to that key still fires.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1A, // `[` on US QWERTY
+            character: None,
+        });
+
+        let k = first_key(&mut comp);
+        assert_eq!(k.text, Some('ü'));
+        assert_eq!(
+            k.key,
+            keymap::key_for_scancode(0x1A),
+            "an unnameable character falls back to the physical key"
+        );
+    }
+
+    #[test]
+    fn a_release_carries_no_character() {
+        // A client that inserted text on every key event would double every
+        // letter if the release carried one too.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("dvorak"));
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1F,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x1F });
+
+        let texts: Vec<Option<char>> = decode_drained(&mut comp)
+            .into_iter()
+            .filter_map(|e| match e.event {
+                ClientEvent::Key(k) if k.key == Key::O => Some(k.text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec![Some('o'), None]);
+    }
+
+    #[test]
+    fn a_layout_this_build_does_not_know_leaves_the_keyboard_working() {
+        // A settings file written by a later build — or edited by hand — must
+        // not be able to leave the user with a keyboard that types nothing.
+        // The name is preserved in the file (see `inputsettings`); what is
+        // refused is *acting* on it.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("dvorak"));
+        comp.set_input_settings(settings_using("klingon-plqaD"));
+
+        assert_eq!(
+            comp.keyboard_layout().id,
+            "dvorak",
+            "an unknown id must leave the layout already in force alone"
+        );
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1F,
+            character: None,
+        });
+        assert_eq!(first_key(&mut comp).text, Some('o'));
+    }
+
+    #[test]
+    fn shift_and_caps_lock_reach_the_client_as_the_upper_face() {
+        // The level machinery is `keylayout`'s, but the wiring that hands it
+        // the modifier state is the compositor's, and it is the wiring that
+        // was missing.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("us-qwerty"));
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x2A, // left shift
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1E, // A
+            character: None,
+        });
+
+        let k = decode_drained(&mut comp)
+            .into_iter()
+            .find_map(|e| match e.event {
+                ClientEvent::Key(k) if k.key == Key::A => Some(k),
+                _ => None,
+            })
+            .expect("no A key event");
+        assert_eq!(k.text, Some('A'));
     }
 
     #[test]

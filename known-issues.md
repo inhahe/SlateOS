@@ -78222,9 +78222,24 @@ at the invariant is a guarantee.
 
 ---
 
-## `A-KSHELL-SED-GUESSES-WHICH-WORD-IS-THE-SCRIPT` (lane A, 2026-08-25) — **open**
+## `A-KSHELL-SED-GUESSES-WHICH-WORD-IS-THE-SCRIPT` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25 (`ba47c7086`)
 
 **Where.** `kernel/src/kshell.rs` — `classify_sed_args` (~123228).
+
+**Correction to this entry before the fix is described.** Row 3 of the table
+below, as originally written, was **wrong about GNU**, and the correction is
+worth more than the row was. It claimed `sed -n stuff.txt other.txt` should
+answer `no command specified`. It should not: GNU takes the first operand as
+the script *unconditionally*, so GNU also compiles `stuff.txt` as an `s`
+command and also applies it to `other.txt`. That example is a case where the
+shape guess and the positional rule happen to **agree**, not a divergence —
+picked, embarrassingly, because it reads alarmingly rather than because it was
+checked. The row is replaced below with the case that is genuinely wrong, which
+is the same one reversed: `sed -i notes.txt 2d`.
+
+The lesson is the entry's own subject matter turned on itself. "It starts with
+`s`, so it is a script" and "it looks like a divergence, so it is one" are the
+same move.
 
 **What.** `sed` has no option parser. It has a `match` over three known flags
 and, for everything else, a guess about *shape*:
@@ -78242,7 +78257,8 @@ Three wrong answers fall out of that, all of them exit-0 or worse.
 |---|---|---|
 | `sed -e 's/a/b/' -e` | runs the first expression, exit 0 | `-e option requires an argument` |
 | `sed -q -i 's/a/b/' f` | **rewrites `f`**, complains that `-q` is not a file | refuse the option and touch nothing |
-| `sed -n stuff.txt other.txt` | reads `stuff.txt` as the script `s/uff./x/` and applies it to `other.txt` | `no command specified` |
+| `sed -i notes.txt 2d` | takes `2d` as the script (it ends in `d`) and **rewrites `notes.txt`** | `notes.txt` is the script; `unknown command`, edit nothing |
+| `sed -i.bak 's/a/b/' f` | ignores `.bak`, treats it as plain `-i` | either honour the suffix or refuse; never silently drop it |
 
 **Why, one at a time.**
 
@@ -78262,17 +78278,20 @@ Three wrong answers fall out of that, all of them exit-0 or worse.
    does exist. GNU refuses the invocation and edits nothing. This is the one with
    a real cost attached: the edit is not recoverable.
 
-3. **A filename can become the script.** The shape guess has no notion of
-   position, so the first operand starting with `s` is taken as a script
-   whenever none has been seen yet — and `s` is the first letter of the
-   commonest sed command *and* of a great many filenames. `sed -n stuff.txt
-   other.txt` compiles `stuff.txt` as `s`-with-delimiter-`t`, which parses
-   cleanly to `s/uff./x/`, and applies it to `other.txt`. Nothing about that
-   run looks wrong from the outside.
+3. **A file and a script can swap places.** The shape guess has no notion of
+   position, so which operand becomes the script depends on how the two words
+   are *spelled*, not on which came first. `sed -i notes.txt 2d` is the case
+   that costs something: `2d` ends in `d`, so it wins the script slot, and
+   `notes.txt` — the word GNU would have compiled and choked on — becomes a
+   file that `-i` then rewrites. The user mistyped the argument order and got a
+   successful in-place edit of the file they were describing.
 
-   It survives today mostly by luck — most filenames do not parse as an `s`
-   command, and the ones that fail are refused loudly. `stuff.txt` is not a
-   contrived example, though, and neither is the `-f` case: `sed -f script.sed
+   The reverse ordering is where the guess is accidentally right, which is why
+   it survived: `sed -n stuff.txt other.txt` takes `stuff.txt` as the script,
+   and so does GNU. Agreeing in the common ordering is exactly what let the
+   disagreement in the uncommon one go unnoticed.
+
+   The `-f` case is the same defect without the reordering: `sed -f script.sed
    f` sends `-f` to the file list and `script.sed` to the script slot.
 
 **What the proper fix looks like.** The same shape `parse_tr_args` already has,
@@ -78292,7 +78311,7 @@ which is the pattern this file has been converging on:
   `TrParseError` and `SedParseError` are, so `cmd_sed` and `cmd_sed_input`
   cannot drift apart on which ones they mention.
 
-**Not a regression.** All three have been true since the command was written.
+**Not a regression.** All of them have been true since the command was written.
 Item 2 is the one to fix first if they are ever split up, because it is the only
 one that destroys data.
 
@@ -78300,3 +78319,37 @@ one that destroys data.
 `TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV`: `sed` is already on
 `command_parses_own_quotes`, so the *words* are right — what is missing is the
 grammar over them.
+
+### Fixed — `ba47c7086`
+
+`classify_sed_args` returns `Result<SedArgs, SedArgsError>` and chooses by
+position. Options first, `--` ends them, short options bundle, `-e`/`-i` take
+attached or following arguments, long options take `=VALUE` or a following
+word — and then, **if and only if no `-e` was given**, the first operand is the
+script and every operand after it is a file.
+
+| was | is |
+|---|---|
+| unknown short option → file operand | `sed: invalid option -- 'q'`, exit 1, nothing opened |
+| unknown long option → file operand | `sed: unrecognized option '--quite'`, exit 1 |
+| `-e` with nothing after it → dropped | `sed: option requires an argument -- 'e'` |
+| `-i.bak` → suffix discarded | refused by name, with what the suffix would have meant |
+| `-E`/`-r`, `-f`, `-s`, `-z` → file operands | refused each with its own reason |
+| script chosen by first letter | first operand, or every operand is a file under `-e` |
+
+`-E` is worth singling out: ignoring it is not a missing feature but a wrong
+answer, because these patterns are BREs, so `a+` silently stops meaning
+"one or more `a`" and starts meaning "an `a` followed by a plus sign" — and
+matches things. Refusing says so.
+
+**What it did not fix.** Nothing about the *script* grammar. A bare `p` is
+still `unknown command` and `s///p` is still an unknown flag; the parser only
+decides which word is handed to `parse_sed_command`. For kshell's current
+grammar every *valid* script also satisfied the old shape test, so the payoff
+here is entirely in the option loop and the reorder case — which is why rung 53
+tests those and not new scripts.
+
+**Covered by** rung 53, `sed takes its script by position, not by shape`. The
+reorder case is run against a real file in `/tmp` and the file's bytes are
+compared afterwards, because "refused" and "rewrote it anyway" are
+indistinguishable from the diagnostic alone.

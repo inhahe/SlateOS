@@ -23398,6 +23398,464 @@ DEFECTS = [
             'events_come_back_in_time_order_whatever_order_they_were_stored_in',
         ],
     ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the start button is a fixed size whatever the display scaling",
+        DESK,
+        [
+            ('            self.scale(START_BUTTON_WIDTH).min(bar.w),\n',
+             '            START_BUTTON_WIDTH.min(bar.w),\n'),
+        ],
+        ["desktop"],
+        [
+            # The button is still drawn from the same rectangle, so it is not
+            # visibly wrong at 100%. At 200% it is half the width the rest of
+            # the bar grew to, and the gap between where it is drawn and where
+            # it can be clicked is the whole failure.
+            'the_start_button_is_clickable_where_it_is_drawn_at_every_scale',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the taskbar does not grow with the display scaling",
+        DESK,
+        [
+            ('        self.scale(self.taskbar_height as f32)\n',
+             '        self.taskbar_height as f32\n'),
+        ],
+        ["desktop"],
+        [
+            # `taskbar_height` is the logical height the settings panel asks
+            # for, so failing to scale it leaves a 40px bar on a 200% display --
+            # and, because the work area is the screen minus the bar, hands the
+            # extra 40px to windows that will be drawn under it.
+            'the_taskbar_grows_with_the_scaling_and_takes_the_room_from_the_work_area',
+            'the_clocks_target_covers_the_reading_that_is_drawn_at_every_scaling',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a taskbar taller than the screen inverts the bar's geometry",
+        DESK,
+        [
+            ('            height.min(self.screen_height as f32),\n',
+             '            height,\n'),
+        ],
+        ["desktop"],
+        [
+            # The `y` is already clamped by `.max(0.0)`, so without the height
+            # clamp too the rectangle runs off the bottom -- and on a screen
+            # shorter than the bar the two clamps disagree, which is the case
+            # the catcher constructs.
+            'a_screen_smaller_than_the_taskbar_does_not_invert_the_geometry',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the start menu is not clamped to the room above the taskbar",
+        DESK,
+        [
+            ('        let h = self.scale(START_MENU_HEIGHT).min(bar.y.max(0.0));\n',
+             '        let h = self.scale(START_MENU_HEIGHT);\n'),
+        ],
+        ["desktop"],
+        [
+            # At 200% the menu's nominal height is 800px, which on an 800px
+            # screen starts at y = -40. A row drawn above the top edge cannot be
+            # clicked, so this is the unreachable-program bug that the scroll
+            # offset exists to prevent, arriving by the other door.
+            'a_scaled_start_menu_still_reaches_every_program',
+            'a_screen_smaller_than_the_taskbar_does_not_invert_the_geometry',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: adjacent start-menu rows overlap by a pixel",
+        DESK,
+        [
+            ('            menu.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * height,\n',
+             '            menu.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * (height - 1.0),\n'),
+        ],
+        ["desktop"],
+        [
+            # The classic fencepost. Every row after the first is one pixel high
+            # into its neighbour, so the boundary pixel belongs to two rows and
+            # `hit_test` gives it to whichever it scans first -- which means one
+            # row of pixels launches the wrong program.
+            'adjacent_rows_do_not_share_a_pixel',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: a scrolled start menu launches the program drawn at the top of the list",
+        DESK,
+        [
+            ('        let index = self.start_menu_scroll.checked_add(row)?;\n',
+             '        let index = row;\n'),
+        ],
+        ["desktop"],
+        [
+            # `row` counts from the top of the *visible* list and the entry
+            # index counts from the top of the whole list; the scroll offset is
+            # the only thing between them. Drop it and the menu launches by
+            # screen position -- correct until the moment anyone scrolls, then
+            # wrong for every row at once.
+            'a_scrolled_row_launches_the_program_named_on_it',
+            'a_scaled_start_menu_still_reaches_every_program',
+            'the_list_cannot_scroll_past_either_end',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the start menu scrolls the wrong way",
+        DESK,
+        [
+            ('        let moved = if rows >= 0 {\n            self.start_menu_scroll\n                .saturating_add(rows.unsigned_abs() as usize)\n        } else {\n            self.start_menu_scroll\n                .saturating_sub(rows.unsigned_abs() as usize)\n        };\n',
+             '        let moved = if rows >= 0 {\n            self.start_menu_scroll\n                .saturating_sub(rows.unsigned_abs() as usize)\n        } else {\n            self.start_menu_scroll\n                .saturating_add(rows.unsigned_abs() as usize)\n        };\n'),
+        ],
+        ["desktop"],
+        [
+            # This is a reintroduction in the literal sense: the method's own
+            # doc comment records that it used to be this way round, and that it
+            # was the one place in the tree where a positive delta moved towards
+            # row 0. The comment is left in place by the patch, so the defect
+            # also stands for the case where code and comment disagree.
+            'a_wheel_notch_over_the_menu_scrolls_it',
+            'the_list_cannot_scroll_past_either_end',
+            'a_scrolled_row_launches_the_program_named_on_it',
+            'a_scaled_start_menu_still_reaches_every_program',
+            'reopening_the_menu_rewinds_the_list',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the start menu can scroll three rows past its own end",
+        DESK,
+        [
+            ('        self.start_menu_scroll = moved.min(max);\n',
+             '        self.start_menu_scroll = moved.min(max.saturating_add(3));\n'),
+        ],
+        ["desktop"],
+        [
+            # Not removed, loosened -- an off-by-N rather than an off-by-
+            # nothing, because a clamp that is merely generous is the version
+            # that survives review. The visible result is a menu that can be
+            # scrolled into empty space below the last program.
+            'the_list_cannot_scroll_past_either_end',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the start menu reopens wherever it was last left",
+        DESK,
+        [
+            ('            self.start_menu_open = true;\n            self.start_menu_scroll = 0;\n',
+             '            self.start_menu_open = true;\n'),
+        ],
+        ["desktop"],
+        [
+            # A menu that reopens scrolled hides the first application from a
+            # user who has no idea it ever scrolled -- and who therefore has no
+            # reason to scroll back up to look for it.
+            'reopening_the_menu_rewinds_the_list',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: reopening the start menu keeps the leftover part-notch",
+        DESK,
+        [
+            ('            self.start_menu_wheel.reset();\n',
+             ''),
+        ],
+        ["desktop"],
+        [
+            # The subtler half of the same rewind. The offset goes back to 0 but
+            # the fraction still pushing it does not, so a menu opened just
+            # after a trackpad flick steps off row 0 on the next tiny delta --
+            # which looks like the list moving on its own.
+            'reopening_the_menu_forgets_the_leftover_fraction',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: closing the start menu strands the power menu open over the desktop",
+        DESK,
+        [
+            ('        self.start_menu_open = false;\n        self.power_menu_open = false;\n    }\n',
+             '        self.start_menu_open = false;\n    }\n'),
+        ],
+        ["desktop"],
+        [
+            # `close_start_menu` is deliberately the single place the menu
+            # closes, so that the submenu cannot outlive its parent. Removing
+            # one line from it leaves a power menu floating over an empty
+            # desktop, anchored to a button that is no longer drawn.
+            'closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it',
+            'the_power_menu_offers_every_system_action_and_launches_them',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the start menu lists the system actions as ordinary programs",
+        DESK,
+        [
+            ('            .filter(|app| matches!(app.category, Category::Application | Category::Setting))\n',
+             '            .filter(|app| {\n                matches!(\n                    app.category,\n                    Category::Application | Category::Setting | Category::System\n                )\n            })\n'),
+        ],
+        ["desktop"],
+        [
+            # The exclusion is not tidiness: it is what keeps `Shutdown` from
+            # being one mis-click away from `Screenshot` in an alphabetical
+            # list. It also puts every system action in *both* menus at once,
+            # which is the half the partition test sees.
+            'the_two_menus_between_them_offer_every_program_exactly_once',
+            'the_start_menu_offers_only_programs_the_launcher_knows',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the power menu offers the applications instead of the system actions",
+        DESK,
+        [
+            ('            .filter(|app| matches!(app.category, Category::System))\n',
+             '            .filter(|app| matches!(app.category, Category::Application))\n'),
+        ],
+        ["desktop"],
+        [
+            # The complement of L, and the reason the two filters are written as
+            # complements of one another: an action must be in exactly one of
+            # the two lists, and only a test that checks the *partition* can see
+            # a change that puts it in the wrong one rather than in neither.
+            'the_power_menu_offers_every_system_action_and_launches_them',
+            'the_two_menus_between_them_offer_every_program_exactly_once',
+            'a_click_on_the_list_behind_the_power_menu_only_dismisses_it',
+            'closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: dismissing the power menu takes the start menu down with it",
+        DESK,
+        [
+            ('            self.power_menu_open = false;\n            if !Self::keeps_start_menu_open(hit) {\n                self.start_menu_open = false;\n            }\n            return ShellAction::Consumed;\n',
+             '            self.power_menu_open = false;\n            self.start_menu_open = false;\n            return ShellAction::Consumed;\n'),
+        ],
+        ["desktop"],
+        [
+            # The submenu is dismissed first and *on its own*: a click on the
+            # application list while the power menu is up should close the power
+            # menu and leave the list where it was. Closing both makes one click
+            # undo two things, the second of which the user did not ask for.
+            'a_click_on_the_list_behind_the_power_menu_only_dismisses_it',
+            'closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it',
+            'the_power_button_toggles_its_menu_and_leaves_the_start_menu_open',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a click on the calendar's own margin closes the calendar",
+        DESK,
+        [
+            ('        if self.calendar.visible && !matches!(hit, Hit::Clock | Hit::CalendarControl(_)) {\n',
+             '        if self.calendar.visible && !matches!(hit, Hit::Clock) {\n'),
+        ],
+        ["desktop"],
+        [
+            # `Hit::CalendarControl` covers the popup's inert space as well as
+            # its controls, which is what stops a click in its own margin
+            # dismissing it -- the single most irritating way for a popup to
+            # behave, and one that only shows up when you miss a button by two
+            # pixels.
+            'a_click_on_the_calendars_margin_leaves_it_open',
+            'a_calendar_arrow_pages_the_month_it_is_drawn_beside',
+            'reopening_the_calendar_rewinds_it',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a release over the shell's chrome is handed to the client underneath",
+        DESK,
+        [
+            ('            MouseEventKind::Release(_) => {\n                if self.hit_test(event.x, event.y).is_shell_chrome() {\n                    ShellAction::Consumed\n                } else {\n                    ShellAction::Pass\n                }\n            }\n',
+             '            MouseEventKind::Release(_) => ShellAction::Pass,\n'),
+        ],
+        ["desktop"],
+        [
+            # A release belongs to whoever took the press. A client that saw a
+            # release with no press for it reads a click on the taskbar as a
+            # click on itself -- so the visible symptom is a button in an
+            # application firing when you let go over the shell.
+            'a_release_over_chrome_is_swallowed_with_the_press',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a right-click on the shell's chrome falls through to the client",
+        DESK,
+        [
+            ('        if button != MouseButton::Left {\n            return if hit.is_shell_chrome() {\n                ShellAction::Consumed\n            } else {\n                ShellAction::Pass\n            };\n        }\n',
+             '        if button != MouseButton::Left {\n            return ShellAction::Pass;\n        }\n'),
+        ],
+        ["desktop"],
+        [
+            # Only the primary button acts, but the others must still not reach
+            # a client when they land on the shell's own surfaces. Otherwise a
+            # right-click on the taskbar opens the context menu of whatever
+            # window is behind the bar.
+            'a_right_click_on_chrome_acts_on_nothing_but_is_still_consumed',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the taskbar button minimizes the window you were trying to reach",
+        DESK,
+        [
+            ('                if self.focused_window == Some(id) {\n                    ShellControlAction::Minimize\n                } else {\n',
+             '                if self.focused_window != Some(id) {\n                    ShellControlAction::Minimize\n                } else {\n'),
+        ],
+        ["desktop"],
+        [
+            # The toggle inverted. Clicking an unfocused window's button
+            # minimizes it instead of raising it, and clicking the focused one
+            # raises what is already raised -- so the taskbar becomes a way to
+            # make windows disappear and nothing else.
+            'a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focused_one',
+            'a_minimized_window_can_be_got_back_from_its_taskbar_button',
+            'the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop',
+            'a_double_click_is_the_same_event_to_this_shell_as_a_single_one',
+            'a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised',
+            'a_taskbar_button_asks_the_compositor_rather_than_changing_anything',
+            'a_window_list_arriving_with_a_click_is_folded_in_after_it',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: bare taskbar leaks the click to whatever is behind the bar",
+        DESK,
+        [
+            ('            return Hit::TaskbarPanel;\n',
+             '            return Hit::Desktop;\n'),
+        ],
+        ["desktop"],
+        [
+            # A press that lands on the bar but on none of its controls -- the
+            # gap after the last button, or the slot a window just vacated. The
+            # bar must keep it; passing it on raises whatever window happens to
+            # be underneath, which the user experiences as a random misfire.
+            #
+            # This defect used to patch the `None` arm of the taskbar-button
+            # match in `handle_press`, and escaped, because that arm was
+            # unreachable: `hit_test` only reported a button index it had just
+            # found a window for. The arm is gone (`Hit::TaskbarButton` now
+            # carries the `WindowId`) and the defect asks the question the test
+            # actually answers.
+            'a_click_where_a_button_used_to_be_is_still_the_taskbars',
+            'the_taskbar_panel_swallows_clicks_that_hit_nothing',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the window list is merged into what the shell believed instead of replacing it",
+        DESK,
+        [
+            ('        self.windows = kept;\n',
+             '        self.windows.extend(kept);\n'),
+        ],
+        ["desktop"],
+        [
+            # The compositor's list is the authority, and the only way the shell
+            # finds out a window is gone is that it stops being in one. Merging
+            # means nothing is ever removed: closed windows keep their taskbar
+            # buttons forever, and the bar only ever grows.
+            'the_window_list_replaces_what_the_shell_believed_rather_than_adding_to_it',
+            'an_empty_desktop_leaves_nothing_focused',
+            'a_click_where_a_button_used_to_be_is_still_the_taskbars',
+            'a_window_list_arriving_with_a_click_is_folded_in_after_it',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the taskbar lists the panels and popups and leaves out the applications",
+        DESK,
+        [
+            ('            if info.layer != Layer::Normal {\n',
+             '            if info.layer == Layer::Normal {\n'),
+        ],
+        ["desktop"],
+        [
+            # An inversion rather than a deletion, because a deleted filter
+            # shows up as *extra* buttons and an inverted one shows up as the
+            # wrong ones -- and the wrong ones are what a test that only counts
+            # buttons would let through.
+            'a_click_off_the_calendar_closes_it_without_acting',
+            'a_double_click_is_the_same_event_to_this_shell_as_a_single_one',
+            'a_key_release_only_ends_the_window_switcher',
+            'a_minimized_window_can_be_got_back_from_its_taskbar_button',
+            'a_minimized_window_keeps_its_button_and_an_unmapped_one_does_not',
+            'a_new_window_opens_above_the_existing_ones_and_takes_focus',
+            'a_press_over_the_taskbar_does_not_reach_it_while_the_overview_is_up',
+            'a_refused_shortcut_does_not_swallow_the_rest_of_the_batch',
+            'a_retitle_reaches_the_button_without_disturbing_shell_local_state',
+            'a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised',
+            'a_taskbar_button_asks_the_compositor_rather_than_changing_anything',
+            'a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focused_one',
+            'a_taskbar_button_is_clickable_where_it_is_drawn',
+            'a_window_is_only_visible_on_its_own_desktop',
+            'a_window_list_arriving_with_a_click_is_folded_in_after_it',
+            'a_window_list_is_what_says_which_desktop_a_window_is_on',
+            'alt_f4_asks_the_compositor_and_changes_nothing_itself',
+            'alt_f4_asks_the_compositor_to_close_the_focused_window',
+            'alt_tab_between_two_windows_swaps_them',
+            'alt_tab_reaches_a_minimized_window',
+            'alt_tab_survives_the_windows_closing_underneath_it',
+            'alt_tab_visits_every_window_and_comes_back_round',
+            'alt_tab_with_one_window_is_consumed_without_opening_the_switcher',
+            'an_empty_desktop_leaves_nothing_focused',
+            'clicking_a_zone_asks_for_the_focused_window_to_be_tiled_into_it',
+            'each_thumbnail_selects_the_layout_it_pictures',
+            'every_drawn_string_follows_the_users_font_size',
+            'run_returns_when_the_compositor_hangs_up',
+            'shift_alt_tab_goes_round_the_other_way',
+            'show_desktop_does_not_ask_an_already_minimized_window_to_minimize',
+            'snapping_and_switching_desktops_are_different_shortcuts',
+            'stepping_backwards_survives_the_windows_closing_underneath_it',
+            'super_d_asks_for_every_window_to_be_minimised',
+            'super_d_minimizes_everything_on_the_current_desktop',
+            'super_down_restores_a_maximized_window_and_minimizes_any_other',
+            'super_right_asks_for_a_tile_and_computes_no_geometry',
+            'switching_desktop_names_no_window',
+            'the_chooser_closes_the_ways_a_popup_closes',
+            'the_chooser_draws_the_layout_it_will_place_into',
+            'the_chooser_tiles_the_work_area_and_not_the_screen',
+            'the_compositors_window_list_is_what_the_taskbar_is_drawn_from',
+            'the_corner_setting_reaches_the_start_menu_and_the_taskbar_buttons',
+            'the_list_that_refreshes_the_taskbar_refreshes_the_overview',
+            'the_lit_zone_is_the_one_a_press_would_place_into',
+            'the_stacking_order_is_the_one_the_list_arrived_in',
+            'the_taskbar_leaves_out_every_surface_that_is_not_an_application_window',
+            'the_tiled_window_is_whichever_one_is_focused_now',
+            'the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop',
+            'the_window_list_replaces_what_the_shell_believed_rather_than_adding_to_it',
+            'turning_the_date_on_widens_the_tray_and_narrows_the_buttons',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: an update rebuilds each window from nothing, losing the shell's own state",
+        DESK,
+        [
+            ('            let previous = self.windows.get(&id);\n',
+             '            let previous: Option<&ManagedWindow> = None;\n'),
+        ],
+        ["desktop"],
+        [
+            # `icon_id` has no counterpart in the compositor's list -- it is
+            # shell-local, and an update that does not look up the existing
+            # window cannot preserve it. The symptom is every taskbar icon
+            # reverting to the blank one each time any window is retitled.
+            'a_retitle_reaches_the_button_without_disturbing_shell_local_state',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: every taskbar button acts on the first window on the bar",
+        DESK,
+        [
+            ('                if self.taskbar_button_rect(index).contains(x, y) {\n                    return Hit::TaskbarButton(window.id);\n',
+             '                if self.taskbar_button_rect(index).contains(x, y) {\n                    let _ = window;\n                    return Hit::TaskbarButton(self.taskbar_windows()[0].id);\n'),
+        ],
+        ["desktop"],
+        [
+            # The pairing of slot to window, which is what the hit test is for
+            # once the hit carries an id. The old form of
+            # `a_taskbar_button_is_clickable_where_it_is_drawn` compared the
+            # slot number with itself and could not fail; this is the defect it
+            # was named for and did not catch.
+            'a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised',
+            'a_taskbar_button_asks_the_compositor_rather_than_changing_anything',
+            'a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focused_one',
+            'a_taskbar_button_is_clickable_where_it_is_drawn',
+            'a_window_list_arriving_with_a_click_is_folded_in_after_it',
+        ],
+    ),
 ]
 def run_tests(pkg):
     r = subprocess.run(

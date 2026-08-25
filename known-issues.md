@@ -75346,14 +75346,14 @@ usability on long scripts, which is the case that most needs it.
 ## TD-GREP-IS-MISSING-CONTEXT-COLOUR-BYTE-OFFSETS-AND-THE-FILE-SELECTORS (lane B, 2026-08-25) — **open** (the missing features; the defects below were fixed the same day)
 
 **In short:** our `grep` handles matching well and is missing a lot of the
-things people actually type at it. `--color`, `-b` (print each hit's byte
-offset), `-T` (line up the output in columns), `-d` (what to do when an operand
+things people actually type at it. `--color`, `-d` (what to do when an operand
 is a directory), and `--include`/`--exclude`/`--exclude-dir` (search only some
-of the files a recursive search would reach) are all missing. Typing any of
+of the files a recursive search would reach) are still missing. Typing any of
 them gets `grep: unknown option`, so a script that uses one fails outright
-rather than degrading. The largest gap, context selection — `grep -C 3 pattern
-file`, show three lines either side of each hit — was closed on 2026-08-25 and
-is recorded below. Five further things were wrong rather than absent — the recursive walk
+rather than degrading. Three larger gaps were closed on 2026-08-25 and are
+recorded below: context selection (`grep -C 3 pattern file`, show three lines
+either side of each hit), `-b` (print each hit's byte offset) and `-T` (line up
+the output in columns). Five further things were wrong rather than absent — the recursive walk
 followed symbolic links it should have skipped, an unreadable directory did not
 raise the exit status, a failed write to a closed output was thrown away, `-q`
 stopped too late, and a long option refused a value given as the next argument
@@ -75374,14 +75374,12 @@ marker is part of closing it, and nothing here can be fixed and forgotten.
 | | What it does | Harness cases |
 |---|---|---|
 | `--color=never\|always\|auto` + `GREP_COLORS` | wrap the matched text in SGR escapes; `auto` means "only if stdout is a terminal" | 7 |
-| `-b` | prefix each output line with the byte offset it starts at | 5 |
 | `--include=GLOB` `--exclude=GLOB` `--exclude-dir=GLOB` | filter what a recursive search descends into and reports | 3 |
 | `-d ACTION` | `read` (the default), `skip`, or `recurse` for a directory operand | 2 |
-| `-T` | pad the filename/line-number prefix so the text lines up | 2 |
 
-`--color` is now the largest group and the one to do next; `-b` and `-T` are
-small and share the prefix-building code that context selection has just
-reworked, so they are cheap to do alongside it.
+`--color` is now the largest group and the one to do next. `-b` and `-T` were
+the cheap pair and landed on 2026-08-25 (recorded below), which leaves
+`--color` and the two file-selection groups.
 
 **Defects — all fixed 2026-08-25**, and each now pinned by plain (unmarked)
 cases in `scripts/grep-diff.sh`, so a regression fails the harness:
@@ -75462,6 +75460,38 @@ not obvious, each measured against GNU 3.11 rather than recalled:
   why the "printed before" flag lives on `Run` and not in `search_stream`.
 * `-c`, `-l`, `-L` and `-q` ignore context outright, separator included.
 
+**`-b` and `-T` — implemented 2026-08-25.** The seven `?` cases that pinned
+their absence are now 33 plain cases. Both were measured against GNU 3.11 with
+`od -c` rather than recalled, and twice the recollection was wrong:
+
+* **`-T`'s field width is computed from the file's `st_size` before a single
+  line is read**, which is the whole reason it can be applied to a stream at
+  all. The rule is `num = size; num += 1 if -n; width = decimal_digits(num)` —
+  the `+1` because a file of N bytes can hold N+1 lines. So a 99-byte file pads
+  line numbers to three columns and byte offsets to two. There is *one* width,
+  shared by both numeric fields, not one per field. An input with no size (a
+  pipe) uses what a signed `off_t` holds, giving 19 columns; `grep -Tn HIT
+  < file` is *not* that case, because redirected stdin is a regular file. This
+  is why `scripts/grep-diff.sh` grew a `w99` fixture: every other fixture is
+  small enough that a hardcoded width of 1 would pass.
+* **The tab goes after the last separator, with no backspace.** GNU's
+  `print_line_head` reads as if it emitted `"	"` *before* the separator;
+  the dump says `a.txt: 1:	foo`. And `-Z` does not suppress it —
+  `a.txt  1:	foo`, and `a.txt 	foo` with no numbers at all. What *does*
+  suppress it is having no field to follow: bare `-T` prints no tab, and
+  neither do `-c`, `-l` or `-L`, which print no line prefix.
+* **`-b` reports the offset of what is printed, not of the line.** Under `-o`
+  each match carries its own, so `grep -bo foo` over `foo bar foo` prints `0`
+  and `8`. Under `-z` the NUL separators count as bytes like any other. A
+  context line gets an offset too, punctuated with `-` like its other fields.
+
+Implementation notes: `line_prefix` now takes a `Prefix` struct rather than
+five positionals, and `search_stream` a `Source`, because the alternative was
+tripping `clippy::too_many_arguments` in a crate that denies pedantic. The
+"is this a regular file, honestly" test that `-T` needs on stdin was already
+written for `wc`; it moved to `coreutils::filekind::borrowed_stdin` and `wc`'s
+private copy was deleted rather than a third one written.
+
 **Diagnostic wording** (four more `?` cases, lower value than the above):
 `grep` with no operands answers `grep: missing PATTERN` where GNU prints the
 usage summary; `--zzz` is `unknown option: --zzz` against GNU's `unrecognized
@@ -75474,5 +75504,5 @@ exiting 0. The first two belong with
 **Severity.** Medium, and lower than it was: the four defects are gone, which
 removes the only hang and the only silently-wrong exit status. What is left
 produces no wrong answer to a query that works — the matching itself agrees
-with GNU across 217 cases — but `-C` and `--color` are common enough that a
-script or a habit that uses them simply does not run.
+with GNU across 305 cases — but `--color` is common enough that a script or a
+habit that uses it simply does not run.

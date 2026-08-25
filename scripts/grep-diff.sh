@@ -120,6 +120,9 @@ cd "$fixtures" || exit 1
 #   run3         three consecutive hits, so that `-m` can be satisfied while
 #                trailing context is still owed — the lines that follow print
 #                as context even though they match
+#   w99          exactly ninety-nine bytes, which is the only size here that
+#                gives `-T` a field width above 1 *and* a different one with
+#                `-n` than without it
 printf 'a\nb\nc\n'                              > abc
 printf 'foo bar\nbaz foo foo\nqux\nfoofoo\n'    > words
 printf 'a{b}\n{b}a\na{}\nab\na\naaa\na{1,2}\n'  > braces
@@ -133,6 +136,15 @@ printf 'caf\303\251\nCAF\303\211\ncafe\n'       > accent
 printf '1\n2\nHIT\n4\n5\n6\nHIT\n8\n'           > ctx
 printf 'HIT\n2\n3\n'                            > ctxtop
 printf 'HIT\nHIT\nHIT\n'                        > run3
+
+# Exactly ninety-nine bytes: nine eleven-byte lines. The one fixture whose
+# `-T` field width is neither 1 nor equal with and without `-n` — 99 bytes is
+# two digits, and the 100 lines a 99-byte file could hold is three. Every other
+# fixture here is under ten bytes per field and so cannot tell a computed width
+# from a hardcoded one.
+i=0
+while [ $i -lt 8 ]; do printf 'nine bytes\n'; i=$((i + 1)); done > w99
+printf 'HITxxxxxxx\n' >> w99
 
 # The recursion fixtures. `sub` is the plain tree; `symdir` exists because -r
 # and -R differ over exactly one thing — a symlink met *during* the walk, which
@@ -669,13 +681,56 @@ grep -LC 1 zzz ctx
 grep -qC 1 HIT ctx
 
 # --- byte offsets and the other output decorations ---
-?-b is not implemented|grep -b a abc
-?-b is not implemented|grep -bn a abc
-?-b is not implemented|grep -bo foo words
-?-b is not implemented|grep -bH a abc
-?-b is not implemented|grep -b foo zsep
-?-T is not implemented|grep -T a abc
-?-T is not implemented|grep -Tn a abc
+grep -b a abc
+grep -bn a abc
+grep -bo foo words
+grep -bH a abc
+# Under `-z` the NUL separators are bytes of the file like any other, so they
+# count towards the offset. (Without `-z` GNU calls this fixture binary and
+# prints no lines at all — see the `!` case above.)
+grep -bz foo zsep
+grep --byte-offset foo words
+# The offset is of the *line*, not of the match — except under -o, where each
+# match carries its own. Context lines get one too, with a `-` after it.
+grep -bC 1 HIT ctx
+grep -bnoH foo words
+grep -bv a abc
+
+# -T pads the numeric fields to a width taken from the file's size *before a
+# line is read*, and ends the prefix with a tab. Which is why `w99` is here: at
+# 99 bytes the width is 2 without -n and 3 with it, because a 99-byte file can
+# hold 100 lines. Every other fixture is small enough for both to be 1, so none
+# of them can tell a correct width from a constant.
+grep -T a abc
+grep -Tn a abc
+grep -T HIT w99
+grep -Tn HIT w99
+grep -Tb HIT w99
+grep -Tbn HIT w99
+grep -TnH HIT w99
+grep -TnHZ HIT w99
+grep -TH HIT w99
+grep -THZ HIT w99
+grep -Tbo foo words
+grep -TbA 1 HIT ctx
+grep -TnC 1 HIT ctx
+grep --initial-tab --line-number HIT w99
+# -T with nothing to pad prints no tab at all: the tab follows the last field,
+# and here there is no field.
+grep -T HIT ctx
+# The options that answer a question about the file print no line prefix, and
+# so take no tab either.
+grep -Tc HIT w99
+grep -THc HIT w99
+grep -Tl HIT w99
+# A stream has no size to take a width from, so GNU falls back to the largest a
+# signed off_t can hold — nineteen columns.
+cat w99 | grep -Tn HIT
+cat w99 | grep -Tb HIT
+# Redirected stdin *is* a regular file, so it gets the file's own width rather
+# than the stream fallback.
+grep -Tn HIT < w99
+grep -Tb HIT < w99
 
 # --- colour, which is escape sequences on stdout and therefore comparable ---
 #
@@ -689,6 +744,52 @@ grep -qC 1 HIT ctx
 ?--color is not implemented|grep --color=always -i alpha mixed
 ?--color is not implemented|grep --color=auto foo words
 ?--color is not implemented|GREP_COLORS='mt=01;32' grep --color=always foo words
+# Every prefix field has a colour of its own, and so does each separator
+# between them — including the `--` between context groups.
+?--color is not implemented|grep --color=always -nbH foo words
+?--color is not implemented|grep --color=always -nC 1 HIT ctx
+?--color is not implemented|grep --color=always -nbHTC 1 HIT w99
+?--color is not implemented|grep --color=always -Z -nH foo words
+?--color is not implemented|grep --color=always foo words abc
+?--color is not implemented|grep --color=always -Hc foo words
+?--color is not implemented|grep --color=always -l foo words
+?--color is not implemented|grep --color=always -lZ foo words
+?--color is not implemented|grep --color=always -L zzz words
+?--color is not implemented|grep --color=always -q foo words
+?--color is not implemented|grep --color=always -z foo zsep
+# `-v` selects the lines that did not match, so there is nothing on them to
+# colour — but a *context* line under -v may match, and gets `mc`.
+?--color is not implemented|grep --color=always -v foo words
+?--color is not implemented|grep --color=always -vC 1 foo words
+# The empty-match rule of -o survives colouring: `o*` matches nothing at most
+# positions, and nothing is what gets printed for them.
+?--color is not implemented|grep --color=always -o 'o*' words
+?--color is not implemented|grep --color=always -i café accent
+# `--colour` is the same option, and bare `--color` means `auto`, which off a
+# terminal means never.
+?--color is not implemented|grep --colour=always foo words
+?--color is not implemented|grep --color foo words
+# GREP_COLORS: `mt` sets both `ms` and `mc`, last assignment wins, an unknown
+# key or an unparsable value is ignored in silence, `ne` drops the `\e[K` that
+# otherwise follows every escape, and `rv` swaps the selected- and context-line
+# colours when -v is in effect.
+?--color is not implemented|GREP_COLORS='ms=01;36:mt=01;33' grep --color=always foo words
+?--color is not implemented|GREP_COLORS='mt=01;33:ms=01;36' grep --color=always foo words
+?--color is not implemented|GREP_COLORS='fn=35:ln=33:bn=34:se=36' grep --color=always -nbH foo words
+?--color is not implemented|GREP_COLORS='sl=33' grep --color=always foo words
+?--color is not implemented|GREP_COLORS='cx=90' grep --color=always -C 1 HIT ctx
+?--color is not implemented|GREP_COLORS='ne' grep --color=always foo words
+?--color is not implemented|GREP_COLORS='rv:sl=33:cx=34' grep --color=always -v foo words
+?--color is not implemented|GREP_COLORS='rv:sl=33:cx=34' grep --color=always foo words
+?--color is not implemented|GREP_COLORS='zz=1' grep --color=always foo words
+?--color is not implemented|GREP_COLORS='ms=zz' grep --color=always foo words
+?--color is not implemented|GREP_COLORS='' grep --color=always foo words
+# The deprecated spelling still works, and says so on stderr.
+?--color is not implemented|GREP_COLOR='01;35' grep --color=always foo words
+# `--color=` with a word that is none of the three is not an error: GNU sets
+# `show_help` and prints the whole usage text on *stdout*, exiting 0. Matching
+# that would mean printing a help text advertising options we do not have.
+!--color=WORD with an unrecognised WORD prints GNU'\''s full usage summary and exits 0; ours has no --help text to print|grep --color=bogus foo words
 
 # --- a character that is not one byte, now that the locale is C.UTF-8 ---
 grep -i cafe accent

@@ -57,6 +57,7 @@
 //! `grep -rlZ … | xargs -0` are the spellings that are actually correct.
 
 use coreutils::diag;
+use coreutils::filekind;
 use coreutils::quote::{self, quotef_os};
 use coreutils::stdfd;
 use std::collections::VecDeque;
@@ -180,6 +181,24 @@ struct Options {
     default_context: Option<usize>,
     /// `--group-separator=SEP` / `--no-group-separator`.
     group_sep: GroupSep,
+    /// `-b`: prefix each printed line with its byte offset in the file.
+    ///
+    /// The offset is of *what is printed*, not of the line: under `-o` each
+    /// match carries its own, so `grep -bo foo` over `foo bar foo` at offset 6
+    /// prints `6` and `14`. Under `-z` it still counts bytes, NUL separators
+    /// included.
+    byte_offset: bool,
+    /// `-T`: line the bodies up, by padding the numeric prefix fields to a
+    /// common width and ending the prefix with a tab.
+    ///
+    /// The width is neither a constant nor the widest value actually printed —
+    /// it is fixed *before the first line is read*, from the file's size, which
+    /// is why it can be applied to a stream. Measured against GNU grep 3.11:
+    /// the digit count of the size, plus one when `-n` is on because a file of
+    /// N bytes can hold N+1 lines. So a 99-byte file pads line numbers to three
+    /// columns and byte offsets to two, and a 9-byte file pads them to two and
+    /// one. See [`offset_width`].
+    align_tabs: bool,
     /// `-z`: the *input* is NUL-separated too, and so is the output.
     ///
     /// The other half of the same pipeline: `find -print0 | xargs -0 grep -z`
@@ -358,6 +377,8 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
                 's' => opts.no_messages = true,
                 'Z' => opts.null_name = true,
                 'z' => opts.null_data = true,
+                'b' => opts.byte_offset = true,
+                'T' => opts.align_tabs = true,
                 // Accepted and ignored: this grep does not suppress output for
                 // input it thinks is binary, so there is nothing for `-a` to
                 // turn off. Refusing it would break callers that pass it
@@ -465,6 +486,8 @@ fn parse_long(
         "no-messages" => opts.no_messages = true,
         "null" => opts.null_name = true,
         "null-data" => opts.null_data = true,
+        "byte-offset" => opts.byte_offset = true,
+        "initial-tab" => opts.align_tabs = true,
         "after-context" => opts.after_context = Some(context_len(&need(value)?)?),
         "before-context" => opts.before_context = Some(context_len(&need(value)?)?),
         "context" => opts.default_context = Some(context_len(&need(value)?)?),
@@ -724,38 +747,133 @@ fn wants_filename(explicit: Option<bool>, operands: usize, named_a_directory: bo
     explicit.unwrap_or(operands > 1 || named_a_directory)
 }
 
-/// The prefix shown before a printed line: file name, line number, both or
-/// neither.
+/// Everything one printed line's prefix is built from.
+///
+/// A struct rather than a longer parameter list because the fields are not
+/// interchangeable and four of them are numbers: `line_prefix(name, 3, 118,
+/// true, 2, b'-')` is a call nobody can read, and swapping two of its arguments
+/// compiles.
+struct Prefix<'a> {
+    filename: &'a str,
+    show_filename: bool,
+    /// Zero-based internally; printed one-based.
+    line_idx: usize,
+    /// The byte offset within the file of whatever follows this prefix — the
+    /// line, or under `-o` the match.
+    byte_pos: u64,
+    /// The column the numeric fields are right-aligned in under `-T`; ignored
+    /// without it. See [`offset_width`].
+    width: usize,
+    /// `:` for a selected line, `-` for a context line.
+    field: u8,
+}
+
+/// The prefix shown before a printed line: file name, line number, byte offset,
+/// any combination, or none.
 ///
 /// Bytes rather than `String` because `-Z` puts a NUL after the name, and
 /// because the name itself is a path — which on this system may hold any byte
-/// but `/` and NUL. Only the *name's* separator changes under `-Z`; the one
-/// after a line number stays as `field`, which is what GNU does and is what
-/// keeps `-nZ` output parseable at all.
+/// but `/` and NUL. Only the *name's* separator changes under `-Z`; the ones
+/// after a line number and a byte offset stay as `field`, which is what GNU
+/// does and is what keeps `-nZ` output parseable at all.
 ///
 /// `field` is `:` for a selected line and `-` for a context line, and it
 /// punctuates *every* field rather than just the last: `grep -nHC1` writes
 /// `ctx:3:HIT` for the match and `ctx-2-2` for its neighbour. That is the only
 /// thing distinguishing the two kinds of line in the output, so a caller
 /// filtering `grep -C` output for real matches is reading this byte.
-fn line_prefix(
-    filename: &str,
-    line_idx_zero_based: usize,
-    show_filename: bool,
-    opts: &Options,
-    field: u8,
-) -> Vec<u8> {
+///
+/// `-T`'s tab goes *after* the last separator and only when some field was
+/// printed at all: `grep -TnH` writes `f: 2:\tbody`, `grep -TH` writes
+/// `f:\tbody`, `grep -THZ` writes `f\0\tbody`, and plain `grep -T` writes no
+/// tab because it wrote no prefix to line up. Measured.
+fn line_prefix(p: &Prefix, opts: &Options) -> Vec<u8> {
     let mut prefix = Vec::new();
-    if show_filename {
-        prefix.extend_from_slice(filename.as_bytes());
-        prefix.push(opts.name_sep(field));
+    let mut any = false;
+    if p.show_filename {
+        prefix.extend_from_slice(p.filename.as_bytes());
+        prefix.push(opts.name_sep(p.field));
+        any = true;
     }
     if opts.line_numbers {
         // Zero-based internally, one-based on the way out.
-        prefix.extend_from_slice(line_idx_zero_based.saturating_add(1).to_string().as_bytes());
-        prefix.push(field);
+        let n = u64::try_from(p.line_idx.saturating_add(1)).unwrap_or(u64::MAX);
+        push_number(&mut prefix, n, if opts.align_tabs { p.width } else { 0 });
+        prefix.push(p.field);
+        any = true;
+    }
+    if opts.byte_offset {
+        push_number(
+            &mut prefix,
+            p.byte_pos,
+            if opts.align_tabs { p.width } else { 0 },
+        );
+        prefix.push(p.field);
+        any = true;
+    }
+    if any && opts.align_tabs {
+        prefix.push(b'\t');
     }
     prefix
+}
+
+/// A decimal number right-aligned in `width` columns, or unpadded when `width`
+/// is zero or too small to hold it.
+fn push_number(out: &mut Vec<u8>, n: u64, width: usize) {
+    let text = n.to_string();
+    for _ in text.len()..width {
+        out.push(b' ');
+    }
+    out.extend_from_slice(text.as_bytes());
+}
+
+/// The column `-T` right-aligns the numeric prefix fields in.
+///
+/// GNU fixes this from the file's *size* before reading a line, not from the
+/// widest value it goes on to print — which is what lets `-T` work on a stream,
+/// and what makes the padding of a given file independent of which lines match.
+/// Measured against GNU grep 3.11:
+///
+/// | size | `-b` pads to | `-n` pads to |
+/// |---|---|---|
+/// | 9 | 1 | 2 |
+/// | 34 | 2 | 2 |
+/// | 99 | 2 | 3 |
+/// | 1504 | 4 | 4 |
+///
+/// So: the digit count of the size, plus one for `-n` — a file of N bytes holds
+/// at most N+1 lines. With both flags the wider of the two is used for both,
+/// which falls out of computing it once.
+///
+/// `None` is an input whose size cannot be taken, which is every pipe. GNU pads
+/// those to 19 columns; that is the digit count of `i64::MAX`, and the
+/// measurement is the reason for the odd-looking constant.
+/// The size `-T` sizes its columns from, or `None` for an input that has no
+/// meaningful one.
+///
+/// [`filekind::is_regular`] rather than `Metadata::is_file`: on the harness's
+/// Windows host a pipe answers yes to the latter and reports however many bytes
+/// happen to be sitting in the pipe buffer, so every run of the same pipeline
+/// would pad to a different width. GNU asks `S_ISREG`, and this is that
+/// question asked portably.
+fn regular_size(file: &File) -> Option<u64> {
+    if !filekind::is_regular(file) {
+        return None;
+    }
+    file.metadata().map(|m| m.len()).ok()
+}
+
+fn offset_width(size: Option<u64>, opts: &Options) -> usize {
+    let mut n = size.unwrap_or_else(|| u64::try_from(i64::MAX).unwrap_or(u64::MAX));
+    if opts.line_numbers {
+        n = n.saturating_add(1);
+    }
+    let mut width = 1usize;
+    while n >= 10 {
+        n /= 10;
+        width = width.saturating_add(1);
+    }
+    width
 }
 
 /// The funnel. A diagnostic that could not be written turns the earned
@@ -906,7 +1024,14 @@ impl Run<'_> {
 
     /// Search one named file — or standard input, spelled `-`.
     fn search(&mut self, path: &str) {
+        // The size is `-T`'s alone, so it is not asked for without it: an
+        // `fstat` per file is cheap but not free, and a `grep -r` over a large
+        // tree pays it once per entry.
+        let mut size: Option<u64> = None;
         let reader: Box<dyn Read> = if path == "-" {
+            if self.opts.align_tabs {
+                size = filekind::borrowed_stdin().and_then(|f| regular_size(&f));
+            }
             Box::new(io::stdin())
         } else {
             if Path::new(path).is_dir() {
@@ -922,7 +1047,12 @@ impl Run<'_> {
                 return;
             }
             match File::open(path) {
-                Ok(f) => Box::new(f),
+                Ok(f) => {
+                    if self.opts.align_tabs {
+                        size = regular_size(&f);
+                    }
+                    Box::new(f)
+                }
                 Err(e) => {
                     if !self.opts.no_messages {
                         diag!("grep: {}: {}", quotef_os(path), strerror(&e));
@@ -937,12 +1067,16 @@ impl Run<'_> {
         };
 
         let shown = display_name(path);
+        let src = Source {
+            filename: shown,
+            show_filename: self.show_filename,
+            width: offset_width(size, self.opts),
+        };
         match search_stream(
             &mut self.out,
             reader,
             self.pats,
-            shown,
-            self.show_filename,
+            &src,
             self.opts,
             &mut self.printed_before,
         ) {
@@ -1142,17 +1276,28 @@ impl Run<'_> {
 fn write_context_line(
     out: &mut impl Write,
     body: &[u8],
-    filename: &str,
-    line_idx: usize,
-    show_filename: bool,
+    p: &Prefix,
     opts: &Options,
 ) -> io::Result<()> {
     if opts.only_matching {
         return Ok(());
     }
-    out.write_all(&line_prefix(filename, line_idx, show_filename, opts, b'-'))?;
+    out.write_all(&line_prefix(p, opts))?;
     out.write_all(body)?;
     out.write_all(&[opts.line_sep()])
+}
+
+/// The one stream being searched, and what its prefixes need to know about it.
+///
+/// Separate from [`Options`] because these three are per-file where the options
+/// are per-run, and `width` in particular is a *measurement* of the file taken
+/// before the first line is read.
+struct Source<'a> {
+    /// The name shown in a prefix — `(standard input)` for `-`.
+    filename: &'a str,
+    show_filename: bool,
+    /// The column `-T` right-aligns numbers in. Meaningless without it.
+    width: usize,
 }
 
 /// Search one stream, printing what the options ask for. Returns whether any
@@ -1167,11 +1312,12 @@ fn search_stream(
     out: &mut impl Write,
     reader: impl Read,
     pats: &[Pat],
-    filename: &str,
-    show_filename: bool,
+    src: &Source<'_>,
     opts: &Options,
     printed_before: &mut bool,
 ) -> io::Result<bool> {
+    let filename = src.filename;
+    let show_filename = src.show_filename;
     // `-m 0` is not "no limit", and it is not "stop after the first" either:
     // GNU prints nothing at all — not even the `-c` count line, which is the
     // surprising half — and reports the file as not matching. Answering it
@@ -1197,9 +1343,16 @@ fn search_stream(
     let mut match_count: usize = 0;
     let mut line_idx: usize = 0;
     let mut line: Vec<u8> = Vec::new();
+    // Bytes of the file that precede the line about to be read — `-b`'s answer,
+    // and the base its per-match offsets are measured from. Counted rather than
+    // asked for because the input need not be seekable, and it counts the line
+    // separator too: under `-z` the NULs are bytes of the file like any other.
+    let mut byte_pos: u64 = 0;
     // Lines held back as possible leading context: the last `out_before` lines
-    // that were neither selected nor already printed, oldest first.
-    let mut before: VecDeque<(usize, Vec<u8>)> = VecDeque::new();
+    // that were neither selected nor already printed, oldest first. The byte
+    // offset travels with the text because by the time the line is printed the
+    // stream has moved past it.
+    let mut before: VecDeque<(usize, u64, Vec<u8>)> = VecDeque::new();
     // Trailing context still owed to the most recent selected line.
     let mut pending_after: usize = 0;
     // The one-based number of the last line this *file* has printed — or has
@@ -1224,12 +1377,23 @@ fn search_stream(
         // is still a line.
         let body = line.strip_suffix(&[sep][..]).unwrap_or(&line);
         let lineno = line_idx.saturating_add(1);
+        let here = byte_pos;
+        // Advanced now, before any `continue` or `break` below can skip it.
+        byte_pos = byte_pos.saturating_add(u64::try_from(line.len()).unwrap_or(0));
+        let at = |line_idx: usize, byte_pos: u64, field: u8| Prefix {
+            filename,
+            show_filename,
+            line_idx,
+            byte_pos,
+            width: src.width,
+            field,
+        };
 
         if limit_reached {
             if pending_after == 0 {
                 break;
             }
-            write_context_line(out, body, filename, line_idx, show_filename, opts)?;
+            write_context_line(out, body, &at(line_idx, here, b'-'), opts)?;
             last_out = Some(lineno);
             pending_after = pending_after.saturating_sub(1);
             if pending_after == 0 {
@@ -1266,19 +1430,11 @@ fn search_stream(
                     // line of the file.
                     out.write_all(b"\n")?;
                 }
-                for (n, text) in before.drain(..) {
+                for (n, pos, text) in before.drain(..) {
                     if n >= start {
-                        write_context_line(
-                            out,
-                            &text,
-                            filename,
-                            n.saturating_sub(1),
-                            show_filename,
-                            opts,
-                        )?;
+                        write_context_line(out, &text, &at(n.saturating_sub(1), pos, b'-'), opts)?;
                     }
                 }
-                let prefix = line_prefix(filename, line_idx, show_filename, opts, b':');
                 if opts.only_matching {
                     // `-o` with `-v` prints nothing: the part of the line that
                     // did not match is the whole line, and GNU declines to call
@@ -1294,14 +1450,18 @@ fn search_stream(
                             // *line* still counts as selected, which is why
                             // this loop can legitimately print nothing.
                             if e > s {
-                                out.write_all(&prefix)?;
+                                // `-bo` reports each match's own offset, not the
+                                // line's: `grep -bo foo` over `foo bar foo` at
+                                // offset 6 prints 6 and 14.
+                                let off = here.saturating_add(u64::try_from(s).unwrap_or(0));
+                                out.write_all(&line_prefix(&at(line_idx, off, b':'), opts))?;
                                 out.write_all(body.get(s..e).unwrap_or_default())?;
                                 out.write_all(&[sep])?;
                             }
                         }
                     }
                 } else {
-                    out.write_all(&prefix)?;
+                    out.write_all(&line_prefix(&at(line_idx, here, b':'), opts))?;
                     out.write_all(body)?;
                     out.write_all(&[sep])?;
                 }
@@ -1316,11 +1476,11 @@ fn search_stream(
                 limit_reached = true;
             }
         } else if pending_after > 0 {
-            write_context_line(out, body, filename, line_idx, show_filename, opts)?;
+            write_context_line(out, body, &at(line_idx, here, b'-'), opts)?;
             last_out = Some(lineno);
             pending_after = pending_after.saturating_sub(1);
         } else if out_before > 0 {
-            before.push_back((lineno, body.to_vec()));
+            before.push_back((lineno, here, body.to_vec()));
             if before.len() > out_before {
                 before.pop_front();
             }
@@ -1905,13 +2065,30 @@ mod tests {
         }
     }
 
+    /// The prefix an assertion about names and line numbers cares about: no
+    /// byte offset and no `-T` width, so neither of those two fields can
+    /// colour the result of a test that is not about them.
+    fn px(filename: &str, line_idx: usize, show_filename: bool, field: u8) -> Prefix<'_> {
+        Prefix {
+            filename,
+            show_filename,
+            line_idx,
+            byte_pos: 0,
+            width: 0,
+            field,
+        }
+    }
+
     #[test]
     fn standard_input_has_a_name_of_its_own() {
         assert_eq!(display_name("-"), "(standard input)");
         assert_eq!(display_name("a.txt"), "a.txt");
         // `grep -H pattern -` printing `-:line` reads as part of the line.
         assert_eq!(
-            line_prefix(display_name("-"), 0, true, &pfx_opts(false, false), b':'),
+            line_prefix(
+                &px(display_name("-"), 0, true, b':'),
+                &pfx_opts(false, false)
+            ),
             b"(standard input):"
         );
     }
@@ -1935,7 +2112,7 @@ mod tests {
     #[test]
     fn prefix_none() {
         assert_eq!(
-            line_prefix("f", 0, false, &pfx_opts(false, false), b':'),
+            line_prefix(&px("f", 0, false, b':'), &pfx_opts(false, false)),
             b""
         );
     }
@@ -1943,7 +2120,7 @@ mod tests {
     #[test]
     fn prefix_filename_only() {
         assert_eq!(
-            line_prefix("a.txt", 0, true, &pfx_opts(false, false), b':'),
+            line_prefix(&px("a.txt", 0, true, b':'), &pfx_opts(false, false)),
             b"a.txt:"
         );
     }
@@ -1951,11 +2128,11 @@ mod tests {
     #[test]
     fn prefix_line_number_only() {
         assert_eq!(
-            line_prefix("ignored", 0, false, &pfx_opts(true, false), b':'),
+            line_prefix(&px("ignored", 0, false, b':'), &pfx_opts(true, false)),
             b"1:"
         );
         assert_eq!(
-            line_prefix("ignored", 41, false, &pfx_opts(true, false), b':'),
+            line_prefix(&px("ignored", 41, false, b':'), &pfx_opts(true, false)),
             b"42:"
         );
     }
@@ -1963,7 +2140,7 @@ mod tests {
     #[test]
     fn prefix_filename_and_line_number() {
         assert_eq!(
-            line_prefix("a.txt", 9, true, &pfx_opts(true, false), b':'),
+            line_prefix(&px("a.txt", 9, true, b':'), &pfx_opts(true, false)),
             b"a.txt:10:"
         );
     }
@@ -1974,16 +2151,158 @@ mod tests {
         // line number too would make `-nZ` output unparseable, and it is not
         // what GNU does.
         assert_eq!(
-            line_prefix("a.txt", 0, true, &pfx_opts(false, true), b':'),
+            line_prefix(&px("a.txt", 0, true, b':'), &pfx_opts(false, true)),
             b"a.txt\0"
         );
         assert_eq!(
-            line_prefix("a.txt", 9, true, &pfx_opts(true, true), b':'),
+            line_prefix(&px("a.txt", 9, true, b':'), &pfx_opts(true, true)),
             b"a.txt\x0010:"
         );
     }
 
+    // ---------------- -b and -T ----------------
+
+    /// The width is fixed from the file's size before a line is read, which is
+    /// what lets `-T` apply to input that cannot be measured twice. Every
+    /// number here was read off GNU grep 3.11.
+    #[test]
+    fn the_tab_width_comes_from_the_size_and_grows_by_one_for_the_line_count() {
+        let plain = Options::default();
+        let numbered = Options {
+            line_numbers: true,
+            ..Options::default()
+        };
+        // A file of N bytes holds at most N+1 lines, so `-n` can need one more
+        // column than the size alone does — but only across a power of ten.
+        for (size, without_n, with_n) in [
+            (0, 1, 1),
+            (1, 1, 1),
+            (9, 1, 2),
+            (10, 2, 2),
+            (99, 2, 3),
+            (100, 3, 3),
+            (1492, 4, 4),
+        ] {
+            assert_eq!(offset_width(Some(size), &plain), without_n, "size {size}");
+            assert_eq!(
+                offset_width(Some(size), &numbered),
+                with_n,
+                "size {size} with -n"
+            );
+        }
+        // Nothing to measure — a pipe — falls back to the largest a signed
+        // `off_t` holds, which is nineteen digits either way.
+        assert_eq!(offset_width(None, &plain), 19);
+        assert_eq!(offset_width(None, &numbered), 19);
+    }
+
+    /// `-T` right-aligns the numeric fields and ends the prefix with a tab —
+    /// *after* the last separator, with no backspace, which is the detail two
+    /// readings of GNU's source got wrong and one `od -c` settled.
+    #[test]
+    fn the_initial_tab_follows_the_last_field_and_pads_only_the_numbers() {
+        let t = |line_numbers, byte_offset, null_name| Options {
+            align_tabs: true,
+            line_numbers,
+            byte_offset,
+            null_name,
+            ..Options::default()
+        };
+        let p = |width, show_filename| Prefix {
+            filename: "a.txt",
+            show_filename,
+            line_idx: 0,
+            byte_pos: 0,
+            width,
+            field: b':',
+        };
+        // Both numeric fields take the same width — there is one width, not one
+        // per field.
+        assert_eq!(
+            line_prefix(&p(3, false), &t(true, true, false)),
+            b"  1:  0:\t"
+        );
+        // The name is never padded, and `-Z`'s NUL does not stop the tab.
+        assert_eq!(
+            line_prefix(&p(2, true), &t(true, false, false)),
+            b"a.txt: 1:\t"
+        );
+        assert_eq!(
+            line_prefix(&p(2, true), &t(true, false, true)),
+            b"a.txt\0 1:\t"
+        );
+        // A name on its own still ends in a tab…
+        assert_eq!(
+            line_prefix(&p(2, true), &t(false, false, false)),
+            b"a.txt:\t"
+        );
+        assert_eq!(
+            line_prefix(&p(2, true), &t(false, false, true)),
+            b"a.txt\0\t"
+        );
+        // …but an empty prefix does not gain one, because the tab follows the
+        // last field and there is no field.
+        assert_eq!(line_prefix(&p(2, false), &t(false, false, false)), b"");
+        // And without `-T` the width is ignored outright.
+        let no_t = Options {
+            line_numbers: true,
+            byte_offset: true,
+            ..Options::default()
+        };
+        assert_eq!(line_prefix(&p(9, false), &no_t), b"1:0:");
+    }
+
+    /// `-b` reports where in the *file* the printed text starts, which is the
+    /// line's own offset — and under `-o` each match's.
+    #[test]
+    fn the_byte_offset_counts_separators_and_follows_the_match_under_o() {
+        let opts = Options {
+            byte_offset: true,
+            ..Options::default()
+        };
+        let p = pats("foo", &opts);
+        let (out, _) = run_search(b"foo bar foo\nbaz\nfoo\n", &p, &opts, "f", false);
+        assert_eq!(out, b"0:foo bar foo\n16:foo\n");
+
+        let o = Options {
+            byte_offset: true,
+            only_matching: true,
+            ..Options::default()
+        };
+        let (out, _) = run_search(b"foo bar foo\nbaz\nfoo\n", &pats("foo", &o), &o, "f", false);
+        assert_eq!(out, b"0:foo\n8:foo\n16:foo\n");
+
+        // Under `-z` the NUL separators are bytes of the file like any other.
+        let z = Options {
+            byte_offset: true,
+            null_data: true,
+            ..Options::default()
+        };
+        let (out, _) = run_search(b"foo\0bar\0foo\0", &pats("foo", &z), &z, "f", false);
+        assert_eq!(out, b"0:foo\08:foo\0");
+
+        // A context line carries its own offset, ended by `-` like every other
+        // field of a context line's prefix.
+        let c = Options {
+            byte_offset: true,
+            ..ctx_opts(None, None, Some(1))
+        };
+        let (out, _) = run_search(b"foo bar foo\nbaz\nfoo\n", &pats("baz", &c), &c, "f", false);
+        assert_eq!(out, b"0-foo bar foo\n12:baz\n16-foo\n");
+    }
+
     // ---------------- search_stream ----------------
+
+    /// A source with no `-T` width, which is what every test that is not about
+    /// `-T` wants: [`line_prefix`] ignores the width unless `align_tabs` is on,
+    /// so zero here can never affect an assertion that does not set it.
+    fn src(filename: &str, show_filename: bool) -> Source<'_> {
+        Source {
+            filename,
+            show_filename,
+            width: 0,
+        }
+    }
 
     fn run_search(
         input: &[u8],
@@ -1998,8 +2317,7 @@ mod tests {
             &mut out,
             input,
             pats,
-            filename,
-            show_filename,
+            &src(filename, show_filename),
             opts,
             &mut printed_before,
         )
@@ -2202,7 +2520,15 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let mut printed_before = false;
         for (name, body) in [("a", CTX), ("b", &b"HIT\n2\n3\n"[..])] {
-            search_stream(&mut out, body, &p, name, true, &opts, &mut printed_before).unwrap();
+            search_stream(
+                &mut out,
+                body,
+                &p,
+                &src(name, true),
+                &opts,
+                &mut printed_before,
+            )
+            .unwrap();
         }
         assert_eq!(
             String::from_utf8(out).unwrap(),
@@ -2213,7 +2539,15 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let mut printed_before = false;
         for (name, body) in [("a", CTX), ("empty", &b""[..]), ("b", CTX)] {
-            search_stream(&mut out, body, &p, name, false, &opts, &mut printed_before).unwrap();
+            search_stream(
+                &mut out,
+                body,
+                &p,
+                &src(name, false),
+                &opts,
+                &mut printed_before,
+            )
+            .unwrap();
         }
         assert_eq!(
             String::from_utf8(out).unwrap(),

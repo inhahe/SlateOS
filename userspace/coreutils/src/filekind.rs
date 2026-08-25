@@ -36,6 +36,7 @@
 //! handle is a regular file, and `FILE_TYPE_PIPE` and `FILE_TYPE_CHAR` are not.
 
 use std::fs::File;
+use std::mem::ManuallyDrop;
 
 /// Whether `file` is a regular file — POSIX's `S_ISREG` — or `None` when the
 /// question could not be answered at all, which is `fstat` having failed.
@@ -118,6 +119,43 @@ pub fn is_seekable(file: &mut File) -> bool {
     // nothing, which is the MSYS-pipe behaviour this module exists to catch.
     // Reading back the position is the only way to tell the two apart.
     file.seek(SeekFrom::Start(at)).is_ok_and(|got| got == at)
+}
+
+/// Standard input as a [`File`], so that [`regular`] and `metadata` can be
+/// asked about it exactly as they are asked about an opened file.
+///
+/// The returned handle does **not** own the descriptor: `File::from_raw_fd`
+/// takes ownership, and letting that `File` drop would close standard input in
+/// the middle of a program that is about to read it — hence the
+/// [`ManuallyDrop`]. Nothing is read or seeked through it here, so it cannot
+/// disturb the stream position either.
+///
+/// `None` only on a platform that is neither Unix nor Windows, where there is
+/// no way to name the descriptor at all.
+#[must_use]
+pub fn borrowed_stdin() -> Option<ManuallyDrop<File>> {
+    #[cfg(unix)]
+    {
+        use std::io::stdin;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let fd = stdin().as_raw_fd();
+        // SAFETY: `fd` is standard input, which the runtime keeps open for the
+        // whole process, and `ManuallyDrop` prevents the `File` from closing it.
+        Some(unsafe { ManuallyDrop::new(File::from_raw_fd(fd)) })
+    }
+    #[cfg(all(not(unix), windows))]
+    {
+        use std::io::stdin;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+        let handle = stdin().as_raw_handle();
+        // SAFETY: as above — standard input's handle, which the runtime keeps
+        // open for the whole process, kept from being closed by `ManuallyDrop`.
+        Some(unsafe { ManuallyDrop::new(File::from_raw_handle(handle)) })
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    {
+        None
+    }
 }
 
 #[cfg(test)]

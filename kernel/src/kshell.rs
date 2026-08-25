@@ -6875,6 +6875,9 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         // undecodable pipe folds rather than being refused — and `fold -b -w76`
         // over base64, the reason people reach for `-b`, is exact.
         "fold" => cmd_fold_input(args, input),
+        // Encoding data that is *not* text is base64's whole purpose, so its
+        // input was never text to begin with, and its decoded output is bytes.
+        "base64" => cmd_base64_input(args, input),
         "cat" if args.is_empty() => {
             // `cat` with no args reads from pipe.
             shell_write_bytes(input);
@@ -7914,7 +7917,7 @@ fn cmd_help() {
     shell_println!("  dpkg -I|-c|-x F.deb [-d DIR]  Inspect/list/extract Debian package");
     shell_println!("  zip [-0] [-r] F.zip FILE..  Create ZIP archive (deflate or stored)");
     shell_println!("  crc32 FILE    Compute CRC32C checksum");
-    shell_println!("  base64 [-d] F Encode file to Base64 (or -d to decode)");
+    shell_println!("  base64 [-di] [-w N] [F]  Base64 encode/decode (- or no F: stdin)");
     shell_println!("  checksum [-t sha256|crc32] FILE  Compute file checksum");
     shell_println!("  wipe FILE     Secure delete (zero-fill + remove)");
     shell_println!("  sed [-i] [-n] 's/old/new/[g]' FILE  Stream editor (substitute/delete/print)");
@@ -12495,6 +12498,212 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = crate::fs::Vfs::remove(a);
         let _ = crate::fs::Vfs::remove(b);
         let _ = crate::fs::Vfs::remove(bad);
+    }
+
+    serial_println!("  kshell::self_test 40: base64 -d writes its output instead of describing it");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+        fn plain(cmd: &str) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch(cmd);
+            capture.finish()
+        }
+
+        // The bug this rung exists for. `base64 -d` printed the decoded bytes
+        // only when they happened to be valid UTF-8; otherwise it printed
+        // `<binary: N bytes>` -- a description of the output in place of the
+        // output -- and exited 0. So the one thing base64 exists to do, carry
+        // bytes that are not text, was the case it could not do.
+        let bin = "/tmp/zz_b64_bin";
+        let raw: &[u8] = b"\x00\x01\xff\xfe\x80\x7f\nz\r\x00";
+        assert!(
+            crate::fs::Vfs::write_file(bin, raw).is_ok(),
+            "writing the binary base64 fixture must succeed"
+        );
+        let encoded = plain(&alloc::format!("base64 {bin}"));
+        assert_eq!(last_exit(), 0, "encoding a binary file is success");
+        let decoded = piped("base64 -d", &encoded);
+        assert_eq!(
+            decoded.as_slice(),
+            raw,
+            "`base64 f | base64 -d` must reproduce f exactly, byte for byte"
+        );
+        assert_eq!(last_exit(), 0, "and decoding it is success");
+
+        // Known vectors from RFC 4648, and the newline that ends the encoding.
+        let out = piped("base64", b"foo");
+        assert_eq!(
+            out.as_slice(),
+            b"Zm9v\n",
+            "three bytes encode without padding"
+        );
+        let out = piped("base64", b"fo");
+        assert_eq!(
+            out.as_slice(),
+            b"Zm8=\n",
+            "two bytes take one padding character"
+        );
+        let out = piped("base64", b"f");
+        assert_eq!(out.as_slice(), b"Zg==\n", "one byte takes two");
+        let out = piped("base64", b"");
+        assert_eq!(
+            out.as_slice(),
+            b"",
+            "nothing in, nothing out -- not a bare newline"
+        );
+
+        // Decoding adds no newline of its own. `shell_println!` used to invent
+        // one, so even the valid-text case failed to round-trip.
+        let out = piped("base64 -d", b"Zm9v\n");
+        assert_eq!(
+            out.as_slice(),
+            b"foo",
+            "the decoded bytes are the output; nothing is appended to them"
+        );
+
+        // Wrapping: 60 bytes encode to 80 characters, which is past the
+        // default 76. `-w0` asks for one unbroken line. Both used to be
+        // impossible to ask for -- `-w` was unimplemented, so `base64 -w0 f`
+        // opened a file named `-w0`.
+        let sixty = [b'z'; 60];
+        let out = piped("base64", &sixty);
+        assert_eq!(
+            out.len(),
+            82,
+            "80 characters wrap into 76 + 4 with a newline after each"
+        );
+        // 'z' repeated encodes as "enp6" repeated, so column 77 -- the first
+        // character of the second line -- is another 'e'.
+        assert_eq!(
+            out.get(76..78).unwrap_or(b""),
+            b"\ne",
+            "the break falls after column 76"
+        );
+        let out = piped("base64 -w0", &sixty);
+        assert_eq!(out.len(), 81, "-w0 is one line of 80 plus its newline");
+        let out = piped("base64 --wrap=0", &sixty);
+        assert_eq!(out.len(), 81, "and the long spelling means the same");
+
+        // Input that is not base64 is refused. It used to be narrowed with
+        // `from_utf8(&data).unwrap_or("")`, so an undecodable file became the
+        // empty string, decoded to zero bytes, and reported success.
+        let out = piped("base64 -d", b"\xff\xfe\xfd\xfc");
+        assert_output_contains("a non-base64 input is reported", &out, b"invalid input");
+        assert_eq!(last_exit(), 1, "and it is a failure, not an empty success");
+
+        let out = piped("base64 -d", b"Zm9v!!!!");
+        assert_output_contains("so is a stray character", &out, b"invalid input");
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        // `-i` is how you ask for the old leniency, and now it has to be asked
+        // for rather than being the only behaviour available.
+        let out = piped("base64 -di", b"Zm 9v!!");
+        assert_eq!(
+            out.as_slice(),
+            b"foo",
+            "-i skips everything outside the alphabet"
+        );
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        // Padding rules. `Xy=z` used to decode as if it read `Xy==`, silently
+        // ignoring the `z`; a group cut short used to be caught, but only by a
+        // length check that whitespace stripping could defeat.
+        let out = piped("base64 -d", b"Zm=v");
+        assert_output_contains(
+            "padding in third place demands it in fourth",
+            &out,
+            b"invalid input",
+        );
+        let out = piped("base64 -d", b"Zg==Zg==");
+        assert_output_contains("nothing may follow the padding", &out, b"invalid input");
+        let out = piped("base64 -d", b"Zm9");
+        assert_output_contains(
+            "a group of three is a truncated group",
+            &out,
+            b"invalid input",
+        );
+
+        // A newline inside the data is structure, not garbage, so a wrapped
+        // encoding decodes without `-i`.
+        let out = piped("base64 -d", b"Zm\n9v\r\n");
+        assert_eq!(out.as_slice(), b"foo", "line breaks are skipped without -i");
+
+        // Argument faults are refused rather than guessed at.
+        let out = plain(&alloc::format!("base64 {bin} /tmp/zz_b64_other"));
+        assert_output_contains("a second operand is reported", &out, b"extra operand");
+        assert_eq!(last_exit(), 1, "and it is a failure, not a silent skip");
+
+        let out = piped("base64 -w abc", b"foo");
+        assert_output_contains(
+            "an unreadable wrap is reported",
+            &out,
+            b"invalid wrap size: 'abc'",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        let out = piped("base64 -w", b"foo");
+        assert_output_contains(
+            "-w with nothing after it is reported",
+            &out,
+            b"requires an argument",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        let out = piped("base64 -q", b"foo");
+        assert_output_contains(
+            "an unknown flag is reported",
+            &out,
+            b"invalid option -- 'q'",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        let out = piped("base64 --nope", b"foo");
+        assert_output_contains(
+            "so is an unknown long option",
+            &out,
+            b"unrecognized option '--nope'",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        // A flag is a flag wherever it stands. `base64 f -d` used to *encode*,
+        // because only the first word was examined.
+        let b64 = "/tmp/zz_b64_text";
+        assert!(
+            crate::fs::Vfs::write_file(b64, b"Zm9v\n").is_ok(),
+            "writing the base64 text fixture must succeed"
+        );
+        let out = plain(&alloc::format!("base64 {b64} -d"));
+        assert_eq!(
+            out.as_slice(),
+            b"foo",
+            "-d after the operand decodes, rather than encoding the encoding"
+        );
+
+        // `--` reaches a file whose name begins with a dash.
+        let out = plain(&alloc::format!("base64 -d -- {b64}"));
+        assert_eq!(out.as_slice(), b"foo", "`--` ends the options");
+
+        // Nothing to read at all is an error, not an empty success.
+        let out = plain("base64");
+        assert_output_contains(
+            "no operand and no pipe is reported",
+            &out,
+            b"no file operand",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        // `--help` is real, which is what makes the "Try 'base64 --help'"
+        // line the diagnostics print an honest suggestion.
+        let out = plain("base64 --help");
+        assert_output_contains("--help explains the options", &out, b"--ignore-garbage");
+        assert_eq!(last_exit(), 0, "and asking for help is not a failure");
+
+        let _ = crate::fs::Vfs::remove(bin);
+        let _ = crate::fs::Vfs::remove(b64);
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -119483,109 +119692,395 @@ fn b64_decode_char(c: u8) -> Option<u8> {
     }
 }
 
-/// Decode Base64 to bytes.
-#[allow(clippy::arithmetic_side_effects)]
-fn base64_decode(input: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
-    // Strip whitespace.
-    let clean: alloc::vec::Vec<u8> = input
-        .bytes()
-        .filter(|&b| !b.is_ascii_whitespace())
-        .collect();
+/// Decode one group of four alphabet-or-padding bytes, appending 1-3 bytes.
+///
+/// Returns whether the group was padded, which ends the stream: nothing may
+/// follow a `=`.
+///
+/// Trailing bits that the padding says are absent are **not** rejected — `Zh==`
+/// decodes to `f`, discarding the low four bits of `h`, exactly as GNU's does.
+/// See design-decisions §276 for why compatibility wins over RFC 4648's
+/// optional canonical-form check.
+fn base64_group(quantum: &[u8; 4], out: &mut Vec<u8>) -> Result<bool, ()> {
+    // `=` is not in the alphabet, so `b64_decode_char` rejects a group that
+    // starts with padding — `=Zm9` and `Z=m9` are both refused here.
+    let c0 = b64_decode_char(*quantum.first().ok_or(())?).ok_or(())?;
+    let c1 = b64_decode_char(*quantum.get(1).ok_or(())?).ok_or(())?;
+    let q2 = *quantum.get(2).ok_or(())?;
+    let q3 = *quantum.get(3).ok_or(())?;
 
-    if !clean.len().is_multiple_of(4) {
-        return Err("invalid base64 length");
-    }
+    out.push((c0 << 2) | (c1 >> 4));
 
-    let mut out = alloc::vec::Vec::with_capacity(clean.len() / 4 * 3);
-
-    let mut i = 0;
-    while i < clean.len() {
-        let c0 = b64_decode_char(clean[i]).ok_or("invalid base64 character")?;
-        let c1 = b64_decode_char(clean[i + 1]).ok_or("invalid base64 character")?;
-
-        out.push((c0 << 2) | (c1 >> 4));
-
-        if clean[i + 2] != b'=' {
-            let c2 = b64_decode_char(clean[i + 2]).ok_or("invalid base64 character")?;
-            out.push(((c1 & 0x0F) << 4) | (c2 >> 2));
-
-            if clean[i + 3] != b'=' {
-                let c3 = b64_decode_char(clean[i + 3]).ok_or("invalid base64 character")?;
-                out.push(((c2 & 0x03) << 6) | c3);
-            }
+    if q2 == b'=' {
+        // `Xy==` — one byte. A third place of `=` demands a fourth: `Xy=z`
+        // used to decode as if it read `Xy==`, silently ignoring the `z`.
+        if q3 != b'=' {
+            return Err(());
         }
+        return Ok(true);
+    }
+    let c2 = b64_decode_char(q2).ok_or(())?;
+    out.push(((c1 & 0x0F) << 4) | (c2 >> 2));
 
-        i += 4;
+    if q3 == b'=' {
+        return Ok(true);
+    }
+    let c3 = b64_decode_char(q3).ok_or(())?;
+    out.push(((c2 & 0x03) << 6) | c3);
+    Ok(false)
+}
+
+/// Decode Base64 to bytes, or say the input is not Base64.
+///
+/// Takes bytes, not `&str`: `cmd_base64` used to narrow the file through
+/// `from_utf8(&data).unwrap_or("")`, so a file that was not valid UTF-8 became
+/// the empty string, decoded to zero bytes, and reported success.
+///
+/// Line breaks are structure rather than data — our own encoder inserts one
+/// every 76 columns, and MIME wraps with CRLF — so `\n` and `\r` are skipped
+/// whatever else is asked for. Everything else outside the alphabet is an
+/// error unless `ignore_garbage` was requested, which is what `-i` means. The
+/// old decoder skipped *all* ASCII whitespace unconditionally, so
+/// `base64 -d` accepted input GNU rejects and had no way to be told not to.
+fn base64_decode(input: &[u8], ignore_garbage: bool) -> Result<alloc::vec::Vec<u8>, ()> {
+    let mut out = alloc::vec::Vec::with_capacity(input.len() / 4 * 3);
+    let mut quantum = [0u8; 4];
+    let mut held = 0usize;
+    // Set once a padded group is decoded. Base64 ends there; anything after it
+    // is a second message glued to the first, which is not something to guess
+    // about.
+    let mut padded = false;
+
+    for &b in input {
+        if b == b'\n' || b == b'\r' {
+            continue;
+        }
+        if b64_decode_char(b).is_none() && b != b'=' {
+            if ignore_garbage {
+                continue;
+            }
+            return Err(());
+        }
+        if padded {
+            return Err(());
+        }
+        *quantum.get_mut(held).ok_or(())? = b;
+        held = held.saturating_add(1);
+        if held == 4 {
+            padded = base64_group(&quantum, &mut out)?;
+            held = 0;
+        }
     }
 
+    // Base64 comes in whole groups of four. A partial group at the end is an
+    // input that was cut short, and decoding what arrived would be answering a
+    // question that was never finished being asked.
+    if held != 0 {
+        return Err(());
+    }
     Ok(out)
 }
 
-/// `base64 [-d] FILE` — encode or decode Base64.
+/// A `base64` invocation that has been fully understood.
+struct Base64Spec {
+    decode: bool,
+    /// `-i`: when decoding, skip bytes outside the alphabet instead of
+    /// refusing the input.
+    ignore_garbage: bool,
+    /// Columns to wrap encoded output at. 0 means never wrap, as in GNU.
+    wrap: usize,
+    /// The single operand. `None`, and a `-` operand, both name the pipe.
+    file: Option<String>,
+    /// `--help` was asked for; print usage and succeed.
+    help: bool,
+}
+
+/// Why a `base64` argument list could not be honoured.
 ///
-/// Without -d: read file, output Base64 (76-char line wrap).
-/// With -d: read Base64 text file, decode to binary and write to stdout.
-#[allow(clippy::arithmetic_side_effects)]
-fn cmd_base64(args: &str) {
-    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
-    if parts.is_empty() {
-        shell_println!("Usage: base64 [-d] <file>");
-        shell_println!("  -d   Decode (input is Base64 text)");
-        set_exit(1);
+/// `cmd_base64` used to have none of these. It looked at the *first* word to
+/// decide whether `-d` had been given, took the next word as the file name,
+/// and ignored everything else — the silent-guess shape that
+/// `TD-A-FOLD-GUESSED-AT-EVERY-ARGUMENT-IT-COULD-NOT-READ` catalogues:
+///
+/// | written | what it did | what it looks like |
+/// |---|---|---|
+/// | `base64 -w0 f` | opened a file named `-w0` | `-w` was unimplemented, and so was the error |
+/// | `base64 f g` | encoded `f`, ignored `g` | both operands were read |
+/// | `base64 f -d` | **encoded** `f` | `-d` was recognised only in first place |
+/// | `cat f \| base64` | usage message, exit 1 | there was no pipe support at all |
+/// | `base64 -d f` where `f` is binary | printed a blank line, exit 0 | an empty decode |
+enum Base64ParseError {
+    /// `-w`/`--wrap` with nothing after it. Holds the option as written.
+    MissingArg(String),
+    InvalidWrap(String),
+    /// A second operand. GNU takes exactly one file.
+    ExtraOperand(String),
+    UnknownOption(String),
+}
+
+impl Base64ParseError {
+    /// Print the diagnostic, in GNU's wording.
+    fn report(&self) {
+        match *self {
+            Self::MissingArg(ref opt) => {
+                if let Some(long) = opt.strip_prefix("--") {
+                    shell_println!("base64: option '--{}' requires an argument", long);
+                } else {
+                    shell_println!(
+                        "base64: option requires an argument -- '{}'",
+                        opt.trim_start_matches('-')
+                    );
+                }
+            }
+            Self::InvalidWrap(ref s) => {
+                shell_println!("base64: invalid wrap size: '{}'", s);
+            }
+            Self::ExtraOperand(ref s) => {
+                shell_println!("base64: extra operand '{}'", s);
+            }
+            Self::UnknownOption(ref opt) => {
+                if opt.starts_with("--") {
+                    shell_println!("base64: unrecognized option '{}'", opt);
+                } else {
+                    shell_println!(
+                        "base64: invalid option -- '{}'",
+                        opt.trim_start_matches('-')
+                    );
+                }
+            }
+        }
+        // Honest only because `--help` is implemented below. A command that
+        // points at help it does not have is worse than one that stays quiet.
+        shell_println!("Try 'base64 --help' for more information.");
+    }
+}
+
+/// Read a `-w` value. Zero is legal and means "never wrap".
+fn base64_wrap(value: &str) -> Result<usize, Base64ParseError> {
+    value
+        .parse::<usize>()
+        .map_err(|_| Base64ParseError::InvalidWrap(String::from(value)))
+}
+
+/// Parse `base64`'s arguments, or say why they cannot be honoured.
+///
+/// Short options bundle as getopt's do (`-diw0` is `-d -i -w 0`), long options
+/// take `--wrap=N` or `--wrap N`, and `--` ends the options so a file really
+/// named `-d` can be reached.
+fn parse_base64_args(args: &str) -> Result<Base64Spec, Base64ParseError> {
+    let words = split_words(args);
+    let mut spec = Base64Spec {
+        decode: false,
+        ignore_garbage: false,
+        wrap: 76,
+        file: None,
+        help: false,
+    };
+    let mut only_operands = false;
+
+    let mut i = 0usize;
+    while let Some(word) = words.get(i) {
+        i = i.saturating_add(1);
+        let w = word.as_str();
+
+        // A lone `-` is the conventional name for standard input, not an
+        // option.
+        if only_operands || w == "-" || !w.starts_with('-') {
+            if spec.file.is_some() {
+                return Err(Base64ParseError::ExtraOperand(String::from(w)));
+            }
+            spec.file = Some(String::from(w));
+            continue;
+        }
+
+        if w == "--" {
+            only_operands = true;
+            continue;
+        }
+
+        if let Some(long) = w.strip_prefix("--") {
+            let (name, inline) = match long.split_once('=') {
+                Some((n, v)) => (n, Some(v)),
+                None => (long, None),
+            };
+            match name {
+                "decode" => spec.decode = true,
+                "ignore-garbage" => spec.ignore_garbage = true,
+                "help" => spec.help = true,
+                "wrap" => {
+                    let value = match inline {
+                        Some(v) => String::from(v),
+                        None => {
+                            let next = words
+                                .get(i)
+                                .ok_or_else(|| Base64ParseError::MissingArg(String::from(w)))?;
+                            i = i.saturating_add(1);
+                            next.clone()
+                        }
+                    };
+                    spec.wrap = base64_wrap(&value)?;
+                }
+                _ => return Err(Base64ParseError::UnknownOption(String::from(w))),
+            }
+            continue;
+        }
+
+        // Bundled short flags, left to right. `-w` takes the rest of the word
+        // if there is any and the next word otherwise, and ends the bundle.
+        let mut rest = w.get(1..).unwrap_or("");
+        while let Some(flag) = rest.chars().next() {
+            rest = rest.get(flag.len_utf8()..).unwrap_or("");
+            match flag {
+                'd' => spec.decode = true,
+                'i' => spec.ignore_garbage = true,
+                'w' => {
+                    let value = if rest.is_empty() {
+                        let next = words
+                            .get(i)
+                            .ok_or_else(|| Base64ParseError::MissingArg(String::from("-w")))?;
+                        i = i.saturating_add(1);
+                        next.clone()
+                    } else {
+                        String::from(rest)
+                    };
+                    spec.wrap = base64_wrap(&value)?;
+                    rest = "";
+                }
+                _ => {
+                    let mut opt = String::from("-");
+                    opt.push(flag);
+                    return Err(Base64ParseError::UnknownOption(opt));
+                }
+            }
+        }
+    }
+
+    Ok(spec)
+}
+
+/// Encode `data`, wrapped at `wrap` columns, and return exactly the bytes
+/// `base64` should write.
+///
+/// A wrap of 0 means one unbroken line. Either way the output ends with a
+/// newline unless there was nothing to encode, which is GNU's behaviour and
+/// what makes `base64 f | base64 -d` round-trip.
+fn base64_encode_wrapped(data: &[u8], wrap: usize) -> Vec<u8> {
+    let encoded = base64_encode(data);
+    let bytes = encoded.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len().saturating_add(bytes.len() / 64 + 1));
+
+    if bytes.is_empty() {
+        return out;
+    }
+    if wrap == 0 {
+        out.extend_from_slice(bytes);
+        out.push(b'\n');
+        return out;
+    }
+
+    let mut off = 0usize;
+    while off < bytes.len() {
+        let end = off.saturating_add(wrap).min(bytes.len());
+        out.extend_from_slice(bytes.get(off..end).unwrap_or(&[]));
+        out.push(b'\n');
+        off = end;
+    }
+    out
+}
+
+/// Print what `base64 --help` promises.
+fn base64_help() {
+    shell_println!("Usage: base64 [OPTION]... [FILE]");
+    shell_println!("Base64 encode or decode FILE, or standard input, to standard output.");
+    shell_println!();
+    shell_println!("With no FILE, or when FILE is -, read standard input.");
+    shell_println!();
+    shell_println!("  -d, --decode          decode data");
+    shell_println!("  -i, --ignore-garbage  when decoding, ignore non-alphabet characters");
+    shell_println!("  -w, --wrap=COLS       wrap encoded lines after COLS character (default 76).");
+    shell_println!("                          Use 0 to disable line wrapping");
+    shell_println!("      --help            display this help and exit");
+}
+
+/// Run a parsed `base64` over its operand, with `stdin` standing in for `-`.
+fn base64_run(spec: &Base64Spec, stdin: Option<&[u8]>) {
+    if spec.help {
+        base64_help();
         return;
     }
 
-    let decode = parts[0] == "-d" || parts[0] == "--decode";
-    let file_arg = if decode {
-        if parts.len() < 2 {
-            shell_println!("base64: missing file argument");
-            set_exit(1);
-            return;
-        }
-        parts[1]
-    } else {
-        parts[0]
-    };
-
-    let path = resolve_path(file_arg);
-    let data = match crate::fs::Vfs::read_file(&path) {
-        Ok(d) => d,
-        Err(e) => {
-            shell_println!("base64: '{}': {:?}", path.display(), e);
-            set_exit(1);
-            return;
-        }
-    };
-
-    if decode {
-        // Input is Base64 text — decode and write binary to stdout.
-        let text = core::str::from_utf8(&data).unwrap_or("");
-        match base64_decode(text) {
-            Ok(decoded) => {
-                // Print as text if valid UTF-8, otherwise show hex summary.
-                if let Ok(s) = core::str::from_utf8(&decoded) {
-                    shell_println!("{}", s);
-                } else {
-                    shell_println!("<binary: {} bytes>", decoded.len());
+    // Read the input as bytes and keep them that way. Encoding a file that is
+    // not text is the ordinary case, not the exception.
+    let owned;
+    let data: &[u8] = match spec.file.as_deref() {
+        None | Some("-") => match stdin {
+            Some(bytes) => bytes,
+            None => {
+                shell_println!("base64: no file operand and no input to read");
+                set_exit(1);
+                return;
+            }
+        },
+        Some(path) => {
+            let resolved = resolve_path(path);
+            match crate::fs::Vfs::read_file(&resolved) {
+                Ok(d) => {
+                    owned = d;
+                    &owned
+                }
+                Err(e) => {
+                    shell_println!("base64: {}: {:?}", path, e);
+                    set_exit(1);
+                    return;
                 }
             }
-            Err(e) => {
-                shell_println!("base64: decode error: {}", e);
+        }
+    };
+
+    if spec.decode {
+        match base64_decode(data, spec.ignore_garbage) {
+            // The decoded bytes, written as bytes. This used to print
+            // `<binary: N bytes>` — a description of the output in place of the
+            // output — whenever the result was not valid UTF-8, so
+            // `base64 f | base64 -d` could not reproduce `f`, which is the one
+            // thing base64 exists to do. And `shell_println!` added a newline
+            // the data never had, so even the text case did not round-trip.
+            Ok(decoded) => shell_write_bytes(&decoded),
+            Err(()) => {
+                shell_println!("base64: invalid input");
                 set_exit(1);
             }
         }
     } else {
-        // Encode file content to Base64 with 76-char line wrapping.
-        let encoded = base64_encode(&data);
-        let line_width = 76;
-        let bytes = encoded.as_bytes();
-        let mut offset = 0;
-        while offset < bytes.len() {
-            let end = (offset + line_width).min(bytes.len());
-            if let Ok(line) = core::str::from_utf8(&bytes[offset..end]) {
-                shell_println!("{}", line);
-            }
-            offset = end;
+        shell_write_bytes(&base64_encode_wrapped(data, spec.wrap));
+    }
+}
+
+/// `base64 [-di] [-w COLS] [FILE]` — encode or decode Base64.
+///
+/// - `-d`, `--decode`: decode rather than encode
+/// - `-i`, `--ignore-garbage`: when decoding, skip bytes outside the alphabet
+/// - `-w COLS`, `--wrap=COLS`: wrap encoded lines at COLS (default 76, 0 = never)
+/// - `--help`: usage
+/// - no FILE, or `-`: read the pipe
+fn cmd_base64(args: &str) {
+    match parse_base64_args(args) {
+        Ok(spec) => base64_run(&spec, None),
+        Err(e) => {
+            e.report();
+            set_exit(1);
+        }
+    }
+}
+
+/// `base64` on piped input. A named file wins over the pipe, as in GNU and as
+/// in every other paired command here; a `-` operand names the pipe.
+fn cmd_base64_input(args: &str, input: &[u8]) {
+    match parse_base64_args(args) {
+        Ok(spec) => base64_run(&spec, Some(input)),
+        Err(e) => {
+            e.report();
+            set_exit(1);
         }
     }
 }

@@ -76161,7 +76161,7 @@ see `TD-A-BASE64-D-DESCRIBES-ITS-OUTPUT-INSTEAD-OF-WRITING-IT`.
 it. The fix is `parse_fold_args`'s flag loop. Not urgent — a refusal is honest,
 not a silent guess — but it is a gratuitous difference from every other `cut`.
 
-#### TD-A-BASE64-D-DESCRIBES-ITS-OUTPUT-INSTEAD-OF-WRITING-IT (lane A, 2026-08-25) — OPEN
+#### TD-A-BASE64-D-DESCRIBES-ITS-OUTPUT-INSTEAD-OF-WRITING-IT (lane A, 2026-08-25) — ✅ FIXED (`4ddcbd9d9`)
 
 **In short:** `base64 -d` is supposed to write the decoded bytes. Ours writes
 an English sentence about them — `<binary: 4096 bytes>` — whenever the result
@@ -76211,3 +76211,104 @@ survived: nothing yet checks that `base64 -d` produces *bytes*.
 
 **Noticed while** making `fold` byte-clean and auditing the remaining
 `from_utf8(&data).unwrap_or("")` sites in `kshell.rs`.
+
+**Resolution (`4ddcbd9d9`).** All three faults, plus the argument handling they
+were sitting on top of, which turned out to be the same silent-guess shape as
+`fold`'s.
+
+The decoded bytes now go out through `shell_write_bytes` with nothing appended,
+so `base64 f | base64 -d` reproduces `f`. The input is read as `&[u8]` and
+`base64_decode` refuses what is not base64 instead of decoding the empty string
+and reporting success.
+
+`parse_base64_args` replaces "look at the first word": `-d`/`--decode`,
+`-i`/`--ignore-garbage`, `-w N`/`--wrap=N` (0 = never wrap) and `--help`, with
+getopt-style bundling, `--` to end the options, and `-` or no operand naming the
+pipe. `base64` also joins the byte-clean arm of `dispatch_with_input`, which it
+had never been in at all — `cat f | base64` used to print a usage message and
+fail.
+
+The decoder tightened where it used to guess (`Xy=z` is refused rather than
+read as `Xy==`; nothing may follow the padding; a partial group is an error)
+and stayed lenient in the one place compatibility demands it (trailing bits,
+and line breaks as structure). Those two calls are argued in
+design-decisions §276.
+
+Covered by self-test rung 40, which leads with the round trip: ten bytes that
+are not valid UTF-8, encoded, fed back through `base64 -d`, and required back
+byte for byte.
+
+**Noticed in passing:** there is a *second* `base64_encode` in the kernel, at
+`kernel/src/net/http.rs:1271`, with its own tests at `:1652`. Two encoders of
+the same format is the duplication class `sed`'s two transform loops belong to
+— one of them will drift. Neither is wrong today, so this is tech debt rather
+than a bug: the fix is for `net::http` and `kshell` to share one, most
+naturally in a small `base64` module, and the `net/websocket.rs` caller at
+`:193` moves with it.
+
+#### TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH (lane A, 2026-08-25) — filed, blocked on `ere` going `no_std`
+
+**In short:** `awk '/^err/ {print}'` in the kernel shell does not match lines
+that *start* with `err`. It matches lines that *contain* the four characters
+`^err`, which almost nothing does — and it exits 0, so the empty output looks
+like an honest "no matches". Lane B fixed exactly this in the userspace `awk`
+months ago and built a shared engine so it could not come back; the kernel
+shell has its own copy of `awk` that was never wired to that engine.
+
+**Where.** `kernel/src/kshell.rs`, `awk_pattern_matches` (~122305). Its own
+comment states the fault:
+
+```rust
+// /regex/ pattern — literal string match.
+if pattern.starts_with('/') && pattern.ends_with('/') && pattern.len() >= 2 {
+    let pat = &pattern[1..pattern.len() - 1];
+    return line.contains(pat);
+}
+```
+
+`sed_addr_matches` (~121581) has the same shape for `sed`'s addresses.
+
+**What it costs.** Every metacharacter is read as itself, and every row exits 0:
+
+| written | what it matches | what awk means |
+|---|---|---|
+| `/^err/` | the literal `^err`, anywhere in the line | lines beginning `err` |
+| `/a.c/` | the literal `a.c` | `abc`, `axc`, `a c`, … |
+| `/x*/` | the literal `x*` | every line — `x*` matches the empty string |
+| `/err$/` | the literal `err$` | lines ending `err` |
+
+The third row is the worst of them: a pattern that in awk matches *everything*
+here matches almost nothing, so a filter that should be a no-op silently
+discards the whole input.
+
+**Why it is still open.** This is the same bug as
+`B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-str::contains`, and it has
+the same right answer: use the `ere` crate lane B wrote for it. But `ere`
+cannot be linked into the kernel today —
+
+```toml
+bstr = { version = "1.13.0", default-features = false, features = ["std"] }
+```
+
+— and `userspace/**` is lane B's tree. Filed as
+`requests/a-b-ere-is-std-only-so-the-kernel-shell-still-matches-regexes-with-contains.md`,
+asking for a `no_std` + `alloc` build of the crate. `ere` wants `bstr` for one
+function (`char_indices`), which `bstr` offers under `alloc`, so the change may
+be a feature flag and some `std::` → `core::`/`alloc::` paths.
+
+**Why not just write one here.** A second ERE in `kernel/` is the outcome the
+`ere` crate exists to prevent — its Cargo.toml says so directly — and two
+engines that must agree about `[[:alpha:]]`, leftmost-longest and backreference
+semantics will not agree for long. A kernel-resident copy would also have to be
+re-verified against gawk independently, duplicating `scripts/awk-diff.sh`.
+
+**The fallback, if lane B declines.** Refuse rather than guess: any `/.../`
+pattern containing a metacharacter reports `awk: regular expressions are not
+supported in the kernel shell` and exits 2. Worse for the user, but a refusal
+is detectable and a wrong answer is not.
+
+**Not `grep`.** `kshell`'s `grep` matches by substring too (`grep_matches`,
+~96861), but it advertises "search for pattern in files", has no `-E`, and a
+fixed-string search is a defensible reading of that. It is left alone
+deliberately; only `awk` and `sed`, where the syntax itself promises a regex,
+are counted here.

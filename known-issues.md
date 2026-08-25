@@ -29549,6 +29549,58 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
+### Follow-up (2026-08-25) — the whole suite reaches glibc now, not just this one section
+
+The correction above repaired *one* harness, and repaired it by adding a second
+reference to it: `sort-diff.sh` grew a `$GLIBC` that shelled out to `wsl -e env
+LC_ALL=C sort` for the option section, while `$GNU` stayed pointed at the host's
+MSYS2 `sort` for everything else. That was the narrowest fix that could work, and
+it left the diagnosis — "a differential harness is only as good as the thing it
+differs against" — applying word for word to the other forty-four harnesses,
+every one of which was still reading MSYS2.
+
+All 45 now source `scripts/diff-wsl.sh`, which re-execs the whole harness inside
+WSL and resolves the reference there:
+
+```
+$ for f in scripts/*-diff.sh; do
+    [ "$f" = scripts/all-diff.sh ] && continue
+    grep -q '^\. "\$(dirname "\$0")/diff-wsl.sh"' "$f" || echo "NOT MIGRATED: $f"
+  done
+$                      # no output
+```
+
+There is no longer a `$GNU` anywhere in `scripts/` that can be MSYS2's. The
+two-references-in-one-tree hazard named at the end of the correction above is
+gone structurally, not harness by harness — which is the difference between a
+fixed bug and a bug that cannot recur. A new harness written tomorrow inherits
+the glibc reference by sourcing the preamble; there is no step it can forget.
+
+Three things that came with it, all relevant to this entry:
+
+- **The subject moved as well as the reference.** `diff-wsl.sh` builds ours for
+  `x86_64-unknown-linux-gnu` rather than `x86_64-pc-windows-gnu`. The old Windows
+  build was not a different compilation of the same program — `coreutils::stdfd`
+  is `#[cfg(target_os = "linux")]`, so the harnesses were measuring a binary with
+  no write-error exit path in it.
+- **The reference is now version-pinned by being a real one.** This entry closes
+  by noting that `tests/quotearg-gnu.txt` names `sort (GNU coreutils) 9.4` while
+  the harness was reading 8.32. Both sides of that mismatch were host artifacts;
+  the WSL reference reports its own version and `DIFF_NEED` skips loudly rather
+  than silently agreeing when it is absent.
+- **A stale subject can no longer pass.** `diff_assert_fresh` compares the built
+  artifacts against every source file that feeds them and refuses to run if a
+  source is newer. The old path had no such check — see
+  `B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES` and §382 in
+  `design-decisions.md`.
+
+**Still outstanding, and it is the same bug one subsystem over.**
+`scripts/osh-bash-diff.py` compares a Windows `osh.exe` against
+Git-for-Windows' `bash.exe`, which is the identical mistake this entry is about:
+a Cygwin-derived reference certifying a Windows-porting artifact. Four entries in
+this file exist only because of it. Tracked as
+`TD-B-THE-SHELL-HARNESS-STILL-MEASURES-AGAINST-MSYS-BASH`.
+
 ## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 18 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
@@ -60039,7 +60091,10 @@ when the three changes are written.
 right that the harness is the measure, and the harness did report 0 differed —
 the moment it was pointed at the right binary. "Measured against the harness" is
 only worth anything if the harness builds what it measures, which is what
-`scripts/diff-subject.sh` now guarantees for all twenty-seven of them.)*
+`scripts/diff-subject.sh` now guarantees for all twenty-seven of them. That
+guarantee moved to `scripts/diff-wsl.sh` on 2026-08-25, unchanged in substance
+and now covering all forty-five; `diff-subject.sh` itself is gone. See
+design-decisions.md §382.)*
 
 ---
 
@@ -60097,6 +60152,10 @@ not the home). It is not a delete-41-directories change.
    `scripts/diff-subject.sh` builds the subject from a named package
    immediately before the comparison, and all 27 `*-diff.sh` harnesses use it.
    That removes the way this defect was actually hurting us.
+   *(2026-08-25: the mechanism is now `scripts/diff-wsl.sh`, which subsumed
+   `diff-subject.sh` when every harness moved into WSL, and it covers all 45
+   harnesses rather than 27. Naming the package is unchanged — it is the
+   `DIFF_PKG` knob. See design-decisions.md §382.)*
 2. **`bc`'s two implementations are merged**, which was the substance of the
    `bc` problem regardless of where the survivor lives: the August rewrite on
    `bignum::Decimal` (200/200 against GNU) is the one that survives, and the

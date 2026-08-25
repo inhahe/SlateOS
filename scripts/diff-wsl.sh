@@ -31,6 +31,41 @@
 # between harnesses and kept out of the repository's `target/` so the Linux and
 # Windows builds do not invalidate each other (design-decisions.md §374).
 #
+# ## Why the subject is built, every run
+#
+# A harness that names a path under the target directory and then merely *runs*
+# it is not measuring the tree -- it is measuring whatever was last written to
+# that path, which can be arbitrarily old and need not even come from the same
+# crate. Both failure modes have happened here, and the second cost a day:
+#
+#   * **Stale.** `cargo test` and `cargo clippy` do not refresh a binary. A fix
+#     verified by a unit test and then "measured" by the harness was measured
+#     against the *previous* build. That was found in `printf-diff.sh`, and for
+#     a while the fix -- build every run -- was applied to `printf` and `seq`
+#     only.
+#
+#   * **The wrong program entirely.** Forty-two binary names in this workspace
+#     are produced by *two* packages -- `coreutils` and a superseded standalone
+#     `userspace/<name>` crate -- which cargo warns about ("output filename
+#     collision") and then resolves by letting whichever built last win. So
+#     `debug/bc` was sometimes `userspace/bc` and sometimes
+#     `coreutils/src/bin/bc.rs`, two different implementations of bc. On
+#     2026-08-21 `calc-diff.sh` reported "95 passed, 105 differed" and three
+#     bugs were written up in `known-issues.md` against a bc that nobody
+#     intends to ship; the bc that is shipped passes all 200. See
+#     `known-issues.md` -> `B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`.
+#
+# Naming the package (`DIFF_PKG`) as well as the binary is what closes the
+# second hole. Building immediately before the harness reads the path closes
+# the first -- and it is done every run, not only when the file is missing,
+# because "is it there?" is exactly the question that lets a stale binary
+# through, and a stale binary yields a *confident wrong answer* rather than an
+# obvious failure.
+#
+# (This section used to live in `scripts/diff-subject.sh`, the host-side
+# ancestor of this file. It was deleted once every harness had moved here --
+# see design-decisions.md §382 -- and the reasoning was moved rather than lost.)
+#
 # ## Using it
 #
 # Set the knobs, then source it, before anything else in the harness:
@@ -202,10 +237,10 @@ diff_ours_example() {
 #
 # A compile error is the *lucky* shape of that bug. The unlucky shape is a
 # harness whose subject compiles against a stale library and passes, certifying
-# a binary nobody built. `diff-subject.sh` argues at length that a harness must
-# not merely run whatever path it was given; this is the same argument one
-# level down, because a build that silently did nothing is a path that was
-# merely run.
+# a binary nobody built. "Why the subject is built, every run" above argues
+# that a harness must not merely run whatever path it was given; this is the
+# same argument one level down, because a build that silently did nothing is a
+# path that was merely run.
 #
 # The check is the invariant a successful `cargo build` establishes: cargo's
 # freshness for a path dependency is mtime-based, so any source file newer than
@@ -326,11 +361,12 @@ if [ -z "$OURS" ]; then
     echo "  install one with:  wsl -e sh -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal'"
     exit 0
   fi
-  # Built every run, for the reason `diff-subject.sh` spells out at length: a
-  # harness that merely *runs* a path measures whatever was written there last,
-  # which need not be current and need not even be this crate. One `cargo
-  # build` for the whole family rather than one per binary, so the output does
-  # not read as though something were rebuilt between two halves of a run.
+  # Built every run, for the reason the header gives under "Why the subject is
+  # built, every run": a harness that merely *runs* a path measures whatever was
+  # written there last, which need not be current and need not even be this
+  # crate. One `cargo build` for the whole family rather than one per binary, so
+  # the output does not read as though something were rebuilt between two halves
+  # of a run.
   diff_args=
   for diff_p in $DIFF_PKG; do diff_args="$diff_args -p $diff_p"; done
   for diff_b in $DIFF_BINS; do diff_args="$diff_args --bin $diff_b"; done

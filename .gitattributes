@@ -4,7 +4,7 @@
 # This is not a style preference. `bash` treats a CR as part of the token it
 # ends, so a CRLF script fails in ways that look like the script being wrong:
 # `set -u` becomes `set -u$'\r'` ("invalid option"), and `. "$(dirname
-# "$0")/diff-subject.sh"` looks for a file whose name ends in a carriage
+# "$0")/diff-wsl.sh"` looks for a file whose name ends in a carriage
 # return. Twenty-three of this tree's differential harnesses were unrunnable
 # from a Windows worktree for exactly that reason, and silently so — with
 # `core.autocrlf=input` the CRLF is normalised away on commit, so `git status`

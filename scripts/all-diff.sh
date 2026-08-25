@@ -17,7 +17,8 @@
 # `coreutils`'s bc rather than `userspace/bc`'s: both packages produce
 # `target/.../debug/bc.exe`, and whichever built last won. Every harness now
 # builds its own subject and names the package it comes from, so a red harness
-# here is a real difference again. See `scripts/diff-subject.sh`.
+# here is a real difference again. See `scripts/diff-wsl.sh`, under "Why the
+# subject is built, every run".
 #
 # Progress goes to stderr as each harness starts, because the slowest take
 # minutes and a run that prints nothing for that long is indistinguishable

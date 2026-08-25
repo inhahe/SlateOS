@@ -75048,3 +75048,22 @@ follow whatever the `cmp`/`diff` entry above settled for multi-valued statuses,
 so the shell speaks one convention rather than two.
 
 **Severity.** Medium in scripts, invisible interactively.
+
+**Two more found in the same function while reading it for the fix** (2026-08-24):
+
+* **`-n` swallows an argument it could not read.** The parse is
+  `max_args = rest.get(..end).and_then(|s| s.parse::<usize>().ok())`, and the
+  word is consumed from `rest` whether or not the parse succeeded. So
+  `xargs -n abc rm` leaves `max_args` at `None`, drops `abc` on the floor, and
+  runs **one** invocation with every input word — the opposite of what was
+  asked, reported as success. `-n 0` does the same, via the `Some(n) if n > 0`
+  guard falling through to the single-invocation arm. GNU: `xargs: invalid
+  number "abc" for -n option`, exit 1. Same family as the `sed` flag that was
+  ignored rather than refused: a wrong answer, not a missing one.
+* **Empty input runs nothing, where GNU runs the command once.** `words
+  .is_empty()` returns early, so `printf '' | xargs false` exits 0. GNU runs the
+  command once with no arguments unless `-r`/`--no-run-if-empty` is given, and
+  would exit 1 here. **BSD/macOS `xargs` does not run it** — so unlike the two
+  bugs above there is no single correct answer to match, and our behaviour is
+  already one of the two real ones. Left alone deliberately; noted so the next
+  reader does not "fix" it into GNU's shape without knowing it is a fork.

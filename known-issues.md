@@ -75921,3 +75921,70 @@ the same format is the duplication class `sed`'s two transform loops belong to
 than a bug: the fix is for `net::http` and `kshell` to share one, most
 naturally in a small `base64` module, and the `net/websocket.rs` caller at
 `:193` moves with it.
+
+#### TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH (lane A, 2026-08-25) — filed, blocked on `ere` going `no_std`
+
+**In short:** `awk '/^err/ {print}'` in the kernel shell does not match lines
+that *start* with `err`. It matches lines that *contain* the four characters
+`^err`, which almost nothing does — and it exits 0, so the empty output looks
+like an honest "no matches". Lane B fixed exactly this in the userspace `awk`
+months ago and built a shared engine so it could not come back; the kernel
+shell has its own copy of `awk` that was never wired to that engine.
+
+**Where.** `kernel/src/kshell.rs`, `awk_pattern_matches` (~122305). Its own
+comment states the fault:
+
+```rust
+// /regex/ pattern — literal string match.
+if pattern.starts_with('/') && pattern.ends_with('/') && pattern.len() >= 2 {
+    let pat = &pattern[1..pattern.len() - 1];
+    return line.contains(pat);
+}
+```
+
+`sed_addr_matches` (~121581) has the same shape for `sed`'s addresses.
+
+**What it costs.** Every metacharacter is read as itself, and every row exits 0:
+
+| written | what it matches | what awk means |
+|---|---|---|
+| `/^err/` | the literal `^err`, anywhere in the line | lines beginning `err` |
+| `/a.c/` | the literal `a.c` | `abc`, `axc`, `a c`, … |
+| `/x*/` | the literal `x*` | every line — `x*` matches the empty string |
+| `/err$/` | the literal `err$` | lines ending `err` |
+
+The third row is the worst of them: a pattern that in awk matches *everything*
+here matches almost nothing, so a filter that should be a no-op silently
+discards the whole input.
+
+**Why it is still open.** This is the same bug as
+`B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-str::contains`, and it has
+the same right answer: use the `ere` crate lane B wrote for it. But `ere`
+cannot be linked into the kernel today —
+
+```toml
+bstr = { version = "1.13.0", default-features = false, features = ["std"] }
+```
+
+— and `userspace/**` is lane B's tree. Filed as
+`requests/a-b-ere-is-std-only-so-the-kernel-shell-still-matches-regexes-with-contains.md`,
+asking for a `no_std` + `alloc` build of the crate. `ere` wants `bstr` for one
+function (`char_indices`), which `bstr` offers under `alloc`, so the change may
+be a feature flag and some `std::` → `core::`/`alloc::` paths.
+
+**Why not just write one here.** A second ERE in `kernel/` is the outcome the
+`ere` crate exists to prevent — its Cargo.toml says so directly — and two
+engines that must agree about `[[:alpha:]]`, leftmost-longest and backreference
+semantics will not agree for long. A kernel-resident copy would also have to be
+re-verified against gawk independently, duplicating `scripts/awk-diff.sh`.
+
+**The fallback, if lane B declines.** Refuse rather than guess: any `/.../`
+pattern containing a metacharacter reports `awk: regular expressions are not
+supported in the kernel shell` and exits 2. Worse for the user, but a refusal
+is detectable and a wrong answer is not.
+
+**Not `grep`.** `kshell`'s `grep` matches by substring too (`grep_matches`,
+~96861), but it advertises "search for pattern in files", has no `-E`, and a
+fixed-string search is a defensible reading of that. It is left alone
+deliberately; only `awk` and `sed`, where the syntax itself promises a regex,
+are counted here.

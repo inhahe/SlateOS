@@ -564,6 +564,27 @@ mod tests {
         .build()
     }
 
+    /// A layout that takes a built-in's *name* and puts different characters
+    /// under it — someone who edited the layout they had rather than inventing
+    /// a new one, which is the ordinary way a custom layout comes about.
+    ///
+    /// It is the only fixture that can tell "installed first" from "catalogue
+    /// first" apart: while a custom layout carries an id the catalogue has
+    /// never heard of, both orders resolve it identically.
+    fn shadow_of_dvorak() -> Layout {
+        keylayout::LayoutSpec {
+            id: "dvorak",
+            display_name: "Dvorak, edited here",
+            short_label: "DV*",
+            language: "en",
+            plain: ["zzzzzzzzzzzzz", "", "", ""],
+            shifted: ["ZZZZZZZZZZZZZ", "", "", ""],
+            iso_extra: None,
+            altgr: &[],
+        }
+        .build()
+    }
+
     /// A built-in, by the name the settings file uses for it.
     fn builtin(id: &str) -> Layout {
         keylayout::by_id(id)
@@ -898,6 +919,27 @@ mod tests {
 
         let ids: Vec<&str> = restored.layouts.iter().map(|l| l.id).collect();
         assert_eq!(ids, vec!["tiny", "dvorak"]);
+    }
+
+    #[test]
+    fn a_layout_that_shadows_a_builtin_name_keeps_the_installed_version() {
+        // The other half of the rule above, and the half a custom *name* can
+        // never test: when the installed layout and the catalogue both answer
+        // to `dvorak`, the installed one wins. Resolving against the catalogue
+        // first would silently hand the user back the stock Dvorak on every
+        // reload — their edits still on disk, no error, and nothing to see
+        // except that the keyboard went back to how it shipped.
+        let mut mgr = InputMethodManager::new(vec![shadow_of_dvorak()]);
+        let text = mgr.to_config_text();
+        mgr.apply_config_text(&text);
+
+        assert_eq!(mgr.layouts.len(), 1);
+        assert_eq!(
+            mgr.active_layout()
+                .map(|l| l.character(u32::from(keylayout::sc::GRAVE), keylayout::Level::PLAIN)),
+            Some(Some('z')),
+            "stock Dvorak puts ` there; the installed copy puts z"
+        );
     }
 
     #[test]

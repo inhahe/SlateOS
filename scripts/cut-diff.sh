@@ -7,57 +7,50 @@
 # terminator, whether a suppressed line leaves a blank one behind, and whether
 # `--output-delimiter` appears between two *touching* ranges or not.
 #
-# ## Why the reference is glibc, and only glibc
+# ## Why both sides run inside WSL
 #
-# The host's `cut` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll`
-# rather than glibc, whose `getopt` words every option diagnostic differently
-# (`unknown option -- x` against `invalid option -- 'x'`). A harness pointed at
-# it would certify sentences no GNU/Linux system prints. See `known-issues.md`
-# → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, and the identical
-# note at the top of `head-diff.sh` and `wc-diff.sh`.
+# `scripts/diff-wsl.sh` gives the reasons; the reference is the one that
+# decided it here. The host's `cut` is MSYS2's — a Cygwin derivative linking
+# `msys-2.0.dll` rather than glibc, whose `getopt` words every option
+# diagnostic differently (`unknown option -- x` against `invalid option --
+# 'x'`). A harness pointed at it certifies sentences no GNU/Linux system
+# prints; see `known-issues.md` →
+# `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`.
 #
-# The locale is `C.UTF-8` throughout. Nothing `cut` does is locale-dependent —
-# GNU 9.4 falls `-c` through to `-b`, so even "characters" are bytes — and the
-# quote marks gnulib puts round a bad LIST agree here too: since §351 ours are
-# U+2018/U+2019 in every locale, which is what GNU prints under any UTF-8 one.
-# Those cases used to be referenced under `LC_ALL=C`, back when ours stayed
-# ASCII (`open-questions.md` → B-Q2, since answered). `C` is now the setting in
-# which the reference would be wrong.
+# That was never quite what this file did — it reached the reference through
+# `wsl -e env LC_ALL=C.UTF-8 cut`, so the sentences it certified were glibc's.
+# What it paid for that was a *per-case* WSL process, a reachability probe
+# because `wsl` inherits the Windows cwd and an MSYS temp directory need not
+# map to the same bytes under `/mnt/...`, a `HAVE_GNU` guard threaded through
+# every runner, and a subject that was a Windows binary. The last of those is
+# what the move actually buys: `coreutils::stdfd` is `#[cfg(target_os =
+# "linux")]`, so the closed-descriptor behaviour was being certified against a
+# stub, and `File::open` of a directory fails outright on Windows where POSIX
+# opens it and fails the *read* — which cost this file an expected-difference
+# that has since been deleted, because on Linux the two sides simply agree.
+#
+# ## Why `LC_ALL=C.UTF-8`
+#
+# Fixed by the preamble, and right for this utility. Nothing `cut` does is
+# locale-dependent — GNU 9.4 falls `-c` through to `-b`, so even "characters"
+# are bytes — and the quote marks gnulib puts round a bad LIST agree here too:
+# since §351 ours are U+2018/U+2019 in every locale, which is what GNU prints
+# under any UTF-8 one. Those cases used to be referenced under `LC_ALL=C`, back
+# when ours stayed ASCII (`open-questions.md` → B-Q2, since answered). `C` is
+# now the setting in which the reference would be wrong.
 set -u
 
-# Our cut is a native Windows binary, so MSYS would rewrite an argument that
-# looks like a path.
-export MSYS2_ARG_CONV_EXCL='*'
-
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils cut "${OURS:-}") || exit 1
-GNU=${GNU:-"wsl -e env LC_ALL=C.UTF-8 cut"}
-export LC_ALL=${LC_ALL:-C.UTF-8}
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `cut` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+DIFF_PROG=cut
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d)
-trap 'rm -rf "$fixtures"' EXIT
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
 cd "$fixtures" >/dev/null || exit 1
-OURS_ABS=$OURS
-case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$OLDPWD/$OURS" ;; esac
-
-# WSL is invoked with the Windows cwd, which for an MSYS temp directory lands
-# on the same bytes under `/mnt/c/...`. Verified rather than assumed, because a
-# reference that silently ran somewhere else would report every file operand as
-# missing and still "agree" on the ones fed through stdin.
-printf 'probe\n' > .probe
-if [ "$($GNU -b1-5 .probe 2>/dev/null)" = "probe" ]; then
-  HAVE_GNU=yes
-else
-  HAVE_GNU=no
-  echo "cut-diff: glibc cut not reachable in this directory (tried: $GNU); skipping"
-fi
-rm -f .probe
 
 # --- fixtures ----------------------------------------------------------------
 printf 'a:b:c\nd:e:f\n'                         > colon.txt
@@ -78,20 +71,29 @@ printf ':a::b:\n'                               > emptyfields.txt
 printf 'a::b\n'                                 > adjacent.txt
 printf 'q:r\n'                                  > w1.txt
 
+# One invocation of one side. `$1` is `ours` or `gnu`.
+#
+# Each side is reached through a symlink named `cut` in a directory that is the
+# whole of `PATH` for that one invocation, so `argv[0]` is the bare word on
+# both sides and the `cut: ` prefix on every diagnostic matches.
+run_side() {
+  local side=$1 stdin=$2 out=$3 err=$4; shift 4
+  if [ "$stdin" = "-" ]; then
+    env PATH="$bindir/$side" cut "$@" </dev/null >"$out" 2>"$err"
+  else
+    printf '%b' "$stdin" | env PATH="$bindir/$side" cut "$@" >"$out" 2>"$err"
+  fi
+}
+
 compare() {
-  local o_out g_out o_err g_err o_rc g_rc stdin=$1 ref=$2; shift 2
+  local o_out g_out o_err g_err o_rc g_rc stdin=$1; shift
   o_err=$(mktemp); g_err=$(mktemp)
   # stdout through a file, not a pipe: in `x=$(cut | od)` the recorded status
   # is od's, and `PIPESTATUS` is set in the substitution's subshell where it
   # cannot be read. See the same note in cat-diff.sh.
   local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
-  if [ "$stdin" = "-" ]; then
-    "$OURS_ABS" "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    $ref "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
-  else
-    printf '%b' "$stdin" | "$OURS_ABS" "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
-    printf '%b' "$stdin" | $ref "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
-  fi
+  run_side ours "$stdin" "$o_bin" "$o_err" "$@"; o_rc=$?
+  run_side gnu  "$stdin" "$g_bin" "$g_err" "$@"; g_rc=$?
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   rm -f "$o_bin" "$g_bin"
 
@@ -124,18 +126,16 @@ report() {
   return 0
 }
 
-run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU" "$@"; report "cut $*"; }
+run_case()  { compare - "$@"; report "cut $*"; }
 run_stdin() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
-  compare "$input" "$GNU" "$@"
+  compare "$input" "$@"
   report "printf '$input' | cut $*"
 }
 
 xfail_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local reason="$1"; shift
-  compare - "$GNU" "$@"
+  compare - "$@"
   if [ "$AGREED" = no ]; then
     xfail=$((xfail+1))
     [ -n "${VERBOSE:-}" ] && printf 'XFAIL cut %s  (%s)\n' "$*" "$reason"
@@ -153,8 +153,8 @@ xfail_case() {
 selfsame() {
   local a="$1" b="$2" x y xr yr
   # shellcheck disable=SC2086  # both are single options by construction
-  x=$("$OURS_ABS" $a </dev/null 2>&1); xr=$?
-  y=$("$OURS_ABS" $b </dev/null 2>&1); yr=$?
+  x=$(env PATH="$bindir/ours" cut $a </dev/null 2>&1); xr=$?
+  y=$(env PATH="$bindir/ours" cut $b </dev/null 2>&1); yr=$?
   if [ "$x" = "$y" ] && [ "$xr" = "$yr" ]; then
     pass=$((pass+1))
     [ -n "${VERBOSE:-}" ] && printf 'OK   cut %s == cut %s\n' "$a" "$b"
@@ -460,16 +460,16 @@ run_case -f18446744073709551614 colon.txt
 run_case -b18446744073709551614- bytes.txt
 run_case -b1-18446744073709551614 bytes.txt
 
-# --- differ on purpose --------------------------------------------------------
-D=directory-operand-cannot-be-opened-on-a-windows-host
-# On SlateOS, and on any POSIX host, opening a directory succeeds and the
-# *read* fails, so GNU says `error reading '.': Is a directory` and so do we.
-# This harness runs a Windows build, where `File::open` of a directory fails
-# outright and we say `cannot open '.' for reading: …` instead. The difference
-# is the host's, not the code's — see the same trap in `filekind.rs`, where a
-# Windows `is_file()` calls a pipe a regular file.
-xfail_case "$D" -b1 .
+# A directory operand. This used to be an expected difference, and is not one
+# any more: opening a directory succeeds on POSIX and the *read* fails, so GNU
+# says `error reading '.': Is a directory` and so do we. It differed only while
+# the subject was a Windows build, where `File::open` of a directory fails
+# outright and we said `cannot open '.' for reading: …` — the difference was
+# the host's, not the code's. Moving both sides into WSL deleted it, which is
+# the case for the move in one line.
+run_case -b1 .
 
+# --- differ on purpose --------------------------------------------------------
 # `--help`'s body matches GNU's byte for byte; what follows it does not, and
 # must not. GNU closes every `--help` with `emit_ancillary_info` — links to
 # gnu.org, the Translation Project and `info '(coreutils) cut invocation'` —
@@ -485,10 +485,6 @@ selfsame --v --version
 selfsame --hel --help
 
 # --- summary ------------------------------------------------------------------
-if [ "$HAVE_GNU" != yes ]; then
-  echo "cut-diff: skipped (no glibc cut)"
-  exit 0
-fi
 printf '\n%d passed, %d differed' "$pass" "$fail"
 [ "$xfail" -gt 0 ] && printf ', %d differ on purpose' "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d XPASS' "$xpass"

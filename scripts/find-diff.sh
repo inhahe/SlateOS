@@ -3,31 +3,38 @@
 #
 # ## Why this one runs inside WSL
 #
-# For the reason `scripts/du-diff.sh` gives at length, and more so. `find`'s
-# answer is a walk over real directory entries, and half its vocabulary asks
-# questions only a real inode can answer: `-inum`, `-links`, `-samefile`,
-# `-perm`, `-user`, `-type l`, `-xtype`, `-fstype`, `%i`, `%n`, `%b`. Windows
-# has none of them, which is why `find.rs`'s `RealTree` and its `main` are both
-# `#[cfg(unix)]` and the Windows build is a stub. Pointing the ordinary
-# `*-diff.sh` shape at it would be comparing GNU against that stub.
+# `scripts/diff-wsl.sh` gives the general reasons; this utility has a stronger
+# one of its own. `find`'s answer is a walk over real directory entries, and
+# half its vocabulary asks questions only a real inode can answer: `-inum`,
+# `-links`, `-samefile`, `-perm`, `-user`, `-type l`, `-xtype`, `-fstype`,
+# `%i`, `%n`, `%b`. Windows has none of them, which is why `find.rs`'s
+# `RealTree` and its `main` are both `#[cfg(unix)]` and the Windows build is a
+# two-line stub. Pointing a host-side harness at it would be comparing GNU
+# against that stub.
 #
 # The fixture tree is built in WSL's own `/tmp` rather than under `/mnt/d`. On
 # 9p the link count of a directory is synthesised, hard links do not share an
 # inode, and `st_blocks` is invented — so `-links`, `-samefile` and `%b` would
-# all be comparing two implementations against fiction.
+# all be comparing two implementations against fiction. `$DIFF_TMP` is a
+# `mktemp -d`, which is under `/tmp` and so is ext4.
 #
-# ## Why `LC_ALL=C.UTF-8` and not `C`
+# ## Why `LC_ALL=C.UTF-8` and not `C`, and why `TZ=UTC`
 #
-# findutils sets `err_quoting_style = locale_quoting_style`, which renders a
-# name in a diagnostic as `‘name’` in a UTF-8 locale and as `'name'` in the C
-# locale. Ours always writes the curly pair, because the target has one locale.
-# Under plain `C` every diagnostic case would differ on the quotes alone and
-# nothing else would be visible; under `C.UTF-8` the quoting agrees and the
-# comparison is about what the messages *say*.
+# The locale is fixed by the preamble, and this utility is one of the reasons
+# it is fixed the way it is. findutils sets `err_quoting_style =
+# locale_quoting_style`, which renders a name in a diagnostic as `‘name’` in a
+# UTF-8 locale and as `'name'` in the C locale. Ours always writes the curly
+# pair, because the target has one locale. Under plain `C` every diagnostic
+# case would differ on the quotes alone and nothing else would be visible;
+# under `C.UTF-8` the quoting agrees and the comparison is about what the
+# messages *say*.
 #
-# `TZ=UTC` for the same class of reason: `-ls` and `-printf %t` print a local
-# time, so a harness that inherited the operator's zone would compare two runs
-# of the same clock and call the agreement a result.
+# `TZ=UTC` is set here rather than by the preamble, because `find` is the only
+# harness whose subject prints a clock: `-ls` and `-printf %t` render a *local*
+# time, so a run that inherited the operator's zone would be comparing two
+# readings of the same clock and calling the agreement a result. It is named in
+# `DIFF_FORWARD` as well as exported, so that an operator who sets `TZ` to
+# reproduce a failure keeps it across the WSL boundary.
 #
 # ## What is compared
 #
@@ -42,119 +49,55 @@
 #
 set -u
 
-# ------------------------------------------------------------------ outer ---
-# Run from MSYS, this half only hands the whole job to WSL. `wsl` inherits the
-# Windows cwd translated to `/mnt/...`, which is why the relative path below
-# resolves where an absolute MSYS path would be mangled.
-if [ "${FIND_DIFF_INNER:-}" != 1 ]; then
-    cd "$(dirname "$0")/.." || exit 1
-    if ! wsl -e true >/dev/null 2>&1; then
-        echo "find-diff: WSL is not available; SKIPPED"
-        exit 0
-    fi
-    exec wsl -e env FIND_DIFF_INNER=1 "OURS=${OURS:-}" LC_ALL=C.UTF-8 TZ=UTC \
-        bash ./scripts/find-diff.sh
-fi
+# Into WSL, build ours for Linux, find GNU's, and put both behind the one name
+# `find` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+#
+# The last of those is *necessary* here, not merely tidy as it is for the
+# coreutils harnesses. gnulib's `set_program_name` keeps the whole of `argv[0]`
+# for findutils rather than taking its basename, so a GNU find started as
+# `/usr/bin/find` prefixes every diagnostic with `/usr/bin/find: ` where ours
+# says `find: `. Every diagnostic case in this file would report a difference
+# that is an artefact of how the harness started the program. Reaching both
+# through a one-entry `PATH` makes `argv[0]` the bare word on both sides, which
+# is also what a shell will do on the target.
+#
+# `dd` and `truncate` are named because two of the fixtures below are not
+# decoration: `t/sparse` is the one file where `-size -1` and `-size -2048c`
+# cannot agree, and without `truncate` it would be an ordinary empty file that
+# both sides report identically and wrongly.
+DIFF_PROG=find
+DIFF_FORWARD=TZ
+DIFF_NEED="dd truncate mkfifo"
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
-# ------------------------------------------------------------------ inner ---
-export LC_ALL=C.UTF-8 TZ=UTC
+export TZ=UTC
 # find reads all three. They would otherwise be inherited from the operator's
 # shell, which changes both sides at once — the worst kind of difference,
 # because it hides rather than reports.
 unset FIND_BLOCK_SIZE POSIXLY_CORRECT FIGNORE
 
-# Resolved while `find` still means the system's: a few lines below it becomes a
-# shell function, and `command -v find` would then answer "find".
-GNU=${GNU:-$(command -v find)}
-OURS=${OURS:-}
-
-if [ -z "$OURS" ]; then
-    export PATH="$HOME/.cargo/bin:$PATH"
-    if ! command -v cargo >/dev/null 2>&1; then
-        cat >&2 <<'MISSING'
-find-diff: no cargo inside WSL, so our find cannot be built for Linux.
-
-Install one (a per-user toolchain, nothing system-wide):
-
-  wsl -e sh -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --default-toolchain stable --profile minimal"
-
-MISSING
-        echo "find-diff: cargo missing inside WSL; SKIPPED"
-        exit 0
-    fi
-    # Built every run, from the package named, for the reason
-    # `scripts/diff-subject.sh` gives: a harness that merely *runs* a path
-    # measures whatever was last written there, which need not be current and
-    # need not even be this crate.
-    #
-    # The target directory is under WSL's home rather than the repository: the
-    # repository is on 9p through `/mnt/d`, where a Rust build is an order of
-    # magnitude slower, and a second `target/` inside the tree would be a
-    # tens-of-gigabytes surprise for whoever next runs `du -sh` on the worktree.
-    #
-    # It is *shared* with the other WSL-built harnesses -- du-diff, ls-diff,
-    # cmp-diff. They build different binaries out of the same workspace for the
-    # same triple, so their dependency artifacts are identical, and a directory
-    # each stored the same objects four times over. See design-decisions.md
-    # §374. Delete it with `wsl rm -rf ~/.cache/slateos-diff-target`.
-    #
-    # Built from the workspace *root*, not from `userspace/coreutils`. Cargo
-    # searches for config upwards from the cwd, and `userspace/.cargo/config.
-    # toml` turns on `build-std` -- which this build does not want (Linux has a
-    # prebuilt std) and which fails outright unless the `rust-src` component is
-    # installed for the active toolchain. Running from the root avoids the zone
-    # config entirely; `-p coreutils` picks the same package.
-    root=$(cd "$(dirname "$0")/.." && pwd) || exit 1
-    ( cd "$root" \
-      && CARGO_TARGET_DIR="$HOME/.cache/slateos-diff-target" \
-         cargo build -p coreutils --bin find --target x86_64-unknown-linux-gnu ) >&2 || {
-        echo "find-diff: the build failed"
-        exit 1
-    }
-    OURS="$HOME/.cache/slateos-diff-target/x86_64-unknown-linux-gnu/debug/find"
-fi
-
-if [ ! -x "$OURS" ]; then
-    echo "find-diff: $OURS is not executable"
-    exit 1
-fi
-
-# Both are about to become the target of a symlink in another directory, and a
-# relative `OURS=` — which the override exists to accept — would then dangle.
-GNU=$(cd "$(dirname "$GNU")" && pwd)/$(basename "$GNU") || exit 1
-OURS=$(cd "$(dirname "$OURS")" && pwd)/$(basename "$OURS") || exit 1
+echo "find-diff:"
+echo "  ours: $OURS"
+echo "  gnu:  $gnu_real"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d /tmp/find-diff.XXXXXX) || exit 1
-trap 'chmod -R u+rwX "$fixtures" 2>/dev/null; rm -rf "$fixtures"' EXIT
-
-# Each implementation gets a directory containing one symlink named `find`, and
-# a case runs with that directory first on `PATH`. The point is `argv[0]`:
-# gnulib's `set_program_name` keeps the whole of it, so GNU find invoked as
-# `/usr/bin/find` prefixes every diagnostic with `/usr/bin/find: ` while ours
-# says `find: `. Comparing those would report a difference in every diagnostic
-# case that is an artefact of how the harness started the program. A `PATH`
-# lookup makes `argv[0]` the word `find` on both sides, which is also what the
-# shell will do on the target.
-#
-# They live under `$fixtures` but *outside* the walked tree: a `bin` directory
-# inside `t` would appear in every listing.
-mkdir -p "$fixtures/bin-gnu" "$fixtures/bin-ours" || exit 1
-ln -s "$GNU" "$fixtures/bin-gnu/find" || exit 1
-ln -s "$OURS" "$fixtures/bin-ours/find" || exit 1
 # `-execdir` refuses to run at all if `$PATH` holds a relative entry, and an
 # empty entry is one. `$PATH` inside WSL routinely ends in `:` because Windows'
 # own PATH is appended; keeping that would make every `-execdir` case a refusal
 # on both sides, which agrees but tests nothing.
 CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v '^$' | grep '^/' \
              | paste -sd: -)
-GNU_PATH="$fixtures/bin-gnu:$CLEAN_PATH"
-OURS_PATH="$fixtures/bin-ours:$CLEAN_PATH"
+GNU_PATH="$bindir/gnu:$CLEAN_PATH"
+OURS_PATH="$bindir/ours:$CLEAN_PATH"
 
-mkdir -p "$fixtures/tree" || exit 1
-cd "$fixtures/tree" || exit 1
+# The walked tree is *not* under either of the directories holding a symlink:
+# a `bin` directory inside `t` would appear in every listing in the file. The
+# preamble puts its `$bindir` beside this rather than inside it, which is what
+# makes that true.
+mkdir -p "$DIFF_TMP/tree" || exit 1
+cd "$DIFF_TMP/tree" || exit 1
 
 # ---------------------------------------------------------------- fixtures ---
 #

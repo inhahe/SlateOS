@@ -29549,6 +29549,58 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
+### Follow-up (2026-08-25) — the whole suite reaches glibc now, not just this one section
+
+The correction above repaired *one* harness, and repaired it by adding a second
+reference to it: `sort-diff.sh` grew a `$GLIBC` that shelled out to `wsl -e env
+LC_ALL=C sort` for the option section, while `$GNU` stayed pointed at the host's
+MSYS2 `sort` for everything else. That was the narrowest fix that could work, and
+it left the diagnosis — "a differential harness is only as good as the thing it
+differs against" — applying word for word to the other forty-four harnesses,
+every one of which was still reading MSYS2.
+
+All 45 now source `scripts/diff-wsl.sh`, which re-execs the whole harness inside
+WSL and resolves the reference there:
+
+```
+$ for f in scripts/*-diff.sh; do
+    [ "$f" = scripts/all-diff.sh ] && continue
+    grep -q '^\. "\$(dirname "\$0")/diff-wsl.sh"' "$f" || echo "NOT MIGRATED: $f"
+  done
+$                      # no output
+```
+
+There is no longer a `$GNU` anywhere in `scripts/` that can be MSYS2's. The
+two-references-in-one-tree hazard named at the end of the correction above is
+gone structurally, not harness by harness — which is the difference between a
+fixed bug and a bug that cannot recur. A new harness written tomorrow inherits
+the glibc reference by sourcing the preamble; there is no step it can forget.
+
+Three things that came with it, all relevant to this entry:
+
+- **The subject moved as well as the reference.** `diff-wsl.sh` builds ours for
+  `x86_64-unknown-linux-gnu` rather than `x86_64-pc-windows-gnu`. The old Windows
+  build was not a different compilation of the same program — `coreutils::stdfd`
+  is `#[cfg(target_os = "linux")]`, so the harnesses were measuring a binary with
+  no write-error exit path in it.
+- **The reference is now version-pinned by being a real one.** This entry closes
+  by noting that `tests/quotearg-gnu.txt` names `sort (GNU coreutils) 9.4` while
+  the harness was reading 8.32. Both sides of that mismatch were host artifacts;
+  the WSL reference reports its own version and `DIFF_NEED` skips loudly rather
+  than silently agreeing when it is absent.
+- **A stale subject can no longer pass.** `diff_assert_fresh` compares the built
+  artifacts against every source file that feeds them and refuses to run if a
+  source is newer. The old path had no such check — see
+  `B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES` and §382 in
+  `design-decisions.md`.
+
+**Still outstanding, and it is the same bug one subsystem over.**
+`scripts/osh-bash-diff.py` compares a Windows `osh.exe` against
+Git-for-Windows' `bash.exe`, which is the identical mistake this entry is about:
+a Cygwin-derived reference certifying a Windows-porting artifact. Four entries in
+this file exist only because of it. Tracked as
+`TD-B-THE-SHELL-HARNESS-STILL-MEASURES-AGAINST-MSYS-BASH`.
+
 ## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 18 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
@@ -60069,7 +60121,10 @@ when the three changes are written.
 right that the harness is the measure, and the harness did report 0 differed —
 the moment it was pointed at the right binary. "Measured against the harness" is
 only worth anything if the harness builds what it measures, which is what
-`scripts/diff-subject.sh` now guarantees for all twenty-seven of them.)*
+`scripts/diff-subject.sh` now guarantees for all twenty-seven of them. That
+guarantee moved to `scripts/diff-wsl.sh` on 2026-08-25, unchanged in substance
+and now covering all forty-five; `diff-subject.sh` itself is gone. See
+design-decisions.md §382.)*
 
 ---
 
@@ -60127,6 +60182,10 @@ not the home). It is not a delete-41-directories change.
    `scripts/diff-subject.sh` builds the subject from a named package
    immediately before the comparison, and all 27 `*-diff.sh` harnesses use it.
    That removes the way this defect was actually hurting us.
+   *(2026-08-25: the mechanism is now `scripts/diff-wsl.sh`, which subsumed
+   `diff-subject.sh` when every harness moved into WSL, and it covers all 45
+   harnesses rather than 27. Naming the package is unchanged — it is the
+   `DIFF_PKG` knob. See design-decisions.md §382.)*
 2. **`bc`'s two implementations are merged**, which was the substance of the
    `bc` problem regardless of where the survivor lives: the August rewrite on
    `bignum::Decimal` (200/200 against GNU) is the one that survives, and the
@@ -76082,10 +76141,15 @@ their absence are now 33 plain cases. Both were measured against GNU 3.11 with
   < file` is *not* that case, because redirected stdin is a regular file. This
   is why `scripts/grep-diff.sh` grew a `w99` fixture: every other fixture is
   small enough that a hardcoded width of 1 would pass.
-* **The tab goes after the last separator, with no backspace.** GNU's
-  `print_line_head` reads as if it emitted `"	"` *before* the separator;
-  the dump says `a.txt: 1:	foo`. And `-Z` does not suppress it —
-  `a.txt  1:	foo`, and `a.txt 	foo` with no numbers at all. What *does*
+* **The tab goes after the last separator, with no backspace.** (`\t`, `\b`
+  and `\0` below are this entry's notation for the bytes themselves; grep
+  emits the bytes. They were written literally here until 2026-08-25, and the
+  two raw NULs made git treat the whole 4.5 MB file as binary -- so it stopped
+  normalising line endings in it, and a CRLF-rewriting edit script went
+  straight into the object store unnoticed.) GNU's
+  `print_line_head` reads as if it emitted `"\t\b"` *before* the separator;
+  the dump says `a.txt: 1:\tfoo`. And `-Z` does not suppress it —
+  `a.txt\0 1:\tfoo`, and `a.txt\0\tfoo` with no numbers at all. What *does*
   suppress it is having no field to follow: bare `-T` prints no tab, and
   neither do `-c`, `-l` or `-L`, which print no line prefix.
 * **`-b` reports the offset of what is printed, not of the line.** Under `-o`
@@ -77659,6 +77723,95 @@ failure class, and because fixing any one of them in isolation would leave a
 
 **No caller is affected.** Nothing in `kernel/` invokes `tr` — no self-test
 rung, no script — so the stricter parser cannot turn something green red.
+
+
+### TD-B-THE-SHELL-HARNESS-STILL-MEASURES-AGAINST-MSYS-BASH. `scripts/osh-bash-diff.py` compares a Windows `osh.exe` against Git-for-Windows bash, so every osh behaviour it certifies was learned from a Cygwin port — 2026-08-25 — OPEN
+
+**Where:** `scripts/osh-bash-diff.py`. Two lists decide what is compared:
+
+```python
+OSH_CANDIDATES = [
+    REPO / "target" / "x86_64-pc-windows-gnu" / "release" / "osh.exe",
+    ...
+]
+BASH_CANDIDATES = [
+    Path("C:/Program Files/Git/usr/bin/bash.exe"),
+    Path("/usr/bin/bash"),
+    Path("/bin/bash"),
+]
+```
+
+On this host the first entry of each wins, so the subject is a Windows binary
+and the reference is MSYS bash. `/usr/bin/bash` is reached only on a machine
+that has no Git for Windows.
+
+**What:** this is the same structural fault that
+`TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE` recorded for `sort`, one
+subsystem over, and it is still live. MSYS is a Cygwin derivative: it links
+`msys-2.0.dll`, not glibc. Its getopt wording, its signal table, its locale
+handling and its process model are all Cygwin's. A differential harness whose
+reference is MSYS certifies behaviour that no GNU/Linux system has — and
+SlateOS is a GNU/Linux-shaped target, so the wrong reference is wrong in the
+direction that matters.
+
+**This is not news to the tree, and that is the point.** `TOOL-OSH-BASH-DIFF`
+(above) says so plainly and resolves it by waiving: "Cases hitting those need an
+`# EXPECT-DIFF` waiver." That was the right call when there was no way to reach
+a glibc bash from a harness. There is now — every one of the twenty-five
+`scripts/*-diff.sh` coreutils harnesses reaches glibc through
+`scripts/diff-wsl.sh`, which re-execs into WSL, builds the subject for
+`x86_64-unknown-linux-gnu`, and refuses to run against a stale build. The shell
+harness was not part of that migration only because it is Python and does not
+match the `*-diff.sh` glob.
+
+**Four entries in this file exist because of it**, and each is a case the
+corpus cannot currently ask:
+
+| entry | what the MSYS reference costs |
+|---|---|
+| `TD-OILS-SIGNAL-NUMBERS-ARE-LINUXS-AND-CANNOT-BE-CHECKED-AGAINST-MSYS` | the signal table is untestable; the corpus tests only behaviour, never a number |
+| `TD-OILS-MSYS-CHMOD-TYPE-A` | `type -a` cannot be used on a file the case created, because MSYS `chmod +x` does not make `test -x` true |
+| `TD-OILS-HOST-ARGV0` | `argv[0]` for an external command is the resolved path, not the word typed |
+| `TD-OILS-A-NON-UTF-8-ARGUMENT-IS-REPLACED-ON-THE-WINDOWS-HOST` | a child sees `\xef\xbf\xbd` where bash's child sees `\xff` |
+
+The last two are *subject*-side, not reference-side: they are artifacts of osh
+being built for Windows, and would go away with the subject rather than with the
+reference. That is worth stating because it means the migration fixes both
+halves, not one.
+
+**What the fix looks like.** The Python equivalent of `diff-wsl.sh`, which is
+mostly the same six steps:
+
+1. Re-exec into WSL if not already there, carrying the harness's arguments.
+2. Build `osh` for `x86_64-unknown-linux-gnu` into
+   `$HOME/.cache/slateos-diff-target` — the same shared target directory the
+   shell harnesses use (design-decisions.md §374).
+3. Take the reference from `/usr/bin/bash`, and skip rather than fall back.
+4. Pin `LC_ALL=C.UTF-8`.
+5. Keep the newest-binary rule and the `write_bytes` rule, both of which are
+   still load-bearing (see `TOOL-OSH-BASH-DIFF`).
+6. Add the staleness guard: `osh` is one binary out of a package, and a cargo
+   cache that replays a library unit while relinking the binary is exactly the
+   failure `diff_assert_fresh` was written for.
+
+**The first measurement, before any of that**, is whether `userspace/oils`
+builds for `x86_64-unknown-linux-gnu` at all. It has never been asked to; it is
+built for `x86_64-pc-windows-gnu` on the host and for `x86_64-slateos` for the
+image. If it does not build, that is the finding and it comes first.
+
+**Expect a wave of differences, and treat each as a finding.** Roughly 150
+corpus cases have been written, run and waived against MSYS. Some fraction were
+tuned to MSYS behaviour and will differ against glibc — every such case is a
+place where osh was shaped by a Cygwin port, which is the whole reason to do
+this. Budget the triage, not just the migration. The four entries above should
+be re-examined at the same time: two should become testable and two should
+disappear.
+
+**Risk of leaving it.** It compounds. Every corpus case added between now and
+the migration is another case written against the wrong reference, and every
+`# EXPECT-DIFF` waiver added is a divergence pinned into the corpus as though
+it were behaviour. `sort` is the precedent: eleven option cases sat green for
+weeks while the implementation faithfully copied a Windows porting artifact.
 
 ---
 

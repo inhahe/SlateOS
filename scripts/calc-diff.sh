@@ -34,62 +34,77 @@
 # script fails if a plain case differs, and also if an xfail stops differing,
 # because that means the recorded reason no longer describes reality.
 #
-# GNU bc/dc are reached through WSL by default, since there is no native
-# Windows build; set GNU_BC/GNU_DC to override (e.g. when running on Linux).
+# ## Why both sides run inside WSL
+#
+# `scripts/diff-wsl.sh` gives the general reasons. Two are specific here.
+#
+# There is no native Windows GNU bc or dc, so the reference always had to be
+# reached through WSL; what the move changes is that *ours* crosses too, and
+# both are then reached through a symlink named `bc`/`dc` on one `PATH`. That
+# matters for a calculator more than it looks: bc and dc write their
+# diagnostics with `argv[0]` in front, and a comparison in which one side says
+# `bc: ` and the other says `/usr/bin/bc: ` differs on every error case for a
+# reason that is not about arithmetic.
+#
+# It also removes a per-case `wsl.exe` launch. This harness runs a program on
+# each side for every one of its cases, so that was the dominant cost of the run.
+#
+# This harness is the first with a `DIFF_PKG` naming more than one package: `bc`
+# comes from `coreutils` and `dc` from the `dc` crate, and one `cargo build`
+# covers both. Naming the packages is also what keeps the subject honest --
+# `bc` used to have a namesake in `coreutils`, an older separate implementation
+# that also wrote `target/…/debug/bc.exe`, and this harness spent a day
+# reporting 105 differences against it. The two have since been merged the right
+# way round (design-decisions.md §359).
 set -u
 
-# Both are built here, from the packages named, rather than picked up from
-# `target/`. `bc` in particular used to have a namesake in `coreutils` -- an
-# older, separate implementation that also wrote `target/…/debug/bc.exe` -- and
-# this harness spent a day reporting 105 differences against it. The two have
-# since been merged the right way round (design-decisions.md §359): the crate
-# that survives is `coreutils`, the code that survives is the one this harness
-# measures. Naming the package is what keeps that honest. See
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS_BC=$(subject_binary coreutils bc "${OURS_BC:-}") || exit 1
-OURS_DC=$(subject_binary dc dc "${OURS_DC:-}") || exit 1
-
-if command -v bc >/dev/null 2>&1; then
-  GNU_BC=${GNU_BC:-bc}
-  GNU_DC=${GNU_DC:-dc}
-  WSL=""
-else
-  # `wsl.exe -e` runs the binary directly, with no shell in between to mangle
-  # the program text on its way to stdin.
-  WSL=${WSL:-"wsl.exe -d Ubuntu -e"}
-  GNU_BC=${GNU_BC:-bc}
-  GNU_DC=${GNU_DC:-dc}
-fi
+# Into WSL, build bc and dc for Linux, and put each behind its own name on a
+# `PATH` both sides share. `DIFF_NO_REF` because there is no one program called
+# `calc`: the references are found per binary by the multi-binary branch of
+# `diff-wsl.sh`, which reports any it could not find in `DIFF_SKIPPED`.
+DIFF_PROG=calc
+DIFF_PKG="coreutils dc"
+DIFF_BINS="bc dc"
+DIFF_NO_REF=1
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 # A reference implementation we cannot reach is a reason to say so and stop, not
 # a reason to report failures. This has to stay a *skip* rather than an error so
-# that the harness can be run from a build that has no WSL without turning into
-# a build dependency; the unit tests it seeded stay behind and keep every
-# measured value under test either way.
-if ! printf '1\n' | $WSL "$GNU_BC" >/dev/null 2>&1 \
-  || ! printf '1 p\n' | $WSL "$GNU_DC" >/dev/null 2>&1; then
-  echo "calc-diff: GNU bc/dc not reachable (tried: $WSL $GNU_BC / $GNU_DC) -- skipping."
-  echo "calc-diff: install them (Debian/Ubuntu: apt-get install bc dc) or set GNU_BC/GNU_DC/WSL."
+# that the harness can be run from a build without GNU bc/dc installed without
+# turning them into a build dependency; the unit tests it seeded stay behind and
+# keep every measured value under test either way. It is all-or-nothing rather
+# than per-program because the case list below is fixed: running the bc half
+# against no dc would report a pass count that means something different from
+# run to run.
+if [ -n "$DIFF_SKIPPED" ]; then
+  echo "calc-diff: no GNU$DIFF_SKIPPED inside WSL -- skipping."
+  echo "calc-diff: install them (Debian/Ubuntu: apt-get install bc dc)."
   exit 0
 fi
 
 pass=0; fail=0; xfail=0; xpass=0
 
+# One invocation of one side. The side's directory goes on the front of `PATH`
+# so the bare word `bc`/`dc` reaches that side's symlink and `argv[0]` -- and
+# therefore the prefix on every diagnostic -- is the same on both.
+#
+# `diff_run` keeps bash's own announcement of a signalled child out of the
+# stderr file; `diff-wsl.sh` says why. It matters more here than in most
+# harnesses, because what is compared is only *whether* stderr was non-empty,
+# so one stray `Aborted` line is indistinguishable from a diagnostic.
+run_side() {
+  local side=$1 tool=$2; shift 2
+  diff_run env PATH="$bindir/$side:$PATH" "$@" "$tool"
+}
+
 # compare TOOL PROGRAM [VAR=VALUE...]
 compare() {
   local tool="$1" program="$2"; shift 2
-  local ours gnu o_out g_out o_err g_err o_rc g_rc
-  case "$tool" in
-    bc) ours="$OURS_BC"; gnu="$GNU_BC" ;;
-    *)  ours="$OURS_DC"; gnu="$GNU_DC" ;;
-  esac
-
-  o_err=$(mktemp); g_err=$(mktemp)
-  o_out=$(printf '%s\n' "$program" | env "$@" "$ours" 2>"$o_err"); o_rc=$?
-  # WSL does not inherit the caller's environment, so a setting has to be
-  # carried across with `env` on the far side of the boundary.
-  g_out=$(printf '%s\n' "$program" | $WSL env "$@" "$gnu" 2>"$g_err"); g_rc=$?
+  local o_out g_out o_err g_err o_rc g_rc
+  o_err=$DIFF_TMP/o.err; g_err=$DIFF_TMP/g.err
+  o_out=$(printf '%s\n' "$program" | run_side ours "$tool" "$@" 2>"$o_err"); o_rc=$?
+  g_out=$(printf '%s\n' "$program" | run_side gnu  "$tool" "$@" 2>"$g_err"); g_rc=$?
 
   local o_loud=no g_loud=no
   [ -s "$o_err" ] && o_loud=yes

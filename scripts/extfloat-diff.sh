@@ -23,6 +23,22 @@
 # cases that motivated the module. So the C side is compiled and run inside WSL,
 # never on the host.
 #
+# ## Why the whole run is inside WSL
+#
+# `diff-wsl.sh` puts it there, and both sides with it. The subject used to be
+# built for `x86_64-pc-windows-gnu` and run on the host while only the C probe
+# lived in WSL, which meant six `wsl -e` round trips per run and a copy of every
+# case file through the 9p mount -- but, much more to the point, it meant the
+# subject was built by a path that has no staleness guard. `extfloat-probe` is
+# an example in the `coreutils` package, so it links the same library that was
+# three commits stale on 2026-08-24 while `cargo build` kept exiting 0. The
+# preamble's `diff_assert_fresh` is the reason to be here; the round trips going
+# away is a bonus.
+#
+# Nothing about the arithmetic changes with the triple -- `extfloat` builds its
+# 80-bit format out of integers, and `f64` is SSE on both -- but the Linux build
+# is the one closer to what `x86_64-slateos` will run.
+#
 # There is no `OURS=` discrimination check here, because there is nothing on the
 # host to point it at: the thing under test is a library, not a program with a
 # system counterpart. What plays that role instead is `--flip`, which runs the
@@ -45,8 +61,21 @@
 
 set -u
 
-cd "$(dirname "$0")/.." || exit 1
+DIFF_PROG=extfloat
+# The subject is an example, not a utility: it exposes a library, and anything
+# in `src/bin/` would be installed into the image. So there is no `--bin` to
+# build, no reference of the same name on `PATH` (`DIFF_NO_REF`), and no pair of
+# same-named binaries to put behind one `PATH` entry (`DIFF_NO_BINDIR`).
+DIFF_EXAMPLES=extfloat-probe
+DIFF_NO_REF=1
+DIFF_NO_BINDIR=1
+# `gcc` builds the reference; `python3` generates the cases. Without either, the
+# run would be skipped rather than reported as agreement.
+DIFF_NEED="gcc python3"
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
+# Parsed *after* the preamble, which carries `$@` across the re-exec intact.
 CASES=4000
 FLIP=0
 KEEP=0
@@ -59,25 +88,19 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-TARGET=x86_64-pc-windows-gnu
-# Built every run, not only when it is missing: an existing probe compiled from
-# an older `extfloat.rs` answers confidently and wrongly, which is worse than
-# not answering. See `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(DIFF_TARGET=$TARGET subject_example coreutils extfloat-probe "${OURS:-}") || exit 1
+WORK=$DIFF_TMP
+# `--keep` is honoured by replacing the preamble's cleanup rather than by
+# cancelling its trap: a second `trap ... EXIT` would replace the first, and the
+# next thing added to `diff_cleanup` would silently stop running here.
+if [ "$KEEP" = 1 ]; then
+  diff_cleanup() { echo "working files in $DIFF_TMP"; }
+fi
 
-WORK=$(mktemp -d)
-cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }
-trap cleanup EXIT
-[ "$KEEP" = 1 ] && echo "working files in $WORK"
-
-# The C probe is compiled inside WSL, from a copy under /tmp: a build in the
-# Windows-mounted tree would write its output through the 9p mount, which is
-# slow enough to dominate the run.
-export MSYS2_ARG_CONV_EXCL='*'
-wsl -e bash -c 'mkdir -p /tmp/extfloat && cat > /tmp/extfloat/probe.c' < scripts/extfloat-probe.c || exit 1
-if ! wsl -e bash -c 'cd /tmp/extfloat && gcc -O2 -o probe probe.c 2>&1'; then
-  echo "could not build the reference probe in WSL" >&2
+# The reference is compiled into `$DIFF_TMP`, which is on WSL's own filesystem;
+# the source is read once from the mounted tree, which is cheap, but writing a
+# build's output through 9p is not.
+if ! gcc -O2 -o "$WORK/probe" "$root/scripts/extfloat-probe.c"; then
+  echo "could not build the reference probe" >&2
   exit 1
 fi
 
@@ -87,14 +110,18 @@ run_mode() {
   mode=$1
   echo
   echo "=== $mode ==="
-  python scripts/extfloat-cases.py "$mode" "$CASES" > "$WORK/$mode.cases" || exit 1
+  python3 "$root/scripts/extfloat-cases.py" "$mode" "$CASES" > "$WORK/$mode.cases" || exit 1
   lines=$(wc -l < "$WORK/$mode.cases")
   echo "$lines cases"
 
-  # Both sides read the identical byte stream. The case file is copied into WSL
-  # rather than read across the mount for the same reason the source was.
-  wsl -e bash -c "cat > /tmp/extfloat/$mode.cases" < "$WORK/$mode.cases" || exit 1
-  wsl -e bash -c "cd /tmp/extfloat && LC_ALL=C ./probe $mode < $mode.cases" > "$WORK/$mode.theirs" || exit 1
+  # Both sides read the identical byte stream, from the same file.
+  #
+  # `LC_ALL=C` rather than the preamble's `C.UTF-8`, and deliberately: glibc's
+  # `printf` takes the decimal point from `LC_NUMERIC`, and the claim being
+  # measured is that `extfloat` implements the C locale. The two agree on the
+  # decimal point today; naming the one that is being claimed is what keeps the
+  # test honest if that ever stops being true.
+  LC_ALL=C "$WORK/probe" "$mode" < "$WORK/$mode.cases" > "$WORK/$mode.theirs" || exit 1
   "$OURS" "$mode" < "$WORK/$mode.cases" > "$WORK/$mode.ours" || exit 1
 
   if [ "$FLIP" = 1 ]; then

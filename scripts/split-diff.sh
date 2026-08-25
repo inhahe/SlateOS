@@ -22,59 +22,46 @@
 # cases use `names_case`, which compares the sorted file list and skips the
 # contents. The contents of a one-byte piece are not in doubt.
 #
-# ## Why the reference is glibc, and only glibc
+# ## Why both sides run inside WSL
 #
-# The host's `split` is MSYS2's, a Cygwin derivative linking `msys-2.0.dll`
-# rather than glibc, and its `getopt` words every option diagnostic
-# differently. See `known-issues.md` →
-# `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, and the identical
-# note at the top of `csplit-diff.sh`, `od-diff.sh` and `wc-diff.sh`.
+# `scripts/diff-wsl.sh` gives the reasons. The one that bites hardest here is
+# the reference: the host's `split` is MSYS2's, a Cygwin derivative linking
+# `msys-2.0.dll` rather than glibc, and its `getopt` words every option
+# diagnostic differently (`known-issues.md` →
+# `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`). This file already
+# reached for `wsl -e env LC_ALL=C.UTF-8 split` to avoid that, at the cost of a
+# WSL process per case — which was most of the twenty-five minutes a run took.
+#
+# The probe that went with it mattered more here than in most harnesses, and is
+# worth recording now that it is gone: what this file compares is *files the run
+# left behind*, so a reference that silently ran in some other directory would
+# have shown up as "ours has files, GNU has none" — a total divergence rather
+# than a broken harness. With both sides inside WSL there is no second view of
+# the directory to get wrong, so there is nothing left to probe for, and the
+# `HAVE_GNU` guards the probe fed have gone with it.
 #
 # ## Why LC_ALL=C.UTF-8
 #
-# The diagnostics quote the offending argument back at the caller through gnulib's
-# `quote()`, which picks its quote marks from the locale. Since §351 ours
-# prints U+2018/U+2019 in every locale, and GNU prints those under a UTF-8
-# locale and ASCII under `C` — so `C.UTF-8` is the setting the two agree in.
-# This file ran under `C` for the mirror-image of that reason until B-Q2 was
-# answered; nothing else here reads the locale.
+# `diff-wsl.sh` fixes it there, for the whole family. The diagnostics quote the
+# offending argument back at the caller through gnulib's `quote()`, which picks
+# its quote marks from the locale. Since §351 ours prints U+2018/U+2019 in every
+# locale, and GNU prints those under a UTF-8 locale and ASCII under `C` — so
+# `C.UTF-8` is the setting the two agree in. This file ran under `C` for the
+# mirror-image of that reason until B-Q2 was answered; nothing else here reads
+# the locale.
 set -u
 
-# Our split is a native Windows binary, so MSYS would rewrite an argument that
-# looks like a path — and `-n l/3`, `-n r/2/3` and `--filter='cat > $FILE'` all
-# can.
-export MSYS2_ARG_CONV_EXCL='*'
-
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils split "${OURS:-}") || exit 1
-export LC_ALL=${LC_ALL:-C.UTF-8}
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `split` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+DIFF_PROG=split
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d)
-trap 'rm -rf "$fixtures"' EXIT
-OURS_ABS=$OURS
-case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$PWD/$OURS" ;; esac
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
 cd "$fixtures" >/dev/null || exit 1
-
-# WSL is invoked with the Windows cwd, which for an MSYS temp directory lands
-# on the same bytes under `/mnt/c/...`. Verified rather than assumed: a
-# reference that silently ran somewhere else would write its output files into
-# a different directory, and every manifest comparison would then be "ours has
-# files, GNU has none" — which looks like a total divergence rather than a
-# broken harness.
-printf '1\n2\n' > .probe
-if wsl -e env LC_ALL=C.UTF-8 split -l 1 .probe .p >/dev/null 2>&1 && [ -f .paa ]; then
-  HAVE_GNU=yes
-else
-  HAVE_GNU=no
-  echo "split-diff: glibc split not reachable in this directory; skipping"
-fi
-rm -f .probe .paa .pab
 
 # --- fixtures -----------------------------------------------------------------
 
@@ -112,8 +99,31 @@ for i in $(seq 1 700); do printf 'z'; done > wide.txt
 
 # --- machinery ----------------------------------------------------------------
 
-run_ours() { ( cd "$1" && "$OURS_ABS" "${@:2}" ); }
-run_gnu()  { ( cd "$1" && wsl -e env LC_ALL=C.UTF-8 split "${@:2}" ); }
+# One invocation of one side, in that side's own directory. `$1` is `ours` or
+# `gnu`; each is reached through a symlink named `split`, so `argv[0]` is the
+# bare word on both sides and the `split: ` prefix on every diagnostic matches.
+#
+# `PATH` is *prepended to* here rather than replaced, which is where this
+# harness parts company with the rest of the family. `--filter=CMD` hands CMD to
+# `sh -c`, and that child inherits the `PATH` split was run with — so under the
+# family's one-entry `PATH` every filter case naming an external command dies
+# with `cat: command not found`. Measured, not assumed: `--filter='cat > $FILE'`
+# on a six-line input gives rc=127 and a single `xaa` under a one-entry `PATH`,
+# and rc=0 with `xaa xab xac` when the directory is merely prepended. Five of
+# the six filter cases below name a command, and the failure would have been
+# *silent* — both sides fail identically, agree, and score a pass. Prepending
+# keeps the bare word `split` resolving to the symlink, which is the whole of
+# what the narrowing was ever for, while leaving the filter a system to run in.
+# `ls-diff.sh` prepends for its own reasons and is the precedent.
+#
+# `diff_run` keeps bash's own announcement of a child that died of a signal out
+# of the stderr the caller captures; `diff-wsl.sh` says why. The subshell does
+# not make it unnecessary — the subshell is the shell that waits on the child,
+# and it inherited the caller's redirected stderr along with everything else.
+run_side() {
+  local side=$1 dir=$2; shift 2
+  ( cd "$dir" && diff_run env PATH="$bindir/$side:$PATH" split "$@" )
+}
 
 # Every file the run left behind, in name order, with its contents.
 #
@@ -160,11 +170,11 @@ compare_argv() {
   # is od's, and PIPESTATUS is set in the substitution's subshell where it
   # cannot be read. Same note as csplit-diff.sh and cat-diff.sh.
   if [ "$stdin" = - ]; then
-    run_ours o "$@" >"$o_bin" 2>"$o_err" </dev/null; o_rc=$?
-    run_gnu  g "$@" >"$g_bin" 2>"$g_err" </dev/null; g_rc=$?
+    run_side ours o "$@" >"$o_bin" 2>"$o_err" </dev/null; o_rc=$?
+    run_side gnu  g "$@" >"$g_bin" 2>"$g_err" </dev/null; g_rc=$?
   else
-    run_ours o "$@" >"$o_bin" 2>"$o_err" <"$stdin"; o_rc=$?
-    run_gnu  g "$@" >"$g_bin" 2>"$g_err" <"$stdin"; g_rc=$?
+    run_side ours o "$@" >"$o_bin" 2>"$o_err" <"$stdin"; o_rc=$?
+    run_side gnu  g "$@" >"$g_bin" 2>"$g_err" <"$stdin"; g_rc=$?
   fi
 
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
@@ -205,7 +215,6 @@ report() {
 
 # The common shape: options, then the fixture as the input operand.
 run_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local fixture=$1; shift
   compare_argv "$fixture" full - "$@" in.txt
   report "split $* $fixture"
@@ -213,7 +222,6 @@ run_case() {
 
 # The same, comparing names only — for the hundreds-of-files cases.
 names_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local fixture=$1; shift
   compare_argv "$fixture" names - "$@" in.txt
   report "split $* $fixture (names)"
@@ -222,7 +230,6 @@ names_case() {
 # The uncommon shape: the whole argv, for cases needing something before the
 # operand, or no operand at all.
 raw_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local fixture=$1; shift
   compare_argv "$fixture" full - "$@"
   report "split $*"
@@ -230,7 +237,6 @@ raw_case() {
 
 # Reading the fixture from stdin rather than naming it.
 stdin_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local fixture=$1; shift
   compare_argv "$fixture" full "$fixture" "$@"
   report "split $* < $fixture"
@@ -240,7 +246,6 @@ stdin_case() {
 # case that starts agreeing is reported too — an xfail that silently becomes
 # correct is a stale note in the harness.
 xfail_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local why="$1" fixture=$2; shift 2
   compare_argv "$fixture" full - "$@" in.txt
   if [ "$AGREED" = yes ]; then
@@ -581,9 +586,7 @@ xfail_case 'GNU reads out of bounds for a hex start value' seq20.txt -l 5 --hex-
 xfail_case 'GNU reads out of bounds for a hex start value' seq20.txt -l 5 --hex-suffixes=a
 xfail_case 'GNU reads out of bounds for a hex start value' seq20.txt -n 3 --hex-suffixes=1f
 
-if [ "$HAVE_GNU" = yes ]; then
-  printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
-  [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"
-  printf '\n'
-fi
+printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
+[ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"
+printf '\n'
 [ "$fail" -eq 0 ] || exit 1

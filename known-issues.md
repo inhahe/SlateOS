@@ -75230,3 +75230,82 @@ patch.
 **Severity.** Low for correctness — the exit status, the message text and
 everything already written to stdout all match gawk exactly. Medium for
 usability on long scripts, which is the case that most needs it.
+
+## TD-GREP-IS-MISSING-CONTEXT-COLOUR-BYTE-OFFSETS-AND-THE-FILE-SELECTORS (lane B, 2026-08-25) — **open**
+
+**In short:** our `grep` handles matching well and is missing a lot of the
+things people actually type at it. `grep -C 3 pattern file` — show three lines
+either side of each hit, the single most-used grep option after `-i` — is not
+implemented; neither is `--color`, `-b` (print each hit's byte offset), `-T`
+(line up the output in columns), `-d` (what to do when an operand is a
+directory), or `--include`/`--exclude`/`--exclude-dir` (search only some of the
+files a recursive search would reach). Typing any of them gets `grep: unknown
+option`, so a script that uses one fails outright rather than degrading. Three
+smaller things are wrong rather than absent: `-r` follows symbolic links it
+finds during the walk when it should skip them, an unreadable directory leaves
+the exit status at 1 where an unreadable file correctly makes it 2, and a
+failed write to a closed stdout is silently discarded.
+
+**How they were found.** All of it in one run, by `scripts/grep-diff.sh`'s
+first execution after it was moved onto `diff-wsl.sh` (2026-08-25). None of it
+was visible before, because the harness had been comparing a Windows build
+against MSYS2's Cygwin-derived grep on a Windows host; six cases were even
+recorded as *deliberate* divergences over a path separator the harness itself
+had introduced. Each item below is a live case in that harness carrying a `?`
+marker, which means the harness fails the moment the gap closes — deleting the
+marker is part of closing it, and nothing here can be fixed and forgotten.
+
+**Missing features**, in the order worth doing them:
+
+| | What it does | Harness cases |
+|---|---|---|
+| `-A N` `-B N` `-C N` | print N lines after / before / around each hit, `--` between non-adjacent groups, `-` instead of `:` on a context line's prefix | 14 |
+| `--color=never\|always\|auto` + `GREP_COLORS` | wrap the matched text in SGR escapes; `auto` means "only if stdout is a terminal" | 7 |
+| `-b` | prefix each output line with the byte offset it starts at | 5 |
+| `--include=GLOB` `--exclude=GLOB` `--exclude-dir=GLOB` | filter what a recursive search descends into and reports | 3 |
+| `-d ACTION` | `read` (the default), `skip`, or `recurse` for a directory operand | 2 |
+| `-T` | pad the filename/line-number prefix so the text lines up | 2 |
+
+The context group is by far the largest and is the one to do first: `-C` is
+ordinary daily usage, and its output shape interacts with `-n`, `-H`, `-c`,
+`-v`, `-m` and multiple file operands, all of which the harness already pins.
+
+**Defects**, which are smaller and independent of the above:
+
+1. **`-r` follows a symlink met during the walk.** GNU follows a symlink only
+   when it was named on the command line; `-R` is the flag that follows them
+   everywhere. Ours does not make the distinction, so `grep -r foo symdir`
+   reports `symdir/tosub/s1` that GNU does not — and, worse, a directory tree
+   containing a link back to one of its own ancestors would not terminate.
+   *Fix:* in the recursive walk, `symlink_metadata` on each entry and skip a
+   symlink unless the walk is `-R` or the entry is a command-line operand.
+
+2. **An unreadable directory leaves the exit status at 1.** `grep -r foo
+   nolist` on a `chmod 000` directory prints the right message
+   (`grep: nolist: Permission denied`) and exits 1; GNU exits 2. An unreadable
+   *file* is handled correctly, which places the bug in the recursive walk's
+   error path rather than in the shared one. Related: `-s` suppresses the
+   message for an unreadable file and does not for an unreadable directory.
+   *Fix:* route the walk's open failures through the same "note an error, set
+   status 2, honour `no_messages`" path the file case already uses.
+
+3. **A failed write to a closed stdout is discarded.** `grep a abc >&-` exits
+   0 having said nothing; GNU exits 2 with `grep: write error: Bad file
+   descriptor`. `close_stdout` is already called, so the `io::Error` is being
+   dropped between the match loop and the exit status — the two `>&-` cases
+   that write nothing pass, which is what localises it to the writing.
+
+**Diagnostic wording** (four more `?` cases, lower value than the above):
+`grep` with no operands answers `grep: missing PATTERN` where GNU prints the
+usage summary; `--zzz` is `unknown option: --zzz` against GNU's `unrecognized
+option '--zzz'`; `-m x` names the offending value where GNU's does not; and a
+leading quantifier under `-E` (`grep -E '*a'`) is accepted silently where GNU
+also warns `grep: warning: * at start of expression` on stderr while still
+exiting 0. The first two belong with
+`TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE` rather than with grep.
+
+**Severity.** Medium. Nothing here produces a wrong answer to a query that
+works — the matching itself agrees with GNU across 190 cases — but `-C` and
+`--color` are common enough that a script or a habit that uses them simply
+does not run, and defect 1 is a hang on a tree that a user could plausibly
+have.

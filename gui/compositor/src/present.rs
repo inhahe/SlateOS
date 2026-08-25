@@ -64,6 +64,8 @@
 //! [`evdev::EvdevError::Denied`] says so in as many words, because a permission
 //! error that looks like a missing file is a day lost to the wrong hypothesis.
 
+use inputsettings::InputSettings;
+
 use crate::InputEvent;
 
 /// One monitor a [`Present`] is driving.
@@ -167,6 +169,27 @@ pub trait Present {
     fn monitors(&mut self) -> Option<Vec<MonitorInfo>> {
         None
     }
+
+    /// Adopt the user's input preferences, which have just changed.
+    ///
+    /// Pointer speed, acceleration, button mapping, scroll direction and the
+    /// key-repeat rate are all applied where raw device deltas arrive — which
+    /// is here and not in the compositor, because a *relative* mouse delta is
+    /// only a pointer position once someone has integrated it, and the thing
+    /// doing the integrating is the input source. The compositor reads
+    /// `input.yaml` and knows what it says; it has no device to say it to.
+    ///
+    /// Called by [`Server::run_with`](crate::Server::run_with) when
+    /// [`Compositor::input_settings`](crate::Compositor::input_settings) starts
+    /// answering something other than what was last passed here. That is the
+    /// same polled, idempotent shape as [`Self::monitors`], for the same
+    /// reason: a push would need a queue, and a queue is a thing that can get
+    /// out of step with what it describes.
+    ///
+    /// The default body ignores it, like [`Self::monitors`]'s: a headless
+    /// server, a recording and a host window have no pointer whose speed could
+    /// change. Only the implementor that owns a device needs to care.
+    fn reload_input(&mut self, _settings: &InputSettings) {}
 }
 
 /// A display server with no display.
@@ -338,6 +361,17 @@ pub trait InputSource {
     /// [`Server::run_with`](crate::Server::run_with) polls input *before* it
     /// shows the first frame.
     fn set_bounds(&mut self, _width: u32, _height: u32) {}
+
+    /// Adopt the user's input preferences, which have just changed.
+    ///
+    /// The [`InputSource`] half of [`Present::reload_input`], and the one that
+    /// actually does the work: a source that integrates relative deltas into a
+    /// pointer position is the only thing in the system that can apply a
+    /// pointer speed, and the only thing that can decide a key has repeated is
+    /// the thing holding the key-down timestamp. The default ignores the
+    /// settings for the same reason [`Self::set_bounds`]'s does — a source with
+    /// no pointer and no repeat clock has nothing to change.
+    fn reload_input(&mut self, _settings: &InputSettings) {}
 }
 
 /// A screen and an input source, presented as one display.
@@ -409,6 +443,10 @@ impl<S: Present, I: InputSource> Present for Paired<S, I> {
     fn monitors(&mut self) -> Option<Vec<MonitorInfo>> {
         self.screen.monitors()
     }
+
+    fn reload_input(&mut self, settings: &InputSettings) {
+        self.input.reload_input(settings);
+    }
 }
 
 pub mod drm;
@@ -430,6 +468,8 @@ mod tests {
         clippy::panic,
         clippy::arithmetic_side_effects
     )]
+
+    use inputsettings::InputSettings;
 
     use super::{Headless, InputSource, MonitorInfo, Paired, Present, Recording};
     use crate::InputEvent;
@@ -557,6 +597,8 @@ mod tests {
         script: std::collections::VecDeque<Vec<InputEvent>>,
         /// Every size this source was told about, in order.
         bounds: Vec<(u32, u32)>,
+        /// Every settings it was told about, in order.
+        reloads: Vec<InputSettings>,
     }
 
     impl InputSource for ScriptedSource {
@@ -566,6 +608,10 @@ mod tests {
 
         fn set_bounds(&mut self, width: u32, height: u32) {
             self.bounds.push((width, height));
+        }
+
+        fn reload_input(&mut self, settings: &InputSettings) {
+            self.reloads.push(settings.clone());
         }
     }
 
@@ -655,5 +701,39 @@ mod tests {
             pair.input().as_slice(),
             [InputEvent::KeyUp { scancode: 0x1E }]
         ));
+    }
+
+    #[test]
+    fn a_pair_hands_the_users_input_settings_to_the_source_and_not_to_the_screen() {
+        // The whole reason `Present::reload_input` exists: a pointer speed is
+        // applied where the raw deltas are integrated, which is the source, and
+        // a screen has no pointer at all. Forwarding to the wrong half would
+        // compile and do nothing — the default body ignores its argument — so
+        // the check is that the source *did* hear it.
+        let mut settings = InputSettings::default();
+        settings.mouse.speed = 7;
+        let mut pair = Paired::new(Recording::new(), ScriptedSource::default(), 2, 2);
+
+        pair.reload_input(&settings);
+
+        assert_eq!(
+            pair.input_mut().reloads.len(),
+            1,
+            "the source was told, exactly once"
+        );
+        assert_eq!(pair.input_mut().reloads[0].mouse.speed, 7);
+    }
+
+    #[test]
+    fn a_display_with_no_pointer_ignores_the_input_settings_rather_than_refusing_them() {
+        // The default body, exercised on purpose. A headless server and a
+        // recording have nothing whose speed could change, and the alternative
+        // to a no-op default is every implementor writing one — which is how a
+        // trait grows a method that half its implementors get wrong.
+        let mut headless = Headless;
+        headless.reload_input(&InputSettings::default());
+        let mut rec = Recording::new();
+        rec.reload_input(&InputSettings::default());
+        assert!(headless.is_open() && rec.is_open(), "and nothing broke");
     }
 }

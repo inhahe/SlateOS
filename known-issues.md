@@ -75188,3 +75188,50 @@ leaves `norm_tables.rs` byte-identical (SHA-256 `434108c5…`), and
 `scripts/check-generated-tables.py` still reports all four of its tables
 matching. Any other crate that mixes generated and hand-written modules will
 hit the same wall the first time its root is touched; the same fix applies.
+
+## TD-C-THE-NUMERIC-KEYPAD-TYPES-NOTHING-BECAUSE-NOTHING-TRACKS-NUM-LOCK (lane C, 2026-08-24)
+
+**In short.** On a real SlateOS machine the number keys on the right-hand
+block of the keyboard — the calculator-style pad — type nothing at all. The
+main number row across the top works fine, so this is not "digits are broken",
+it is "one particular set of keys is". The reason is that the keypad's keys are
+double-duty (`4` or Left-arrow, `7` or Home) and which one you get depends on
+the Num Lock light, which the compositor does not currently pay any attention
+to. Rather than guess, those keys were left typing nothing.
+
+**Where.** `gui/compositor/src/keymap.rs` — `text_outside_the_block`, the
+fallback for scancodes no [`Layout`] describes. It answers `Some(' ')` for
+`0x39` and `None` for everything else, keypad included. `ModifierState`
+(same file) tracks Caps Lock as a latch but has no Num Lock equivalent, and
+`ModifierState::update` ignores `0x45` entirely.
+
+**Why not just add the digits.** The keypad reports the *same* set-1 scancodes
+whichever way the latch is set — `0x4B` is keypad-4 and keypad-Left both — so a
+table that unconditionally maps `0x4B` to `'4'` would type a `4` every time a
+user pressed keypad-Left with Num Lock off. `key_for_scancode` already maps
+those codes to `Key::Numpad*` names, and
+`the_navigation_cluster_is_not_conflated_with_the_keypad` guards that the pad
+and the arrow cluster stay distinct, so the `Key` half is already right; it is
+only the character half that is unanswerable without the latch.
+
+**Reproduce.** Boot the evdev backend (any bare-metal or QEMU run), focus a
+text field, press keypad-1 with Num Lock on. Nothing is inserted. On the host
+backend it works, because Windows hands the compositor its own character and
+that branch wins before the layout is ever consulted — the same masking that
+hid the space-bar bug fixed in this commit.
+
+**Proper fix.** Give `ModifierState` a `num_lock: bool` latch alongside
+`caps_lock`, toggled on press of `0x45` and ignored on release exactly as
+`0x3A` is, defaulting to **on** (which is what firmware sets on essentially
+every desktop keyboard, and what a user who bought a keypad expects). Then let
+`key_for_layout` consult it: with the latch on, `0x47`–`0x53` type
+`7 8 9 - 4 5 6 + 1 2 3 0 .`; with it off they keep answering `None` and stay
+navigation keys. `0x4A`/`0x4E`/`0xE035` (`-`, `+`, `/`) and `0x37` (`*`) are
+not double-duty and could type unconditionally. The decimal separator is the
+one genuinely locale-dependent key — a German keypad is engraved `,` — so it
+should come from the layout rather than the table, which is an argument for
+`LayoutSpec` growing a `decimal_separator` field rather than for hard-coding
+`'.'`.
+
+**Severity.** Medium. It is a whole physical key block that does nothing, and
+data-entry users reach for it first. Not urgent only because the top row works.

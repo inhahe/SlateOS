@@ -264,10 +264,40 @@ pub const fn key_for_char(character: char) -> Option<Key> {
 #[must_use]
 pub fn key_for_layout(layout: &Layout, scancode: u32, level: Level) -> (Key, Option<char>) {
     let Some(def) = layout.key(scancode) else {
-        return (key_for_scancode(scancode), None);
+        return (key_for_scancode(scancode), text_outside_the_block(scancode));
     };
     let key = key_for_char(def.plain).unwrap_or_else(|| key_for_scancode(scancode));
     (key, def.character(level))
+}
+
+/// The character a key types that no layout describes.
+///
+/// A [`Layout`] is the *alphanumeric block* and nothing else, deliberately: it
+/// is the part a layout rearranges, and Enter is Enter on every keyboard ever
+/// made. But "no layout describes it" is not the same as "it types nothing",
+/// and space is the case that proves it — [`key_for_layout`] answered `None`
+/// for `0x39`, so on the path where the compositor does its own translation
+/// (the evdev backend, which is every real SlateOS machine) the space bar typed
+/// no text at all, and no text field could contain a space. The host backend
+/// hid this completely: Windows hands us its own character and that branch
+/// wins, so every test and every developer run typed spaces perfectly well.
+///
+/// Space is the whole list, and the omissions are on purpose:
+///
+/// * **Tab, Enter and Backspace** are control characters, which
+///   [`KeyEvent::typed`](guitk::event::KeyEvent::typed) filters out. Widgets
+///   match them as a [`Key`] instead, which is where a newline-or-submit
+///   decision belongs.
+/// * **The numeric keypad** would need Num Lock, which nothing here tracks. The
+///   keypad reports the same scancodes whichever way the latch is set, so
+///   putting digits here unconditionally would type `4` every time a user
+///   pressed keypad-Left — a worse bug than the one being fixed. Recorded in
+///   `known-issues.md` rather than guessed at.
+const fn text_outside_the_block(scancode: u32) -> Option<char> {
+    match scancode {
+        0x39 => Some(' '),
+        _ => None,
+    }
 }
 
 /// Whether this keystroke resolved through the layout's AltGr level.
@@ -634,6 +664,41 @@ mod tests {
         }
         for code in [0x1Eu32, 0xE04B, 0x39] {
             assert!(!ModifierState::is_modifier(code), "{code:#x}");
+        }
+    }
+
+    #[test]
+    fn the_space_bar_types_a_space_even_though_no_layout_describes_it() {
+        // The bug this catches: a `Layout` covers the alphanumeric block only,
+        // so `layout.key(0x39)` is `None` and the fallback used to answer
+        // `None` for the character too. On the evdev backend — every real
+        // SlateOS machine — that meant the space bar typed nothing at all and
+        // no text field could hold a space. The host backend supplies its own
+        // character and so never showed it.
+        for layout in keylayout::builtins() {
+            for level in [Level::PLAIN, Level::shift(), Level::alt_gr()] {
+                assert_eq!(
+                    key_for_layout(layout, 0x39, level),
+                    (Key::Space, Some(' ')),
+                    "{} types no space",
+                    layout.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_keys_outside_the_block_that_type_no_text_still_type_none() {
+        // The other half of the same fallback, stated so that widening it is a
+        // deliberate act. Tab, Enter and Backspace are control characters that
+        // `KeyEvent::typed` filters out anyway, and the keypad cannot be
+        // decided without a Num Lock latch that nothing tracks yet.
+        for code in [0x0F, 0x1C, 0x0E, 0x01, 0x3B, 0x4B, 0x4F, 0xE04B] {
+            assert_eq!(
+                key_for_layout(keylayout::default_layout(), code, Level::PLAIN).1,
+                None,
+                "{code:#x}"
+            );
         }
     }
 

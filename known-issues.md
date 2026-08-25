@@ -78219,3 +78219,47 @@ both stop compiling. `SKY` is the membership sweep's one exemption from "the
 desktop paints only palette roles", so the phase cannot arrive as a colour the
 sweep was never told about. A single `E0027` is a nudge; a chain that terminates
 at the invariant is a guarantee.
+
+### Lesson 45: a feature with no production caller is a feature that does not exist
+
+`apps/indexer` had a config option, `index_contents`, that did nothing at all.
+Setting it to `true` caused no file to be read, no trigram to be stored, and no
+content search ever to match. `cmd_search` had a whole fallback branch for
+content hits that could not be reached, and printed "No results found" instead.
+The option had been in the config file, the `Display` for `Config`, the
+serializer and the docs for as long as they had existed.
+
+What made it invisible was the test. `test_search_content` built an index, then
+called `index_file_content` itself for two entries, then searched and found
+them. Every line of it passes against a build in which nothing in the program
+ever calls `index_file_content` -- which was the actual state of affairs. It is
+lesson 42 one level up: not a test that re-derives an expected *value*, but a
+test that supplies the *step the program was supposed to perform*. It tested
+that a function works. Nobody had tested that it is called.
+
+The tell is available without reading any test: **grep the callers of the
+function that does the work.** `index_file_content` had exactly two, both
+inside `#[cfg(test)]`. A production function whose only callers are tests is
+either dead code or an unwired feature, and the two are worth telling apart
+because the second is a bug with a config key advertising it.
+
+Two smaller findings from the same fix, both worth generalising:
+
+- **"Off" and "broken" must not be the same observable state.** With
+  `index_contents` on, the program did exactly what it did with it off. The
+  new `ScanStats::files_content_indexed` counter exists so the two are
+  distinguishable at a glance, and the regression test asserts the count and
+  not merely that the search came back empty. Any option whose failure mode is
+  "produces nothing" needs some positive evidence that it ran.
+- **A derived cache is only derived if something re-derives it.**
+  `trigram_index` was not written by `serialize`, on the reasonable-sounding
+  grounds that it is a cache -- but nothing rebuilt it on load either, so it was
+  empty in every process that had not just built it. `name_lookup` next to it
+  *is* rebuilt, by `build_from_entries`, which is what made the omission look
+  deliberate. When a field is left out of a writer, the question is not "is it
+  derivable?" but "where, in the code, is it actually re-derived?"
+
+The check that would have caught all of it is cheap and mechanical: for each
+field a serializer omits, name the line that reconstructs it. If there is no
+such line, the omission is a defect regardless of how derivable the field is
+in principle.

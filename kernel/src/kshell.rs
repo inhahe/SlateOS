@@ -46,6 +46,7 @@ use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Output capture for redirection and piping
@@ -65,6 +66,10 @@ use alloc::vec::Vec;
 /// → `TD-KSHELL-LINE-EDITOR-IS-UTF8`, which names this sink as the binding
 /// constraint on the rest of the byte-clean conversion.
 static SHELL_OUTPUT: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
+/// Running total of bytes written into [`SHELL_OUTPUT`] while a capture is
+/// active. Read by the liveness watchdog — see [`captured_output_count`].
+static CAPTURED_OUTPUT_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// A capture in progress, holding the enclosing capture it displaced.
 ///
@@ -181,10 +186,61 @@ pub fn shell_write_bytes(bytes: &[u8]) {
     let mut guard = SHELL_OUTPUT.lock();
     if let Some(ref mut buf) = *guard {
         buf.extend_from_slice(bytes);
+        // Captured output is still output. See [`captured_output_count`].
+        CAPTURED_OUTPUT_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed);
     } else {
         drop(guard);
         crate::console::write_bytes(bytes);
     }
+}
+
+/// Bytes the shell has written into a capture buffer since boot.
+///
+/// The liveness watchdog decides a boot has hung from three signals, and a
+/// captured command defeats all three at once. `kernel_progress_count` sums
+/// page faults and block I/O; `USEFUL_WORK_TICKS` only advances for ticks that
+/// preempt ring-3 or a CPU with a queued task; a CPU-bound in-kernel loop
+/// touches neither. The third signal — serial output — is the one that normally
+/// saves such a loop from being called a hang, and [`shell_write_bytes`] takes
+/// it away the moment a capture is running, because the bytes go into a `Vec`
+/// instead of out of the port.
+///
+/// So the watchdog's question is "is anything happening?", the honest answer is
+/// "yes, the shell is writing", and the counter it consults says "no". That is
+/// not a threshold that needs raising — raising it would dull a gate whose
+/// whole job is to notice a boot that stopped — it is a signal that is simply
+/// not being reported. This counter reports it.
+///
+/// It matters well beyond the self-test that exposed it. `capture_command` is
+/// what serves `$(...)` substitution and the SSH and telnet servers, so a
+/// remote user running any long pipeline is invisible to the watchdog in
+/// exactly the same way. A fix aimed only at the self-test — breadcrumbs inside
+/// the expensive rung — would have left every one of those cases blind.
+///
+/// This cannot mask a real hang. A captured command that writes and then blocks
+/// forever advances this counter once and then stops, so the silence resumes
+/// and the report follows. What it does mask is a captured command that loops
+/// while writing without bound — which is not a hang but a runaway, is caught
+/// by the allocator rather than the watchdog, and is already unreported in the
+/// *uncaptured* case for the same reason. Making the two agree is the point.
+pub fn captured_output_count() -> u64 {
+    CAPTURED_OUTPUT_BYTES.load(Ordering::Relaxed)
+}
+
+/// Write `bytes` through the capture branch of [`shell_write_bytes`] and throw
+/// them away, so the scheduler's liveness drill can assert that captured output
+/// registers as output.
+///
+/// Exists because [`Capture`] is deliberately private — the whole point of that
+/// type is that a call site cannot forget the restore — so the drill cannot open
+/// and close one itself. Driving the real write path rather than poking
+/// [`CAPTURED_OUTPUT_BYTES`] directly is what makes the drill worth having: it
+/// has to fail if a later edit moves the increment off this branch or drops it,
+/// and a test that incremented the counter itself would pass either way.
+pub fn write_captured_for_liveness_drill(bytes: &[u8]) {
+    let capture = capture_start();
+    shell_write_bytes(bytes);
+    drop(capture.finish());
 }
 
 /// Write raw bytes followed by a newline.
@@ -7892,7 +7948,7 @@ fn cmd_help() {
     shell_println!("  cut -d/-f/-c  Extract columns/fields from text");
     shell_println!("  tr SET1 SET2  Translate/delete characters");
     shell_println!("  tac [F]   Print lines in reverse order");
-    shell_println!("  fold [-w N] F Wrap lines to N columns (default 80)");
+    shell_println!("  fold [-bs] [-w N] F..  Wrap lines to N columns (default 80)");
     shell_println!("  paste F1 F2   Merge lines from files");
     shell_println!("  yes [STR]  Repeat STR (default 'y') indefinitely");
     shell_println!("  xargs [-n N] CMD  Run CMD with piped input as arguments");
@@ -12083,6 +12139,306 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         let _ = crate::fs::Vfs::remove(one);
         let _ = crate::fs::Vfs::remove(two);
+    }
+
+    serial_println!("  kshell::self_test 38: sed writes the same bytes from a pipe as from a file");
+    // The two halves of `sed` used to hold two copies of the transform loop, and
+    // the copies disagreed about the trailing newline: the file half popped it
+    // and printed with `shell_println!` (putting one back), the pipe half popped
+    // it and printed with `shell_print!` (leaving it off). So the same script
+    // over the same bytes produced a different byte count depending on which end
+    // the text arrived from, and `cat f | sed s/a/b/ | wc -l` counted one short.
+    //
+    // The interesting assertions here are about *bytes*, not about which lines
+    // appear -- both halves already agreed on the lines. That is why each one
+    // compares whole captured output rather than searching it.
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+        fn plain(cmd: &str) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch(cmd);
+            capture.finish()
+        }
+
+        let path = "/tmp/zz_sed_nl";
+        let body: &[u8] = b"zz_alpha\nzz_beta\n";
+        assert!(
+            crate::fs::Vfs::write_file(path, body).is_ok(),
+            "fixture for the sed newline rung must be writable"
+        );
+
+        // The whole point: same script, same bytes, both ends.
+        let from_pipe = piped("sed s/zz_alpha/zz_gamma/", body);
+        let from_file = plain(&alloc::format!("sed s/zz_alpha/zz_gamma/ {path}"));
+        assert_eq!(
+            from_pipe, from_file,
+            "the pipe half and the file half must write identical bytes"
+        );
+        let want: &[u8] = b"zz_gamma\nzz_beta\n";
+        assert_eq!(
+            from_file.as_slice(),
+            want,
+            "and both must write every line with its newline"
+        );
+        assert_eq!(last_exit(), 0, "and succeed");
+
+        // An input with no final newline keeps not having one. `str::lines`
+        // cannot tell `"a\nb"` from `"a\nb\n"`, so a loop that appends a newline
+        // per line invents one -- which is a silent edit to the user's data, the
+        // same class of fault as the pass-throughs rungs 33-37 are about.
+        let out = piped("sed s/zz_alpha/zz_gamma/", b"zz_alpha\nzz_beta");
+        let want: &[u8] = b"zz_gamma\nzz_beta";
+        assert_eq!(
+            out.as_slice(),
+            want,
+            "input without a final newline is written back without one"
+        );
+
+        // ... and that is a property of the *input*, not of whether the last
+        // line survived the script. Deleting the unterminated last line leaves
+        // `zz_alpha` as the final output line, and `zz_alpha` did have a
+        // newline, so it keeps it. A rule written as "pop the last newline"
+        // instead of "the last input line is special" gets this one wrong.
+        let out = piped("sed /zz_beta/d", b"zz_alpha\nzz_beta");
+        let want: &[u8] = b"zz_alpha\n";
+        assert_eq!(
+            out.as_slice(),
+            want,
+            "a surviving line keeps the newline it came with"
+        );
+
+        // Empty output is empty. The file half used to pop a newline that was
+        // not there and then print one, so a script that deleted everything
+        // emitted a blank line -- output where there should be none.
+        let out = piped("sed /zz_/d", body);
+        assert!(
+            out.is_empty(),
+            "a script that deletes every line prints nothing at all, got {out:?}"
+        );
+        assert_eq!(last_exit(), 0, "deleting everything is not an error");
+
+        // `-n` with no `p` is the same case reached from the other direction.
+        let out = plain(&alloc::format!("sed -n s/zz_alpha/zz_gamma/ {path}"));
+        assert!(
+            out.is_empty(),
+            "-n without p prints nothing at all, got {out:?}"
+        );
+
+        // `-i` goes through the identical string, so the file on disk must gain
+        // the same bytes the terminal would have seen. The old code wrote the
+        // pre-pop string here and the post-pop string to the terminal, which is
+        // a third spelling of the same output.
+        dispatch(&alloc::format!("sed -i s/zz_alpha/zz_gamma/ {path}"));
+        assert_eq!(last_exit(), 0, "an in-place edit succeeds");
+        let want: &[u8] = b"zz_gamma\nzz_beta\n";
+        match crate::fs::Vfs::read_file(path) {
+            Ok(d) => assert_eq!(
+                d.as_slice(),
+                want,
+                "-i writes the bytes the terminal would have shown"
+            ),
+            Err(e) => panic!("re-reading the sed -i fixture failed: {e:?}"),
+        }
+
+        let _ = crate::fs::Vfs::remove(path);
+    }
+
+    serial_println!("  kshell::self_test 39: fold breaks where it says and drops nothing");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+        fn plain(cmd: &str) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch(cmd);
+            capture.finish()
+        }
+
+        // The bug this rung exists for: `fold_process` measured the line in
+        // bytes and then sliced it with `line.get(pos..end)`, so a chunk
+        // boundary landing inside a multi-byte character made `get` return
+        // `None` -- and the `None` arm wrote nothing. Every byte of the chunk
+        // vanished, and `fold` exited 0. Alpha is two bytes in UTF-8, so a
+        // width of 3 puts the boundary in the middle of it.
+        let out = piped("fold -w3", "zzα\n".as_bytes());
+        assert_eq!(
+            out.as_slice(),
+            "zzα\n".as_bytes(),
+            "three characters fit in three columns and none of them may be dropped"
+        );
+        assert_eq!(last_exit(), 0, "and folding is success");
+
+        let out = piped("fold -w2", "zzα\n".as_bytes());
+        assert_eq!(
+            out.as_slice(),
+            "zz\nα\n".as_bytes(),
+            "a character that does not fit moves to the next line whole"
+        );
+
+        // `-b` counts bytes and so may split a character, which is the whole
+        // point of asking for it, and is what GNU's does.
+        let out = piped("fold -bw3", "zzα\n".as_bytes());
+        assert_eq!(
+            out.as_slice(),
+            b"zz\xce\n\xb1\n",
+            "-b counts bytes, so three bytes is `zz` plus the first byte of alpha"
+        );
+
+        // A tab advances to the next multiple of 8 rather than counting as one
+        // column -- unless `-b` was asked for, where every byte is one column.
+        let out = piped("fold -w8", b"zz\tzz\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz\t\nzz\n",
+            "a tab at column 2 reaches column 8, leaving no room for more"
+        );
+        let out = piped("fold -bw8", b"zz\tzz\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz\tzz\n",
+            "-b counts the tab as one byte, so all five fit"
+        );
+
+        // One unit wider than the whole line gets a line to itself. It must
+        // neither vanish nor send the break loop round for ever.
+        let out = piped("fold -w4", b"\tzz\n");
+        assert_eq!(
+            out.as_slice(),
+            b"\t\nzz\n",
+            "a tab wider than the width is written anyway, on a line of its own"
+        );
+
+        // `-s` breaks after the last blank that fits and carries the rest of
+        // the word down; without it the break lands mid-word.
+        let out = piped("fold -sw10", b"zz_hello zz_world\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_hello \nzz_world\n",
+            "-s breaks after the blank, keeping the blank on the line it ended"
+        );
+        let out = piped("fold -w10", b"zz_hello zz_world\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_hello z\nz_world\n",
+            "without -s the break is wherever the width falls"
+        );
+
+        // The newline that was read is the newline that is written. `fold`
+        // used to print every line with `shell_println!`, which invents a final
+        // newline for input that never had one.
+        let out = piped("fold -w2", b"zzzz");
+        assert_eq!(
+            out.as_slice(),
+            b"zz\nzz",
+            "input without a final newline is written back without one"
+        );
+
+        // A carriage return is data, and returns the column to the left margin.
+        // `str::lines` would have eaten the one before the newline.
+        let out = piped("fold -w2", b"zz\r\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz\r\n",
+            "a carriage return before the newline survives"
+        );
+
+        // Width faults are refused rather than guessed at. Each of these used
+        // to fold at some width nobody asked for and report success: `-w abc`
+        // at 80, `-w0` at 1.
+        let out = piped("fold -w abc", b"zz_data\n");
+        assert_output_contains(
+            "an unreadable width is reported",
+            &out,
+            b"invalid number of columns",
+        );
+        assert_output_lacks("and nothing is folded at a guessed width", &out, b"zz_data");
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        let out = piped("fold -w0", b"zz_data\n");
+        assert_output_contains(
+            "a zero width is reported",
+            &out,
+            b"invalid number of columns: '0'",
+        );
+        assert_output_lacks("and is not clamped to 1", &out, b"zz_data");
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        let out = piped("fold -w", b"zz_data\n");
+        assert_output_contains(
+            "-w with nothing after it is reported",
+            &out,
+            b"requires an argument",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        // An unknown flag is refused, not folded into the file name.
+        let out = piped("fold -q", b"zz_data\n");
+        assert_output_contains(
+            "an unknown flag is reported",
+            &out,
+            b"unrecognized option '-q'",
+        );
+        assert_output_lacks("and the input is not written out", &out, b"zz_data");
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        // Flags bundle the way getopt's do, and `-N` is the obsolete spelling
+        // of `-w N` that GNU still accepts.
+        let out = piped("fold -2", b"zzzz\n");
+        assert_eq!(out.as_slice(), b"zz\nzz\n", "-2 is -w 2");
+
+        let a = "/tmp/zz_fold_a";
+        let b = "/tmp/zz_fold_b";
+        assert!(
+            crate::fs::Vfs::write_file(a, b"zz_one\n").is_ok(),
+            "writing the first fold fixture must succeed"
+        );
+        assert!(
+            crate::fs::Vfs::write_file(b, b"zz_two\n").is_ok(),
+            "writing the second fold fixture must succeed"
+        );
+
+        // Two operands are two files. They used to be one file name with a
+        // space in it, which could not be opened.
+        let out = plain(&alloc::format!("fold -w99 {a} {b}"));
+        assert_eq!(
+            out.as_slice(),
+            b"zz_one\nzz_two\n",
+            "every operand is read, in the order given"
+        );
+        assert_eq!(last_exit(), 0, "and reading both is success");
+
+        // `-` names the pipe, so a command may read both, in the order written.
+        let out = piped(&alloc::format!("fold -w99 - {a}"), b"zz_pipe\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_pipe\nzz_one\n",
+            "`-` reads the pipe where it stands in the operand list"
+        );
+
+        // A missing operand raises the status without erasing the ones that
+        // worked -- the rule the `xargs` and `cut` fixes established.
+        let out = plain(&alloc::format!("fold -w99 /tmp/zz_fold_absent {a}"));
+        assert_output_contains("a missing operand is reported", &out, b"zz_fold_absent");
+        assert_output_contains("and the readable one is still read", &out, b"zz_one");
+        assert_eq!(last_exit(), 1, "and the worst status wins");
+
+        // Nothing to read at all is an error, not an empty success.
+        let out = plain("fold -w99");
+        assert_output_contains(
+            "no operand and no pipe is reported",
+            &out,
+            b"no file operand",
+        );
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        let _ = crate::fs::Vfs::remove(a);
+        let _ = crate::fs::Vfs::remove(b);
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -107336,75 +107692,411 @@ fn tac_process(text: &[u8]) {
     }
 }
 
-/// `fold [-w WIDTH] [FILE]` — wrap lines to specified width (default 80).
-#[allow(clippy::arithmetic_side_effects)]
-fn cmd_fold(args: &str) {
-    let (width, file) = parse_fold_args(args);
+/// How one unit of input moves the output column.
+///
+/// Only the default column-counting mode produces anything but
+/// [`FoldAdj::Plain`]: `fold -b` counts every byte as one column, tabs
+/// included, which is exactly what `Plain` does.
+#[derive(Clone, Copy)]
+enum FoldAdj {
+    /// Advance one column. Everything that is not one of the three below,
+    /// including non-printing characters — GNU stopped testing `isprint` here
+    /// long ago, and a character whose width we cannot know is better counted
+    /// as one than as none.
+    Plain,
+    /// Advance to the next multiple of 8.
+    Tab,
+    /// Retreat one column, but never past the left margin.
+    Backspace,
+    /// Return to the left margin.
+    Return,
+}
 
-    if let Some(path) = file {
-        let resolved = resolve_path(&path);
-        match crate::fs::Vfs::read_file(&resolved) {
-            Ok(data) => {
-                let text = core::str::from_utf8(&data).unwrap_or("");
-                fold_process(text, width);
+/// The input a single [`FoldUnit`] stands for.
+///
+/// Held as a value rather than as a slice of the line so that writing it back
+/// cannot fail. That is not fastidiousness: the bug this rewrite exists to fix
+/// was a fallible slice (`line.get(pos..end)`) whose `None` arm wrote nothing,
+/// and an infallible representation is the only kind that cannot grow that arm
+/// again.
+#[derive(Clone, Copy)]
+enum FoldPiece {
+    /// Column mode: one whole character, however many bytes it occupies.
+    Ch(char),
+    /// `-b`: one byte, which may be a fragment of a character.
+    Byte(u8),
+}
+
+/// One indivisible piece of input: what to write, and how it moves the column.
+///
+/// Splitting the line into units *before* measuring it is the point. The old
+/// `fold_process` measured in bytes with `line.len()` and then sliced with
+/// `line.get(pos..end)`, so a chunk boundary landing inside a multi-byte
+/// character made `get` return `None` — and nothing was written for it.
+/// `printf 'zzα\n' | fold -w3` printed **nothing at all**, and exited 0.
+#[derive(Clone, Copy)]
+struct FoldUnit {
+    piece: FoldPiece,
+    adj: FoldAdj,
+    /// `isblank`: a space or a tab, the only two characters `-s` breaks after.
+    blank: bool,
+}
+
+/// A `fold` invocation that has been fully understood.
+struct FoldSpec {
+    /// Always at least 1; [`fold_width`] refuses 0 rather than clamping it.
+    width: usize,
+    /// `-s`: break after the last blank that fits, rather than mid-word.
+    spaces: bool,
+    /// `-b`: count bytes instead of columns.
+    bytes: bool,
+    /// Operands in the order given. `-` means standard input.
+    files: Vec<String>,
+}
+
+/// Why a `fold` argument list could not be honoured.
+///
+/// `parse_fold_args` used to return no errors at all. It answered every case
+/// below by guessing and reported success — the same silent-guess failure the
+/// `cut` rewrite removed (`e43ef0307`), and strictly worse than a missing
+/// answer because nothing downstream can detect it:
+///
+/// | written | what it did | what it looks like |
+/// |---|---|---|
+/// | `fold -w abc f` | folded at **80** | the width you asked for was honoured |
+/// | `fold -w0 f` | folded at **1** | ditto |
+/// | `fold -s -w20 f` | opened a file named `-s -w20 f` | `-s` was unimplemented, and so was the error |
+/// | `fold f1 f2` | opened one file named `f1 f2` | two operands became one name |
+/// | `fold f -w20` | folded at 80, then failed to open `f -w20` | flags were recognised only at the *start* of the line |
+/// | `fold -q f` | opened a file named `-q f` | an unknown flag became part of the name |
+enum FoldParseError {
+    /// `-w` with nothing after it.
+    MissingArg(char),
+    /// `-w abc`, `-w 0`, `-w -3`. One variant for all three because GNU has one
+    /// message for all three: a width that is not a positive number is invalid,
+    /// and which way it is invalid does not change what the user must do.
+    InvalidWidth(String),
+    /// A real `fold` option this one does not implement.
+    Unsupported(String, &'static str),
+    /// Anything else beginning with `-`.
+    UnknownOption(String),
+}
+
+impl FoldParseError {
+    /// Print the diagnostic, in GNU's wording where GNU has one.
+    fn report(&self) {
+        match *self {
+            Self::MissingArg(f) => {
+                shell_println!("fold: option requires an argument -- '{}'", f);
             }
-            Err(e) => {
-                shell_println!("fold: {}: {:?}", path, e);
+            Self::InvalidWidth(ref s) => {
+                shell_println!("fold: invalid number of columns: '{}'", s);
+            }
+            Self::Unsupported(ref opt, hint) => {
+                shell_println!("fold: {} is not supported ({})", opt, hint);
+            }
+            Self::UnknownOption(ref opt) => {
+                shell_println!("fold: unrecognized option '{}'", opt);
+            }
+        }
+    }
+}
+
+/// Read a `-w` value.
+///
+/// Zero is refused rather than clamped: `w.max(1)` used to turn `fold -w0` into
+/// a one-column fold, which is a different command from the one that was typed,
+/// and it reported success for it.
+fn fold_width(value: &str) -> Result<usize, FoldParseError> {
+    match value.parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(FoldParseError::InvalidWidth(String::from(value))),
+    }
+}
+
+/// Parse `fold`'s arguments, or say why they cannot be honoured.
+///
+/// Words come from [`split_words`], and every word is examined. The old scan
+/// tested `args.trim().starts_with("-w")` *once*, against the whole remaining
+/// line, so an operand's position decided whether a flag was seen at all, and
+/// everything the scan did not consume became one file name.
+///
+/// Short options bundle the way getopt's do: `-sw20` is `-s -w 20`.
+fn parse_fold_args(args: &str) -> Result<FoldSpec, FoldParseError> {
+    let words = split_words(args);
+    let mut width: Option<usize> = None;
+    let mut spaces = false;
+    let mut bytes = false;
+    let mut files: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while let Some(word) = words.get(i) {
+        i = i.saturating_add(1);
+        let w = word.as_str();
+
+        // A lone `-` is the conventional name for standard input, not an
+        // option. Everything else without a leading `-` is a file.
+        if w == "-" || !w.starts_with('-') {
+            files.push(String::from(w));
+            continue;
+        }
+
+        let after = w.get(1..).unwrap_or("");
+
+        // `fold -20` is the obsolete-but-documented spelling of `fold -w20`,
+        // and GNU still rewrites it before getopt sees it. Without this it
+        // would be an unrecognized option, which is a worse answer than GNU's.
+        if after.starts_with(|c: char| c.is_ascii_digit()) {
+            width = Some(fold_width(after)?);
+            continue;
+        }
+        if after.starts_with('-') {
+            return Err(FoldParseError::Unsupported(
+                String::from(w),
+                "long options are not implemented; use -b, -s, -w",
+            ));
+        }
+
+        // Bundled short flags, left to right. `-w` takes the rest of the word
+        // if there is any and the next word otherwise, and ends the bundle.
+        let mut rest = after;
+        while let Some(flag) = rest.chars().next() {
+            rest = rest.get(flag.len_utf8()..).unwrap_or("");
+            match flag {
+                's' => spaces = true,
+                'b' => bytes = true,
+                'w' => {
+                    let value = if rest.is_empty() {
+                        let next = words.get(i).ok_or(FoldParseError::MissingArg('w'))?;
+                        i = i.saturating_add(1);
+                        next.clone()
+                    } else {
+                        String::from(rest)
+                    };
+                    width = Some(fold_width(&value)?);
+                    rest = "";
+                }
+                _ => return Err(FoldParseError::UnknownOption(String::from(w))),
+            }
+        }
+    }
+
+    Ok(FoldSpec {
+        width: width.unwrap_or(80),
+        spaces,
+        bytes,
+        files,
+    })
+}
+
+/// Split one input line into the units `fold` may not break apart.
+fn fold_units(line: &str, count_bytes: bool) -> Vec<FoldUnit> {
+    let mut units = Vec::new();
+    if count_bytes {
+        for &b in line.as_bytes() {
+            units.push(FoldUnit {
+                piece: FoldPiece::Byte(b),
+                // `-b` counts every byte as one column, tabs included...
+                adj: FoldAdj::Plain,
+                // ...but a tab is still a blank, so `-bs` may break after one.
+                // No UTF-8 continuation byte can be confused for one: they are
+                // all >= 0x80.
+                blank: b == b' ' || b == b'\t',
+            });
+        }
+    } else {
+        for c in line.chars() {
+            units.push(FoldUnit {
+                piece: FoldPiece::Ch(c),
+                adj: match c {
+                    '\t' => FoldAdj::Tab,
+                    '\u{8}' => FoldAdj::Backspace,
+                    '\r' => FoldAdj::Return,
+                    _ => FoldAdj::Plain,
+                },
+                blank: c == ' ' || c == '\t',
+            });
+        }
+    }
+    units
+}
+
+/// The column reached after writing `unit` at `column`.
+fn fold_advance(column: usize, unit: FoldUnit) -> usize {
+    match unit.adj {
+        FoldAdj::Plain => column.saturating_add(1),
+        FoldAdj::Tab => column.saturating_add(8usize.saturating_sub(column % 8)),
+        FoldAdj::Backspace => column.saturating_sub(1),
+        FoldAdj::Return => 0,
+    }
+}
+
+/// Append the units at `pending` to `out`.
+fn fold_flush(out: &mut Vec<u8>, pending: &[FoldUnit]) {
+    for unit in pending {
+        match unit.piece {
+            FoldPiece::Byte(b) => out.push(b),
+            FoldPiece::Ch(c) => {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+    }
+}
+
+/// Fold `text` and return exactly the bytes `fold` should write.
+///
+/// One function, called by both the file half and the pipe half — `sed` is the
+/// standing lesson in what two copies of one loop become
+/// (`TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP`).
+///
+/// Lines are split on `\n` alone, with [`str::split_inclusive`] rather than
+/// [`str::lines`], for two reasons: `lines` also strips a `\r`, which GNU
+/// treats as data *and* as a column reset; and it cannot tell `"a\nb"` from
+/// `"a\nb\n"`, so a loop built on it invents a final newline for input that had
+/// none. What is written back is the newline that was read.
+///
+/// The break rule is GNU's `fold_file` restated without its `goto`: measure the
+/// next unit, and if it would overrun the width, end the line and measure that
+/// same unit again against the fresh column.
+fn fold_process(text: &str, spec: &FoldSpec) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+
+    for chunk in text.split_inclusive('\n') {
+        let (line, newline) = match chunk.strip_suffix('\n') {
+            Some(l) => (l, true),
+            None => (chunk, false),
+        };
+
+        let units = fold_units(line, spec.bytes);
+        // The units accumulated for the current output line.
+        let mut pending: Vec<FoldUnit> = Vec::new();
+        let mut column = 0usize;
+
+        for unit in units {
+            // "Rescan": after a break, this same unit is measured again.
+            loop {
+                let next = fold_advance(column, unit);
+                if next <= spec.width {
+                    column = next;
+                    pending.push(unit);
+                    break;
+                }
+
+                // `-s`: prefer the last blank that fits, and carry the word
+                // that follows it down to the next line.
+                if spec.spaces {
+                    if let Some(at) = pending.iter().rposition(|u| u.blank) {
+                        let cut = at.saturating_add(1);
+                        fold_flush(&mut out, pending.get(..cut).unwrap_or(&[]));
+                        out.push(b'\n');
+                        pending.drain(..cut);
+                        // Everything after the last blank is by definition not
+                        // a blank, so the next pass through here finds none and
+                        // falls through to the plain break. That is what stops
+                        // this looping.
+                        column = pending.iter().fold(0usize, |c, &u| fold_advance(c, u));
+                        continue;
+                    }
+                }
+
+                if pending.is_empty() {
+                    // One unit is wider than the whole line — a tab under
+                    // `-w4`, say. It gets a line to itself rather than being
+                    // dropped, and `column` is deliberately left past the width
+                    // so the *next* unit breaks immediately.
+                    column = next;
+                    pending.push(unit);
+                    break;
+                }
+
+                fold_flush(&mut out, &pending);
+                out.push(b'\n');
+                pending.clear();
+                column = 0;
+            }
+        }
+
+        fold_flush(&mut out, &pending);
+        if newline {
+            out.push(b'\n');
+        }
+    }
+
+    out
+}
+
+/// Run a parsed `fold` over its operands, with `stdin` standing in for `-`.
+///
+/// `stdin` is `None` when there is no pipe feeding this command, which is a
+/// different thing from an empty pipe: the first has nothing to read and should
+/// say so, the second has read everything there was.
+fn fold_run(spec: &FoldSpec, stdin: Option<&str>) {
+    if spec.files.is_empty() {
+        match stdin {
+            Some(text) => shell_write_bytes(&fold_process(text, spec)),
+            None => {
+                shell_println!("fold: no file operand and no input to read");
                 set_exit(1);
             }
         }
-    } else {
-        shell_println!("Usage: fold [-w WIDTH] <file>");
-        set_exit(1);
-    }
-}
-
-/// `fold` on piped input. As with [`cmd_cut_input`], a named file wins over
-/// the pipe rather than being parsed and discarded.
-fn cmd_fold_input(args: &str, input: &str) {
-    let (width, file) = parse_fold_args(args);
-    if file.is_some() {
-        cmd_fold(args);
         return;
     }
-    fold_process(input, width);
-}
 
-fn parse_fold_args(args: &str) -> (usize, Option<String>) {
-    let mut width: usize = 80;
-    let mut rest = args.trim();
-
-    if rest.starts_with("-w") {
-        rest = rest.get(2..).unwrap_or("").trim_start();
-        let end = rest.find([' ', '\t']).unwrap_or(rest.len());
-        if let Ok(w) = rest.get(..end).unwrap_or("80").parse::<usize>() {
-            width = w.max(1);
-        }
-        rest = rest.get(end..).unwrap_or("").trim_start();
-    }
-
-    let file = if rest.is_empty() {
-        None
-    } else {
-        Some(String::from(rest))
-    };
-    (width, file)
-}
-
-#[allow(clippy::arithmetic_side_effects)]
-fn fold_process(text: &str, width: usize) {
-    for line in text.lines() {
-        if line.len() <= width {
-            shell_println!("{}", line);
-        } else {
-            let mut pos = 0;
-            while pos < line.len() {
-                let end = (pos + width).min(line.len());
-                if let Some(chunk) = line.get(pos..end) {
-                    shell_println!("{}", chunk);
+    let mut worst: u8 = 0;
+    for path in &spec.files {
+        if path == "-" {
+            match stdin {
+                Some(text) => shell_write_bytes(&fold_process(text, spec)),
+                None => {
+                    shell_println!("fold: -: no input to read");
+                    worst = worst.max(1);
                 }
-                pos = end;
             }
+            continue;
+        }
+        let resolved = resolve_path(path);
+        match crate::fs::Vfs::read_file(&resolved) {
+            Ok(data) => {
+                let text = core::str::from_utf8(&data).unwrap_or("");
+                shell_write_bytes(&fold_process(text, spec));
+            }
+            Err(e) => {
+                // Every operand is attempted and the worst status reported: a
+                // later readable file must not erase an earlier missing one.
+                shell_println!("fold: {}: {:?}", path, e);
+                worst = worst.max(1);
+            }
+        }
+    }
+    set_exit(worst);
+}
+
+/// `fold [-bs] [-w WIDTH] [FILE]...` — wrap long lines to a fixed width.
+///
+/// - `-w N`, or the obsolete `-N`: wrap at N columns, default 80
+/// - `-b`: count bytes rather than columns
+/// - `-s`: break after the last blank that fits, rather than mid-word
+/// - `-`: read the pipe
+fn cmd_fold(args: &str) {
+    match parse_fold_args(args) {
+        Ok(spec) => fold_run(&spec, None),
+        Err(e) => {
+            e.report();
+            set_exit(1);
+        }
+    }
+}
+
+/// `fold` on piped input. A named file wins over the pipe, as in GNU and as in
+/// every other paired command here; a `-` operand names the pipe, so
+/// `cat a | fold - b` reads both, in that order.
+fn cmd_fold_input(args: &str, input: &str) {
+    match parse_fold_args(args) {
+        Ok(spec) => fold_run(&spec, Some(input)),
+        Err(e) => {
+            e.report();
+            set_exit(1);
         }
     }
 }
@@ -120219,53 +120911,7 @@ fn cmd_sed(args: &str) {
         };
 
         let text = core::str::from_utf8(&data).unwrap_or("");
-        let mut output = alloc::string::String::new();
-
-        for (line_idx, line) in text.lines().enumerate() {
-            let line_num = line_idx.wrapping_add(1);
-            let mut current = alloc::string::String::from(line);
-            let mut deleted = false;
-            let mut print_this = false;
-
-            for cmd in &parsed {
-                match cmd {
-                    SedCmd::Substitute {
-                        pattern,
-                        replacement,
-                        global,
-                        addr,
-                    } => {
-                        if sed_addr_matches(addr, line_num, &current) {
-                            if *global {
-                                current = sed_replace_all(&current, pattern, replacement);
-                            } else {
-                                current = sed_replace_first(&current, pattern, replacement);
-                            }
-                        }
-                    }
-                    SedCmd::Delete { addr } => {
-                        if sed_addr_matches(addr, line_num, &current) {
-                            deleted = true;
-                        }
-                    }
-                    SedCmd::Print { addr } => {
-                        if sed_addr_matches(addr, line_num, &current) {
-                            print_this = true;
-                        }
-                    }
-                }
-            }
-
-            if !deleted {
-                if !suppress || print_this {
-                    output.push_str(&current);
-                    output.push('\n');
-                }
-                if suppress && print_this {
-                    // Already added above.
-                }
-            }
-        }
+        let output = sed_apply(text, &parsed, suppress);
 
         if in_place {
             match crate::fs::Vfs::write_file(&path, output.as_bytes()) {
@@ -120276,11 +120922,13 @@ fn cmd_sed(args: &str) {
                 }
             }
         } else {
-            // Print output (without trailing newline already in output).
-            if output.ends_with('\n') {
-                output.pop();
-            }
-            shell_println!("{}", output);
+            // Verbatim: `sed_apply` has already put a newline after every line
+            // that gets one. The old code popped that newline and handed the
+            // string to `shell_println!`, which put one back — the same result
+            // for a non-empty output, and a spurious blank line for an empty
+            // one, so `sed '/./d' f` printed a line where it should print
+            // nothing at all.
+            shell_print!("{}", output);
         }
     }
 }
@@ -120317,6 +120965,73 @@ fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &str) -> bool {
         SedAddr::Line(n) => line_num == *n,
         SedAddr::Pattern(pat) => line.contains(pat.as_str()),
     }
+}
+
+/// Run a parsed script over `text` and return exactly what `sed` should write.
+///
+/// `cmd_sed` and `cmd_sed_input` each carried a copy of this loop, and the
+/// copies kept drifting. `classify_sed_args` was extracted for the same reason
+/// after the pipe copy lost the `-i` arm; the `filter_map` fix had to be made
+/// twice; and by the time this was written the two disagreed about the trailing
+/// newline — the file half popped it and printed with `shell_println!`, the pipe
+/// half popped it and printed with `shell_print!`, so the piped form dropped the
+/// final newline outright. Two copies of a loop is how one command comes to
+/// disagree with itself; one copy is the fix that stops it recurring.
+///
+/// The newline rule is now GNU's, and it is why the last line is special-cased:
+/// `str::lines` cannot tell `"a\nb"` from `"a\nb\n"`, so a naive loop invents a
+/// final newline for input that had none. A newline follows every emitted line
+/// *except* the last line of an input that did not end in one — which is a
+/// property of the input, not of whether that line survived the script.
+fn sed_apply(text: &str, script: &[SedCmd], suppress: bool) -> alloc::string::String {
+    let final_newline = text.ends_with('\n');
+    let total = text.lines().count();
+    let mut output = alloc::string::String::new();
+
+    for (line_idx, line) in text.lines().enumerate() {
+        let line_num = line_idx.wrapping_add(1);
+        let mut current = alloc::string::String::from(line);
+        let mut deleted = false;
+        let mut print_this = false;
+
+        for cmd in script {
+            match cmd {
+                SedCmd::Substitute {
+                    pattern,
+                    replacement,
+                    global,
+                    addr,
+                } => {
+                    if sed_addr_matches(addr, line_num, &current) {
+                        if *global {
+                            current = sed_replace_all(&current, pattern, replacement);
+                        } else {
+                            current = sed_replace_first(&current, pattern, replacement);
+                        }
+                    }
+                }
+                SedCmd::Delete { addr } => {
+                    if sed_addr_matches(addr, line_num, &current) {
+                        deleted = true;
+                    }
+                }
+                SedCmd::Print { addr } => {
+                    if sed_addr_matches(addr, line_num, &current) {
+                        print_this = true;
+                    }
+                }
+            }
+        }
+
+        if !deleted && (!suppress || print_this) {
+            output.push_str(&current);
+            if final_newline || line_num != total {
+                output.push('\n');
+            }
+        }
+    }
+
+    output
 }
 
 /// Why a `sed` script could not be turned into a [`SedCmd`].
@@ -120585,52 +121300,11 @@ fn cmd_sed_input(args: &str, input: &str) {
         return;
     };
 
-    let mut output = alloc::string::String::new();
-    for (line_idx, line) in input.lines().enumerate() {
-        let line_num = line_idx.wrapping_add(1);
-        let mut current = alloc::string::String::from(line);
-        let mut deleted = false;
-        let mut print_this = false;
-
-        for cmd in &parsed {
-            match cmd {
-                SedCmd::Substitute {
-                    pattern,
-                    replacement,
-                    global,
-                    addr,
-                } => {
-                    if sed_addr_matches(addr, line_num, &current) {
-                        if *global {
-                            current = sed_replace_all(&current, pattern, replacement);
-                        } else {
-                            current = sed_replace_first(&current, pattern, replacement);
-                        }
-                    }
-                }
-                SedCmd::Delete { addr } => {
-                    if sed_addr_matches(addr, line_num, &current) {
-                        deleted = true;
-                    }
-                }
-                SedCmd::Print { addr } => {
-                    if sed_addr_matches(addr, line_num, &current) {
-                        print_this = true;
-                    }
-                }
-            }
-        }
-
-        if !deleted && (!suppress || print_this) {
-            output.push_str(&current);
-            output.push('\n');
-        }
-    }
-
-    if output.ends_with('\n') {
-        output.pop();
-    }
-    shell_print!("{}", output);
+    // Same call, same string, same rules as the file half — which is the point
+    // of the extraction. The pop that used to stand here is what lost the final
+    // newline on every piped `sed`, so `cat f | sed 's/a/b/' | wc -l` counted
+    // one line short.
+    shell_print!("{}", sed_apply(input, &parsed, suppress));
 }
 
 /// Replace all occurrences of `pattern` in `text` with `replacement`.

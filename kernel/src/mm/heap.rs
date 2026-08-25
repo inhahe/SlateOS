@@ -1501,6 +1501,53 @@ pub fn stats() -> HeapStats {
     }
 }
 
+/// Cumulative count of allocations served since boot, for the scheduler's
+/// liveness watchdog.
+///
+/// A narrower [`stats`] for the one caller that runs from the timer tick: it
+/// wants a number that rises whenever the kernel allocates and never otherwise,
+/// not a consistent snapshot of twelve counters.
+///
+/// **Allocations only, never frees.** A count that included frees would rise
+/// for a loop that allocated and released the same block for ever — that is a
+/// livelock, and the watchdog has a separate branch making a separate claim
+/// about those. This one exists to refute "nothing at all is happening".
+///
+/// **Why the watchdog needs it.** Its total-hang branch already discounts two
+/// kinds of silent work — resolved page faults and completed block I/O — but a
+/// kernel-side computation over in-memory data leaves neither trace. The shell
+/// self-test's `find` rung is exactly that: it walks a 50-component tmpfs tree
+/// into a capture buffer, so it faults nothing, reads no disk, and prints
+/// nothing on the wire, and the watchdog called a boot that was working hard a
+/// `SYSTEM HANG`. Allocation is the trace such work does leave — a directory
+/// walk allocates a path per component per level — and a spinning-on-a-lock
+/// hang, which is what the branch exists to catch, allocates nothing at all.
+#[must_use]
+pub fn alloc_progress_count() -> u64 {
+    let mut total = SLAB_ALLOCS
+        .load(Ordering::Relaxed)
+        .wrapping_add(LARGE_ALLOCS.load(Ordering::Relaxed));
+
+    // Clamped rather than trusted. `stats` above indexes with a bare
+    // `cpu_count()` and justifies it in a SAFETY comment ("cpu_count is bounded
+    // by SMP init"), which is true today and is an invariant held a long way
+    // from here; a watchdog that runs on every tick should not be the place
+    // that discovers it stopped being true.
+    let online = crate::smp::cpu_count().clamp(1, HEAP_MAX_CPUS);
+    for cpu in 0..online {
+        // SAFETY: `cpu < HEAP_MAX_CPUS` by the clamp above, so the index is in
+        // bounds. The read races with the owning CPU's own increment of the
+        // same field; that is benign for a monotonically rising progress
+        // counter, where a stale value costs at most one deferred check. Taking
+        // a lock here is not an option: this runs from the timer tick, and a
+        // watchdog that blocked could deadlock against the very hang it exists
+        // to report.
+        let cache = unsafe { &PCPU_SLAB_CACHES[cpu] };
+        total = total.wrapping_add(cache.slab_allocs);
+    }
+    total
+}
+
 /// Read heap statistics without blocking (alias for [`stats`]).
 ///
 /// Since the stats are atomic counters (no lock needed), this always

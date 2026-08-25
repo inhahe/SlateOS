@@ -604,7 +604,7 @@ fn a_taskbar_button_is_clickable_where_it_is_drawn() {
     open(&mut shell, "B");
     open(&mut shell, "C");
 
-    for index in 0..shell.visible_windows().len() {
+    for index in 0..shell.taskbar_windows().len() {
         let (x, y) = centre(shell.taskbar_button_rect(index));
         assert_eq!(shell.hit_test(x, y), Hit::TaskbarButton(index));
     }
@@ -622,7 +622,7 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
     let b = open(&mut shell, "B");
     assert_eq!(shell.focused_window, Some(b));
 
-    // A is at index 0: `visible_windows` is in the compositor's order, and B
+    // A is at index 0: `taskbar_windows` is in the compositor's order, and B
     // arrived above it.
     let first = shell.taskbar_button_rect(0);
     assert_eq!(
@@ -641,7 +641,7 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
     );
 
     let index = shell
-        .visible_windows()
+        .taskbar_windows()
         .iter()
         .position(|w| w.id == b)
         .unwrap();
@@ -695,7 +695,7 @@ fn the_window_list_replaces_what_the_shell_believed_rather_than_adding_to_it() {
         "a window absent from the list kept its taskbar button"
     );
     let titles: Vec<&str> = shell
-        .visible_windows()
+        .taskbar_windows()
         .iter()
         .map(|w| w.title.as_str())
         .collect();
@@ -706,7 +706,7 @@ fn the_window_list_replaces_what_the_shell_believed_rather_than_adding_to_it() {
     );
     assert_eq!(shell.focused_window, Some(WindowId(2)));
     assert_eq!(
-        shell.visible_windows().last().map(|w| w.id),
+        shell.taskbar_windows().last().map(|w| w.id),
         Some(WindowId(2)),
         "the list is bottom-to-top, so the last entry is topmost"
     );
@@ -725,7 +725,7 @@ fn the_taskbar_leaves_out_every_surface_that_is_not_an_application_window() {
 
     shell.apply_window_list(&here(&[wallpaper, app(3, "Editor"), bar]));
 
-    let ids: Vec<WindowId> = shell.visible_windows().iter().map(|w| w.id).collect();
+    let ids: Vec<WindowId> = shell.taskbar_windows().iter().map(|w| w.id).collect();
     assert_eq!(ids, [WindowId(3)], "the shell listed its own surfaces");
 }
 
@@ -744,15 +744,105 @@ fn a_minimized_window_keeps_its_button_and_an_unmapped_one_does_not() {
 
     assert_eq!(shell.windows[&WindowId(1)].state, WindowState::Minimized);
     assert!(
-        !shell.windows[&WindowId(1)].visible,
-        "a minimized window is not on the glass"
+        shell.windows[&WindowId(1)].mapped,
+        "a minimized window is still mapped -- the user put it away, it did not go away"
+    );
+    assert!(
+        !shell.windows[&WindowId(1)].on_glass(),
+        "a minimized window is not being drawn"
     );
     assert!(
         shell.windows.contains_key(&WindowId(2)),
         "an unmapped window keeps its id and its place in the stack"
     );
-    let listed: Vec<WindowId> = shell.visible_windows().iter().map(|w| w.id).collect();
-    assert_eq!(listed, [WindowId(3)]);
+
+    // The assertion this test is named for, and which it did not used to make:
+    // it asserted `[WindowId(3)]` -- that the minimized window had lost its
+    // button -- which is the bug itself, written down as the expectation. A
+    // test whose name promises one behaviour and whose body pins the opposite
+    // is worse than no test, because a reader who greps for the promise finds
+    // it and stops looking.
+    let listed: Vec<WindowId> = shell.taskbar_windows().iter().map(|w| w.id).collect();
+    assert_eq!(
+        listed,
+        [WindowId(1), WindowId(3)],
+        "the minimized window keeps its button; only the unmapped one loses it"
+    );
+}
+
+#[test]
+fn a_minimized_window_can_be_got_back_from_its_taskbar_button() {
+    // The other half of the same rule, and the reason it matters. Clicking the
+    // button of a window that is not focused asks for `Activate` -- which the
+    // compositor implements as un-minimize-then-focus precisely so that this
+    // click works. That care was unreachable code for as long as minimizing a
+    // window deleted its button: there was no way left to click.
+    let mut shell = shell();
+    let id = open(&mut shell, "Editor");
+    minimize(&mut shell, id);
+
+    assert_eq!(
+        shell.taskbar_windows().len(),
+        1,
+        "the button must still be there to be clicked"
+    );
+    let button = shell.taskbar_button_rect(0);
+    assert_eq!(
+        click_at(&mut shell, button),
+        ShellAction::Control(ShellRequest::window(id, ShellControlAction::Activate)),
+        "the click must ask for the window back, not minimize it again"
+    );
+}
+
+#[test]
+fn alt_tab_reaches_a_minimized_window() {
+    // The switcher lists the same set for the same reason: Alt+Tab is the other
+    // standing way to reach a window you put away, and a switcher that silently
+    // skipped minimized windows made the last one you minimized unreachable by
+    // either route at once.
+    let mut shell = shell();
+    let first = open(&mut shell, "Editor");
+    open(&mut shell, "Terminal");
+    minimize(&mut shell, first);
+
+    assert_eq!(shell.taskbar_windows().len(), 2, "both are still listed");
+    shell.start_alt_tab();
+    assert!(
+        shell.alt_tab_active,
+        "two windows is enough to switch between"
+    );
+    assert!(
+        shell
+            .taskbar_windows()
+            .iter()
+            .any(|w| w.id == first && w.state == WindowState::Minimized),
+        "the minimized window must be among the rows the switcher steps through"
+    );
+}
+
+#[test]
+fn show_desktop_does_not_ask_an_already_minimized_window_to_minimize() {
+    // The one caller that wants the *narrow* question. Super+D means "clear the
+    // screen", so it has nothing to say to a window that is already away --
+    // asking would be a request the compositor must ignore and, worse, one the
+    // user would have to undo twice to get back where they were. This is why
+    // the fix is two accessors rather than one widened one.
+    let mut shell = shell();
+    let away = open(&mut shell, "Editor");
+    let still_here = open(&mut shell, "Terminal");
+    minimize(&mut shell, away);
+
+    let asked: Vec<WindowId> = shell
+        .windows
+        .values()
+        .filter(|w| w.on_glass() && w.desktop == shell.current_desktop)
+        .map(|w| w.id)
+        .collect();
+    assert_eq!(
+        asked,
+        [still_here],
+        "only the window still on the glass should be asked to go away"
+    );
 }
 
 #[test]
@@ -820,7 +910,7 @@ fn the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop()
         ))
     );
     assert!(
-        shell.visible_windows().len() == 1,
+        shell.taskbar_windows().len() == 1,
         "the shell acted on the request itself"
     );
 
@@ -828,7 +918,12 @@ fn the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop()
     let mut away = app(1, "Editor");
     away.minimized = true;
     shell.apply_window_list(&here(&[away]));
-    assert!(shell.visible_windows().is_empty());
+    // The button survives the minimize -- this used to assert
+    // `taskbar_windows().is_empty()`, which is the stranded-window bug stated
+    // as an expectation for the second time in this file. What the round trip
+    // actually shows is that the *state* moved and the listing did not.
+    assert_eq!(shell.taskbar_windows().len(), 1);
+    assert_eq!(shell.windows[&WindowId(1)].state, WindowState::Minimized);
     assert_eq!(shell.focused_window, None);
 }
 

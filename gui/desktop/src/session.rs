@@ -431,7 +431,7 @@ impl<T: Transport> ShellSession<T> {
         // *After* the input, deliberately. `poll` is also what reads the window
         // list off the wire, so by here the connection may already hold a newer
         // desktop than the taskbar the user clicked was drawn from. Folding it
-        // in first would renumber `visible_windows` underneath a click that was
+        // in first would renumber `taskbar_windows` underneath a click that was
         // aimed at the old numbering — the click would minimise whichever
         // window had inherited the slot. The shell's own copy therefore stays
         // one revision behind until every event of this batch has been answered

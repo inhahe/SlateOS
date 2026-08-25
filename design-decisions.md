@@ -42974,11 +42974,22 @@ leaves the second one waiting, rather than trying to merge them.
 
 This one looks like a no-op until you check Unicode. `¨` (diaeresis) combined
 with an acute accent is a real composition: U+0385 GREEK DIALYTIKA TONOS. A
-Spanish typist whose board has `´` and `¨` on adjacent faces of one key can
+Spanish typist whose board has `´` and `¨` on the two faces of one key can
 produce it by accident, and would have no idea what they were looking at. So
 the deadness check has to come *first*, before the composition table is
 consulted at all — an ordering that is invisible in the common case and
 load-bearing in exactly one.
+
+**Which way round it composes matters, and the test was first written the
+wrong way.** U+0385 decomposes to `¨` plus a *combining acute*, so the
+sequence that composes is `´` **then** `¨` — the acute pending, the diaeresis
+typed after it. `¨` then `´` composes nothing at all, and a test written that
+way proves this rule vacuously: it passes just as happily with the two checks
+reordered. That is not hypothetical — it is how the reintroduction harness
+reported this rule unproved (defect `AB`) while the test that claimed to cover
+it was green. It is also, across every builtin layout, the *only* pair of dead
+faces that composes with each other, so it is the single keystroke sequence in
+which the two orderings of the check are distinguishable at all.
 
 A pleasant consequence: pressing the same dead key *n* times types *n-1*
 accents and leaves one waiting, with no rule of its own. That is the X11

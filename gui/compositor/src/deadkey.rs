@@ -231,14 +231,25 @@ mod tests {
         by_id("de-qwertz").expect("de-qwertz is a builtin layout")
     }
 
+    /// The Spanish board, the only builtin that puts a dead diaeresis and a
+    /// dead acute on the *same* key — which is what makes the one accent pair
+    /// Unicode does compose reachable in two keystrokes. See
+    /// [`two_different_dead_keys_do_not_compose_with_each_other`].
+    fn spanish() -> &'static Layout {
+        by_id("es-qwerty").expect("es-qwerty is a builtin layout")
+    }
+
     /// German `´` plain, `` ` `` shifted — both dead.
     const ACCENT: u32 = sc::EQUALS as u32;
+    /// Spanish, the key right of `Ñ`: `´` plain and `¨` shifted, both dead.
+    const ES_ACCENT: u32 = sc::APOSTROPHE as u32;
     /// German `^` plain (dead), `°` shifted (live — a degree sign combines
     /// with nothing).
     const CIRCUMFLEX: u32 = sc::GRAVE as u32;
     const E: u32 = sc::E as u32;
     const A: u32 = sc::A as u32;
     const S: u32 = sc::S as u32;
+    const U: u32 = sc::U as u32;
     const X: u32 = sc::X as u32;
     /// The space bar. Not in `sc`, and that is the point: a [`Layout`] is the
     /// alphanumeric block, and space is not part of what a layout rearranges.
@@ -332,11 +343,8 @@ mod tests {
 
     #[test]
     fn two_different_dead_keys_do_not_compose_with_each_other() {
-        // Unicode says `¨` and an acute make `΅` GREEK DIALYTIKA TONOS, and it
-        // is right; it is just not what a typist pressing two accent keys
-        // means. This is why deadness is checked before composition, and the
-        // test names the character so that reordering those two checks fails
-        // here with the Greek in the message rather than somewhere obscure.
+        // The ordinary case first: two accents that compose into nothing, so
+        // the flush-and-re-arm is all there is to see.
         let mut state = DeadKeys::new();
         let de = german();
         // German: `´` on EQUALS plain, `` ` `` on EQUALS shifted. Use the
@@ -345,6 +353,35 @@ mod tests {
         assert_eq!(press(&mut state, de, CIRCUMFLEX, PLAIN), "´");
         assert_eq!(state.pending(), Some('^'), "the circumflex now waits");
         assert_eq!(press(&mut state, de, A, PLAIN), "â");
+
+        // And now the case the rule actually exists for. Unicode says `¨` and
+        // an acute make `΅` GREEK DIALYTIKA TONOS, and it is right; it is just
+        // not what a typist pressing two accent keys means. Of every pair of
+        // dead faces our layouts carry, this is the *only* one that composes,
+        // so it is the only keystroke sequence in which checking deadness
+        // before composition is distinguishable from checking it after —
+        // which is exactly why it has to be asserted rather than described.
+        // Spanish is the layout that can reach it: `´` and `¨` are the two
+        // faces of one key, right of `Ñ`. The acute has to be the *pending*
+        // one and the diaeresis the one typed after it, because U+0385
+        // decomposes to `¨` plus a combining acute and not the other way
+        // round — so `´` then `¨` is the order that composes, and `¨` then
+        // `´` composes nothing at all.
+        assert_eq!(
+            osfont::deadkey::compose('´', '¨'),
+            Some('\u{0385}'),
+            "the premise: these two really do compose, so the ordering matters"
+        );
+        let mut state = DeadKeys::new();
+        let es = spanish();
+        assert_eq!(press(&mut state, es, ES_ACCENT, PLAIN), "", "`´` arms");
+        assert_eq!(
+            press(&mut state, es, ES_ACCENT, SHIFT),
+            "´",
+            "`¨` must flush the acute, not compose Greek with it"
+        );
+        assert_eq!(state.pending(), Some('¨'), "the diaeresis now waits");
+        assert_eq!(press(&mut state, es, U, PLAIN), "ü", "as in `pingüino`");
     }
 
     #[test]

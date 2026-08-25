@@ -85525,23 +85525,52 @@ st=1
         let base = dir.slashed();
         let g = |rest: &str| run(&format!("cd {base}\ncompgen {rest}"));
 
+        // These three `-o` sources are readline's filename completion, which
+        // hands entries back in *directory* order: readline sorts only when it
+        // draws a column list, and `compgen` is not that. So the order is the
+        // filesystem's, and asserting a literal one asserts a fact about the
+        // host. NTFS keeps its index sorted, which is how `a1\nadir\n` came to
+        // be written here as if it were a rule; ext4's hashed order puts `adir`
+        // first, and bash on Linux prints exactly that (measured, bash 5.2.21).
+        // Reading the order back from the directory is what keeps the assertion
+        // about `compgen` rather than about the filesystem under it.
+        let listing = |keep: &dyn Fn(&str, bool) -> bool| {
+            let mut out = String::new();
+            for e in std::fs::read_dir(&dir.path).expect("read_dir") {
+                let e = e.expect("dir entry");
+                let name = e.file_name().to_string_lossy().into_owned();
+                let is_dir = e.file_type().expect("file type").is_dir();
+                if keep(&name, is_dir) {
+                    out.push_str(&name);
+                    out.push('\n');
+                }
+            }
+            out
+        };
+        let a_all = listing(&|n, _| n.starts_with('a'));
+        let a_dirs = listing(&|n, d| d && n.starts_with('a'));
+        let all_dirs = listing(&|_, d| d);
+
         // plusdirs adds directories to whatever the compspec found, after the
         // decoration and past the filter.
-        assert_eq!(g("-o plusdirs -W 'aw' -P '<' -S '>' a").0, "<aw>\nadir\n");
-        assert_eq!(g("-o plusdirs -W 'aw' -X 'a*' a").0, "adir\n");
+        assert_eq!(
+            g("-o plusdirs -W 'aw' -P '<' -S '>' a").0,
+            format!("<aw>\n{a_dirs}")
+        );
+        assert_eq!(g("-o plusdirs -W 'aw' -X 'a*' a").0, a_dirs);
         // …and it counts, so an answer it fills is not an empty one.
-        assert_eq!(g("-o default -o plusdirs a").0, "adir\n");
-        assert_eq!(g("-o plusdirs -W 'zz' a"), ("adir\n".to_string(), 0));
+        assert_eq!(g("-o default -o plusdirs a").0, a_dirs);
+        assert_eq!(g("-o plusdirs -W 'zz' a"), (a_dirs.clone(), 0));
         // default and dirnames step in only for an answer that came out empty —
         // even one the filter emptied — and directories win over filenames.
-        assert_eq!(g("-o default a").0, "a1\nadir\n");
-        assert_eq!(g("-o dirnames a").0, "adir\n");
-        assert_eq!(g("-W 'a1' -o default -X '*' a").0, "a1\nadir\n");
-        assert_eq!(g("-o default -o dirnames a").0, "adir\n");
-        assert_eq!(g("-o default -P '<' -S '>' a").0, "a1\nadir\n");
+        assert_eq!(g("-o default a").0, a_all);
+        assert_eq!(g("-o dirnames a").0, a_dirs);
+        assert_eq!(g("-W 'a1' -o default -X '*' a").0, a_all);
+        assert_eq!(g("-o default -o dirnames a").0, a_dirs);
+        assert_eq!(g("-o default -P '<' -S '>' a").0, a_all);
         // An empty word reaches the whole directory; a word nothing starts with
         // reaches nothing, and that is the ordinary empty answer.
-        assert_eq!(g("-o dirnames ''").0, "adir\nbdir\n");
+        assert_eq!(g("-o dirnames ''").0, all_dirs);
         assert_eq!(g("-o default -o plusdirs zz"), (String::new(), 1));
         // An -o that says nothing about candidates still asks for a compspec,
         // so it gets the empty-answer status rather than the silent success.

@@ -79840,6 +79840,57 @@ Python startup and reading 372 files.
 
 ---
 
+### Lesson 49: a filter that names one severity cannot see the other (lane A, 2026-08-25)
+
+**In short:** the kernel carries ~18k pedantic-level clippy warnings as known
+debt, so "did my change add any?" cannot be answered by the exit code — a clean
+change and a dirty one both leave the count in the eighteen-thousands. The
+established method is to `git stash`, re-measure, and compare. The pipeline used
+to do that was
+
+```bash
+cargo clippy -p kernel --message-format short 2>&1 | grep -E "^kernel" | grep warning
+```
+
+and that last `grep warning` is the whole lesson. **`clippy::all` is
+deny-level in this workspace, so a violation of it is emitted as `error:`, not
+as `warning:`.** The filter that made the comparison tractable was precisely
+the filter that made it blind to the only class of diagnostic that actually
+stops the build. The comparison came back "identical multiset — zero new
+warnings", which was *true* and useless: the change had introduced a deny-level
+`clippy::type_complexity` error, and the boot test refused to build 203 seconds
+later, before QEMU ever started.
+
+**The second half of the trap.** `scripts/boot-test.sh` runs its gates *before*
+booting, so a gate failure leaves `build/serial-test.txt` untouched — still
+holding the previous run's output, ending in `kshell::self_test PASSED`. The
+standing verification recipe (zero `!! ` lines, self-test passed, no unexpected
+faults) therefore reported **green on a run that never booted**. The recipe is
+not wrong; it just has no way to notice it is reading a file from an hour ago.
+
+**What to take from it.**
+
+- **Check the gate's own exit code before starting a run that will check it for
+  you.** `cargo clippy -p kernel; echo $?` costs one command and answers the
+  deny-level question exactly, with no filtering at all. Do that first; use the
+  stash-and-compare only for the warning-level delta it is actually for.
+- **When comparing diagnostics, filter by *file*, never by severity.** `grep -E
+  "^kernel"` alone is the right filter — it keeps errors and warnings both, and
+  the severity word is part of the text being compared rather than a
+  precondition for being compared.
+- **`rm` the artifact you are about to verify.** A verification that reads a
+  file the run may not have written is a verification that can pass without the
+  run happening. Deleting `build/serial-test.txt` first turns "stale pass" into
+  "file not found", which is unmistakable.
+- **Always read the tail of the harness log, not only the greps.** Every fact
+  needed to catch this was in `/tmp/bt-*.log`: no `BOOT_OK`, no
+  `=== Boot test PASSED ===`, and an explicit `ERROR: refusing to build`. Two
+  of those were already in the recipe as *positive* checks — their absence is
+  what carried the signal, and absence is easy to skim past when the other four
+  greps look right.
+
+---
+
 ### TOOL-DIFF-WSL-LIB-FRESHNESS-CHECK-IS-CURRENTLY-INERT. `diff_lib_artifacts` cannot tell "this package has no library" from "this package's library is gone", and today it answers the second with the first — 2026-08-25 — FIXED
 
 > **Correction, same day, before the fix landed.** This entry was filed with the

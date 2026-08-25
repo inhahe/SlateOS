@@ -7018,6 +7018,11 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
             // `cat` with no args reads from pipe.
             shell_write_bytes(input);
         }
+        // `column` re-spaces its input and hands back every other byte, so a
+        // decode here was a rewrite of the very thing it was asked to preserve.
+        // It still measures display width -- but in cells, off the bytes, by
+        // the console's own rule; see `display_width`.
+        "column" => cmd_column_input(args, input),
 
         // --- Still text-only: narrowed individually, at the point of use. ---
         // The narrowing is here rather than at the top of the function so that
@@ -7026,12 +7031,11 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         // arm up into the block above.
         //
         // `grep` is `char`-oriented (character classes, code-point ranges);
-        // `xargs` and `column` re-parse into words and measure display width.
-        // `mapfile` is blocked on something else rather than on itself — it
-        // stores its lines as `String`s in the shell environment, which is
-        // still a `String` map, so converting it here would only move the
-        // decode one call deeper.
-        "grep" | "mapfile" | "readarray" | "xargs" | "column" => {
+        // `xargs` re-parses into words. `mapfile` is blocked on something else
+        // rather than on itself — it stores its lines as `String`s in the shell
+        // environment, which is still a `String` map, so converting it here
+        // would only move the decode one call deeper.
+        "grep" | "mapfile" | "readarray" | "xargs" => {
             let Some(text) = shell_bytes_as_str(input, cmd) else {
                 set_exit(1);
                 return;
@@ -7040,7 +7044,6 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
                 "grep" => cmd_grep_input(args, text),
                 "mapfile" | "readarray" => cmd_mapfile_input(args, text),
                 "xargs" => cmd_xargs_input(args, text),
-                "column" => cmd_column_input(args, text),
                 // Unreachable: the outer arm lists exactly these names.
                 _ => dispatch(line),
             }
@@ -15028,6 +15031,125 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "and reports failure");
     }
 
+    serial_println!("  kshell::self_test 62: column aligns in cells and passes bytes through");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // The visible defect, and the one that made this worth doing: widths
+        // were measured with `str::len`, so a column was padded to a *byte*
+        // count. `é` is two bytes and one cell, so it over-counted by one and
+        // the next column started a cell early -- in the one command whose
+        // entire job is to make columns line up.
+        //
+        // Worked through: `é` is width 1, `ab` is width 2, so the column is 2
+        // wide and both rows must start their second field at cell 4. Under
+        // the old reading both fields measured 2, so `é`'s row got no padding
+        // and `x` landed at cell 3 while `y` landed at 4.
+        let out = piped("column -t", "é x\nab y\n".as_bytes());
+        assert_eq!(
+            out.as_slice(),
+            "é   x\nab  y\n".as_bytes(),
+            "a column holding a two-byte character is padded to cells, not bytes"
+        );
+
+        // Bytes that are not UTF-8 at all. `column` is a formatter -- it
+        // re-spaces its input and hands back every other byte of it -- so
+        // `from_utf8_lossy` was rewriting the very thing it was asked to
+        // preserve, turning each undecodable byte into `EF BF BD`. The console
+        // draws such a byte as one replacement character, so it is also one
+        // cell wide, and the two rows below must still line up.
+        let out = piped("column -t", b"\xff zz_x\nabc zz_y\n");
+        assert_eq!(
+            out.as_slice(),
+            b"\xff    zz_x\nabc  zz_y\n",
+            "an undecodable byte survives and counts as the one cell it is drawn in"
+        );
+
+        // CRLF, the same half of the bug `sed` had: `str::lines` strips a
+        // trailing `\r`, so a DOS-ending file came back with Unix endings.
+        // Simple mode is a pure pass-through and must not touch them.
+        let out = piped("column", b"zz_a\r\nzz_b\r\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a\r\nzz_b\r\n",
+            "CRLF endings round-trip through the non-table mode"
+        );
+
+        // ...and in table mode the `\r` rides on the last field, which is the
+        // one that is never padded, so the row still ends `\r\n`. This is why
+        // the default split is space-and-tab rather than `is_ascii_whitespace`:
+        // treating `\r` as a separator would have dropped it.
+        let out = piped("column -t", b"zz_a zz_b\r\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a  zz_b\r\n",
+            "and in table mode too, because \\r is not a field separator"
+        );
+
+        // U+00A0 NO-BREAK SPACE is `White_Space` to Rust and not a space to
+        // glibc, so `str::split_whitespace` tore apart the one character whose
+        // entire purpose is not to be a break. GNU keeps it whole; so do we.
+        let out = piped("column -t", "zz_a\u{a0}zz_b zz_c\n".as_bytes());
+        assert_eq!(
+            out.as_slice(),
+            "zz_a\u{a0}zz_b  zz_c\n".as_bytes(),
+            "a no-break space is not a field separator"
+        );
+
+        // `-s` takes the first *character*, so a multi-byte one splits on the
+        // sequence the user typed. Taking the first byte instead would split on
+        // 0xE2, which appears inside other characters.
+        let out = piped("column -t -s →", "zz_a→zz_b\n".as_bytes());
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a  zz_b\n",
+            "a multi-byte -s separator splits on the whole character"
+        );
+
+        // An explicit separator keeps empty fields, where the default split
+        // collapses runs -- unchanged from `str::split` and worth holding still,
+        // since `split_on_bytes` is new code doing an old job.
+        let out = piped("column -t -s ,", b"zz_a,,zz_b\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a    zz_b\n",
+            "an explicit separator keeps the empty field between two of them"
+        );
+
+        // The file path had the same decode, and it is the worse one: a pipe
+        // that could not be decoded was at least the caller's own bytes, but a
+        // file is on disk and was read for exactly this.
+        let path = "/tmp/kshell_column_bytes.bin";
+        crate::fs::Vfs::write_file(path, b"\xff zz_x\nabc zz_y\n")?;
+        let out = capture_command(&alloc::format!("column -t {path}"));
+        assert_eq!(
+            last_exit(),
+            0,
+            "a file that is not UTF-8 is still formattable"
+        );
+        assert_eq!(
+            out.as_slice(),
+            b"\xff    zz_x\nabc  zz_y\n",
+            "and formats to the same bytes the pipe did"
+        );
+        let _ = crate::fs::Vfs::remove(path);
+
+        // A last line with no newline gains one. That is GNU's behaviour --
+        // `column` emits a row terminator after every row -- and it is stated
+        // here so that it stays a decision rather than becoming an accident of
+        // whichever splitter is in use.
+        let out = piped("column", b"zz_a");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a\n",
+            "a missing final newline is supplied, as GNU column does"
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -15453,11 +15575,16 @@ fn cmd_strings(args: &str) {
 ///
 /// Usage: `column [-t] [-s SEP]` (reads from file or pipe)
 ///
-/// `-t` — format into a table (auto-detect columns based on whitespace)
-/// `-s CHAR` — use CHAR as the delimiter (default: whitespace)
+/// `-t` — format into a table (columns split on runs of space or tab)
+/// `-s CHAR` — use CHAR as the delimiter (default: space or tab)
 ///
 /// Without `-t`, merges short lines into side-by-side columns filling
 /// the terminal width.
+///
+/// Byte-clean end to end: the file or pipe is never decoded, so input that is
+/// not UTF-8 comes back out as it went in. Column widths are console *cells*
+/// via [`display_width`], which is what makes `-t` line up for input that is
+/// not all ASCII — the thing the command exists to do.
 fn cmd_column(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: column [-t] [-s SEP] <file>");
@@ -15466,23 +15593,7 @@ fn cmd_column(args: &str) {
         return;
     }
 
-    // Parse flags.
-    let mut table_mode = false;
-    let mut sep: Option<char> = None;
-    let mut file_path = "";
-
-    let mut words = args.split_whitespace().peekable();
-    while let Some(w) = words.next() {
-        if w == "-t" {
-            table_mode = true;
-        } else if w == "-s" {
-            if let Some(s) = words.next() {
-                sep = s.chars().next();
-            }
-        } else {
-            file_path = w;
-        }
-    }
+    let (table_mode, sep, file_path) = column_parse_args(args);
 
     if file_path.is_empty() {
         shell_println!("column: no input file");
@@ -15499,37 +15610,61 @@ fn cmd_column(args: &str) {
             return;
         }
     };
-    let text = alloc::string::String::from_utf8_lossy(&data);
-    column_format(&text, table_mode, sep);
+    column_format(&data, table_mode, sep.as_deref());
 }
 
-/// column from piped input.
-fn cmd_column_input(args: &str, input: &str) {
-    if input.is_empty() && args.is_empty() {
-        shell_println!("Usage: ... | column [-t] [-s SEP]");
-        set_exit(1);
-        return;
-    }
-
+/// Parse `column`'s flags, shared by the file and pipe entry points.
+///
+/// Returns `(table_mode, separator, file_path)`. The separator is the first
+/// *character* of the `-s` argument, carried as its bytes rather than as a
+/// `char` so that a multi-byte one (`column -s →`) splits on the sequence the
+/// user typed instead of on its first byte, which is a continuation byte that
+/// appears inside other characters too.
+///
+/// First character, not the whole argument: that is what this command has
+/// always documented (`-s CHAR`) and what it has always done. GNU takes the
+/// argument as a *set* of possible delimiters, so `column -s ', '` splits on
+/// either — see the `column -s` note in `known-issues.md`. Widening it is a
+/// behaviour change and belongs in its own commit, not smuggled into a
+/// correctness fix.
+fn column_parse_args(args: &str) -> (bool, Option<Vec<u8>>, &str) {
     let mut table_mode = false;
-    let mut sep: Option<char> = None;
+    let mut sep: Option<Vec<u8>> = None;
     let mut file_path = "";
 
-    let mut words = args.split_whitespace().peekable();
+    let mut words = args.split_whitespace();
     while let Some(w) = words.next() {
         if w == "-t" {
             table_mode = true;
         } else if w == "-s" {
             if let Some(s) = words.next() {
-                sep = s.chars().next();
+                sep = s.chars().next().map(|c| {
+                    let mut buf = [0u8; 4];
+                    c.encode_utf8(&mut buf).as_bytes().to_vec()
+                });
             }
         } else {
             file_path = w;
         }
     }
 
+    (table_mode, sep, file_path)
+}
+
+/// column from piped input.
+fn cmd_column_input(args: &str, input: &[u8]) {
+    if input.is_empty() && args.is_empty() {
+        shell_println!("Usage: ... | column [-t] [-s SEP]");
+        set_exit(1);
+        return;
+    }
+
+    let (table_mode, sep, file_path) = column_parse_args(args);
+
     // If a file was specified, read from it; otherwise use piped input.
-    if !file_path.is_empty() {
+    if file_path.is_empty() {
+        column_format(input, table_mode, sep.as_deref());
+    } else {
         let path = resolve_path(file_path);
         let data = match crate::fs::Vfs::read_file(&path) {
             Ok(d) => d,
@@ -15539,71 +15674,137 @@ fn cmd_column_input(args: &str, input: &str) {
                 return;
             }
         };
-        let text = alloc::string::String::from_utf8_lossy(&data);
-        column_format(&text, table_mode, sep);
-    } else {
-        column_format(input, table_mode, sep);
+        column_format(&data, table_mode, sep.as_deref());
     }
 }
 
 /// Core column formatting: split lines into columns and align.
-#[allow(clippy::arithmetic_side_effects)]
-fn column_format(text: &str, table_mode: bool, sep: Option<char>) {
-    let lines: alloc::vec::Vec<&str> = text.lines().collect();
+///
+/// Bytes throughout. `column` is a *formatter* — it re-spaces its input and
+/// hands back every other byte of it — so the one thing it must never do is
+/// rewrite the bytes it was given, which is exactly what the
+/// `from_utf8_lossy` this replaced did to any input that was not UTF-8.
+///
+/// Field widths come from [`display_width`], not from `len`, because the
+/// padding is measured in console cells. See that function for why the two
+/// disagree and by how much.
+fn column_format(text: &[u8], table_mode: bool, sep: Option<&[u8]>) {
+    let lines = split_lines(text);
     if lines.is_empty() {
         return;
     }
 
-    if table_mode {
-        // Split each line into fields, compute max width per column,
-        // then print left-aligned with 2-space padding.
-        let rows: alloc::vec::Vec<alloc::vec::Vec<&str>> = lines
-            .iter()
-            .map(|line| {
-                if let Some(c) = sep {
-                    line.split(c).collect()
-                } else {
-                    line.split_whitespace().collect()
-                }
-            })
-            .collect();
-
-        // Find max columns and per-column max width.
-        let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-        let mut widths = alloc::vec![0usize; max_cols];
-        for row in &rows {
-            for (i, field) in row.iter().enumerate() {
-                if field.len() > widths[i] {
-                    widths[i] = field.len();
-                }
-            }
-        }
-
-        for row in &rows {
-            let mut out = alloc::string::String::new();
-            for (i, field) in row.iter().enumerate() {
-                if i > 0 {
-                    out.push_str("  ");
-                }
-                out.push_str(field);
-                // Pad to column width (except for the last column).
-                if i + 1 < row.len() {
-                    let pad = widths[i].saturating_sub(field.len());
-                    for _ in 0..pad {
-                        out.push(' ');
-                    }
-                }
-            }
-            shell_println!("{}", out);
-        }
-    } else {
-        // Simple mode: print lines as-is (no table formatting).
-        // A full implementation would fill the terminal width, but
-        // without terminal width info we just print each line.
+    if !table_mode {
+        // Simple mode: print lines as-is (no table formatting). A full
+        // implementation would fill the terminal width, but without terminal
+        // width info we just print each line.
         for line in &lines {
-            shell_println!("{}", line);
+            shell_write_bytes(line);
+            shell_write_bytes(b"\n");
+        }
+        return;
+    }
+
+    // Split each line into fields, compute max width per column, then print
+    // left-aligned with 2-space padding.
+    let rows: Vec<Vec<&[u8]>> = lines
+        .iter()
+        .map(|line| match sep {
+            Some(s) => split_on_bytes(line, s),
+            None => split_ascii_blanks(line),
+        })
+        .collect();
+
+    // Find max columns and per-column max width.
+    let max_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut widths = alloc::vec![0usize; max_cols];
+    for row in &rows {
+        for (i, field) in row.iter().enumerate() {
+            let w = display_width(field);
+            if let Some(slot) = widths.get_mut(i) {
+                if w > *slot {
+                    *slot = w;
+                }
+            }
         }
     }
+
+    for row in &rows {
+        let mut out: Vec<u8> = Vec::new();
+        let last = row.len().saturating_sub(1);
+        for (i, field) in row.iter().enumerate() {
+            if i > 0 {
+                out.extend_from_slice(b"  ");
+            }
+            out.extend_from_slice(field);
+            // Pad to column width (except for the last column).
+            if i < last {
+                let pad = widths
+                    .get(i)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_sub(display_width(field));
+                out.resize(out.len().saturating_add(pad), b' ');
+            }
+        }
+        out.push(b'\n');
+        shell_write_bytes(&out);
+    }
+}
+
+/// Split `line` on every occurrence of the byte sequence `sep`.
+///
+/// Empty fields are kept — `a,,b` is three fields, the middle one empty — and
+/// a separator at either end produces an empty field there, which is what
+/// `str::split` did before and what an explicitly-given delimiter should do.
+fn split_on_bytes<'a>(line: &'a [u8], sep: &[u8]) -> Vec<&'a [u8]> {
+    if sep.is_empty() {
+        return alloc::vec![line];
+    }
+    let mut out: Vec<&[u8]> = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i.saturating_add(sep.len()) <= line.len() {
+        if line.get(i..i.saturating_add(sep.len())) == Some(sep) {
+            out.push(line.get(start..i).unwrap_or(&[]));
+            i = i.saturating_add(sep.len());
+            start = i;
+        } else {
+            i = i.saturating_add(1);
+        }
+    }
+    out.push(line.get(start..).unwrap_or(&[]));
+    out
+}
+
+/// Split `line` on runs of blanks, ignoring leading and trailing ones.
+///
+/// "Blank" is **space and tab only**, deliberately narrower than the
+/// `str::split_whitespace` this replaces. Two reasons, and they point the same
+/// way. Rust's rule is Unicode `White_Space`, which includes U+00A0 NO-BREAK
+/// SPACE — the character whose entire purpose is *not* to be a break — so a
+/// name written `Mr.\u{a0}Smith` was silently torn into two columns. glibc's
+/// `iswspace(U+00A0)` is false and util-linux's `column` tokenises on `" \t"`,
+/// so GNU keeps it whole; this now agrees. And it leaves a CRLF file's trailing
+/// `\r` attached to the last field, where it is emitted unpadded at end of row
+/// and the line comes back out as CRLF — where treating `\r` as a separator
+/// would have dropped it, rewriting the file's line endings for no reason.
+fn split_ascii_blanks(line: &[u8]) -> Vec<&[u8]> {
+    let mut out: Vec<&[u8]> = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, &b) in line.iter().enumerate() {
+        if b == b' ' || b == b'\t' {
+            if let Some(s) = start.take() {
+                out.push(line.get(s..i).unwrap_or(&[]));
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(s) = start {
+        out.push(line.get(s..).unwrap_or(&[]));
+    }
+    out
 }
 
 /// Display a monthly calendar.
@@ -125719,6 +125920,82 @@ fn split_lines(text: &[u8]) -> Vec<&[u8]> {
         out.push(text.get(start..).unwrap_or(&[]));
     }
     out
+}
+
+/// Cells a byte string occupies when the console draws it.
+///
+/// This exists because `len()` is the wrong answer and `chars().count()` is a
+/// different wrong answer. A column that is padded to a *byte* count misaligns
+/// by two for every `é` and by one for every CJK ideograph in the field above
+/// it, which defeats the entire point of the command doing the padding.
+///
+/// It is a deliberate mirror of the console's own byte→cell rule
+/// ([`crate::console::putchar_normal`] plus its UTF-8 accumulator), because the
+/// only width that aligns a table is the width the thing is actually drawn at.
+/// The three rules, in the console's order:
+///
+/// * A lead byte whose [`crate::unicode::utf8_seq_len`] is ≥ 2 consumes that
+///   many bytes and draws **one** codepoint, whose width is
+///   [`crate::unicode::char_width`] — 2 for the wide ranges, 1 otherwise.
+///   Overlong and surrogate sequences decode to U+FFFD *having consumed the
+///   whole sequence*, exactly as [`crate::unicode::decode_utf8`] does.
+/// * An invalid lead byte, or a sequence cut short by a byte that is not a
+///   continuation, draws U+FFFD in one cell — and in the cut-short case the
+///   offending byte is then reconsidered from the top, which is why the loop
+///   does not advance past it.
+/// * Everything else is one cell per byte.
+///
+/// The exception, stated rather than hidden: `\t`, `\r`, `\x08` and `ESC` are
+/// cursor *motion*, not glyphs, so they have no width at all — where the cursor
+/// lands after a tab depends on where it started. They count 0 here, which is
+/// the closest a width can come, and a field containing one will misalign no
+/// matter what this function returns. GNU is in the same position and resolves
+/// it the same way: glibc's `wcwidth` returns −1 for a control character and
+/// util-linux's `column` skips it.
+fn display_width(bytes: &[u8]) -> usize {
+    let mut width = 0usize;
+    let mut i = 0usize;
+    while let Some(&lead) = bytes.get(i) {
+        let seq_len = crate::unicode::utf8_seq_len(lead);
+        if seq_len >= 2 {
+            let len = seq_len as usize;
+            let mut buf = [0u8; 4];
+            let mut got = 0usize;
+            while got < len {
+                match bytes.get(i.saturating_add(got)) {
+                    // The lead itself, then continuation bytes only.
+                    Some(&b) if got == 0 || b & 0xC0 == 0x80 => {
+                        if let Some(slot) = buf.get_mut(got) {
+                            *slot = b;
+                        }
+                        got = got.saturating_add(1);
+                    }
+                    _ => break,
+                }
+            }
+            if got == len {
+                let cp = crate::unicode::decode_utf8(buf, seq_len);
+                width = width.saturating_add(usize::from(crate::unicode::char_width(cp)));
+                i = i.saturating_add(len);
+            } else {
+                // Aborted sequence: one U+FFFD for what was started, and the
+                // byte that aborted it is left for the next iteration to judge
+                // on its own merits — the console re-processes it too.
+                width = width.saturating_add(1);
+                i = i.saturating_add(got.max(1));
+            }
+            continue;
+        }
+        // Cursor motion draws nothing; see the note above.
+        if matches!(lead, b'\t' | b'\r' | 0x08 | 0x1B) {
+            i = i.saturating_add(1);
+            continue;
+        }
+        // One cell: ASCII, or an invalid lead byte drawn as U+FFFD.
+        width = width.saturating_add(1);
+        i = i.saturating_add(1);
+    }
+    width
 }
 
 /// Write one copy of the pattern space, honouring a missing final newline.

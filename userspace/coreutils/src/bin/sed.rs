@@ -171,6 +171,28 @@ enum Sel {
     Range(Addr, EndAddr),
 }
 
+impl Sel {
+    /// Whether this selector uses line 0 somewhere line 0 does not exist.
+    ///
+    /// There is no line 0, and the only reason to write one is the `0,/re/`
+    /// range: it may end on line 1, which `1,/re/` cannot, because a range's end
+    /// is never tested before its start line. Every other use of it — `0p`,
+    /// `0,5p`, `0,$p`, `0,+2p`, `0,0p` — selects nothing at all, so GNU refuses
+    /// it rather than running a script that can only be a mistake. A `0` in the
+    /// *second* position is fine and means what it says: `/a/,0p` is a range
+    /// that ends immediately.
+    fn rejects_line_zero(&self) -> bool {
+        let first = match self {
+            Sel::Always => return false,
+            Sel::One(a) | Sel::Range(a, _) => a,
+        };
+        if !matches!(first, Addr::Line(0)) {
+            return false;
+        }
+        !matches!(self, Sel::Range(_, EndAddr::Addr(Addr::Re(_))))
+    }
+}
+
 /// A piece of an `s` command's replacement text.
 enum Rep {
     Lit(Vec<u8>),
@@ -261,6 +283,17 @@ struct Script {
     rfiles: Vec<String>,
     /// Set by a `#n` first line, which is POSIX's in-script spelling of `-n`.
     suppress: bool,
+    /// Where a diagnostic raised *after* the script has been read points, as
+    /// the bytes that go between `sed: ` and the message — or `None` when there
+    /// is no script text to point into.
+    ///
+    /// There is one such diagnostic, `no previous regular expression`, and it
+    /// belongs to the run rather than to the parse. GNU still gives it a
+    /// location, and the location is always the very end of the joined script,
+    /// whichever fragment wrote the empty regex: `sed -e 's//X/' -e p` names
+    /// expression #2 and `sed -f g.sed -e p` names expression #1. Measured. See
+    /// [`Pos::AfterParse`] for why an expression is always `char 0` there.
+    end_loc: Option<Vec<u8>>,
 }
 
 // ---------------------------------------------------------------- the parser
@@ -307,9 +340,42 @@ impl Parser<'_> {
     }
 
     /// Skip whatever may sit between two commands.
+    ///
+    /// No `\r`: a carriage return is an ordinary character to GNU, so a script
+    /// with CRLF line endings is a syntax error there (`extra characters after
+    /// command`) rather than silently working. Accepting it here would be a
+    /// kindness that changes what a script means, and a script that relies on
+    /// it would then fail on every other sed.
     fn skip_separators(&mut self) {
-        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r' | b';')) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b';')) {
             self.i = self.i.saturating_add(1);
+        }
+    }
+
+    /// GNU's `read_end_of_cmd`: what may follow a command that takes no
+    /// argument of its own.
+    ///
+    /// Blanks are skipped, then only a separator, a `}`, a comment or the end
+    /// of the script is allowed. Anything else is the fault upstream calls
+    /// `extra characters after command` — which is why `sed px` is an error and
+    /// not a `p` followed by a mystery.
+    ///
+    /// A `}` or a `#` is *left* where it is, for the caller to read: `{p}`
+    /// closes its block and `p }` goes on to report the unexpected `}`. The
+    /// offending character, by contrast, is consumed before the error, because
+    /// GNU reports one past it — `sed 'px'` says char 2.
+    fn end_of_cmd(&mut self) -> Result<(), String> {
+        self.skip_blank();
+        match self.peek() {
+            None | Some(b'}' | b'#') => Ok(()),
+            Some(b';' | b'\n') => {
+                self.i = self.i.saturating_add(1);
+                Ok(())
+            }
+            Some(_) => {
+                self.i = self.i.saturating_add(1);
+                Err("extra characters after command".to_string())
+            }
         }
     }
 
@@ -319,15 +385,18 @@ impl Parser<'_> {
         }
     }
 
+    /// A run of digits, or zero if there are none.
+    ///
+    /// No digits is deliberately not an error: GNU's `in_integer` returns 0 for
+    /// an empty run, so `sed '1~'` is `1~0` — a step of zero, which is just line
+    /// 1 — and the fault it then reports is the absent *command*, not the absent
+    /// number. Measured: `sed '1~'` says `char 2: missing command`.
     fn number(&mut self) -> Result<usize, String> {
         let start = self.i;
         while self.peek().is_some_and(|c| c.is_ascii_digit()) {
             self.i = self.i.saturating_add(1);
         }
         let digits = self.s.get(start..self.i).unwrap_or_default();
-        if digits.is_empty() {
-            return Err("expected a number".to_string());
-        }
         let mut n: usize = 0;
         for &d in digits {
             n = n
@@ -445,8 +514,17 @@ impl Parser<'_> {
 
     fn compile(&self, pat: &[u8], ci: bool) -> Result<Option<Rc<Regex>>, String> {
         // An empty pattern is not an error: `s//X/` and `//d` re-use the last
-        // regular expression that was matched, which is a run-time value.
+        // regular expression that was *tried*, which is a run-time value — and
+        // whether there was one is a run-time question too, which is why
+        // nothing here looks for a preceding regex. See [`Exec::resolve`].
         if pat.is_empty() {
+            // A modifier has nothing to modify, since the pattern it would apply
+            // to was compiled elsewhere with modifiers of its own. This one *is*
+            // decided here: GNU refuses `s//X/I` while reading the script, with
+            // no input read and whatever else the script says.
+            if ci {
+                return Err("cannot specify modifiers on empty regexp".to_string());
+            }
             return Ok(None);
         }
         // The one funnel every pattern passes through, which is why GNU's
@@ -460,7 +538,15 @@ impl Parser<'_> {
         };
         match r {
             Ok(re) => Ok(Some(Rc::new(re))),
-            Err(e) => Err(String::from_utf8_lossy(&e.detail).into_owned()),
+            // `e.message()`, not `e.detail`: GNU sed hands the pattern to glibc
+            // and prints back verbatim whatever `re_compile_pattern` returned,
+            // so the sentence after `char N:` is one of glibc's fourteen fixed
+            // strings — `Unmatched ( or \(`, `Trailing backslash` — and never
+            // sed's own words. `ere`'s `detail` is the more useful sentence but
+            // it is not the one a script grepping this line was written
+            // against. Measured; pinned by the error block in
+            // `scripts/sed-diff.sh`.
+            Err(e) => Err(e.message().to_string()),
         }
     }
 
@@ -491,7 +577,13 @@ impl Parser<'_> {
                 let n = self.number()?;
                 if self.eat(b'~') {
                     let step = self.number()?;
-                    return Ok(Some(Addr::Step(n, step)));
+                    // A step of zero is no step at all, and GNU collapses it to
+                    // the plain line number rather than carrying it — which is
+                    // why `0~0p` is refused for using line 0 while `0~3p` is
+                    // fine, and why `1~` (an absent step, hence zero) is line 1.
+                    if step > 0 {
+                        return Ok(Some(Addr::Step(n, step)));
+                    }
                 }
                 Ok(Some(Addr::Line(n)))
             }
@@ -531,14 +623,42 @@ impl Parser<'_> {
     /// runs the same `normalize_text` over it as over a pattern. Note that the
     /// `\` in `a\x41` is the *marker* introducing the text and is eaten above,
     /// which is why GNU appends the three characters `x41` there and not `A`.
+    ///
+    /// # The trailing newline is part of the result
+    ///
+    /// GNU's text buffer ends with a newline, and that is what tells "no text
+    /// at all" from "one empty line" — an empty result here means the former
+    /// and emits nothing. It is also the newline itself that `a` writes, which
+    /// is why `sed -z 'a X'` ends the appended line with a newline and not with
+    /// the NUL every other line ends with. See [`text_out`].
     fn parse_text(&mut self) -> Result<Vec<u8>, String> {
         self.skip_blank();
-        if self.peek() == Some(b'\\') {
-            self.i = self.i.saturating_add(1);
-            self.eat(b'\n');
-            self.skip_blank();
+        // The end of the script is the one thing that cannot introduce text.
+        // Everything else can, including a bare newline (`sed $'a\np'` appends
+        // an empty line and then prints) and a bare backslash at the very end
+        // (`sed 'a\'`, which appends nothing) — both measured, both accepted.
+        if self.peek().is_none() {
+            return Err("expected \\ after `a', `c' or `i'".to_string());
         }
         let mut out = Vec::new();
+        if self.peek() == Some(b'\\') {
+            self.i = self.i.saturating_add(1);
+            // The character after the backslash is GNU's `leadin_ch`, and the
+            // two interesting values of it are the two ends of the script's
+            // line. A newline introduces text on the *next* line and is not
+            // part of it — and the blanks that follow it are, which is why
+            // nothing skips them here: `a\` + newline + `  X` appends two
+            // spaces and an `X`, while the one-liner `a   X` appends only the
+            // `X`. The end of the script means there is no text at all, which
+            // is what separates `sed 'a\'` (appends nothing) from a `-f` file
+            // ending `a\` *and a newline* (appends one empty line). All
+            // measured.
+            match self.peek() {
+                None => return Ok(out),
+                Some(b'\n') => self.i = self.i.saturating_add(1),
+                Some(_) => {}
+            }
+        }
         while let Some(c) = self.peek() {
             if c == b'\n' {
                 self.i = self.i.saturating_add(1);
@@ -570,6 +690,7 @@ impl Parser<'_> {
                 None => out.push(n),
             }
         }
+        out.push(b'\n');
         Ok(out)
     }
 
@@ -629,27 +750,34 @@ impl Parser<'_> {
         Ok(())
     }
 
+    /// The label of `:`, `b`, `t` and `T`.
+    ///
+    /// It ends at the first *whitespace*, `;`, `}`, newline or end of script —
+    /// so a label cannot contain a space, and what follows one is the next
+    /// command rather than more label. That is GNU's rule and it is load-bearing
+    /// in both directions: `sed 'b x y'` reads `b x` and then tries to run `y`
+    /// (measured: `unterminated `y' command`), and `sed '{b}'` branches to the
+    /// end of the script rather than to a label called `}`.
     fn parse_label(&mut self) -> Vec<u8> {
         self.skip_blank();
         let start = self.i;
-        while !matches!(self.peek(), None | Some(b'\n' | b';' | b'}')) {
+        while !matches!(
+            self.peek(),
+            None | Some(b'\n' | b';' | b'}' | b' ' | b'\t' | b'\r')
+        ) {
             self.i = self.i.saturating_add(1);
         }
-        let raw = self.s.get(start..self.i).unwrap_or_default();
-        raw.iter()
-            .rev()
-            .skip_while(|c| matches!(**c, b' ' | b'\t' | b'\r'))
-            .copied()
-            .collect::<Vec<u8>>()
-            .into_iter()
-            .rev()
-            .collect()
+        self.s.get(start..self.i).unwrap_or_default().to_vec()
     }
 
     fn parse_subst(&mut self) -> Result<Subst, String> {
         let delim = self
             .bump()
-            .ok_or_else(|| "`s' needs a delimiter".to_string())?;
+            // Not a message of its own: GNU reads the delimiter with the same
+            // `inchar` it reads the rest of the command with, so a missing one
+            // is the same fault as a missing closing delimiter — `sed 's'` and
+            // `sed 's/a/b'` both say `unterminated 's' command`. Measured.
+            .ok_or_else(|| "unterminated `s' command".to_string())?;
         if delim == b'\\' || delim == b'\n' {
             return Err("`s' may not be delimited by a backslash or a newline".to_string());
         }
@@ -661,30 +789,45 @@ impl Parser<'_> {
         let mut print = false;
         let mut ci = false;
         let mut wfile = None;
+        // Every rejection below is reported *after* consuming the offending
+        // character, because that is where GNU reports it: `s/a/b/x` says char
+        // 7 and the `x` is at 6. Blanks separate flags but do not end them —
+        // `s/a/b/2 3` is two number flags and is refused as such, at char 9.
         loop {
+            self.skip_blank();
             match self.peek() {
                 Some(b'g') => {
                     self.i = self.i.saturating_add(1);
+                    if global {
+                        return Err("multiple `g' options to `s' command".to_string());
+                    }
                     global = true;
                 }
                 Some(b'p') => {
                     self.i = self.i.saturating_add(1);
+                    if print {
+                        return Err("multiple `p' options to `s' command".to_string());
+                    }
                     print = true;
                 }
+                // No multiple-use check on these two: GNU has none either, so
+                // `s/a/b/Ii` is accepted.
                 Some(b'i' | b'I') => {
                     self.i = self.i.saturating_add(1);
                     ci = true;
                 }
                 Some(b'm' | b'M') => {
+                    self.i = self.i.saturating_add(1);
                     return Err("the `M' flag of `s' is not supported".to_string());
                 }
                 Some(c) if c.is_ascii_digit() => {
-                    if occurrence != 0 {
-                        return Err("`s' takes only one number flag".to_string());
-                    }
+                    let seen = occurrence != 0;
                     occurrence = self.number()?;
+                    if seen {
+                        return Err("multiple number options to `s' command".to_string());
+                    }
                     if occurrence == 0 {
-                        return Err("`s' counts matches from 1".to_string());
+                        return Err("number option to `s' command may not be zero".to_string());
                     }
                 }
                 Some(b'w') => {
@@ -694,13 +837,35 @@ impl Parser<'_> {
                     wfile = Some(self.wfile(path));
                     break;
                 }
-                _ => break,
+                // What ends the flags, and nothing else does. A `}` is left
+                // where it is for `parse_body` to close the block with.
+                None | Some(b';' | b'\n' | b'}' | b'#') => break,
+                Some(_) => {
+                    self.i = self.i.saturating_add(1);
+                    return Err("unknown option to `s'".to_string());
+                }
             }
         }
 
+        let re = self.compile(&pat, ci)?;
+        let repl = parse_replacement(&raw_repl)?;
+        // A `\N` naming a group the pattern does not have is refused, not
+        // silently empty — and refused here, after the flags, because that is
+        // where GNU reports it: `s/a/\9/w f.txt` says char 14, the end of the
+        // whole command. Skipped when the pattern is empty, since `s//\1/` will
+        // re-use a regular expression that is not known until run time.
+        if let Some(re) = re.as_deref() {
+            let groups = re.group_count();
+            if let Some(n) = repl.iter().find_map(|r| match *r {
+                Rep::Group(n) if n > groups => Some(n),
+                _ => None,
+            }) {
+                return Err(format!("invalid reference \\{n} on `s' command's RHS"));
+            }
+        }
         Ok(Subst {
-            re: self.compile(&pat, ci)?,
-            repl: parse_replacement(&raw_repl)?,
+            re,
+            repl,
             global,
             occurrence: occurrence.max(1),
             print,
@@ -711,7 +876,8 @@ impl Parser<'_> {
     fn parse_transliterate(&mut self) -> Result<Box<[u8; 256]>, String> {
         let delim = self
             .bump()
-            .ok_or_else(|| "`y' needs a delimiter".to_string())?;
+            // As for `s`, above: a missing delimiter is an unterminated command.
+            .ok_or_else(|| "unterminated `y' command".to_string())?;
         let from = unescape_y(&self.take_until(delim, false, "`y' command")?)?;
         let to = unescape_y(&self.take_until(delim, false, "`y' command")?)?;
         if from.len() != to.len() {
@@ -1010,13 +1176,43 @@ fn parse_replacement(raw: &[u8]) -> Result<Vec<Rep>, String> {
 /// about a place in the text — an unresolved label is about the script's shape.
 #[cfg_attr(test, derive(Debug))]
 struct ScriptError {
-    at: Option<usize>,
+    pos: Pos,
     msg: String,
     code: i32,
 }
 
+/// Where a script error is, in the joined script text.
+///
+/// The offset alone is not enough, because two of GNU's faults are reported
+/// only once the whole program has been read. See [`Pos::AfterParse`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pos {
+    /// At this byte offset: the character count is the offset within whichever
+    /// `-e` fragment or `-f` file the offset lands in.
+    At(usize),
+    /// This offset picks the fragment — and, in a `-f` file, the line — but the
+    /// character offset within an `-e` fragment is 0 whatever the offset is.
+    ///
+    /// That is not a simplification, it is what upstream prints. `bad_prog`
+    /// renders a string expression's position as `prog.cur - prog.base`, and
+    /// both pointers are cleared once the expression has been read, so any
+    /// diagnostic raised after parsing says char 0. Two are: the unmatched `{`,
+    /// which restores the location saved when the brace was read, and the
+    /// leading empty regex, which restores nothing and so lands at the end of
+    /// the script. The difference between them is invisible in an `-e` fragment
+    /// and plain in a `-f` file, which has real line numbers: `printf 'p\n{p\n'`
+    /// reports line 2 — the brace — while `printf 'p\ns//X/\n'` reports line 3,
+    /// one past the last line there is. Both measured.
+    AfterParse(usize),
+    /// Nowhere: an unresolvable label, which GNU reports with no location at
+    /// all because it is found after the program has been read.
+    Nowhere,
+}
+
 enum ScriptFail {
     Syntax(String),
+    /// A syntax error somewhere other than where the parser stopped.
+    SyntaxAt(Pos, String),
     Label(String),
 }
 
@@ -1032,6 +1228,7 @@ impl From<String> for ScriptFail {
 /// because a `{` may be opened in one fragment and closed in the next.
 fn compile_script(
     script: &[u8],
+    segments: &[Segment],
     ere: bool,
     line_len: usize,
     sandbox: bool,
@@ -1046,17 +1243,21 @@ fn compile_script(
         rfiles: Vec::new(),
     };
     match parse_body(&mut p, script) {
-        Ok(s) => Ok(s),
+        Ok(mut s) => {
+            s.end_loc = locate(script, segments, Pos::AfterParse(script.len()));
+            Ok(s)
+        }
         Err(ScriptFail::Syntax(msg)) => Err(ScriptError {
-            at: Some(p.i),
+            pos: Pos::At(p.i),
             msg,
             code: 1,
         }),
+        Err(ScriptFail::SyntaxAt(pos, msg)) => Err(ScriptError { pos, msg, code: 1 }),
         // GNU reports an unresolvable label after parsing has finished, and
         // gives it its own status. Matching that keeps a script that checks
         // `$?` behaving the same under either sed.
         Err(ScriptFail::Label(msg)) => Err(ScriptError {
-            at: None,
+            pos: Pos::Nowhere,
             msg,
             code: 4,
         }),
@@ -1065,7 +1266,10 @@ fn compile_script(
 
 fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
     let mut cmds: Vec<Command> = Vec::new();
-    let mut open: Vec<usize> = Vec::new();
+    // The command index of each unclosed `{`, paired with the byte offset of the
+    // brace itself — which is needed only to report an unclosed one where GNU
+    // reports it. See [`Pos::AfterParse`].
+    let mut open: Vec<(usize, usize)> = Vec::new();
     let mut labels: Vec<(Vec<u8>, usize)> = Vec::new();
     let mut branches: Vec<(usize, Vec<u8>)> = Vec::new();
 
@@ -1087,7 +1291,7 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
             }
             Some(b'}') => {
                 p.i = p.i.saturating_add(1);
-                let start = open.pop().ok_or_else(|| "unexpected `}'".to_string())?;
+                let (start, _) = open.pop().ok_or_else(|| "unexpected `}'".to_string())?;
                 let here = cmds.len();
                 cmds.push(Command {
                     sel: Sel::Always,
@@ -1097,6 +1301,9 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                 if let Some(c) = cmds.get_mut(start) {
                     c.act = Action::Block(here.saturating_add(1));
                 }
+                // A `}` takes no argument either, so `{p}p` is junk after a
+                // command and not two commands — measured, char 4.
+                p.end_of_cmd()?;
                 continue;
             }
             Some(_) => {}
@@ -1104,6 +1311,23 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
 
         let sel = p.parse_sel()?;
         p.skip_blank();
+        if sel.rejects_line_zero() {
+            // GNU makes this check having already read the character that
+            // follows the address — the `!` or the command letter — so the
+            // offset it prints is one past it, except at the end of the script
+            // where there was nothing to read. Measured: `0p` says char 2,
+            // `0!p` says char 2 as well (the `!` is that character), and a bare
+            // `0` says char 1.
+            let at = if p.peek().is_some() {
+                p.i.saturating_add(1)
+            } else {
+                p.i
+            };
+            return Err(ScriptFail::SyntaxAt(
+                Pos::At(at),
+                "invalid usage of line address 0".to_string(),
+            ));
+        }
         let mut negated = false;
         while p.eat(b'!') {
             negated = !negated;
@@ -1115,14 +1339,16 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
         let here = cmds.len();
         let act = match c {
             b'{' => {
-                open.push(here);
+                // `p.i` is just past the brace, so back up one to name it.
+                open.push((here, p.i.saturating_sub(1)));
                 Action::Block(0)
             }
             b'}' => return Err(ScriptFail::Syntax("unexpected `}'".to_string())),
             b':' => {
                 let name = p.parse_label();
                 if name.is_empty() {
-                    return Err(ScriptFail::Syntax("`:' needs a label".to_string()));
+                    // GNU's wording, double quotes and all.
+                    return Err(ScriptFail::Syntax("\":\" lacks a label".to_string()));
                 }
                 labels.push((name, here));
                 Action::Label
@@ -1203,11 +1429,43 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                 )));
             }
         };
+        // GNU's `read_end_of_cmd`, run after every command that does not read to
+        // the end of its own line. `a`, `i`, `c`, `r`, `R`, `w`, `W`, `b`, `t`,
+        // `T` and `:` all take the rest of the line as their argument, so there
+        // is nothing left that could be junk; `s` ends with its own flag scan,
+        // which refuses junk in its own words (`unknown option to `s'`); and `{`
+        // is followed by more commands by definition.
+        if !matches!(
+            c,
+            b'{' | b'}'
+                | b':'
+                | b'b'
+                | b't'
+                | b'T'
+                | b's'
+                | b'a'
+                | b'i'
+                | b'c'
+                | b'r'
+                | b'R'
+                | b'w'
+                | b'W'
+        ) {
+            p.end_of_cmd()?;
+        }
         cmds.push(Command { sel, negated, act });
     }
 
-    if !open.is_empty() {
-        return Err(ScriptFail::Syntax("unmatched `{'".to_string()));
+    // The *innermost* unclosed brace, not the outermost: GNU pushes each open
+    // block onto the head of a list and reports the head, so of `{\np\n{\np\n`
+    // it names line 3 and not line 1 — measured. With both braces in one `-e`
+    // that is invisible (char 0 either way), but a `-f` file gives each its own
+    // line and a second `-e` gives each its own expression number.
+    if let Some(&(_, brace)) = open.last() {
+        return Err(ScriptFail::SyntaxAt(
+            Pos::AfterParse(brace),
+            "unmatched `{'".to_string(),
+        ));
     }
 
     let end = cmds.len();
@@ -1240,6 +1498,9 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
         wfiles: std::mem::take(&mut p.wfiles),
         rfiles: std::mem::take(&mut p.rfiles),
         suppress,
+        // Filled in by [`compile_script`], which is the only caller that knows
+        // the fragment map the offset has to be resolved against.
+        end_loc: None,
     })
 }
 
@@ -1392,6 +1653,26 @@ impl Out<'_> {
     }
 }
 
+/// Write the text of an `i` or a `c`.
+///
+/// Two things separate this from writing the text as it is stored. An empty
+/// text is *no* text — `sed '2i\'` inserts nothing, and is not the same as the
+/// one empty line `a\` followed by a newline appends — so it writes nothing at
+/// all rather than a bare separator. And the newline the text carries is
+/// dropped and re-supplied as the output separator, so `sed -z 'i X'` ends the
+/// inserted line with a NUL like every other line.
+///
+/// That last point is where `i` and `c` part company with `a`, which writes its
+/// text unchanged and so ends it with a newline even under `-z`. Both measured;
+/// upstream splits them the same way, because `i` and `c` write through the
+/// missing-newline bookkeeping and the append queue does not.
+fn text_out(out: &mut Out, t: &[u8]) -> io::Result<()> {
+    if t.is_empty() {
+        return Ok(());
+    }
+    out.line(t.strip_suffix(b"\n").unwrap_or(t), true)
+}
+
 // -------------------------------------------------------------- the executor
 
 /// What a run of the script decided about the current cycle.
@@ -1411,12 +1692,11 @@ enum Flow {
 
 /// Text queued by `a` or `r`, emitted after the cycle's own output.
 enum Pending {
-    Text(Vec<u8>),
     File(String),
-    /// One line already read by `R`, separator and all — or without one, if it
-    /// was the last line of a file that had none. Distinct from `Text` because
-    /// `a`'s text is a line that *needs* a separator adding, while this one
-    /// carries its own and must not be given a second.
+    /// Bytes that already end however they should end, and so are written with
+    /// nothing added: one line read by `R`, separator and all — or without one,
+    /// if it was the last line of a file that had none — and the text of an
+    /// `a`, which carries the newline [`Parser::parse_text`] gave it.
     Raw(Vec<u8>),
 }
 
@@ -1530,6 +1810,12 @@ struct RangeState {
 enum Stop {
     Io(io::Error),
     Limit(ere::MatchLimit),
+    /// An empty regular expression with nothing to repeat.
+    ///
+    /// Carries no message because there is only one, and no location because
+    /// the location is a property of the script rather than of this cycle: see
+    /// [`Script::end_loc`].
+    NoRegex,
 }
 
 impl From<io::Error> for Stop {
@@ -1561,7 +1847,6 @@ struct Exec<'w> {
     /// Borrowed for the same reason as `wfiles`, and see [`open_rfiles`].
     rfiles: &'w mut Vec<RFile>,
     suppress: bool,
-    had_error: bool,
 }
 
 impl<'w> Exec<'w> {
@@ -1599,29 +1884,30 @@ impl<'w> Exec<'w> {
             wfiles,
             rfiles,
             suppress,
-            had_error: false,
         }
     }
 
-    fn fail(&mut self, msg: &str) {
-        diag!("sed: {msg}");
-        self.had_error = true;
-    }
-
-    /// Resolve `//` and record what was matched, so the next `//` can find it.
-    fn resolve(&mut self, r: Option<&Rc<Regex>>) -> Option<Rc<Regex>> {
+    /// Resolve `//` and record what was tried, so the next `//` can find it.
+    ///
+    /// *Tried*, not matched: merely evaluating an address sets it, whether the
+    /// address selected the line or not. That is why `sed '/b/{p};s//X/'`
+    /// substitutes `/b/` on every line and not only on the ones `/b/` picked —
+    /// measured, and the reason this records the regex before the search rather
+    /// than after a successful one.
+    ///
+    /// An empty regex with nothing before it is a run-time failure, not a
+    /// compile-time one: GNU has no static check at all, so `sed 's//X/'` over
+    /// an empty file reads no line, runs no command and exits 0. Also measured.
+    fn resolve(&mut self, r: Option<&Rc<Regex>>) -> Run<Rc<Regex>> {
         let re = match r {
             Some(x) => Rc::clone(x),
             None => match &self.last_re {
                 Some(x) => Rc::clone(x),
-                None => {
-                    self.fail("no previous regular expression");
-                    return None;
-                }
+                None => return Err(Stop::NoRegex),
             },
         };
         self.last_re = Some(Rc::clone(&re));
-        Some(re)
+        Ok(re)
     }
 
     fn addr_match(&mut self, a: &Addr, input: &mut Input) -> Run<bool> {
@@ -1636,10 +1922,7 @@ impl<'w> Exec<'w> {
                         && self.line_num.saturating_sub(*first).is_multiple_of(*step)
                 }
             }
-            Addr::Re(r) => match self.resolve(r.as_ref()) {
-                Some(re) => re.find(&self.pattern)?.is_some(),
-                None => false,
-            },
+            Addr::Re(r) => self.resolve(r.as_ref())?.find(&self.pattern)?.is_some(),
         })
     }
 
@@ -1680,10 +1963,7 @@ impl<'w> Exec<'w> {
 
         let close = match a2 {
             EndAddr::Addr(Addr::Last) => input.at_end(),
-            EndAddr::Addr(Addr::Re(r)) => match self.resolve(r.as_ref()) {
-                Some(re) => re.find(&self.pattern)?.is_some(),
-                None => true,
-            },
+            EndAddr::Addr(Addr::Re(r)) => self.resolve(r.as_ref())?.find(&self.pattern)?.is_some(),
             EndAddr::Addr(Addr::Step(_, _)) => false,
             _ => {
                 let end = self.ranges.get(pc).and_then(|r| r.end_line);
@@ -1771,7 +2051,6 @@ impl<'w> Exec<'w> {
     fn flush_appends(&mut self, out: &mut Out<'_>) -> io::Result<()> {
         for p in std::mem::take(&mut self.appends) {
             match p {
-                Pending::Text(t) => out.line(&t, true)?,
                 Pending::Raw(t) => out.raw(&t)?,
                 Pending::File(path) => {
                     // GNU ignores a file it cannot read here: `r` is an
@@ -1796,9 +2075,7 @@ impl<'w> Exec<'w> {
 
     /// Apply one `s` command; returns whether anything was replaced.
     fn substitute(&mut self, sub: &Subst) -> Run<bool> {
-        let Some(re) = self.resolve(sub.re.as_ref()) else {
-            return Ok(false);
-        };
+        let re = self.resolve(sub.re.as_ref())?;
         let hay = std::mem::take(&mut self.pattern);
         let mut out: Vec<u8> = Vec::with_capacity(hay.len());
         let mut last = 0usize;
@@ -1968,15 +2245,24 @@ impl<'w> Exec<'w> {
                     let n = self.line_num.to_string();
                     out.line(n.as_bytes(), true)?;
                 }
-                Action::AppendText(t) => self.appends.push(Pending::Text(t.clone())),
-                Action::InsertText(t) => out.line(t, true)?,
+                // Verbatim, newline and all — not `Pending::Text`, which would
+                // end the line with the output separator. GNU's append queue
+                // writes the text as it was stored, so `sed -z 'a X'` emits
+                // `X\n` between NUL-terminated lines. Measured, and the reason
+                // `i` and `c` below go the other way.
+                Action::AppendText(t) => {
+                    if !t.is_empty() {
+                        self.appends.push(Pending::Raw(t.clone()));
+                    }
+                }
+                Action::InsertText(t) => text_out(out, t)?,
                 Action::ChangeText(t) => {
                     // For a range, the text replaces the whole range and so is
                     // written once, when the range closes — not once per line.
                     let still_open = matches!(cmd.sel, Sel::Range(_, _))
                         && self.ranges.get(pc).is_some_and(|r| r.active);
                     if !still_open {
-                        out.line(t, true)?;
+                        text_out(out, t)?;
                     }
                     return Ok(Flow::Deleted);
                 }
@@ -2449,16 +2735,55 @@ non-option argument is taken as the sed script to interpret.  All
 remaining arguments are names of input files; if no input files are
 specified, then the standard input is read.";
 
+/// Where one stretch of the joined script text came from.
+///
+/// The whole script is parsed as one buffer, because a `{` may be opened in one
+/// fragment and closed in the next — GNU allows that too (`sed -e '{' -e p -e
+/// '}'` runs), so it is not an accident of our implementation. But GNU reports
+/// an error against the *fragment* it fell in, not against the join, and the
+/// two kinds of fragment are reported quite differently. This is the map back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Origin {
+    /// The Nth `-e`, counting from 1. A bare script operand is counted too — it
+    /// is `-e expression #1` to GNU as much as `-e` is. `-f` files are *not*
+    /// counted: `sed -f x.sed -e Z` reports `expression #1`, not `#2`.
+    Expr(usize),
+    /// A `-f` file, named as its bytes, since a filename need not be text.
+    /// Errors in one are located by line number, with no character offset.
+    File(Vec<u8>),
+}
+
+/// One fragment's starting offset in the joined script text, and its origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Segment {
+    start: usize,
+    origin: Origin,
+}
+
 /// Gather the script text from `-e` fragments and `-f` files.
 ///
-/// The error is already formatted for [`panic_out`], and carries the name as
-/// bytes so a `-f` file whose name is not UTF-8 is reported as itself.
-fn collect_script(parts: &[ScriptPart]) -> Result<Vec<u8>, Vec<u8>> {
+/// Returns the joined text and the map from offset back to fragment; see
+/// [`Segment`]. The error is already formatted for [`panic_out`], and carries
+/// the name as bytes so a `-f` file whose name is not UTF-8 is reported as
+/// itself.
+fn collect_script(parts: &[ScriptPart]) -> Result<(Vec<u8>, Vec<Segment>), Vec<u8>> {
     let mut script: Vec<u8> = Vec::new();
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut exprs = 0usize;
     for part in parts {
         if !script.is_empty() {
             script.push(b'\n');
         }
+        segments.push(Segment {
+            start: script.len(),
+            origin: match part {
+                ScriptPart::Text(_) => {
+                    exprs = exprs.saturating_add(1);
+                    Origin::Expr(exprs)
+                }
+                ScriptPart::File(path) => Origin::File(os_bytes(path).into_owned()),
+            },
+        });
         match part {
             ScriptPart::Text(t) => script.extend_from_slice(t),
             ScriptPart::File(path) => {
@@ -2480,7 +2805,49 @@ fn collect_script(parts: &[ScriptPart]) -> Result<Vec<u8>, Vec<u8>> {
             }
         }
     }
-    Ok(script)
+    Ok((script, segments))
+}
+
+/// GNU's location prefix for a script error, without the trailing `: `.
+///
+/// Two shapes, because upstream has two: a `-e` fragment is located by
+/// expression number and character offset within that fragment, a `-f` file by
+/// name and line number within that file. Neither is the offset into the joined
+/// buffer we actually parse, which is why [`Segment`] exists.
+fn locate(script: &[u8], segments: &[Segment], pos: Pos) -> Option<Vec<u8>> {
+    let (at, brace) = match pos {
+        Pos::At(at) => (at, false),
+        Pos::AfterParse(at) => (at, true),
+        Pos::Nowhere => return None,
+    };
+    // The last segment that starts at or before `at`. A fault at the very end of
+    // the script belongs to the last fragment, which this gives for free.
+    let seg = segments.iter().rev().find(|s| s.start <= at)?;
+    let mut out = Vec::new();
+    match &seg.origin {
+        Origin::Expr(n) => {
+            // `char 0` for an unclosed brace whatever its offset — see
+            // [`Pos::AfterParse`].
+            let ch = if brace {
+                0
+            } else {
+                at.saturating_sub(seg.start)
+            };
+            out.extend_from_slice(format!("-e expression #{n}, char {ch}").as_bytes());
+        }
+        Origin::File(name) => {
+            let counted = script.get(seg.start..at).unwrap_or_default();
+            let line = counted
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count()
+                .saturating_add(1);
+            out.extend_from_slice(b"file ");
+            out.extend_from_slice(name);
+            out.extend_from_slice(format!(" line {line}").as_bytes());
+        }
+    }
+    Some(out)
 }
 
 fn main() {
@@ -2511,7 +2878,7 @@ fn main() {
         }
     };
 
-    let script_text = match collect_script(&parsed.script_parts) {
+    let (script_text, segments) = match collect_script(&parsed.script_parts) {
         Ok(s) => s,
         // Not status 1: the command line was well formed, and a `-f` file that
         // will not open is an I/O failure like any other.
@@ -2525,13 +2892,24 @@ fn main() {
         }
     };
 
-    let script = match compile_script(&script_text, parsed.ere, parsed.line_len, parsed.sandbox) {
+    let script = match compile_script(
+        &script_text,
+        &segments,
+        parsed.ere,
+        parsed.line_len,
+        parsed.sandbox,
+    ) {
         Ok(s) => s,
         Err(e) => {
-            match e.at {
-                Some(at) => diag!("sed: -e expression #1, char {at}: {}", e.msg),
-                None => diag!("sed: {}", e.msg),
+            let mut line = Vec::from(&b"sed: "[..]);
+            if let Some(where_) = locate(&script_text, &segments, e.pos) {
+                line.extend_from_slice(&where_);
+                line.extend_from_slice(b": ");
             }
+            line.extend_from_slice(e.msg.as_bytes());
+            line.push(b'\n');
+            let _ = io::stdout().flush();
+            stdfd::diag_bytes(&line);
             process::exit(e.code);
         }
     };
@@ -2610,8 +2988,28 @@ impl Job<'_> {
                 diag!("sed: {e}");
                 return (Some(EXIT_PANIC), true);
             }
+            // Upstream leaves at once, and leaves *after* what it has already
+            // written: a `w` file given a line on an earlier cycle keeps it, and
+            // the pattern spaces already printed are on standard output. Hence
+            // the flush before the diagnostic and the exit rather than a return
+            // — under `-i` there is a half-written temporary file, and GNU does
+            // not finish it either. Measured.
+            Err(Stop::NoRegex) => {
+                let _ = sink.flush();
+                let mut line = Vec::from(&b"sed: "[..]);
+                if let Some(at) = self.script.end_loc.as_deref() {
+                    line.extend_from_slice(at);
+                    line.extend_from_slice(b": ");
+                }
+                line.extend_from_slice(b"no previous regular expression\n");
+                let _ = io::stdout().flush();
+                stdfd::diag_bytes(&line);
+                process::exit(1);
+            }
         };
-        (quit, exec.had_error)
+        // The cycle either finished or took one of the branches above, each of
+        // which returns; there is no third way for it to have gone wrong.
+        (quit, false)
     }
 
     /// All the files as one stream: line numbers and `$` run across them.
@@ -2770,7 +3168,7 @@ mod tests {
     /// the default `l` width, and no sandbox. The two tests that care about
     /// either of those call `compile_script` directly.
     fn compile(script: &[u8], ere: bool) -> Result<Script, ScriptError> {
-        compile_script(script, ere, DEFAULT_LINE_LEN, false)
+        compile_script(script, &[], ere, DEFAULT_LINE_LEN, false)
     }
 
     /// Why [`compile`] refused `script`. Panics if it did not — `Script` has no
@@ -2819,6 +3217,47 @@ mod tests {
         };
         job.run_one(&mut inp, &mut sink);
         sink
+    }
+
+    /// [`run`] for a script that may hit the empty-regex fault.
+    ///
+    /// [`Job::run_one`] answers that fault the way upstream does — a diagnostic
+    /// and `exit(1)` — which a test cannot survive, so this drives the [`Exec`]
+    /// directly instead. Either way it returns what had been written when the
+    /// run ended, since "what stands before the failure" is half of what is
+    /// being checked.
+    fn run_stopping(script: &str, input: &str) -> Result<Vec<u8>, Vec<u8>> {
+        let compiled = compile(script.as_bytes(), false)
+            .unwrap_or_else(|e| panic!("compiling {script}: {}", e.msg));
+        let mut inp = Input {
+            paths: Vec::new(),
+            next_path: 0,
+            cur_name: OsString::from("stdin"),
+            cur: Some(Box::new(BufReader::new(io::Cursor::new(
+                input.as_bytes().to_vec(),
+            )))),
+            peeked: None,
+            sep: b'\n',
+            had_error: false,
+        };
+        let mut wfiles = open_wfiles(&compiled.wfiles);
+        let mut rfiles = open_rfiles(&compiled.rfiles);
+        let mut sink: Vec<u8> = Vec::new();
+        // Scoped so the borrow of `sink` ends before it is returned.
+        let stopped = {
+            let mut exec = Exec::new(&compiled, compiled.suppress, &mut wfiles, &mut rfiles);
+            let mut out = Out {
+                w: &mut sink,
+                sep: b'\n',
+                owed: false,
+            };
+            match exec.cycle(&compiled.cmds, &mut inp, &mut out) {
+                Ok(_) => false,
+                Err(Stop::NoRegex) => true,
+                Err(_) => panic!("{script} failed for some other reason"),
+            }
+        };
+        if stopped { Err(sink) } else { Ok(sink) }
     }
 
     // ---------------- the defect that started this ----------------
@@ -3142,8 +3581,9 @@ mod tests {
         assert_eq!(run("s/\\x2e/Z/", "a.c\n"), "Z.c\n");
         assert_eq!(run("s/a\\x2a/Z/", "aaa\n"), "Z\n");
         assert_eq!(run("s/\\x5b\\x61\\x5d/Z/", "abc\n"), "Zbc\n");
-        // A bare backslash, therefore the error a bare backslash always is.
-        assert!(compile_err(b"s/\\x5c/Z/").contains("trailing backslash"));
+        // A bare backslash, therefore the error a bare backslash always is —
+        // in glibc's words, since that is what GNU prints.
+        assert_eq!(compile_err(b"s/\\x5c/Z/"), "Trailing backslash");
         // The conversion runs after the delimiter scan, so a delimiter it
         // produces is a character and not the end of the command.
         assert_eq!(run("s/\\x2f/Z/", "a/c\n"), "aZc\n");
@@ -3292,7 +3732,7 @@ mod tests {
         // `l 0` beats a narrow `-l`, and `l` with no number defers to it.
         // The width a one-command script's `l` resolved to, with `-l` set to 3.
         let width_of = |script: &[u8]| -> usize {
-            let s = compile_script(script, false, 3, false).expect("compiling");
+            let s = compile_script(script, &[], false, 3, false).expect("compiling");
             match &s.cmds.first().expect("one command").act {
                 Action::List(w) => *w,
                 _ => panic!("{} did not parse as `l`", String::from_utf8_lossy(script)),
@@ -3388,20 +3828,20 @@ mod tests {
         // arrive they must be added here and to `deny_in_sandbox`'s callers.
         for script in [&b"r f"[..], b"R f", b"w f", b"W f", b"s/a/b/w f"] {
             assert!(
-                compile_script(script, false, DEFAULT_LINE_LEN, true).is_err(),
+                compile_script(script, &[], false, DEFAULT_LINE_LEN, true).is_err(),
                 "{} should be refused under --sandbox",
                 String::from_utf8_lossy(script)
             );
             // …and is a perfectly good script without it, so the refusal is
             // the sandbox's doing and not a parse failure in disguise.
             assert!(
-                compile_script(script, false, DEFAULT_LINE_LEN, false).is_ok(),
+                compile_script(script, &[], false, DEFAULT_LINE_LEN, false).is_ok(),
                 "{} should compile without --sandbox",
                 String::from_utf8_lossy(script)
             );
         }
         // A script that reaches nowhere is unaffected.
-        assert!(compile_script(b"s/a/b/p", false, DEFAULT_LINE_LEN, true).is_ok());
+        assert!(compile_script(b"s/a/b/p", &[], false, DEFAULT_LINE_LEN, true).is_ok());
     }
 
     // ---------------- `-z` ----------------
@@ -3710,5 +4150,332 @@ mod tests {
         assert_eq!(status(Some(5), false), 5);
         // `q5` is louder than "a file was missing", so it wins.
         assert_eq!(status(Some(5), true), 5);
+    }
+
+    // ---------------- what may follow a command ----------------
+
+    /// GNU's `read_end_of_cmd`. Every offset below was measured: upstream reads
+    /// the offending character before deciding it is one, so it reports one
+    /// past it.
+    #[test]
+    fn a_command_that_takes_no_argument_is_followed_by_a_separator_or_nothing() {
+        for script in [
+            &b"px"[..],
+            b"p x",
+            b"d x",
+            b"=x",
+            b"q5x",
+            b"l5x",
+            b"y/a/b/x",
+            b"{p} x",
+            b"{p}p",
+        ] {
+            assert_eq!(
+                compile_err(script),
+                "extra characters after command",
+                "{}",
+                String::from_utf8_lossy(script)
+            );
+        }
+        // …and the spellings that are not junk, which is the other half of it.
+        for script in [
+            &b"p;p"[..],
+            b"p #c",
+            b"{p}",
+            b"{ p }",
+            b"{p};p",
+            b"q 5",
+            b"y/a/b/;p",
+        ] {
+            assert!(
+                compile(script, false).is_ok(),
+                "{}",
+                String::from_utf8_lossy(script)
+            );
+        }
+    }
+
+    /// A label ends at whitespace, so what follows a space is the next command.
+    /// `sed 'b x y'` is a branch to `x` and then an unterminated `y`.
+    #[test]
+    fn a_label_ends_at_the_first_blank() {
+        assert_eq!(compile_err(b"b x y"), "unterminated `y' command");
+        assert_eq!(compile_err(b":x y"), "unterminated `y' command");
+        assert_eq!(compile_err(b"b x s"), "unterminated `s' command");
+        // A `}` is not label text either: `{b}` branches to the end of the
+        // script and closes its block.
+        assert!(compile(b"{b}", false).is_ok());
+        assert!(compile(b"{:x}", false).is_ok());
+        assert_eq!(compile_err(b": "), "\":\" lacks a label");
+    }
+
+    /// A missing delimiter is the same fault as a missing closing one, because
+    /// upstream reads both with the same call.
+    #[test]
+    fn s_and_y_report_a_missing_delimiter_as_an_unterminated_command() {
+        assert_eq!(compile_err(b"s"), "unterminated `s' command");
+        assert_eq!(compile_err(b"s/a"), "unterminated `s' command");
+        assert_eq!(compile_err(b"s/a/b"), "unterminated `s' command");
+        assert_eq!(compile_err(b"y"), "unterminated `y' command");
+        assert_eq!(compile_err(b"y/ab/cd"), "unterminated `y' command");
+    }
+
+    /// Every rejection the `s` flag scan can make, in GNU's words.
+    #[test]
+    fn the_s_flags_are_scanned_the_way_gnu_scans_them() {
+        assert_eq!(compile_err(b"s/a/b/x"), "unknown option to `s'");
+        assert_eq!(
+            compile_err(b"s/a/b/gg"),
+            "multiple `g' options to `s' command"
+        );
+        assert_eq!(
+            compile_err(b"s/a/b/pp"),
+            "multiple `p' options to `s' command"
+        );
+        assert_eq!(
+            compile_err(b"s/a/b/p2p"),
+            "multiple `p' options to `s' command"
+        );
+        assert_eq!(
+            compile_err(b"s/a/b/2 3"),
+            "multiple number options to `s' command"
+        );
+        assert_eq!(
+            compile_err(b"s/a/b/0"),
+            "number option to `s' command may not be zero"
+        );
+        // Blanks separate flags without ending them; `I` and `i` are the same
+        // flag and GNU does not count them; `}` and `#` end them.
+        for script in [
+            &b"s/a/b/ "[..],
+            b"s/a/b/ p",
+            b"s/a/b/  2",
+            b"s/a/b/Ii",
+            b"s/a/b/#c",
+            b"{s/a/b/}",
+            b"s/a/b/2gp",
+        ] {
+            assert!(
+                compile(script, false).is_ok(),
+                "{}",
+                String::from_utf8_lossy(script)
+            );
+        }
+    }
+
+    /// `\N` on the right-hand side may only name a group the pattern has.
+    #[test]
+    fn a_replacement_may_not_name_a_group_the_pattern_lacks() {
+        assert_eq!(
+            compile_err(br"s/a/\9/g"),
+            "invalid reference \\9 on `s' command's RHS"
+        );
+        assert_eq!(
+            compile_err(br"s/\(a\)/\2/"),
+            "invalid reference \\2 on `s' command's RHS"
+        );
+        assert!(compile(br"s/\(a\)/\1/", false).is_ok());
+        assert!(compile(br"s/a/\0/", false).is_ok());
+        // Nothing to check against: `s//\1/` re-uses a pattern that is not
+        // known until the command runs.
+        assert!(compile(br"s/a/b/;s//\1/", false).is_ok());
+    }
+
+    /// Line 0 exists only so `0,/re/` can end on line 1.
+    #[test]
+    fn line_address_zero_is_refused_everywhere_but_the_start_of_a_regex_range() {
+        for script in [
+            &b"0"[..],
+            b"0p",
+            b"0!p",
+            b"0,3p",
+            b"0,3!p",
+            b"0,$p",
+            b"0,0p",
+            b"0,+2p",
+            b"0,~2p",
+            b"0~0p",
+        ] {
+            assert_eq!(
+                compile_err(script),
+                "invalid usage of line address 0",
+                "{}",
+                String::from_utf8_lossy(script)
+            );
+        }
+        for script in [&b"0,/a/p"[..], b"0,/a/!p", b"0~3p", b"/a/,0p", b"$,0p"] {
+            assert!(
+                compile(script, false).is_ok(),
+                "{}",
+                String::from_utf8_lossy(script)
+            );
+        }
+    }
+
+    /// An absent number is zero rather than an error, so what these lack is a
+    /// command and not a number.
+    #[test]
+    fn a_missing_step_or_count_is_zero() {
+        for script in [&b"1"[..], b"1,2", b"/a/", b"1~", b"1,+", b"1,~"] {
+            assert_eq!(
+                compile_err(script),
+                "missing command",
+                "{}",
+                String::from_utf8_lossy(script)
+            );
+        }
+        // `1~` is `1~0`, which is line 1 — not "every line from 1".
+        assert_eq!(run("1~p", "a\nb\nc\n"), "a\na\nb\nc\n");
+    }
+
+    // ---------------- where an error is ----------------
+
+    /// The two shapes GNU has, and the rule that tells them apart. A `-e`
+    /// fragment is numbered and gets a character offset; a `-f` file is named
+    /// and gets a line number, and does not advance the expression counter.
+    #[test]
+    fn an_error_is_located_in_the_fragment_it_fell_in() {
+        // The map a `-e s/a/A/ -f x.sed -e p` would produce, where `x.sed` holds
+        // two lines. Built by hand rather than through `collect_script`, which
+        // would have to read a real file.
+        let script = b"s/a/A/\np\np\np";
+        let segments = [
+            Segment {
+                start: 0,
+                origin: Origin::Expr(1),
+            },
+            Segment {
+                start: 7,
+                origin: Origin::File(b"x.sed".to_vec()),
+            },
+            Segment {
+                start: 11,
+                origin: Origin::Expr(2),
+            },
+        ];
+        let at =
+            |pos| locate(script, &segments, pos).map(|b| String::from_utf8_lossy(&b).into_owned());
+        assert_eq!(at(Pos::At(3)), Some("-e expression #1, char 3".to_string()));
+        assert_eq!(at(Pos::At(7)), Some("file x.sed line 1".to_string()));
+        assert_eq!(at(Pos::At(9)), Some("file x.sed line 2".to_string()));
+        assert_eq!(
+            at(Pos::At(11)),
+            Some("-e expression #2, char 0".to_string())
+        );
+        assert_eq!(
+            at(Pos::At(12)),
+            Some("-e expression #2, char 1".to_string())
+        );
+        // A fault raised after the script has been read has no offset within an
+        // expression, but still has a line within a file.
+        assert_eq!(
+            at(Pos::AfterParse(12)),
+            Some("-e expression #2, char 0".to_string())
+        );
+        assert_eq!(
+            at(Pos::AfterParse(9)),
+            Some("file x.sed line 2".to_string())
+        );
+        assert_eq!(at(Pos::Nowhere), None);
+    }
+
+    /// `-f` files are not counted as expressions, and a bare script operand is.
+    #[test]
+    fn only_dash_e_fragments_are_numbered() {
+        let (script, segments) = collect_script(&[
+            ScriptPart::Text(b"p".to_vec()),
+            ScriptPart::Text(b"d".to_vec()),
+        ])
+        .expect("no file to read");
+        assert_eq!(script, b"p\nd");
+        assert_eq!(
+            segments,
+            [
+                Segment {
+                    start: 0,
+                    origin: Origin::Expr(1)
+                },
+                Segment {
+                    start: 2,
+                    origin: Origin::Expr(2)
+                },
+            ]
+        );
+    }
+
+    // ---------------- the text of a, i and c ----------------
+
+    /// The two spellings disagree about leading whitespace, and "no text" is
+    /// not the same as "one empty line". All measured against GNU.
+    #[test]
+    fn the_text_keeps_the_blanks_of_the_backslash_form_and_not_the_one_liners() {
+        assert_eq!(run("a   X", "1\n"), "1\nX\n");
+        assert_eq!(run("a\\\n  X", "1\n"), "1\n  X\n");
+        // A backslash in the text is dropped, which is how a text line can
+        // begin with something that would otherwise be eaten.
+        assert_eq!(run("a\\\n\\  X", "1\n"), "1\n  X\n");
+        assert_eq!(run("a\\\nX\\\nY", "1\n"), "1\nX\nY\n");
+        // Nothing at all after the backslash: no text, so nothing is appended.
+        assert_eq!(run("a\\", "1\n"), "1\n");
+        assert_eq!(run("i\\", "1\n"), "1\n");
+        assert_eq!(run("c\\", "1\n"), "");
+        // A newline after it: a text of one empty line, which *is* appended.
+        assert_eq!(run("a\\\n", "1\n"), "1\n\n");
+        assert_eq!(run("i\\\n", "1\n"), "\n1\n");
+    }
+
+    /// `a` writes its text as it was stored, newline and all, so under `-z` it
+    /// is the one line a NUL does not end. `i` and `c` re-supply the separator.
+    #[test]
+    fn the_text_of_a_ends_in_a_newline_even_under_dash_z() {
+        // Spelled as a join so the NUL that ends `X` cannot be read as part of
+        // an escape belonging to the byte after it.
+        let joined = |a: &[u8], b: &[u8]| [a, b].concat();
+        assert_eq!(
+            run_sep(b"a X", b"1\0", false, false, 0),
+            joined(b"1\0", b"X\n")
+        );
+        assert_eq!(
+            run_sep(b"i X", b"1\0", false, false, 0),
+            joined(b"X\0", b"1\0")
+        );
+        assert_eq!(run_sep(b"c X", b"1\0", false, false, 0), b"X\0".to_vec());
+    }
+
+    // ---------------- the empty regular expression ----------------
+
+    /// `//` re-uses the last regex that was *tried*, not the last that matched:
+    /// evaluating an address sets it whether or not the address picked the
+    /// line. Measured — `sed '/b/{p};s//X/'` substitutes on every line.
+    #[test]
+    fn an_empty_regex_re_uses_the_last_one_evaluated() {
+        assert_eq!(run("/b/{p};s//X/", "a\nb\nc\n"), "a\nb\nX\nc\n");
+        // The second `s` re-uses `/a/` and so takes the `a` the first one left.
+        assert_eq!(run("s/a/b/;s//X/", "aa\n"), "bX\n");
+        assert_eq!(run("/a/p;//p", "a\nb\n"), "a\na\na\nb\n");
+    }
+
+    /// With nothing tried before it, an empty regex is a *run-time* failure —
+    /// GNU has no static check, so a script that never reaches the command is
+    /// not a failure at all.
+    #[test]
+    fn an_empty_regex_with_nothing_before_it_fails_only_when_it_runs() {
+        // Compiles: whether it can run is not a question about the text.
+        assert!(compile(b"p;s//X/", false).is_ok());
+        assert!(compile(b"//p", false).is_ok());
+        // No input, so no cycle, so no failure.
+        assert_eq!(run_stopping("s//X/", ""), Ok(Vec::new()));
+        // One cycle's output stands before the failure.
+        assert_eq!(run_stopping("p;s//X/", "a\nb\n"), Err(b"a\n".to_vec()));
+        assert_eq!(run_stopping("2{s//X/}", "a\nb\n"), Err(b"a\n".to_vec()));
+        // A modifier on an empty regex *is* refused while reading the script.
+        assert_eq!(
+            compile_err(b"s//X/I"),
+            "cannot specify modifiers on empty regexp"
+        );
+        assert_eq!(
+            compile_err(b"//Ip"),
+            "cannot specify modifiers on empty regexp"
+        );
     }
 }

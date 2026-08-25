@@ -602,6 +602,209 @@ run_stdin abc.txt 'w'
 run_stdin abc.txt 'r'
 run_stdin abc.txt -e 's/a/A/' -e 'Z'
 
+# Junk after a command that takes no argument — GNU's `read_end_of_cmd`. The
+# offset is one *past* the offending character, because upstream reads it before
+# deciding it is junk.
+run_stdin abc.txt 'px'
+run_stdin abc.txt 'p x'
+run_stdin abc.txt 'd x'
+run_stdin abc.txt '=x'
+run_stdin abc.txt 'q5x'
+run_stdin abc.txt 'l5x'
+run_stdin abc.txt 'y/a/b/x'
+run_stdin abc.txt '{p} x'
+run_stdin abc.txt '{p}p'
+run_stdin abc.txt 'p }'
+# …and the spellings that are *not* junk, which is the other half of the claim.
+run_stdin abc.txt 'p;p'
+run_stdin abc.txt 'p #c'
+run_stdin abc.txt '{p}'
+run_stdin abc.txt '{ p }'
+run_stdin abc.txt '{p};p'
+run_stdin abc.txt 'q 5'
+run_stdin abc.txt 'y/a/b/;p'
+
+# A label ends at whitespace, so `b x y` is a branch to `x` and then a `y`
+# command — which is unterminated. `{b}` branches to the end, not to a label
+# called `}`.
+run_stdin abc.txt 'b x y'
+run_stdin abc.txt ':x y'
+run_stdin abc.txt 'b x s'
+# A missing delimiter is not a fault of its own: `s` and `y` read it with the
+# same call they read the rest of the command with, so running out there is the
+# same `unterminated` complaint as running out half way through.
+run_stdin abc.txt 's'
+run_stdin abc.txt 'y'
+run_stdin abc.txt 's/a'
+run_stdin abc.txt 'y/a'
+run_stdin abc.txt 's/a/b'
+run_stdin abc.txt 'y/ab/cd'
+run_stdin abc.txt 'b}'
+run_stdin abc.txt '{b}'
+run_stdin abc.txt '{:x}'
+run_stdin abc.txt ': '
+
+# The `s` flags: each rejection, and the offset of each.
+run_stdin abc.txt 's/a/b/x'
+run_stdin abc.txt 's,a,b,x'
+run_stdin abc.txt 's/a/b/gg'
+run_stdin abc.txt 's/a/b/pp'
+run_stdin abc.txt 's/a/b/p2p'
+run_stdin abc.txt 's/a/b/0'
+run_stdin abc.txt 's/a/b/2 3'
+run_stdin abc.txt 's/a/b/w'
+# Accepted: blanks between flags, `Ii` twice over, and a `}` or `#` ending them.
+run_stdin abc.txt 's/a/b/ '
+run_stdin abc.txt 's/a/b/ p'
+run_stdin abc.txt 's/a/b/  2'
+run_stdin abc.txt 's/a/b/Ii'
+run_stdin abc.txt 's/a/b/#c'
+run_stdin abc.txt '{s/a/b/}'
+run_stdin abc.txt 's/a/b/2gp'
+
+# `\N` on the RHS naming a group the pattern has not got. Reported at the end of
+# the whole command, flags included.
+run_stdin abc.txt 's/a/\9/g'
+run_stdin abc.txt 's/\(a\)/\2/'
+run_stdin abc.txt -E 's/(a)/\2/'
+run_stdin abc.txt 's/a/\0/'
+run_stdin abc.txt 's/\(a\)/\1/'
+
+# Line address 0: a fault everywhere except as the start of a `0,/re/` range.
+run_stdin abc.txt '0'
+run_stdin abc.txt '0!p'
+run_stdin abc.txt '0,3!p'
+run_stdin abc.txt '0,$p'
+run_stdin abc.txt '0,0p'
+run_stdin abc.txt '0,+2p'
+run_stdin abc.txt '0,~2p'
+run_stdin abc.txt '0~0p'
+run_stdin abc.txt '0,/a/p'
+run_stdin abc.txt '0,/a/!p'
+run_stdin abc.txt '0~3p'
+run_stdin abc.txt '/a/,0p'
+run_stdin abc.txt '$,0p'
+
+# A missing step or count is zero, so what these lack is a command.
+run_stdin abc.txt '1'
+run_stdin abc.txt '1,2'
+run_stdin abc.txt '/a/'
+run_stdin abc.txt '1~'
+run_stdin abc.txt '1~p'
+run_stdin abc.txt '1,+'
+run_stdin abc.txt '1,~'
+
+# `a`, `i` and `c` with no text at all.
+run_stdin abc.txt 'a'
+run_stdin abc.txt 'a '
+run_stdin abc.txt 'i'
+run_stdin abc.txt 'c'
+run_stdin abc.txt 'a\'
+run_stdin abc.txt "$(printf 'a\np')"
+
+# The text of `a`, `i` and `c`, whose two spellings do not agree about leading
+# whitespace: the one-liner `a   X` drops it and the `a\`-and-a-newline form
+# keeps it. Nor do they agree about emptiness — a script ending `a\` has no text
+# and appends nothing, while one ending `a\` *and a newline* has a text of one
+# empty line and appends that. These go through `-f` because the difference
+# between the two is a trailing newline, which `$(…)` would eat.
+printf 'a   X\n'      > t1.sed
+printf 'a\\\n  X\n'   > t2.sed
+printf 'a\\\n\n'      > t3.sed
+printf 'a\\\n'        > t4.sed
+printf 'a\\'          > t5.sed
+printf 'a\\\nX\\\nY\n' > t6.sed
+printf 'a\\\n\\  X\n' > t7.sed
+printf 'i\\\n  X\n'   > t8.sed
+printf 'c\\\n  X\n'   > t9.sed
+printf '2c\\\n'       > t10.sed
+printf '2i\\\n'       > t11.sed
+for f in t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11; do
+  run_stdin abc.txt -f "$f.sed"
+  run_stdin abc.txt -n -f "$f.sed"
+done
+# `a` writes its text as it was stored, newline and all, so under `-z` it is the
+# one line in the output that a NUL does not end. `i` and `c` do end with one.
+run_stdin nulsep.txt -z 'a X'
+run_stdin nulsep.txt -z 'i X'
+run_stdin nulsep.txt -z 'c X'
+run_stdin nulsep.txt -z '$a X'
+# The text is emitted even with no trailing separator on the last input line.
+run_stdin nonl.txt '$a X'
+run_stdin nonl.txt '$i X'
+run_stdin nonl.txt '$c X'
+
+# The empty regex re-uses the last one that was *tried*, which is a run-time
+# value: merely evaluating an address sets it, whether or not the address
+# picked the line. So `/b/{p};s//X/` substitutes `/b/` on every line.
+run_stdin abc.txt '/b/{p};s//X/'
+run_stdin abc.txt '/a/p;//p'
+run_stdin abc.txt '/a/{//p}'
+run_stdin abc.txt 's/a/b/;//p'
+run_stdin abc.txt 's/a/b/;s//X/'
+# With nothing tried before it, it is a run-time failure — so the output written
+# up to that point stands, the exit status is 1, and a script that never reaches
+# the command (here, because there is no input to read) is not a failure at all.
+run_stdin abc.txt 's//X/'
+run_stdin abc.txt 'p;s//X/'
+run_stdin abc.txt '//p'
+run_stdin abc.txt 's//X/;s/a/b/'
+run_stdin abc.txt '{//p}'
+run_stdin abc.txt '2{s//X/}'
+run_stdin abc.txt '1{//p}'
+run_stdin abc.txt '$!d;s//X/'
+run_stdin empty.txt 's//X/'
+run_stdin empty.txt '//p'
+run_stdin abc.txt -e 'p' -e 's//X/'
+run_stdin abc.txt -e 's//X/' -e 'Z'
+# The location is the end of the whole script, whichever fragment wrote the
+# empty regex and whatever kind of fragment the last one is.
+run_stdin abc.txt -e 's//X/' -e 'p'
+run_stdin abc.txt -e 'p' -e 's//X/' -e 'p'
+printf 's//X/\np\np\n' > g1.sed
+printf 'p\n' > g2.sed
+run_stdin abc.txt -f g1.sed
+run_stdin abc.txt -f g1.sed -f g2.sed
+run_stdin abc.txt -f g1.sed -e 'p'
+run_stdin abc.txt -e 'p' -f g1.sed
+# A modifier on an empty regex has nothing to modify — and *that* one is
+# refused while the script is read, whatever else the script says.
+run_stdin abc.txt 's//X/I'
+run_stdin abc.txt '//Ip'
+
+# Where an error is: which `-e`, or which line of which `-f` file. These are the
+# two shapes GNU has, and they are not interchangeable — a `-f` file has no
+# character offset and does not advance the expression counter.
+printf 's/a/A/\n'   > f1.sed
+printf 'Z\n'        > f2.sed
+printf '{p\n'       > f3.sed
+printf 'p\np\nZ\n'  > f4.sed
+printf 'p\n{p\n'    > f5.sed
+printf 'p\ns//X/\n' > f6.sed
+run_stdin abc.txt -e 's/a/A/' -e '{p'
+run_stdin abc.txt -e 's/a/A/' -e '0p'
+run_stdin abc.txt -e 'Z' -e 'Z'
+run_stdin abc.txt -e 's/a/A/' -e 'p' -e 'Q9x'
+run_stdin abc.txt -e '{p' -e '{p'
+run_stdin abc.txt -f f1.sed -e 'Z'
+run_stdin abc.txt -e 'Z' -f f1.sed
+run_stdin abc.txt -f f2.sed
+run_stdin abc.txt -f f1.sed -f f2.sed
+run_stdin abc.txt -f f3.sed
+run_stdin abc.txt -f f4.sed
+run_stdin abc.txt -f f5.sed
+run_stdin abc.txt -f f6.sed
+# A block may be opened in one fragment and closed in another, including across
+# the `-e`/`-f` boundary — so the joined script really is one program.
+printf '}\n' > fclose.sed
+run_stdin abc.txt -e '{' -e 'p' -e '}'
+run_stdin abc.txt -e '{p' -f fclose.sed
+run_stdin abc.txt -e '}' -e '{p'
+# A carriage return is an ordinary character, so a CRLF script is a syntax
+# error rather than something that quietly works.
+printf 'p\r\np\r\n' > crlf.sed
+run_stdin abc.txt -f crlf.sed
+
 # --- usage errors -------------------------------------------------------------
 #
 # glibc's getopt on both sides now, so the quoting and the wording of these are

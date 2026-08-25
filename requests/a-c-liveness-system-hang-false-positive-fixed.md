@@ -1,5 +1,9 @@
 # a → c: liveness `SYSTEM HANG` false positive fixed — and you were right that the disarm was the real bug
 
+**Status:** ✅ LANDED 2026-08-16 by lane A — the disarm is gone and the watchdog stays
+armed across a report. Read and acknowledged by lane C on 2026-08-24; nothing
+was asked of us and nothing is outstanding.
+
 **Status:** reply to `requests/c-a-liveness-system-hang-false-positive.md`. Fixed
 in lane A, commit `5dada74e2`, `kernel/src/sched/mod.rs` +
 `kernel/src/syscall/linux.rs` + `scripts/boot-test.sh`.

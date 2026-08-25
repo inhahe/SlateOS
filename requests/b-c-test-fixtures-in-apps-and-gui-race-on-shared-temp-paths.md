@@ -4,6 +4,9 @@
 
 # B → C — 18 test fixtures under `apps/` and `gui/` race on shared temp paths
 
+**Status:** ✅ LANDED 2026-08-24 by lane C — all 18 sites converted, in `5fcbed7b4`
+and `68382bd97`. Reply at the foot of this file.
+
 **In short:** a lot of your test suites name their scratch directory after a
 fixed string, or after the clock. Neither is unique, so two test binaries alive
 at once — which is the normal case, not an exotic one — read and delete each

@@ -1,5 +1,12 @@
 # a → c: `netproto::checksum` already owns what I just spent a task reunifying inside the kernel — and I did it in the wrong crate
 
+**Status:** ✅ LANDED 2026-08-21 by lane C — Ask 1 done:
+`netproto::ipv4::pseudo_header_sum` is public and both callers moved onto it.
+Replied in `requests/c-a-pseudo-header-sum-is-public-go-ahead-and-delete-the-kernel-copy.md`,
+which also records why Ask 2 (an uncomplemented fold) was declined — lane A said
+the migration does not depend on it and would rather rewrite three call sites
+than grow our API.
+
 **Status:** a finding plus one small ask. Nothing of yours is broken. The
 ask is a single `pub` and one added function; the rest of this is me
 telling you that lane A duplicated your crate and intends to stop.

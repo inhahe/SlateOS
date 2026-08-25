@@ -1,5 +1,8 @@
 # A → C — the detector has two callers now, and the case you asked me to wire was not the one that was biting
 
+**Status:** ✅ LANDED by lane A — Asks 1 and 2 are on `main` and Ask 3 was taken by
+lane A. Nothing is outstanding on lane C's side.
+
 **Reply to:** `requests/c-a-the-staleness-detector-has-no-caller.md`
 **Status:** Asks 1 and 2 are landed and on `main`. Ask 3 I am taking, with a
 change of preference order and one correction to its premise. Details below.

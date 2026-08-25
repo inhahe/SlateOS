@@ -63,7 +63,7 @@ fn main() {
     ));
     println!(
         "Compositor says {} windows, focused {:?}",
-        desktop.visible_windows().len(),
+        desktop.taskbar_windows().len(),
         desktop.focused_window
     );
 
@@ -176,7 +176,7 @@ fn main() {
     }
     println!(
         "...and until the compositor answers, the shell still shows {} windows",
-        desktop.visible_windows().len()
+        desktop.taskbar_windows().len()
     );
 
     // The compositor did as it was asked, and the shell finds out the only way
@@ -193,7 +193,7 @@ fn main() {
     ));
     println!(
         "After the next list: {} windows, focused {:?}",
-        desktop.visible_windows().len(),
+        desktop.taskbar_windows().len(),
         desktop.focused_window
     );
 
@@ -206,7 +206,7 @@ fn main() {
     println!(
         "...still showing desktop {} with {} windows, because no list has come back",
         desktop.current_desktop_number(),
-        desktop.visible_windows().len()
+        desktop.taskbar_windows().len()
     );
 
     // The compositor did it. Every window is still open, every one is now filed
@@ -222,7 +222,7 @@ fn main() {
     println!(
         "After the next list: desktop {} with {} windows",
         desktop.current_desktop_number(),
-        desktop.visible_windows().len()
+        desktop.taskbar_windows().len()
     );
 
     println!("\nDesktop shell initialized successfully.");

@@ -33283,6 +33283,36 @@ Two caveats for the compositor half:
 Details and the reasoning: `design-decisions.md` §270. Reply request filed as
 `requests/a-c-drm-setcrtc-has-landed-and-page-flip-is-now-strict.md`.
 
+**Update 2026-08-25 — the compositor now issues the mode-set, and had to.**
+Lane A's second caveat above understated the urgency: with `page_flip` strict,
+*not* mode-setting is no longer a limitation, it is a black screen on the ATI
+backend — that backend's CRTCs enumerate with `active: false, mode: None`, and a
+first flip onto a CRTC with no mode is `EINVAL`. `gui/compositor/src/present/drm.rs`
+now issues `DRM_IOCTL_MODE_SETCRTC` once per head in `make_head`, after both
+dumb buffers are registered and before the head's first flip, naming the
+connector, the head's back buffer, and the mode `best_mode` picked from the
+connector's advertised list. `uapi.rs` gained `SETCRTC` (`0xC068_64A2`) and
+`ModeCrtc` (104 bytes), pinned by the same offset and `_IOC`-size tests as every
+other struct there.
+
+The mode-set's error is deliberately discarded — the flip that follows is a
+strictly stronger check of the same property, and treating it as fatal would
+decline the connector on any kernel with no `SETCRTC` at all. Reasoning, and
+the diagnosis cost it accepts: `design-decisions.md` §552.
+
+The test double was made strict in the same change, which is the part that
+makes the tests mean anything: `FakeCard` now tracks the mode programmed on
+each CRTC, refuses a flip on a CRTC that has none or whose mode is not the
+framebuffer's size, and refuses a mode-set naming a mode the connector never
+advertised or a connector its encoders cannot route. Six new tests, including
+one that asserts the fake's own strictness so that a future permissive fake
+fails loudly rather than silently making `set_mode` deletable.
+
+**Still open:** changing to a mode other than the display's native one. Nothing
+above this module can ask for one, and two of the three backends refuse it
+anyway. This entry stays open at the same low severity, now for a smaller
+reason than when it was filed.
+
 ## BUG-DRM-PAGE-FLIP-ACCEPTS-A-MISMATCHED-FB (found by lane C 2026-08-21; lives in lane A's tree)
 
 **In short:** the kernel lets a program hand the graphics card a picture that is
@@ -76780,6 +76810,643 @@ its own commit and its own rung.
 **Not a regression.** This has been true since the command was written; the
 `908043883` rewrite neither caused it nor made it worse. It is recorded now
 because the rewrite is what made it visible.
+
+---
+
+## BUG-C-MINIMIZING-A-WINDOW-MADE-IT-UNREACHABLE (lane C, 2026-08-25) — ✅ **FIXED same day**, `1b773bb71`
+
+**In short:** minimising a window in the shell deleted its taskbar button *and*
+its Alt+Tab row at the same instant, so there was no way left to get the window
+back. It had not gone anywhere — the compositor still had it — but nothing the
+shell draws would show it to you again.
+
+**Found by** surveying `gui/desktop/src/pointer_tests.rs` for the reintroduction
+campaign, not by a failing test. Two tests covered this behaviour and both had
+the bug written down as their expectation.
+
+**Where it lived.** `gui/desktop/src/lib.rs`, three lines in three places:
+
+```rust
+// apply_window_list
+visible: info.visible && !info.minimized,
+// visible_windows
+.filter(|w| w.visible && w.desktop == self.current_desktop)
+```
+
+`visible_windows()` was then the set used by `taskbar_button_rect`,
+`taskbar_button_width`, the `hit_test` button loop, `render_taskbar`,
+`start_alt_tab` / `next_alt_tab` / `prev_alt_tab` / `finish_alt_tab`,
+`render_alt_tab` and the overview — **every list the shell draws whose entire
+purpose is to get a put-away window back**.
+
+**Root cause: one accessor answering two questions** — the same shape as the
+`COVERED_DIRS` bug in `reintro-palette.py` recorded above, three days apart and
+in unrelated code, which is why it is worth naming as a shape rather than as an
+incident. The compositor reports *unmapped* ("the program took its window
+away") and *minimised* ("the user put it away") as two separate flags because
+they are two different facts. `visible` ANDed them into one and then served
+both questions from the result. The field's own doc comment said
+`/// Whether the window is visible (not minimized to taskbar)` — the
+parenthetical is the author correctly describing a taskbar button that the code
+underneath it deletes.
+
+**The `Activate`-not-`Restore` care was unreachable code for as long as this
+lasted.** `handle_press` deliberately sends `ShellControlAction::Activate` for
+an unfocused window, and `design-decisions` records why: `Activate` un-minimises
+*and* focuses in one step, whereas `Restore` would also un-maximise, silently
+dropping a state the user never asked to leave. All of that reasoning is about
+clicking the taskbar button of a minimised window — which no user could ever do.
+
+**The fix is two accessors, not one widened one**, because the narrow question
+does have exactly one legitimate caller:
+
+| | means | asked by |
+|---|---|---|
+| `ManagedWindow::mapped` | the compositor's flag alone; a minimised window **is** mapped | taskbar, Alt+Tab, overview |
+| `ManagedWindow::on_glass()` | `mapped && state != Minimized` — is it *drawn*? | Show Desktop, and nothing else |
+
+`visible_windows()` was renamed `taskbar_windows()` for the set it actually
+returns. "Show Desktop" (Super+D) keeps the narrow question: asking an
+already-minimised window to minimise is a request the compositor must ignore
+and one the user would have to undo twice.
+
+### Why no test caught it: both of them asserted the bug
+
+This is the part worth carrying forward. The behaviour was covered *twice*, and
+both tests pinned the defect as the expectation:
+
+- `a_minimized_window_keeps_its_button_and_an_unmapped_one_does_not` asserted
+  `listed == [WindowId(3)]` — i.e. that the minimised window had **lost** its
+  button. **The body asserts the exact opposite of the name.** Its own leading
+  comment even states the rule correctly ("a minimised window is one the user
+  put away and can click to get back, so it must keep its button") and then the
+  assertion three lines later contradicts it.
+- `the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop`
+  ended `assert!(shell.taskbar_windows().is_empty())` after a minimise, for the
+  same reason.
+
+**Lesson 30: a test whose name promises a behaviour and whose body pins the
+opposite is worse than no test at all.** An absent test leaves a hole that a
+coverage sweep reports. A misnamed one fills the hole with a green result, and
+anyone who greps for the promise — which is exactly what a careful reader does
+before changing that code — finds it and stops looking. Both of these would have
+been reported as `unproved` by `--coverage` had they not existed at all; instead
+they read as two independent confirmations.
+
+The corollary for the reintroduction campaign: **`--coverage` counts names, and
+a name is not a claim.** A test can be "proved" by a defect and still be
+asserting the wrong thing, if the defect was written to match the test rather
+than the intent. This is the one failure mode the harness cannot detect on its
+own, and the only defence is reading the assertion against the *doc comment of
+the code under test* rather than against the test's own name.
+
+**A third test was vacuous in the same area** and is left as it is, noted here:
+`a_click_off_the_calendar_closes_it_without_acting` says "on the taskbar button
+of the minimised window" and calls `taskbar_button_rect(0)` — which, with the
+only window minimised, was the rectangle of a button that was not drawn. It
+passed either way because the calendar-dismiss rule consumes the click whatever
+is underneath. It is now describing something real.
+
+**Tests added:** `a_minimized_window_can_be_got_back_from_its_taskbar_button`
+(the click asks `Activate`), `alt_tab_reaches_a_minimized_window`, and
+`show_desktop_does_not_ask_an_already_minimized_window_to_minimize` (the
+`on_glass` exemption, so a future simplification back to one accessor fails).
+
+## MODULE 83 (lane C, 2026-08-25) — the pointer tranche, and four ways a green test can be empty
+
+**In short:** the shell's pointer-handling test file — 69 tests covering the
+start menu, the taskbar, the calendar popup and the tiling chooser — had never
+had a single one of its tests *proved*. Proving a test means breaking the code
+it is supposed to guard and watching it go red; until that happens, all a green
+test tells you is that it ran. Twenty-two deliberate faults were introduced one
+at a time. Eighteen were caught. The four that were not each pointed at a
+different way a test can be green without being a check, and one of them turned
+out to be guarding code the program could never execute.
+
+**Why this file.** Chosen by measurement rather than by taste: ranking every
+swept file by unproved tests put `calendar.rs` (76 of 114) and `wallpaper.rs`
+(75 of 92) above it numerically, but `pointer_tests.rs` was **69 of 69**, and a
+file that is entirely unproved is a stronger signal than a larger partial hole.
+A partial hole means the defects written so far ran along some dimension and
+missed others; a whole file means nothing has ever been asked of it.
+
+**The first pass, 22 defects:**
+
+```
+22 defects: 18 caught, 4 escaped, 0 never asked, 0 under-caught,
+11 under-declared
+restored: all files match their recorded SHA-256
+```
+
+### Lesson 31: a test that takes its aim from the code it is testing cannot miss
+
+Defect `A` made the start button a fixed size at every display scaling —
+`self.scale(START_BUTTON_WIDTH).min(bar.w)` became
+`START_BUTTON_WIDTH.min(bar.w)`, so on a 200%-scaled display the button is half
+the width of the icon drawn in it. The test named for exactly that:
+
+```rust
+fn the_start_button_is_clickable_where_it_is_drawn_at_every_scale() {
+    for percent in [100, 125, 150, 200] {
+        let mut shell = scaled(percent);
+        let start = shell.start_button_rect();
+        assert_eq!(click_at(&mut shell, start), ShellAction::Consumed);
+        assert!(shell.start_menu_open, "at {percent}% scaling");
+    }
+}
+```
+
+It clicks the middle of `start_button_rect()` and asks whether the start button
+was hit. Shrink the button and the aim shrinks with it: the middle of a small
+rectangle is still inside the small rectangle. **The expectation is computed
+from the function under test, so no value of that function can falsify it.**
+This is lesson 22 (*derived expectation*) again, and the reason it is worth a
+second number is the structural finding underneath it.
+
+**There is no second view of this geometry anywhere in the crate.** `hit_test`
+decides between chrome by calling the accessors —
+`self.start_button_rect().contains(x, y)`, `self.start_menu_row_rect(row)
+.contains(x, y)`, and so on down the list — and `render_taskbar` fills
+`self.start_button_rect()`. Renderer and hit test are not two witnesses that
+could disagree; they are one witness called twice. So the whole
+"clickable-where-it-is-drawn" family of tests can only ever prove that
+`hit_test` *scans in the right order and returns the right variant*, which is
+real but is not what the names say.
+
+The fix is the only independent view available: arithmetic written down in the
+test.
+
+```rust
+let expected = START_BUTTON_WIDTH * f32::from(percent) / 100.0;
+assert!((start.w - expected).abs() < 0.01, ...);
+assert!((start.h - shell.taskbar_thickness()).abs() < 0.01, ...);
+```
+
+Not elegant, and deliberately so — it duplicates `scale()`'s multiplication,
+which is the point. A test that re-derives the answer is a test that agrees
+with the code by construction.
+
+Two other members of the family were checked and are sound.
+`the_clocks_target_covers_the_reading_that_is_drawn_at_every_scaling` reads the
+clock's coordinates **out of the render tree** and compares them with
+`clock_rect()` — two views, because the renderer places the text from
+`bar.w - padding - clock_width()` rather than from the rect.
+`every_power_action_is_clickable_where_it_is_drawn_at_every_scale` makes
+independent claims (the popup is on the screen, the power button is inside the
+menu, every action fits without a scroll). Those two needed nothing.
+
+### Lesson 32: checking that two rows *meet* does not check that they meet *once*
+
+Defect `E` laid the start-menu rows out a pixel short — `row as f32 * height`
+became `row as f32 * (height - 1.0)` — so every row overlaps its neighbour and a
+click near a boundary is ambiguous between two programs. The test is called
+`adjacent_rows_do_not_share_a_pixel` and it escaped.
+
+```rust
+let first = shell.start_menu_row_rect(0);
+let boundary = first.y + first.h;
+assert!(!first.contains(first.x + 4.0, boundary));
+assert!(shell.start_menu_row_rect(1).contains(first.x + 4.0, boundary));
+```
+
+Row 0 is unaffected (`0 * anything` is 0). Row 1 starts one pixel *early*, so it
+still contains the boundary — it simply contains the pixel before it as well.
+Both assertions hold. **The test states that there is no gap and says nothing at
+all about there being no overlap**, which is the half its name is about.
+
+A seam has two failure modes and they need two assertions. The repaired test
+walks the first four rows and, for each pair, checks the pixel *at* the boundary
+belongs to the next row and not this one, the pixel *before* it belongs to this
+row and not the next, and — because two `contains` pairs still admit a pitch
+wrong by less than half a pixel, which walks the last row off the bottom of a
+long menu — that `next.y` equals `this.y + this.h` as arithmetic.
+
+### Lesson 33: a clamp has two ends, and the far one is the end that runs away
+
+Defect `C` deleted the taskbar's height clamp: `height.min(self.screen_height as
+f32)` became `height`. The bar's thickness is what the *user* asked for (48
+logical pixels by default, 96 at 200% scaling), so on a screen shorter than that
+the bar hangs off the bottom — a rectangle that answers `contains` for
+coordinates the display does not have. The test is
+`a_screen_smaller_than_the_taskbar_does_not_invert_the_geometry`, it builds a
+200×20 shell, and it escaped.
+
+It asserts `bar.y == 0.0`. It never mentions `bar.h`. Every other thing it
+checks is derived from `bar.y` — `work_area().3`, the menu height, the visible
+row count — so removing the clamp on the *height* leaves all of them intact.
+
+The property worth stating is not "y is 0" but that the bar sits on the bottom
+edge, `bar.y + bar.h == screen_height`, which is exactly true in both regimes:
+on a normal screen `y = h_screen − h_bar` and on a tiny one `y = 0` with `h`
+clamped. Its sibling `the_taskbar_grows_with_the_scaling_and_takes_the_room_from
+_the_work_area` already asserted it for normal screens; the small-screen test
+now asserts the same thing, which is the shape a boundary test should have —
+*the same invariant, at the boundary*, not a different and weaker one.
+
+### Lesson 34: an unreachable arm looks exactly like a covered one
+
+Defect `S` made the shell leak a click when the button under it had vanished:
+in `handle_press`, the taskbar-button arm's `None => ShellAction::Consumed`
+became `ShellAction::Pass`. There is a test whose whole subject is that case —
+`a_taskbar_button_whose_window_has_gone_swallows_the_click` — and it escaped,
+because **the arm the defect patched cannot execute.**
+
+```rust
+// hit_test
+for index in 0..self.taskbar_windows().len() {
+    if self.taskbar_button_rect(index).contains(x, y) {
+        return Hit::TaskbarButton(index);
+    }
+}
+return Hit::TaskbarPanel;
+
+// handle_press, in the same call, on the same &mut self
+Hit::TaskbarButton(index) => match self.taskbar_windows().get(index).map(|w| w.id) {
+    Some(id) => ...,
+    // The button is gone from under the click -- the window closed between
+    // the frame it was drawn in and this press.
+    None => ShellAction::Consumed,
+}
+```
+
+`hit_test` only ever reports an index it has just found a window for, and
+`handle_press` re-reads the same list in the same call with no opportunity for
+anything to change it — `ShellSession` deliberately dispatches input *before*
+folding in a new window list, which is design-decisions §503 and is why the
+race the comment describes cannot happen. So the `None` arm is dead code with a
+plausible-sounding comment, and the test named after it walks straight past:
+after the window list empties, `hit_test` finds no button at all and returns
+`Hit::TaskbarPanel`, whose arm is a different `Consumed` on a different line.
+
+**The test was green, the behaviour was real, and the route between them was
+imaginary.** That is the trap: an unreachable arm is indistinguishable from a
+covered one in every artefact a test suite produces. Only a defect injected
+*into that arm specifically* can tell them apart — which is what the harness is
+for, and is the second unreachable branch it has surfaced in this file this
+week (the `Activate`-rather-than-`Restore` care in the same match was unreachable
+for as long as minimising a window deleted its taskbar button; see
+`BUG-C-MINIMIZING-A-WINDOW-MADE-IT-UNREACHABLE`).
+
+**The fix is to make the state unrepresentable rather than merely unvisited.**
+`Hit::TaskbarButton` now carries the `WindowId` instead of the slot number:
+
+```rust
+for (index, window) in self.taskbar_windows().iter().enumerate() {
+    if self.taskbar_button_rect(index).contains(x, y) {
+        return Hit::TaskbarButton(window.id);
+    }
+}
+```
+
+The slot is resolved to a window while the list that produced the rectangle is
+still in hand, so there is no second lookup, no `None`, and no arm to write a
+comment about. Deleting the arm and leaving the index would have been the
+smaller change and the wrong one: it leaves the representation able to express
+"a slot with nothing in it" and relies on nobody ever constructing one.
+
+**A tautology fell out with it.** `a_taskbar_button_is_clickable_where_it_is
+_drawn` said:
+
+```rust
+for index in 0..shell.taskbar_windows().len() {
+    let (x, y) = centre(shell.taskbar_button_rect(index));
+    assert_eq!(shell.hit_test(x, y), Hit::TaskbarButton(index));
+}
+```
+
+which compares the slot number with itself. No arrangement of windows can make
+it false — it is lesson 31's derived aim carried all the way to the assertion.
+With ids it becomes a claim about the *pairing*: capture `a`, `b`, `c` from
+`open()` and require the button in slot 0 to name `a`. That is the thing that
+would actually strand a click on the wrong program, and it is now guarded by a
+new defect `W` (every button reports the first window on the bar), which five
+tests catch.
+
+Two consequential renames. `a_taskbar_button_whose_window_has_gone_swallows_the
+_click` became `a_click_where_a_button_used_to_be_is_still_the_taskbars`,
+because the panel is what answers and the button never did; the behaviour it
+checks — bare taskbar keeps a click rather than raising whatever is behind the
+bar — is real and worth a test, and defect `S` was retargeted to the line that
+produces it (`return Hit::TaskbarPanel` → `Hit::Desktop`).
+
+### A test that the bug fix gave teeth to
+
+`a_click_off_the_calendar_closes_it_without_acting` opens a window, minimises
+it, opens the calendar, and clicks the minimised window's taskbar button,
+asserting the click is spent dismissing the popup and the window stays away.
+Before `1b773bb71` the minimised window had *no button*, so the click landed on
+bare taskbar and "stays minimised" was true because nothing could possibly have
+acted on it — vacuous, in the same file and the same area as the two tests that
+asserted the stranded-window bug outright. Fixing the bug gave the test its
+subject back without a line of it changing. Recorded because it is the pleasant
+case of the same phenomenon: **a test's strength depends on the code around it,
+so a test can silently lose its meaning when unrelated code changes, and
+silently regain it.** Nothing in a green suite reports either direction.
+
+### Result
+
+```
+23 defects: 23 caught, 0 escaped, 0 never asked, 0 under-caught,
+0 under-declared
+restored: all files match their recorded SHA-256
+```
+
+Every repair was re-run **in contact** — the defect reintroduced against the
+fixed test — rather than merely re-checked at preflight, because a test that
+has been strengthened is a test whose new assertion has itself never been seen
+to fail.
+
+**Net:** `pointer_tests.rs` goes from **69 of 69 unproved** to **26 of 72** (the
+three extra tests came with the minimised-window fix). Across the swept
+packages, unproved falls **2419 → 2371** and proved rises **17.7 % → 19.3 %**,
+with single-prover tests up 135 → 166. The defect list is **1760 defects, 0
+stale, 0 ambiguous, 0 no-op**. 2882 desktop tests green, clippy `--all-targets`
+clean, `cargo fmt` clean.
+
+**The shape of the four escapes is worth keeping.** None of them was a logic
+defect — the eighteen logic defects (scroll direction, scroll clamping, menu
+category filters, dismissal rules, press/release/right-click routing, window-list
+replacement, layer filtering) were all caught, several by five or more tests.
+All four escapes were **geometry or reachability**: two tests that aimed with
+the code they tested, one that checked half a boundary, one that guarded a
+branch the program cannot enter. A file at 0 % proved is not uniformly weak;
+it is weak in whichever dimension nobody has yet pushed on, and this file's
+weak dimension was *where things are*, not *what happens when you click them*.
+
+## MODULE 84 (lane C, 2026-08-25) — multi-monitor geometry, and why two of the three escapes were the same escape
+
+**In short:** `gui/desktop/src/multimon.rs` is the file that decides where the
+desktop is when more than one screen is plugged in — how the monitors line up
+into one coordinate space, which one a new window opens on, what happens when
+one is unplugged. Twenty-six deliberate faults were introduced into it one at a
+time to find out which of its tests would notice. Twenty-three did. The three
+that got through were all cases where the test suite had never built the *input*
+that makes the code's decision matter, and two of those three were literally the
+same mistake in two places.
+
+**The first pass, 26 defects:**
+
+```
+26 defects: 23 caught, 3 escaped, 0 never asked, 0 under-caught,
+3 under-declared
+restored: all files match their recorded SHA-256
+```
+
+The twenty-three that were caught cover the substance of the module and are
+worth naming, because they are what says the file is in good shape: reversed
+rectangle corners, edge-inclusive `contains`, the desktop bounding box over
+enabled and disabled monitors, rotation swapping width and height, the DPI
+arithmetic in both directions and its divide-by-zero guard, every branch of the
+monitor-drag snapping (threshold equality, best-candidate replacement, both
+axes, snap-by-gap rather than snap-to-edge, disabled monitors not attracting a
+drag), gap detection, horizontal and mirrored arrangement, primary-only mode,
+duplicate hotplug, and unplugging the primary. Several were caught by five or
+more tests.
+
+### Lesson 35: a mitigation is untested until a test creates the hazard it mitigates
+
+Defect `A` reversed the direction of the module's saturating narrow:
+
+```rust
+-    i32::try_from(v).unwrap_or(if v.is_negative() { i32::MIN } else { i32::MAX })
++    i32::try_from(v).unwrap_or(if v.is_negative() { i32::MAX } else { i32::MIN })
+```
+
+`narrow` exists because every rectangle computation in the file widens to `i64`
+first, so that an intermediate cannot wrap; `narrow` is the single place the
+value comes back down, and clamping it the wrong way reintroduces exactly the
+wrap the widening was written to prevent — a monitor dragged off the left edge
+of the coordinate space reappears at the right. It is a two-line function on the
+path of every public constructor in the module, and **not one test noticed.**
+
+Not because the function was unreached — `VirtualRect::from_corners` calls it on
+every construction, and dozens of tests construct rectangles. It was unreached
+*in the branch that matters*. Every test in the file used screen-shaped numbers:
+0, 1920, 3840, −1080. `i32::try_from` succeeds for all of them, so every test
+took the `Ok` path, and the `unwrap_or` — the whole point of the function — was
+dead as far as the suite was concerned.
+
+**This generalises past this file.** Overflow guards, fallbacks, retry paths,
+error branches, `saturating_*`, the `else` of a bounds check: all of them are
+code that only runs on input the rest of the program is trying to avoid, which
+is the same input a test author is not naturally holding in mind while writing
+fixtures. A suite assembled from realistic values tests the realistic path
+exhaustively and the defensive path not at all — and the defensive path is
+precisely the one whose failure mode is silent and weird rather than loud.
+
+The fix tests `narrow` directly at the four boundaries and then again through
+the public surface, so the private helper's contract is pinned and the route
+from a caller to it is pinned too:
+
+```rust
+assert_eq!(narrow(i64::from(i32::MAX) + 1), i32::MAX);
+assert_eq!(narrow(i64::from(i32::MIN) - 1), i32::MIN);
+assert_eq!(narrow(i64::MIN), i32::MIN);
+assert_eq!(narrow(0), 0);
+
+let r = VirtualRect::from_corners(i64::from(i32::MIN) - 5_000, -9, 10, 11);
+assert_eq!(r.x, i32::MIN);   // still on the left
+assert_eq!(r.y, -9);
+```
+
+### Lesson 36: a compound condition is only proved where its operands disagree
+
+Two of the three escapes were this, and finding the same hole twice in one
+module is the reason it gets a number rather than a sentence.
+
+Defect `E` turned an `||` into an `&&`:
+
+```rust
+-        self.w == 0 || self.h == 0     // is_empty
++        self.w == 0 && self.h == 0
+```
+
+Defect `K` deleted a conjunct:
+
+```rust
+-        self.monitors.iter().find(|m| m.primary && m.enabled)
++        self.monitors.iter().find(|m| m.primary)
+```
+
+Different operators, opposite directions, same reason for escaping: **no test
+ever supplied an input on which the two operands differ.** Every existing
+`is_empty` test used a 0×0 rectangle or a fully-sized one, and on those `||` and
+`&&` return the same answer. Every existing layout fixture marked its primary
+monitor enabled, and on those `primary` and `primary && enabled` return the same
+monitor. The tests were not weak in general — they were blind along one specific
+axis, and the axis is stated exactly by the boolean structure of the code.
+
+That gives a mechanical rule that does not require insight into the subject
+matter: **for `A op B`, a suite that never runs a case with `A != B` cannot
+distinguish `&&` from `||` from `A` alone from `B` alone.** It is checkable by
+reading the condition, and it says which fixture is missing rather than merely
+that one is.
+
+Both escapes also had a real user-visible consequence, which is worth recording
+because "a predicate is under-tested" sounds academic until you follow it out:
+
+* A 1920×0 strip is empty — it covers no pixels. Under `&&` it reports itself
+  non-empty, and every caller that guards a division by the desktop's size
+  (scaling a wallpaper, computing what fraction of the desktop a window
+  occupies) divides by zero.
+* A laptop panel that is closed for the evening is still the primary display; the
+  primary flag deliberately survives being switched off, so that it comes back
+  when the lid opens. `suggest_default_monitor` consults `primary()` *before* it
+  considers area, so a disabled primary is not filtered downstream — every new
+  window opens on a screen showing nothing.
+
+The fixes state the disagreeing case directly:
+
+```rust
+assert!(VirtualRect::new(0, 0, 1920, 0).is_empty());
+assert!(VirtualRect::new(0, 0, 0, 1080).is_empty());
+assert!(!VirtualRect::new(0, 0, 1, 1).is_empty());
+```
+
+```rust
+layout.monitors[0].enabled = false;                 // still flagged primary
+assert!(layout.primary().is_none(), "it is showing nothing");
+assert_eq!(WindowPlacement::suggest_default_monitor(&layout), Some(MonitorId(2)));
+layout.monitors[0].enabled = true;                  // and it comes back
+assert_eq!(layout.primary().map(|m| m.id), Some(MonitorId(1)));
+```
+
+### Result
+
+```
+26 defects: 26 caught, 0 escaped, 0 never asked, 0 under-caught,
+0 under-declared
+```
+
+**Contrast with module 83.** That module's escapes were about *reachability* —
+tests aiming with the code they tested, an arm the program could not enter.
+This module's were about *input coverage* — the code was reached, the assertion
+was real, and the value fed in could not tell the right answer from the wrong
+one. Both are invisible in a green suite, but they call for opposite responses:
+83's wanted the code restructured so the untestable state stopped existing;
+84's wanted three more fixtures and no production change at all beyond the two
+lines the defects had touched, which were already correct.
+
+## MODULE 85 (lane C, 2026-08-25) — the rest of multimon: the config file, window placement, and one hole in a round trip
+
+**In short:** the other half of `gui/desktop/src/multimon.rs` — the code that
+saves your monitor arrangement to a file and reads it back, decides where a new
+window opens, and keeps windows from being dragged off the edge of the desktop.
+Twenty-one deliberate faults, twenty caught. The one escape was in the
+save-and-reload code, and it escaped a test that was *specifically written to
+catch exactly that kind of fault* and had already caught three of its siblings.
+The reason is worth a lesson: the test round-tripped two of the four screen
+rotations, and the fault was in one of the other two.
+
+**The pass, 21 defects:**
+
+```
+21 defects: 20 caught, 1 escaped, 0 never asked, 0 under-caught,
+0 under-declared
+```
+
+Caught: every parser fault the module can have (a bare `[` treated as a section
+header, the final section never flushed, a missing resolution, a resolution with
+no `x` in it, a position split on the wrong separator, a disabled monitor written
+out as enabled, the resolution separator itself), all of window placement
+(centring, per-monitor offsets, proportional moves between monitors of different
+sizes), all four edges of the keep-on-screen clamp including the
+smaller-than-the-minimum panic and the no-monitors case, both branches of
+choosing a monitor for a new window, and the manager's demote-the-old-primary,
+scale clamp and hotplug bookkeeping. Ten of the twenty were caught by more than
+one test.
+
+### Lesson 37: a round trip proves the values you round-tripped, and nothing else
+
+`Rotation` is written to the config with `as_str` and read back with
+`from_str_config`. They are two hand-written lists of the same four words, and
+the property that matters is that they are mutual inverses. There is a test for
+exactly that — `config_save_load_roundtrip` — and it works: it caught defect `B`
+(`Left` written as `"right"`), defect `C` (a disabled monitor written out as
+enabled) and defect `D` (the resolution separator changed to a comma).
+
+Defect `A` was the same shape as `B`:
+
+```rust
+-            Self::Inverted => "inverted",
++            Self::Inverted => "normal",
+```
+
+and it escaped, because the fixture the round-trip test uses carries a `Normal`
+monitor and a `Left` one. `Right` and `Inverted` are never written, so nothing
+observes what word they are written as.
+
+**A serialiser is the worst possible case for sampling.** Most functions
+degrade smoothly — get one input wrong and nearby inputs are usually wrong too,
+so a sample stands a fair chance of landing on the fault. A serialiser built
+from a `match` is the opposite: each arm is independent, and a wrong arm is
+wrong for exactly one value and correct for every other. The round trip is a
+strong *property*, and it is easy to read a passing round trip as having proved
+the property rather than four instances of it. It proved two.
+
+**The escape count understates the hole.** The harness staged one defect in this
+family, so the sweep reported one escape — but `Self::Right => "left"` would
+have escaped identically, and so would anything touching `from_str_config`'s
+`"right"` or `"inverted"` arms. Half the enum was unobserved; the sweep could
+only see the half of that half it happened to poke at. Escape counts are a lower
+bound on the size of a hole, never a measurement of it.
+
+**The fix is exhaustive, because for an enum it can be.** This is the one
+situation where "cover the whole input space" is not an aspiration but a loop of
+four iterations, which makes sampling an unforced choice rather than a
+compromise:
+
+```rust
+const ALL: [Rotation; 4] = [Rotation::Normal, Rotation::Left,
+                            Rotation::Right, Rotation::Inverted];
+
+// The collision itself, stated directly rather than inferred from a
+// failed round trip.
+let mut labels: Vec<&str> = ALL.iter().map(|r| r.as_str()).collect();
+let written = labels.len();
+labels.sort_unstable();
+labels.dedup();
+assert_eq!(labels.len(), written, "two rotations share a config label");
+
+for rotation in ALL {
+    // Exhaustiveness guard: a fifth variant stops this match compiling
+    // until it is listed in `ALL` above.
+    match rotation {
+        Rotation::Normal | Rotation::Left | Rotation::Right | Rotation::Inverted => {}
+    }
+    // …save a config carrying `rotation`, load it back, assert it survived.
+}
+```
+
+Two deliberate details. The **label-collision assertion** is separate from the
+round trip because it names the failure directly — "two rotations share a config
+label" is a better diagnostic than "expected Inverted, got Normal", and it holds
+even for a variant that some future refactor stops round-tripping. The
+**exhaustiveness guard** is there because `ALL` is a hand-written list, and a
+hand-written list of variants is precisely the thing that silently falls behind
+the enum; the `match` makes adding a fifth rotation a compile error here rather
+than a fresh gap.
+
+**Where this generalises.** Any `T -> String -> T` pair over a closed set — the
+rotation labels here, and by inspection the same pattern in the theme-mode,
+scaling-mode and panel-position settings elsewhere in the crate — should be
+tested over the whole set, not over a plausible-looking sample. The cost is a
+`for` loop; the thing it buys is that a collision, which is invisible in every
+other artefact, becomes a compile-time-adjacent certainty.
+
+### Result
+
+```
+21 defects: 21 caught, 0 escaped, 0 never asked, 0 under-caught,
+0 under-declared
+```
+
+`multimon.rs` is now 50 of 75 tests proved (it was 0 of 75 before module 84).
+The swept corpus stands at **2943 tests, 2325 unproved — 21.0 % proved, 0
+dangling, 202 single-prover**; the last figure recorded above, before modules
+83–85, was 15.7 %.
+
+---
 
 ## `A-KSHELL-TR-ANSWERS-FIVE-QUESTIONS-IT-WAS-NOT-ASKED` (lane A, 2026-08-25) — **open**
 

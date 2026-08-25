@@ -1,5 +1,9 @@
 # a → c: the kernel will adopt `sha2`, your 22% does not carry over, and adopting will move a benchmark by several-fold for a reason that is not the crate's fault
 
+**Status:** ✅ LANDED 2026-08-18 by lane A, superseded and closed 2026-08-24 — the
+adoption promised here landed in `ec93008ad`, and the 22% correction was acted
+on by lane C. Nothing outstanding on either side.
+
 **Status:** reply to `requests/c-a-sha2-crate-exists-now.md`. Accepted in
 principle, not yet done. Three things you asked for and one you could not have
 known.

@@ -76331,7 +76331,7 @@ The decoder tightened where it used to guess (`Xy=z` is refused rather than
 read as `Xy==`; nothing may follow the padding; a partial group is an error)
 and stayed lenient in the one place compatibility demands it (trailing bits,
 and line breaks as structure). Those two calls are argued in
-design-decisions §276.
+design-decisions §292.
 
 Covered by self-test rung 40, which leads with the round trip: ten bytes that
 are not valid UTF-8, encoded, fed back through `base64 -d`, and required back
@@ -76411,3 +76411,139 @@ is detectable and a wrong answer is not.
 fixed-string search is a defensible reading of that. It is left alone
 deliberately; only `awk` and `sed`, where the syntax itself promises a regex,
 are counted here.
+
+#### TD-A-AWK-DEMANDED-A-FILE-FOR-A-PROGRAM-THAT-READS-NO-INPUT (lane A, 2026-08-25) — ✅ FIXED (`908043883`)
+
+**In short:** `awk 'BEGIN{print "hi"}'` — the way almost everyone first uses
+awk — refused to run in the kernel shell, because it insisted on being given a
+file even for a program that reads nothing. Four other things it did wrong were
+worse, because they *did* run and exited 0: a file it could not decode came out
+empty, `-F':'` silently made `$1` the entire line, and a Windows-style text file
+quietly lost a character off its last field. All fixed, and pinned by a
+self-test rung.
+
+**Where.** `kernel/src/kshell.rs`: `cmd_awk` and `cmd_awk_input`, replaced by
+one `awk_run`; `parse_awk_args`, `awk_field_sep`, `awk_records`,
+`awk_split_fields`, `awk_exec_action`, `awk_format_print`, `awk_eval_expr`.
+
+**The refusal.** `cmd_awk` checked `files.is_empty()` and returned before the
+BEGIN loop:
+
+```rust
+if files.is_empty() {
+    shell_println!("awk: no input file specified");
+    set_exit(1);
+    return;
+}
+```
+
+POSIX is explicit that awk reads input only if the program has a rule that
+still needs it. A `BEGIN`-only program is finished when BEGIN is; an `END`
+block, by contrast, *does* need input, because it reports the final `NR`. The
+driver now asks `rules.iter().any(|r| !r.is_begin)` and reads only then.
+
+**The four silent ones.** Every row exited 0:
+
+| written | what it did | what it looks like |
+|---|---|---|
+| `awk '{print}' some.png` | printed nothing | the file was empty |
+| `awk -F':' '{print $2}' f` | printed a blank line per record | field 2 did not exist |
+| `awk -F'[,;]' '{print $2}' f` | printed the whole record as `$1`, blank for `$2` | ditto |
+| `awk '{print $NF}'` on CRLF | dropped the `\r` from the last field | the file had no `\r` |
+| `awk 'BEGIN{print "a   b"}'` | printed `a b` | the program said one space |
+
+- **The undecodable file** is the shared `from_utf8(&data).unwrap_or("")` fault,
+  the same one `fold` and `base64 -d` had. Records and fields are now `&[u8]`
+  slices of the input and `print` writes them back through
+  `shell_write_bytes`, so `awk` moves up into the byte-clean arm of
+  `dispatch_with_input`. The *program* is still `&str` — it came from the
+  command line, which is — but the data never is.
+- **`-F':'`** kept the quotes the shell had left on it, so the separator was
+  the three characters `':'`; `awk_split_fields` answered a separator it could
+  not use with `alloc::vec![line]`, one field holding everything. The argument
+  line now goes through `split_words`, which honours quotes — the same
+  function `fold` and `base64` use.
+- **The rejoin.** The old parse ran `split_whitespace` over the raw argument
+  line and then rebuilt a quoted program by pushing words back with a *single*
+  space between them. Runs of spaces inside a string literal did not survive
+  that, so `print "a   b"` printed `a b`.
+- **A multi-character `-F`** is an extended regular expression in POSIX (a
+  single character is always literal, which is why `-F.` splits on dots). With
+  no regex engine there are two readings, and the old code picked neither. It
+  now splits **literally where the two readings cannot differ** — no
+  metacharacter in the separator, which covers the overwhelmingly common
+  `-F', '` — and **refuses, with exit 2**, where they can. A refusal is
+  detectable; a whole record in `$1` is not.
+- **The carriage return.** Records came from `str::lines`, which strips a `\r`
+  that precedes the `\n`, and fields from `split_whitespace`, which breaks on
+  one. awk treats `\r` as ordinary data, so `$NF == "ok"` was true on a CRLF
+  file where awk says false. Records now split on `\n` alone (`awk_records`,
+  which also declines to invent a trailing empty record), and the default `FS`
+  is space/tab/newline as POSIX says, rather than every Unicode space.
+
+**The duplication.** `cmd_awk` and `cmd_awk_input` carried a copy each of the
+BEGIN/record/END driver — the class recorded as
+`TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP` — and they had already
+drifted: only the file copy did anything about a read error, and the pipe copy
+delegated wholesale to `cmd_awk` the moment any operand was named, which threw
+the pipe away even when `-` asked for it. There is now one
+`awk_run(spec, stdin)`; `-` names the pipe; every operand is attempted and the
+worst status is reported, so a readable second file cannot erase an unreadable
+first.
+
+Covered by self-test rung 41, which asserts whole byte strings rather than
+searching them.
+
+**Left standing:** `/re/` is still a substring match — see
+`TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`, blocked on
+`ere` gaining a `no_std` build — and the statement executor still ignores
+anything it cannot run, below.
+
+#### TD-A-AWK-IGNORES-EVERY-STATEMENT-IT-CANNOT-RUN (lane A, 2026-08-25) — filed
+
+**In short:** the kernel shell's `awk` understands exactly one statement,
+`print`. Anything else — an assignment, an `if`, a function call — is skipped
+in silence and the program reports success. So a program that does real work in
+a real awk does *nothing* here, and says it worked.
+
+**Where.** `kernel/src/kshell.rs`, `awk_exec_action`:
+
+```rust
+} else {
+    // Unknown statement — ignore.
+}
+```
+
+**What it costs.**
+
+| written | what it does | what awk does |
+|---|---|---|
+| `awk '{ n = n + 1 } END { print n }'` | prints an empty line | prints the count |
+| `awk '{ if ($1 > 5) print }'` | prints nothing, ever | prints the matching records |
+| `awk '{ printf "%s\n", $1 }'` | prints nothing | prints field 1 |
+| `awk '{ sub(/a/, "b"); print }'` | prints the record unchanged | prints it substituted |
+
+Each exits 0. The last row is the shape that matters most: the output *looks*
+like plausible awk output, so nothing downstream can tell the substitution
+never happened.
+
+**What the fix looks like.** Report and stop, rather than skip:
+`awk: unsupported statement: '<stmt>'` on stderr with exit 2, checked once when
+the program is parsed rather than per record — gawk reports a syntax error
+before reading any input, and reporting per record would emit one line per
+input line. `parse_awk_program` already walks every rule, so the check belongs
+there.
+
+**Why it was not done with `908043883`.** That commit fixed the driver — which
+sources are read, and what the bytes are — and this is about the *language*.
+Bundling them would have made one commit that could not be reverted in halves,
+and the refusal needs a decision the driver fix did not: whether a program
+using an unimplemented statement should fail at parse time (gawk's behaviour,
+and it means `awk '{n=1} {print}'` stops printing) or fail only when the
+statement is reached. Parse-time is almost certainly right, but it is a
+user-visible behaviour change to a command that currently "works", so it wants
+its own commit and its own rung.
+
+**Not a regression.** This has been true since the command was written; the
+`908043883` rewrite neither caused it nor made it worse. It is recorded now
+because the rewrite is what made it visible.

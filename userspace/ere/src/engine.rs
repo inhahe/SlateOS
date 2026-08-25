@@ -257,6 +257,9 @@ enum Node {
     Class(ClassData),
     Start,
     End,
+    /// A zero-width assertion about the word characters either side of the
+    /// current position: `\b`, `\B`, `\<` or `\>`.
+    Word(WordAssert),
     /// Capturing group with its 1-based group index.
     Group(usize, Box<Node>),
     Concat(Vec<Node>),
@@ -274,6 +277,79 @@ enum Node {
         /// `None` = unbounded (`*`, `+`, `{m,}`).
         max: Option<usize>,
     },
+}
+
+/// Which of the four GNU word assertions a [`Node::Word`] is.
+///
+/// All four are decided by the same two facts — whether the character before
+/// the position is a word character, and whether the one after it is — so they
+/// share an instruction and differ only in how they combine them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordAssert {
+    /// `\b` — one side is a word character and the other is not.
+    Boundary,
+    /// `\B` — the two sides agree, *including* when neither is a word
+    /// character. That is why `\B` matches inside a run of spaces, and matches
+    /// the empty subject: both sides are "off the end", which is not a word
+    /// character, so they agree.
+    NotBoundary,
+    /// `\<` — the start of a word.
+    Start,
+    /// `\>` — the end of a word.
+    End,
+}
+
+/// Whether `c` is a word character, for [`WordAssert`].
+///
+/// The same set `\w` abbreviates, and deliberately the same *code path*: if the
+/// two ever disagreed, `\bfoo` and `\Wfoo` would draw the word's edge in
+/// different places, and no one reading either would suspect it.
+///
+/// An undecodable byte is not a word character. In a UTF-8 locale glibc agrees,
+/// since such a byte is not alphanumeric there either — `sed 's/\b/|/g'` on
+/// `café` puts no bar inside the `é` under `C.UTF-8`, and puts one before its
+/// bytes under `C`, which is that locale reading them as non-letters.
+fn is_word_ch(c: Ch) -> bool {
+    PosixClass::Alnum.matches(c) || c == Ch::U('_')
+}
+
+/// The class `\w` abbreviates — `[[:alnum:]_]` — or `\W`, its negation.
+fn word_class(negated: bool) -> ClassData {
+    ClassData {
+        negated,
+        ranges: vec![(Ch::U('_'), Ch::U('_'))],
+        posix: vec![PosixClass::Alnum],
+    }
+}
+
+/// The class `\s` abbreviates — `[[:space:]]` — or `\S`, its negation.
+fn space_class(negated: bool) -> ClassData {
+    ClassData {
+        negated,
+        ranges: Vec::new(),
+        posix: vec![PosixClass::Space],
+    }
+}
+
+impl WordAssert {
+    /// Whether this assertion holds at character position `sp` of `input`.
+    ///
+    /// Off either end counts as "not a word character", which is what makes
+    /// `\bx\b` match the whole of a one-character subject.
+    fn holds_at(self, input: &[Ch], sp: usize) -> bool {
+        let before = sp
+            .checked_sub(1)
+            .and_then(|i| input.get(i))
+            .copied()
+            .is_some_and(is_word_ch);
+        let after = input.get(sp).copied().is_some_and(is_word_ch);
+        match self {
+            WordAssert::Boundary => before != after,
+            WordAssert::NotBoundary => before == after,
+            WordAssert::Start => !before && after,
+            WordAssert::End => before && !after,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -881,6 +957,23 @@ impl EParser {
                     }
                     return Ok(Node::Backref(n));
                 }
+                // The GNU operators. glibc honours these in both dialects —
+                // `RE_NO_GNU_OPS` is off for every syntax grep, sed and awk
+                // use — so they are handled here, once, rather than in `bre`'s
+                // translation. Before this they fell through to the literal arm
+                // below, which made `grep -E '\w'` search for a `w`: a silent
+                // wrong answer, and the shape this crate exists to avoid.
+                if let Some(op) = e.as_ascii() {
+                    match op {
+                        'w' | 'W' => return Ok(Node::Class(word_class(op == 'W'))),
+                        's' | 'S' => return Ok(Node::Class(space_class(op == 'S'))),
+                        'b' => return Ok(Node::Word(WordAssert::Boundary)),
+                        'B' => return Ok(Node::Word(WordAssert::NotBoundary)),
+                        '<' => return Ok(Node::Word(WordAssert::Start)),
+                        '>' => return Ok(Node::Word(WordAssert::End)),
+                        _ => {}
+                    }
+                }
                 Ok(Node::Lit(unescape(e)))
             }
             // Under POSIX-extended syntax only `parse_quantifier` may consume
@@ -1094,6 +1187,10 @@ enum Inst {
     Save(usize),
     AssertStart,
     AssertEnd,
+    /// A word assertion: zero-width, like the two above, and decided from the
+    /// characters either side of the position rather than from the position
+    /// alone. See [`WordAssert`].
+    AssertWord(WordAssert),
     /// Match the text group `n` captured. Consumes as many characters as that
     /// group holds — a width the *program* does not know, which is precisely
     /// why the Pike VM cannot run it.
@@ -1146,6 +1243,9 @@ impl Compiler {
             }
             Node::End => {
                 self.emit(Inst::AssertEnd);
+            }
+            Node::Word(w) => {
+                self.emit(Inst::AssertWord(*w));
             }
             Node::Group(idx, inner) => {
                 // The two slots of group `idx`. `idx` counts opening parens in
@@ -1860,6 +1960,7 @@ impl Regex {
                     }
                     Inst::AssertStart if f.sp == 0 => f.pc = next_pc,
                     Inst::AssertEnd if f.sp == input.len() => f.pc = next_pc,
+                    Inst::AssertWord(w) if w.holds_at(input, f.sp) => f.pc = next_pc,
                     Inst::Match => {
                         if best_end.is_none_or(|e| f.sp > e) {
                             best = Some(f.caps.clone());
@@ -2085,6 +2186,11 @@ impl Regex {
             }
             Inst::AssertEnd => {
                 if sp == input.len() {
+                    self.add_thread(list, next, sp, caps, input);
+                }
+            }
+            Inst::AssertWord(w) => {
+                if w.holds_at(input, sp) {
                     self.add_thread(list, next, sp, caps, input);
                 }
             }
@@ -2697,6 +2803,83 @@ mod tests {
         assert!(m("^[[:alpha:]]+$", "abcXYZ"));
         assert!(m("^[[:alnum:]]+$", "ab12"));
         assert!(m("[[:space:]]", "a b"));
+    }
+
+    /// The four GNU shorthands, read by the ERE parser itself.
+    ///
+    /// glibc honours these in both dialects — `RE_NO_GNU_OPS` is off for every
+    /// syntax grep, sed and awk use — so they belong here rather than in
+    /// `bre`'s translation. Before 2026-08-24 only the BRE side had them, by
+    /// rewriting; in ERE they fell through to the literal arm, so `grep -E
+    /// '\w'` searched for the letter `w`.
+    #[test]
+    fn the_gnu_shorthand_classes() {
+        assert!(m(r"^\w+$", "ab_12"));
+        assert!(!m(r"^\w+$", "a b"));
+        assert!(!m(r"\w", "   "));
+        assert!(m(r"^\W$", "-"));
+        assert!(!m(r"^\W$", "_"));
+        assert!(m(r"^\s$", " "));
+        assert!(m(r"^\s$", "\t"));
+        assert!(!m(r"^\s$", "x"));
+        assert!(m(r"^\S$", "x"));
+        assert!(!m(r"^\S$", " "));
+        // A shorthand is an atom, so it quantifies and concatenates.
+        assert!(m(r"^\w\s\w$", "a b"));
+        assert!(m(r"^\w{2,}$", "ab"));
+        // It is *not* one inside a bracket: POSIX gives a backslash no meaning
+        // there, and GNU agrees — measured, `grep -E '^[\w-]+$'` matches `w\-`
+        // and not `a-b_1`.
+        assert!(!m(r"^[\w-]+$", "a-b_1"));
+    }
+
+    /// The four GNU word assertions, against measured GNU output.
+    ///
+    /// | script | input | GNU |
+    /// |---|---|---|
+    /// | `s/\b/\|/g` | `a1 2b` | `\|a1\| \|2b\|` |
+    /// | `s/\B/\|/g` | `abc` | `a\|b\|c` |
+    /// | `s/\B/\|/g` | `a  b` | `a \| b` |
+    /// | `s/\B/\|/g` | (empty) | `\|` |
+    /// | `s/\</[/g` | `foo bar` | `[foo [bar` |
+    /// | `s/\>/]/g` | `foo bar` | `foo] bar]` |
+    #[test]
+    fn the_gnu_word_assertions() {
+        // `\b`: the two sides disagree about being word characters.
+        assert!(m(r"\bfoo\b", "foo bar"));
+        assert!(!m(r"\bfo\b", "foo bar"));
+        assert!(m(r"\bx\b", "x"));
+        assert!(m(r"\b", "café"));
+        // `\B`: they agree — including when *neither* is a word character,
+        // which is why `\B` matches inside a run of spaces, and matches the
+        // empty subject: both sides are off the end.
+        assert!(m(r"a\Bb", "abc"));
+        assert!(!m(r"b\Bc", "ab c"));
+        assert!(m(r"\B", ""));
+        assert!(m(r" \B ", "a  b"));
+        assert!(!m(r"\Bfoo", "foo"));
+        // `\<` and `\>`: one specific end of a word.
+        assert!(m(r"\<bar\>", "foo bar baz"));
+        assert!(!m(r"\<ar\>", "foo bar baz"));
+        assert!(!m(r"\<ba\>", "foo bar baz"));
+        assert!(m(r"\>", "a "));
+        assert!(!m(r"\>", "  "));
+        // `_` is a word character; a letter outside ASCII is one too.
+        assert!(m(r"^\<a_b\>$", "a_b"));
+        assert!(m(r"^\<café\>$", "café"));
+    }
+
+    /// Zero-width, so a word assertion has nothing for a quantifier to repeat
+    /// and matches without consuming: `\<*` is a repeat of an assertion (ERE
+    /// lets a quantifier repeat nothing — see [`egrep_lets_a_quantifier_repeat_nothing`]),
+    /// and `\b\b` is the same test twice.
+    #[test]
+    fn a_word_assertion_consumes_nothing() {
+        let re = compile(r"\<foo").unwrap();
+        let caps = re.captures(b"a foo").unwrap().unwrap();
+        assert_eq!(caps[0].as_deref(), Some(&b"foo"[..]));
+        assert!(m(r"\b\bfoo", "foo"));
+        assert!(m(r"^\<\<foo\>\>$", "foo"));
     }
 
     #[test]

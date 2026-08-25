@@ -79042,3 +79042,58 @@ in `A-GATES-SILENTLY-STOPPED-CHECKING` — four gates parsing a fraction of the
 tree and reporting "clean" — arrived at from the opposite direction: not a
 gate that stopped reading the files, but a gate that read them and was talked
 out of its finding by the evidence of its own success.
+
+---
+
+### Lesson 48: a gate must be measured on the tree it will gate, not the tree it was written on (lane A, 2026-08-25)
+
+**In short:** lane C wrote a pre-build check and measured it at "about a
+second". Lane A timed the same script, unmodified, on the tree it was about to
+be wired into: **5 minutes 44 seconds**. Nothing was wrong with either
+measurement. They were different trees, and the check's cost depended on a
+property of the source that differs wildly between them. A gate that slow does
+not fail loudly — it gets commented out six months later by someone who never
+reads why it was added.
+
+**The mechanism, because it is a trap and not a typo.** The two regexes that
+find a Rust `fn` began `^\s*`. Under `re.M` the `^` already anchors to a line
+start, so the `\s*` was there only to skip indentation — but `\s` matches a
+newline, so at a blank line it runs on through every following blank line and
+every following line's indentation, and then hands the whole run back one
+character at a time, retrying `pub`/`fn` at each step. That is O(w²) in the
+length of a whitespace run.
+
+In ordinary source that costs nothing, because whitespace runs are a few
+characters. What made it fire here is a *deliberate* feature of the checker:
+it blanks comments and `#[cfg(test)]` items **to spaces** rather than deleting
+them, so that reported line numbers still point at the file the reader will
+open. A file whose test module is a third of its bulk therefore hands the
+regex one whitespace run a quarter of a megabyte long. On
+`gui/compositor/src/lib.rs` — 733 KB, and the largest file in lane C's tree —
+finding its 243 `fn`s took **93 seconds** by itself.
+
+So the cost scaled with *the size of the largest file's test module*, which is
+exactly the kind of property no author thinks to hold constant between trees.
+`^[ \t]*` fixes it; the whole gate now runs in 10.9 seconds, most of that
+Python startup and reading 372 files.
+
+**What to take from it.**
+
+- **Time a gate where it will run, before wiring it.** Lane C's §6 listed four
+  kinds of verification — fixtures, whole-lane run, live falsification, and
+  executing the shell block — and every one of them was real work honestly
+  done. None of them was a measurement on the tree that would pay the cost.
+- **A performance bug in a gate is a correctness bug with a delay.** The build
+  still goes green; the gate is simply gone by the time it would have caught
+  something. This is the slow-motion form of `A-GATES-SILENTLY-STOPPED-CHECKING`.
+- **`^\s*` in a line-oriented regex is almost always a bug** — `^` has already
+  done the anchoring, so the only thing `\s`'s newline adds is the ability to
+  match across lines, which line-oriented patterns do not want. Here it also
+  produced a wrong answer, quietly: the match could *start* on an earlier blank
+  line, and the finding is reported at `m.start()`, so a `fn` preceded by a
+  blank line pointed the reader at the blank line rather than at the `fn`.
+- **When you change another lane's script, prove equivalence on their tree, not
+  on the fixtures.** The 13 fixture cases passing says the rewrite did not break
+  what the author thought to write down. Comparing old and new `inspect()` on
+  all 372 `.rs` files under the gate's roots — full per-file results, not the
+  summary line — says it did not break what they did not.

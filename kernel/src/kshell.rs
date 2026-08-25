@@ -14921,7 +14921,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // The synopsis is still there -- dropping the status must not have cost
         // the reader the list of subcommands.
-        assert_output_contains("with the synopsis kept as a hint", &out, b"Usage: quota <on|off|");
+        assert_output_contains(
+            "with the synopsis kept as a hint",
+            &out,
+            b"Usage: quota <on|off|",
+        );
 
         // And the error case, which shares no branch with the query above and
         // must still fail.

@@ -9156,6 +9156,7 @@ fn cmd_colorscheme(args: &str) {
                 }
             }
             shell_println!("Unknown scheme '{}'. Available:", name);
+            set_exit(1);
             for scheme in crate::console::BUILTIN_SCHEMES {
                 shell_println!("  {}", scheme.name);
             }
@@ -14938,6 +14939,95 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "and reports failure");
     }
 
+    serial_println!(
+        "  kshell::self_test 61: a diagnostic not worded `Usage:` still reports failure"
+    );
+    {
+        // The usage-status gate found its diagnostics by searching for the word
+        // `Usage:`, which is the wording the *first* instance of this bug
+        // happened to have. Everything worded `Unknown ...` / `Invalid ...`
+        // passed it while still reporting success -- 49 sites in 29 commands.
+        // The trigger now fires on the category rather than the word; see
+        // design-decisions.md §299.
+        //
+        // Four of the 49 are pinned here, chosen for the four *shapes* the
+        // sweep had to handle rather than for the commands they live in, since
+        // it is the shapes that a future edit would reintroduce:
+        //
+        //   * a `None =>` arm whose whole body was the print (`fstrim mode`),
+        //   * the same, but where the print was the block's tail expression
+        //     with no trailing `;` -- the one site the mechanical pass refused
+        //     and left for hand treatment (`fstrim mode`, as it happens),
+        //   * a `let ... else { print; continue; }` inside a loop over
+        //     arguments (`container start`),
+        //   * a catch-all `other =>` binding the offending word
+        //     (`container network`).
+        //
+        // Each is paired, where the command has one, with the *query* reading
+        // next door that must keep exit 0 -- because the failure mode of
+        // fixing this class is over-applying it, which is exactly what §298's
+        // second gate exists to catch.
+
+        // Shape 1 and 2: `fstrim mode <bad>` is a `None =>` arm, and it was the
+        // site whose print had no trailing semicolon.
+        let out = capture_command("fstrim mode zz_not_a_mode");
+        assert_output_contains(
+            "an unrecognised trim mode is named back to the user",
+            &out,
+            b"Unknown mode: zz_not_a_mode",
+        );
+        assert_eq!(last_exit(), 1, "and reported as a failure, not a success");
+
+        // ... and its sibling branch, which answers a question and must not.
+        let out = capture_command("fstrim mode");
+        assert_output_contains(
+            "while the bare form answers with the current mode",
+            &out,
+            b"Current mode: ",
+        );
+        assert_eq!(last_exit(), 0, "and succeeds, because it answered");
+
+        // Shape 3: a `let Ok(id) = ... else { print; continue; }` in a loop.
+        // The `continue` is why this one is easy to miss: control leaves the
+        // block without a `return` and without falling off the end of a match
+        // arm, so neither of the two earlier sweeps' shapes would have caught
+        // it.
+        let out = capture_command("container start zz_not_a_number");
+        assert_output_contains(
+            "an unparseable container id is named back to the user",
+            &out,
+            b"Invalid container ID 'zz_not_a_number'",
+        );
+        assert_eq!(last_exit(), 1, "and reported as a failure");
+
+        // Shape 4: a catch-all arm binding the offending word.
+        let out = capture_command("container network zz_not_an_action");
+        assert_output_contains(
+            "an unrecognised subcommand is named back to the user",
+            &out,
+            b"Unknown network action 'zz_not_an_action'",
+        );
+        assert_eq!(last_exit(), 1, "and reported as a failure");
+
+        // And a control from the other direction: `theme accent` with no
+        // argument prints the current accent, which is an answer.
+        let out = capture_command("theme accent");
+        assert_output_contains(
+            "a bare `theme accent` answers with the current colour",
+            &out,
+            b"Accent: ",
+        );
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        let out = capture_command("theme accent zz_not_hex");
+        assert_output_contains(
+            "while a malformed colour is a mistake",
+            &out,
+            b"Invalid hex color: zz_not_hex",
+        );
+        assert_eq!(last_exit(), 1, "and reports failure");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -19943,6 +20033,7 @@ fn cmd_overlay(args: &str) {
 
         _ => {
             shell_println!("Unknown overlay subcommand: {}", parts[0]);
+            set_exit(1);
             shell_println!(
                 "Usage: overlay <list|create|destroy|ls|cat|write|rm|which|whiteouts|stats|reset|commit>"
             );
@@ -21711,7 +21802,10 @@ fn cmd_fcompress(args: &str) {
                     fcompress::set_default_algorithm(a);
                     shell_println!("Default algorithm set to {}.", a.name());
                 }
-                None => shell_println!("Unknown algorithm: {}", parts[1]),
+                None => {
+                    shell_println!("Unknown algorithm: {}", parts[1]);
+                    set_exit(1);
+                }
             }
         }
         "minsize" | "min" => {
@@ -24203,7 +24297,10 @@ fn cmd_fspolicy(args: &str) {
             };
             match policy::get_setting(key) {
                 Some(val) => shell_println!("{} = {}", key, val),
-                None => shell_println!("Unknown setting: {}", key),
+                None => {
+                    shell_println!("Unknown setting: {}", key);
+                    set_exit(1);
+                }
             }
         }
         "set" => {
@@ -24650,7 +24747,10 @@ fn cmd_atime(args: &str) {
                     atime::add_override(path, p);
                     shell_println!("Override: {} → {}", path, p.label());
                 }
-                None => shell_println!("Unknown policy: {}", parts[2]),
+                None => {
+                    shell_println!("Unknown policy: {}", parts[2]);
+                    set_exit(1);
+                }
             }
         }
         "unmount" | "remove" => {
@@ -25102,7 +25202,8 @@ fn cmd_fstrim(args: &str) {
                         shell_println!("TRIM mode set to: {}", mode.label());
                     }
                     None => {
-                        shell_println!("Unknown mode: {} (manual, periodic, continuous)", mode_str)
+                        shell_println!("Unknown mode: {} (manual, periodic, continuous)", mode_str);
+                        set_exit(1);
                     }
                 }
             } else {
@@ -29535,7 +29636,10 @@ fn cmd_appregistry(args: &str) {
                         }
                     }
                 }
-                None => shell_println!("Unknown category: {}", cat_name),
+                None => {
+                    shell_println!("Unknown category: {}", cat_name);
+                    set_exit(1);
+                }
             }
         }
         "mime" => {
@@ -29689,7 +29793,10 @@ fn cmd_theme(args: &str) {
                     theme::set_accent(c);
                     shell_println!("Accent set: {}", c.to_hex());
                 }
-                None => shell_println!("Invalid hex color: {}", hex),
+                None => {
+                    shell_println!("Invalid hex color: {}", hex);
+                    set_exit(1);
+                }
             }
         }
         "color" | "get" => {
@@ -29707,7 +29814,10 @@ fn cmd_theme(args: &str) {
                     let c = theme::color(role);
                     shell_println!("{}: {}", role.label(), c.to_hex());
                 }
-                None => shell_println!("Unknown role: {}", role_str),
+                None => {
+                    shell_println!("Unknown role: {}", role_str);
+                    set_exit(1);
+                }
             }
         }
         "set" => {
@@ -29749,7 +29859,10 @@ fn cmd_theme(args: &str) {
                     theme::clear_override(role);
                     shell_println!("Override cleared: {}", role.label());
                 }
-                None => shell_println!("Unknown role: {}", role_str),
+                None => {
+                    shell_println!("Unknown role: {}", role_str);
+                    set_exit(1);
+                }
             }
         }
         "overrides" => {
@@ -30004,7 +30117,10 @@ fn cmd_hotkey(args: &str) {
                     Some(combo) => shell_println!("{} → {}", combo.display(), action.label()),
                     None => shell_println!("No binding for: {}", action_str),
                 },
-                None => shell_println!("Unknown action: {}", action_str),
+                None => {
+                    shell_println!("Unknown action: {}", action_str);
+                    set_exit(1);
+                }
             }
         }
         "search" => {
@@ -36375,7 +36491,10 @@ fn cmd_useracct(args: &str) {
                                 set_exit(1);
                             }
                         },
-                        _ => shell_println!("Invalid uid/gid"),
+                        _ => {
+                            shell_println!("Invalid uid/gid");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -36395,7 +36514,10 @@ fn cmd_useracct(args: &str) {
                                 set_exit(1);
                             }
                         },
-                        _ => shell_println!("Invalid uid/gid"),
+                        _ => {
+                            shell_println!("Invalid uid/gid");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -36664,7 +36786,10 @@ fn cmd_progmgr(args: &str) {
                                 set_exit(1);
                             }
                         },
-                        None => shell_println!("Unknown capability: {}", parts[2]),
+                        None => {
+                            shell_println!("Unknown capability: {}", parts[2]);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -36702,7 +36827,10 @@ fn cmd_progmgr(args: &str) {
                                 set_exit(1);
                             }
                         },
-                        None => shell_println!("Unknown capability: {}", parts[2]),
+                        None => {
+                            shell_println!("Unknown capability: {}", parts[2]);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -36843,7 +36971,10 @@ fn cmd_progmgr(args: &str) {
                                 }
                             }
                         }
-                        _ => shell_println!("Unknown field: {}", parts[3]),
+                        _ => {
+                            shell_println!("Unknown field: {}", parts[3]);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -37352,7 +37483,10 @@ fn cmd_scriptlang(args: &str) {
                             }
                         }
                     }
-                    _ => shell_println!("Invalid arguments"),
+                    _ => {
+                        shell_println!("Invalid arguments");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -38392,7 +38526,10 @@ fn cmd_swapcfg(args: &str) {
                             set_exit(1);
                         }
                     },
-                    _ => shell_println!("Invalid arguments"),
+                    _ => {
+                        shell_println!("Invalid arguments");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -38408,7 +38545,10 @@ fn cmd_swapcfg(args: &str) {
                             set_exit(1);
                         }
                     },
-                    _ => shell_println!("Invalid arguments"),
+                    _ => {
+                        shell_println!("Invalid arguments");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -43598,6 +43738,7 @@ fn cmd_kernelbuild(args: &str) {
                     "bootloader" | "boot" => Some(kernelbuild::ComponentType::Bootloader),
                     _ => {
                         shell_println!("Unknown type: {}", parts[3]);
+                        set_exit(1);
                         None
                     }
                 };
@@ -43696,6 +43837,7 @@ fn cmd_kernelbuild(args: &str) {
                     "size" | "os" | "Os" => Some(kernelbuild::OptLevel::Size),
                     _ => {
                         shell_println!("Unknown level: {}", parts[2]);
+                        set_exit(1);
                         None
                     }
                 };
@@ -43908,6 +44050,7 @@ fn cmd_wakesensor(args: &str) {
                     "mic" | "microphone" => Some(wakesensor::SensorType::Microphone),
                     _ => {
                         shell_println!("Unknown sensor: {}", parts[1]);
+                        set_exit(1);
                         None
                     }
                 };
@@ -43977,6 +44120,7 @@ fn cmd_wakesensor(args: &str) {
                     "mic" | "microphone" => Some(wakesensor::SensorType::Microphone),
                     _ => {
                         shell_println!("Unknown sensor");
+                        set_exit(1);
                         None
                     }
                 };
@@ -43987,6 +44131,7 @@ fn cmd_wakesensor(args: &str) {
                     "custom" => Some(wakesensor::Sensitivity::Custom),
                     _ => {
                         shell_println!("Unknown level");
+                        set_exit(1);
                         None
                     }
                 };
@@ -44010,6 +44155,7 @@ fn cmd_wakesensor(args: &str) {
                     "mic" | "microphone" => Some(wakesensor::SensorType::Microphone),
                     _ => {
                         shell_println!("Unknown sensor");
+                        set_exit(1);
                         None
                     }
                 };
@@ -44040,6 +44186,7 @@ fn cmd_wakesensor(args: &str) {
                     "mic" | "microphone" => Some(wakesensor::SensorType::Microphone),
                     _ => {
                         shell_println!("Unknown sensor");
+                        set_exit(1);
                         None
                     }
                 };
@@ -44063,7 +44210,10 @@ fn cmd_wakesensor(args: &str) {
                                     }
                                 }
                             }
-                            _ => shell_println!("Invalid hours"),
+                            _ => {
+                                shell_println!("Invalid hours");
+                                set_exit(1);
+                            }
                         }
                     }
                 }
@@ -44293,6 +44443,7 @@ fn cmd_netsettings(args: &str) {
                         "vpn" => Some(netsettings::InterfaceType::Vpn),
                         _ => {
                             shell_println!("Unknown type: {}", parts[2]);
+                            set_exit(1);
                             None
                         }
                     };
@@ -46054,6 +46205,7 @@ fn cmd_sysdiag(args: &str) {
                     }
                 } else {
                     shell_println!("Unknown category: {}", cname);
+                    set_exit(1);
                     shell_println!(
                         "Categories: network, storage, memory, services, boot, security"
                     );
@@ -46153,6 +46305,7 @@ fn cmd_sysdiag(args: &str) {
                     }
                 } else {
                     shell_println!("Unknown category: {}", cname);
+                    set_exit(1);
                     shell_println!(
                         "Categories: network, storage, memory, services, boot, security"
                     );
@@ -51034,7 +51187,10 @@ fn cmd_parental(args: &str) {
                         if ok { "ALLOWED" } else { "BLOCKED" }
                     );
                 }
-                _ => shell_println!("Unknown check type: {} (app|web|time)", check_type),
+                _ => {
+                    shell_println!("Unknown check type: {} (app|web|time)", check_type);
+                    set_exit(1);
+                }
             }
         }
         "profile" => {
@@ -56312,7 +56468,10 @@ fn cmd_elog(args: &str) {
                     eventlog::set_serial_echo_level(sev);
                     shell_println!("Serial echo level set to: {}", sev.as_str());
                 }
-                None => shell_println!("Unknown severity: {}", parts[1]),
+                None => {
+                    shell_println!("Unknown severity: {}", parts[1]);
+                    set_exit(1);
+                }
             }
         }
         "namespaces" => {
@@ -56484,7 +56643,10 @@ fn cmd_logpersist(args: &str) {
                         logpersist::set_mode(RotationMode::PerNamespace);
                         shell_println!("Mode set to per-namespace");
                     }
-                    _ => shell_println!("Unknown mode: {}. Use 'combined' or 'per-namespace'.", m),
+                    _ => {
+                        shell_println!("Unknown mode: {}. Use 'combined' or 'per-namespace'.", m);
+                        set_exit(1);
+                    }
                 }
             } else {
                 let cfg = logpersist::config();
@@ -58148,6 +58310,7 @@ fn cmd_vmguest(args: &str) {
                 let h: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
                 if w == 0 || h == 0 {
                     shell_println!("Invalid dimensions");
+                    set_exit(1);
                 } else {
                     let (ew, eh) = vmguest::request_display_resize(w, h);
                     shell_println!("Requested: {}x{}, effective: {}x{}", w, h, ew, eh);
@@ -59521,6 +59684,7 @@ fn cmd_telnetd(args: &str) {
                 let port: u16 = port_str.parse().unwrap_or(0);
                 if port == 0 {
                     shell_println!("Invalid port");
+                    set_exit(1);
                 } else {
                     telnet::set_port(port);
                     shell_println!("Port set to {} (restart server to apply)", port);
@@ -59638,6 +59802,7 @@ fn cmd_sshd(args: &str) {
                 let port: u16 = port_str.parse().unwrap_or(0);
                 if port == 0 {
                     shell_println!("Invalid port");
+                    set_exit(1);
                 } else {
                     ssh::set_port(port);
                     shell_println!("Port set to {} (restart server to apply)", port);
@@ -60054,6 +60219,7 @@ fn cmd_netsyslog(args: &str) {
                 let port: u16 = port_str.parse().unwrap_or(0);
                 if port == 0 {
                     shell_println!("Invalid port");
+                    set_exit(1);
                 } else {
                     syslog::set_port(port);
                     shell_println!("Port set to {} (restart to apply)", port);
@@ -87024,7 +87190,10 @@ fn cmd_secpolicy(args: &str) {
                             set_exit(1);
                         }
                     },
-                    None => shell_println!("Invalid mode. Use: disabled|permissive|enforcing"),
+                    None => {
+                        shell_println!("Invalid mode. Use: disabled|permissive|enforcing");
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Mode: {}", secpolicy::get_mode().label());
@@ -87060,7 +87229,10 @@ fn cmd_secpolicy(args: &str) {
                         }
                     }
                 }
-                None => shell_println!("Unknown action: {}", act_str),
+                None => {
+                    shell_println!("Unknown action: {}", act_str);
+                    set_exit(1);
+                }
             }
         }
         "label" => {
@@ -96609,7 +96781,10 @@ fn cmd_taskbar(args: &str) {
                     taskbar::set_small_icons(val == "on" || val == "yes" || val == "true");
                     shell_println!("Small icons: {}", val);
                 }
-                _ => shell_println!("Unknown config key: {}", key),
+                _ => {
+                    shell_println!("Unknown config key: {}", key);
+                    set_exit(1);
+                }
             }
         }
         "test" => match taskbar::self_test() {
@@ -96883,7 +97058,10 @@ fn cmd_startmenu(args: &str) {
             }
             match startmenu::SystemAction::from_str(action) {
                 Some(a) => shell_println!("Power action: {} (simulated)", a.label()),
-                None => shell_println!("Unknown action: {}", action),
+                None => {
+                    shell_println!("Unknown action: {}", action);
+                    set_exit(1);
+                }
             }
         }
         "init" => match startmenu::init_defaults() {
@@ -104431,6 +104609,7 @@ fn cmd_container(args: &str) {
                 for id_str in ids {
                     let Ok(id) = id_str.parse::<u32>() else {
                         shell_println!("Invalid container ID '{}'", id_str);
+                        set_exit(1);
                         continue;
                     };
                     let result = if force {
@@ -104462,6 +104641,7 @@ fn cmd_container(args: &str) {
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
                         shell_println!("Invalid container ID '{}'", id_str);
+                        set_exit(1);
                         continue;
                     };
                     match container::start(id) {
@@ -104486,6 +104666,7 @@ fn cmd_container(args: &str) {
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
                         shell_println!("Invalid container ID '{}'", id_str);
+                        set_exit(1);
                         continue;
                     };
                     match container::stop(id) {
@@ -105108,6 +105289,7 @@ fn cmd_container(args: &str) {
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
                         shell_println!("Invalid container ID '{}'", id_str);
+                        set_exit(1);
                         continue;
                     };
                     match container::kill(id) {
@@ -105246,6 +105428,7 @@ fn cmd_container(args: &str) {
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
                         shell_println!("Invalid container ID '{}'", id_str);
+                        set_exit(1);
                         continue;
                     };
                     match container::pause(id) {
@@ -105274,6 +105457,7 @@ fn cmd_container(args: &str) {
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
                         shell_println!("Invalid container ID '{}'", id_str);
+                        set_exit(1);
                         continue;
                     };
                     match container::unpause(id) {
@@ -105391,6 +105575,7 @@ fn cmd_container(args: &str) {
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
                         shell_println!("Invalid container ID '{}'", id_str);
+                        set_exit(1);
                         continue;
                     };
                     match container::restart(id) {
@@ -106486,6 +106671,7 @@ fn cmd_container_network(parts: &[&str]) {
         }
         other => {
             shell_println!("Unknown network action '{}'", other);
+            set_exit(1);
             shell_println!(
                 "Usage: container network <create|ls|rm|inspect|prune|resolve|connect|disconnect> NAME [--subnet CIDR] [--gateway IP]"
             );

@@ -73907,7 +73907,8 @@ never saw it because the gate keys on the *word* `Usage:`, and this arm says
 `Use:`. The arm now sets `set_exit(1)` and is worded `Usage:` so the gate can
 see it.
 
-**That blind spot is general and still open.** Re-running the usage-status
+**That blind spot is general** — and was closed the same day, one commit later.
+Re-running the usage-status
 walk with its trigger widened from `Usage:` to `Unknown…`/`Unrecognised…`/
 `Invalid…`/`Use: ` reports **49 further sites** in `kshell.rs` that print a
 diagnostic and report success — `cmd_container`'s seven `Invalid container ID`
@@ -73915,8 +73916,10 @@ paths, `cmd_wakesensor`'s five `Unknown sensor` arms, `cmd_theme`, `cmd_progmgr`
 `cmd_secpolicy`, and more. (Two of the 51 raw matches are report lines rather
 than diagnostics: `thumbcache`'s "Invalidated {} entries" and `vlan`'s "Unknown
 drops:" counter.) This is the same lesson a third time — a gate keyed on the
-shape of the last bug defines its own blind spot — and it is tracked as
-`A-KSHELL-DIAGNOSTICS-NOT-WORDED-USAGE-ESCAPE-THE-GATE` below.
+shape of the last bug defines its own blind spot. All 49 are fixed and the
+trigger is widened; see
+`A-KSHELL-DIAGNOSTICS-NOT-WORDED-USAGE-ESCAPE-THE-GATE` below and
+design-decisions.md §299.
 
 **Tested by:** `kshell::self_test` rung 60 — `quota` prints the state line and
 exits 0, the synopsis survives as a hint, and `quota zz_not_a_subcommand` names
@@ -73924,59 +73927,98 @@ the word and exits 1.
 
 ---
 
-## A-KSHELL-DIAGNOSTICS-NOT-WORDED-USAGE-ESCAPE-THE-GATE — open (lane A)
+## A-KSHELL-DIAGNOSTICS-NOT-WORDED-USAGE-ESCAPE-THE-GATE — ✅ FIXED 2026-08-25 (lane A)
 
 **In short:** the shell has a build-time check that stops a command from
 printing an error message and then telling the caller it succeeded. The check
-finds the message by looking for the word "Usage:". Messages that start
+found the message by looking for the word "Usage:". Messages that start
 "Unknown subcommand…", "Invalid port", "Unknown sensor" and so on say exactly
-the same thing in different words, and the check does not look for them — so
-49 of them still report success today.
+the same thing in different words, and the check did not look for them — so 49
+of them scolded the user and then reported success. The check now fires on the
+*kind* of message rather than one word of it, and all 49 are fixed.
 
 **Where:** `kernel/src/kshell.rs`; the gate is
-`scripts/check-usage-status.py`, whose trigger is
+`scripts/check-usage-status.py`, whose trigger was
 
 ```python
 USAGE = re.compile(r'(?:console_println!|shell_println!)\s*\(\s*"\s*[Uu]sage\b')
 ```
 
-**How the 49 were counted.** The checker's own forward walk, with only that
-regex swapped for `Unknown|Unrecogni[sz]ed|Invalid|Use: ` and `ALLOWED`
-cleared, reports 51 sites; two are report lines that merely begin with one of
-those words (`thumbcache`'s "Invalidated {} entries for: …", `vlan`'s
-"  Unknown drops:    {}" statistic). The rest are real: seven `Invalid
-container ID '{}'` paths in `cmd_container`, five `Unknown sensor`/`Unknown
-level` arms in `cmd_wakesensor`, three `Invalid port` (`telnetd`, `sshd`,
-`netsyslog`), `cmd_theme` ×3, `cmd_progmgr` ×3, `cmd_swapcfg` ×2,
-`cmd_useracct` ×2, `cmd_sysdiag` ×2, `cmd_secpolicy` ×2, and singles in
+and is now
+
+```python
+USAGE = re.compile(
+    r'(?:console_println!|shell_println!)\s*\(\s*"'
+    r'(?:\s*[Uu]sage\b|Unknown\b|Unrecogni[sz]ed\b|Invalid\b|Use:)'
+)
+```
+
+**How the 49 were counted, and where they were.** The checker's own forward
+walk, with only that regex widened, reported 51 sites. Two are report lines
+that merely begin with one of those words — `thumbcache`'s "Invalidated {}
+entries for: …" (a *success* line) and `vlan stats`' "  Unknown drops:    {}"
+(a field label). Both are excluded **structurally rather than by allowlist**:
+the new words must *start* the string (a field label is indented inside its
+report) and are matched with `\b` (so "Invalidated" is not an "Invalid"
+anything). `Usage` keeps its leading-whitespace tolerance because `cmd_memcg`
+has an indented one already sitting in `ALLOWED`, and removing the tolerance
+would have silently dropped a site the gate was watching.
+
+The remaining 49, in 29 functions: seven `Invalid container ID '{}'` paths in
+`cmd_container`, six `Unknown sensor`/`Unknown level`/`Invalid hours` arms in
+`cmd_wakesensor`, three `Invalid port` (`telnetd`, `sshd`, `netsyslog`),
+`cmd_theme` ×3, `cmd_progmgr` ×3, `cmd_swapcfg` ×2, `cmd_useracct` ×2,
+`cmd_sysdiag` ×2, `cmd_secpolicy` ×2, `cmd_kernelbuild` ×2, and singles in
 `cmd_colorscheme`, `cmd_overlay`, `cmd_fcompress`, `cmd_fspolicy`, `cmd_atime`,
 `cmd_fstrim`, `cmd_appregistry`, `cmd_hotkey`, `cmd_scriptlang`,
-`cmd_kernelbuild` ×2, `cmd_netsettings`, `cmd_parental`, `cmd_elog`,
-`cmd_logpersist`, `cmd_vmguest`, `cmd_taskbar`, `cmd_startmenu`,
-`cmd_container_network`.
+`cmd_netsettings`, `cmd_parental`, `cmd_elog`, `cmd_logpersist`, `cmd_vmguest`,
+`cmd_taskbar`, `cmd_startmenu`, `cmd_container_network`.
 
 **Why this is the interesting part and not a footnote.** It is the third time
 the same methodological failure has produced shipped bugs in this one file. The
 710-site sweep keyed on "a `Usage:` print followed by `return;`" and missed 87
 that fall off the end of a `match` arm. The checker written to replace it keyed
 on the *semantic* property but kept the *lexical* trigger, so it inherited the
-blind spot one level down: it is complete over messages containing the word
+blind spot one level down: it was complete over messages containing the word
 "Usage", which is not the set it is trying to guard. A gate's trigger is part
 of its rule, and a trigger derived from the wording of the last bug is a
-syntactic sweep wearing a semantic hat.
+syntactic sweep wearing a semantic hat. Recorded as design-decisions.md §299.
 
-**The proper fix** is to make the trigger the *category* rather than a word:
-any print that names something the user typed back at them as wrong. In
-practice that is a widened vocabulary plus an allowlist for the report lines
-that happen to start with the same words — which is what the count above
-already demonstrates works. Then fix all 49. Doing it in one change with the
-count pinned (so the debt can only shrink) is the same shape as the
-`KNOWN_CONFLATED` mechanism already in the script.
+**How the fix was applied.** By a scratch script that **imported the checker
+and took its site list from the checker's own output**, rather than
+re-implementing "find the diagnostics" a second time — §297's rule, that two
+descriptions of one set maintained separately differ silently. Here the
+divergence would have been invisible in both directions: a site the sweep
+missed would look like a new bug, and one it fixed that the gate did not care
+about would look like nothing at all. The script also **refused shapes it did
+not recognise and printed the refusals** instead of trying its best; exactly one
+site came out as `MANUAL` — `cmd_fstrim`'s `Unknown mode`, whose print is the
+block's tail expression with no trailing `;` — and was fixed by hand. The
+script was deleted after use; the gate is what persists.
 
-**Why it is not fixed in the same commit as the `quota` one:** 49 sites in 30
-functions is its own change with its own boot test, and folding it into the
-commit that introduces the *query* gate would put two unrelated sweeps behind
-one green run.
+**Verified in both directions.** After the sweep both gates are green
+(`check-usage-status.py`: 22 allowed, 0 conflations; `check-query-status.py`:
+2 allowed). Run against the *pre-sweep* tree the widened checker reports all 49,
+which is the positive control for the widened trigger — a checker nobody has
+watched fail is a checker nobody knows works. The original historical control
+still holds too: on `9251e5a3d^` it still reports `cmd_fcompress` and `cmd_elog`.
+
+**What is still not covered, stated rather than implied.** A diagnostic opening
+with none of the five words — `"no such mode: …"`, `"cannot parse …"`,
+`"expected a number"` — is not nominated and will pass. That residue is real.
+If a fourth instance of this defect appears, the question is not "which word do
+we add" but whether the trigger should become a property of the *block* (does
+this branch correspond to input the command rejected?) rather than of the
+string. §299 records the estimate of what that costs.
+
+**Tested by:** kshell self-test rung 61, which pins four of the 49 chosen for
+the four *shapes* the sweep had to handle rather than for the commands they
+live in — a `None =>` arm whose whole body was the print, the tail-expression
+variant that the mechanical pass refused, a `let … else { print; continue; }`
+inside a loop over arguments, and a catch-all `other =>`. Each is paired with
+the query reading next door (`fstrim mode`, `theme accent` with no argument)
+that must keep exit 0, because the failure mode of fixing this class is
+over-applying it.
 
 ---
 

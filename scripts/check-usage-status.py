@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Guard the rule that printing a usage message is *reporting a failure*.
+"""Guard the rule that printing a diagnostic is *reporting a failure*.
 
 The rule
 --------
-**If a kshell command prints `Usage: ...` because it could not do what it was
-asked, it must also set a non-zero exit status before it returns.**
+**If a kshell command tells the user it could not do what it was asked, it must
+also set a non-zero exit status before it returns.**
 
 Why a checker and not just a code review
 ----------------------------------------
-Because this defect has now been fixed twice, and the second fix existed only
-because the first one could not see its own blind spot.
+Because this defect has now been fixed three times, and each fix existed only
+because the one before it could not see its own blind spot.
 
 `A-KSHELL-A-MISTYPED-COMMAND-REPORTED-SUCCESS` fixed **710** sites in August
 2026.  It found them by searching for the shape they had: a `Usage:` print
@@ -21,10 +21,23 @@ it, with no `return` to match on:
     _ => shell_println!("Usage: dynlock autounlock <on|off>"),
 
 That is the general failure of a syntax-keyed sweep: it defines its own blind
-spot and cannot report it.  So this checker is keyed on the *semantic*
-property instead -- "a `Usage:` print that can be reached and then left without
-a non-zero `set_exit`" -- which is the thing actually being guaranteed, and
-does not care what shape the next one is written in.
+spot and cannot report it.  So the *walk* was keyed on the semantic property
+instead -- "a diagnostic that can be reached and then left without a non-zero
+`set_exit`" -- which does not care what shape the next one is written in.
+
+**And the trigger was left lexical anyway, which put the blind spot back one
+level down.**  The checker looked for the word `Usage:`, so it was complete
+over messages containing that word rather than over diagnostics.  `cmd_quota`'s
+catch-all arm printed
+
+    shell_println!("Unknown subcommand '{}'. Use: on, off, set, ...", parts[0]);
+
+with no status at all, and passed this gate, because it says `Use:` and not
+`Usage:`.  Widening the trigger to the *category* -- any message that names
+something the user typed back at them as wrong -- turned up 49 more, all of
+which are fixed; the widened trigger is what this file now carries.  A gate's
+trigger is part of its rule; a trigger derived from the wording of the last bug
+is a syntactic sweep wearing a semantic hat.  See design-decisions.md §299.
 
 The consequence of a miss is not cosmetic.  The diagnostic is on the screen
 either way; it is the status that lies.  A script reads the status:
@@ -34,14 +47,27 @@ because the caller has no signal to distrust it.
 
 What is checked
 ---------------
-For each `Usage:`-printing line, walk forward to wherever control leaves the
+For each diagnostic-opening line -- `Usage:`, `Unknown ...`, `Unrecognised
+...`, `Invalid ...`, `Use: ` -- walk forward to wherever control leaves the
 enclosing block (a `return`, or the brace that closes it) and look for a
 `set_exit` with a non-zero argument.  If none is found, the site is reported.
 
-Sites that legitimately print `Usage:` without failing are listed in `ALLOWED`,
-keyed by enclosing function plus a distinguishing fragment of the message --
-not by line number, which drifts on every edit and would make the allowlist
-rot into a rubber stamp.  Adding an entry is meant to require saying why.
+Two structural rules keep report lines out of the trigger, so that neither
+needs an allowlist entry:
+
+* **The new words must start the message.**  A report *field* is indented
+  inside its report -- `"  Unknown drops:    {}"` in `vlan stats` -- while a
+  diagnostic starts at the beginning of the string.  (`Usage` keeps its
+  leading-whitespace tolerance, because `cmd_memcg` has an indented one that
+  is in `ALLOWED` already and removing the tolerance would silently drop it.)
+* **They are matched with `\\b`.**  `"Invalidated {} entries for: {}"` is
+  `thumbcache`'s success line, not an `Invalid` anything.
+
+Sites that legitimately print a diagnostic word without failing are listed in
+`ALLOWED`, keyed by enclosing function plus a distinguishing fragment of the
+message -- not by line number, which drifts on every edit and would make the
+allowlist rot into a rubber stamp.  Adding an entry is meant to require saying
+why.
 
 Exit status: 0 clean, 1 unaccounted sites found.
 """
@@ -165,7 +191,15 @@ ALLOWED = {
 # and the count must come down with it, add one and the check trips.
 KNOWN_CONFLATED = {}
 
-USAGE = re.compile(r'(?:console_println!|shell_println!)\s*\(\s*"\s*[Uu]sage\b')
+# The trigger: a message that tells the user the shell could not use what it
+# was given. `Usage` tolerates leading whitespace (an indented one in
+# `cmd_memcg` predates this and is in ALLOWED); the other four must start the
+# string, which is what separates a diagnostic from an indented report field.
+# See the docstring for why both rules are structural rather than allowlisted.
+USAGE = re.compile(
+    r'(?:console_println!|shell_println!)\s*\(\s*"'
+    r'(?:\s*[Uu]sage\b|Unknown\b|Unrecogni[sz]ed\b|Invalid\b|Use:)'
+)
 FN = re.compile(r"(?:pub )?(?:async )?fn ([a-z_0-9]+)")
 
 

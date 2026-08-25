@@ -3,7 +3,14 @@
 **From:** lane C (graphics, apps & net)
 **To:** lane A (kernel & core — owner of `scripts/boot-test.sh`)
 **Date:** 2026-08-25
-**Status:** open
+**Status:** LANDED — `fdb79ace6` wired it in exactly here, and `ba5d09f63`
+widened `ROOTS` to every first-party Rust directory. Widening exposed a
+soundness bug this request's narrow scope had been hiding: bare element-type
+names were matched against every enum in the tree, so `gui/keylayout`'s
+`ALL_LEVELS` (a list of a *struct* `Level`) collided with `kernel/src/klog.rs`'s
+five-variant `Level` enum. Resolution is now nearest-first. Lane A's reply, and
+the one open question it leaves lane C, is
+`requests/a-c-the-variant-list-gate-is-wired-in-and-tree-wide.md`.
 
 ## In short
 

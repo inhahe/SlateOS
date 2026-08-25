@@ -19,9 +19,12 @@ and `scripts/boot-test.sh` is where its siblings are rung and is your file, so
 this is a request rather than a commit. The paste-ready function is in §5, in
 the same fixture-first shape as `check_selftest_skips`.
 
-This is the same ask as `c-a-wire-the-variant-list-gate-into-boot-test.md`, and
-if you are taking that one, these two want to land together — but they are
-independent and either can go alone.
+This is the same ask as `c-a-wire-the-variant-list-gate-into-boot-test.md`,
+which you landed as `fdb79ace6`. The block below is already written in the
+shape you settled on there — an explicit `if ! … then exit 1` rather than a
+bare call, for the reason you gave: a gate whose enforcement depends on a
+`set -e` three thousand lines away is a gate that stops enforcing the day
+someone relaxes it. Placement is the same slot, one function further down.
 
 ## 1. What went wrong, five times
 
@@ -111,11 +114,9 @@ failure arriving from the other direction.
 
 ## 5. The block to paste
 
-Insert after `check_selftest_skips` (i.e. after line ~2659, before the
-`check_production_unwrap` comment block) — or after `check_variant_lists` if
-the other request landed first; the two do not interact. Pre-build placement,
-for the reason its siblings give: it costs about a second against a ten-minute
-build.
+Insert after `check_variant_lists` (i.e. after line ~2736, before the
+`check_production_unwrap` comment block). Pre-build placement, for the reason
+its siblings give: it costs about a second against a ten-minute build.
 
 ```bash
 # An app that keeps time but never receives the clock.
@@ -183,7 +184,9 @@ check_tick_wiring() {
     exit 1
 }
 
-check_tick_wiring
+if ! check_tick_wiring; then
+    exit 1
+fi
 ```
 
 ## 6. Verification already done
@@ -202,8 +205,10 @@ check_tick_wiring
   with all fixtures green, said nothing. The file was restored from git and the
   tree re-verified clean.
 - **The shell block in §5 was extracted from this file and executed**, not
-  merely written — both paths. Clean tree: the two `===` lines print, returns 0.
-  Broken tree: it prints the finding, the remedy text, exits 1.
+  merely written — both paths, under `set -euo pipefail` as `boot-test.sh` runs
+  it, and re-run after it was rewritten into your `if ! … then exit 1` shape.
+  Clean tree: the two `===` lines print, exit 0. Broken tree: it prints the
+  finding, the remedy text, exit 1.
 
 ## 7. Two notes on scope
 

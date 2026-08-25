@@ -59,6 +59,7 @@ Filter either with defect letters: `reintro-keylayout.py A B C`.
 
 import hashlib
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -716,6 +717,34 @@ def run_tests(pkg):
     return failed, out
 
 
+def declared_tests():
+    """Every `fn <name>(` in the crates this script patches.
+
+    Used by `--check` to catch an expectation naming a test that no longer
+    exists. That failure hides unusually well: the run only says `[MISSING:]`
+    when *every* name a defect expects is absent, so a stale name inside a
+    defect whose other names still match reports as a clean catch forever. Four
+    had accumulated that way before this check existed -- two from the rename
+    of `KeyEvent::character` to `text`, two from a settings test that moved.
+
+    Scans each patched file's whole crate rather than the file itself, because
+    the test that proves a change is often in a different module from the
+    change (`keymap.rs`'s space fallback is proved from `deadkey.rs` too).
+    """
+    roots = {pathlib.PurePath(*pathlib.PurePath(f).parts[:2])
+             for f in {d[1] for d in DEFECTS}}
+    names = set()
+    for root in roots:
+        for f in (ROOT / root).rglob("*.rs"):
+            if "target" in f.parts:
+                continue
+            for m in re.finditer(r"\bfn ([a-z0-9_]+)\(", f.read_text(
+                encoding="utf-8", errors="replace"
+            )):
+                names.add(m.group(1))
+    return names
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     check_only = "--check" in sys.argv[1:]
@@ -753,6 +782,17 @@ def main():
                 bad += 1
             print(f"{name}\n    {verdict}")
         print(f"\n{len(selected) - bad}/{len(selected)} patterns apply cleanly")
+
+        known = declared_tests()
+        stale = sorted({t for _n, _p, _e, _pk, expect in selected
+                        for t in expect if t not in known})
+        if stale:
+            bad += len(stale)
+            print("\nexpectations naming a test that does not exist:")
+            for t in stale:
+                print(f"  {t}")
+        else:
+            print("every expected test resolves to a function that exists")
         sys.exit(1 if bad else 0)
 
     verdicts = []

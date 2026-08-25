@@ -65092,7 +65092,17 @@ fn parent_pid() -> u32 {
 /// times before the handle closes. That also means a `( … )` sees the totals its
 /// parent had accumulated, where a forked bash's subshell would start from zero
 /// — the same approximation osh already makes for `$SECONDS` and for wall time.
+///
+/// Windows-only, because the two systems keep this total in different places.
+/// Windows charges a *process* and keeps the charge only while some handle to
+/// it is open, so the shell has to read each child as it reaps it and do the
+/// adding up itself. Linux keeps the running total in the kernel and hands it
+/// over on demand — that is what `RUSAGE_CHILDREN` is — and there it is the
+/// only route available, because `std` reaps with `waitpid` and discards the
+/// `rusage` that a `wait4` would have returned.
+#[cfg(windows)]
 static CHILD_USER_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(windows)]
 static CHILD_SYS_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Add one just-exited child's CPU consumption to the running totals.
@@ -65101,6 +65111,7 @@ static CHILD_SYS_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// dropped: on Windows the kernel keeps the accounting alive only as long as
 /// some handle to the process does. Call it exactly once per child — every
 /// reaping site funnels through [`reap_child`] for that reason.
+#[cfg(windows)]
 fn account_child(child: &std::process::Child) {
     let (user, sys) = child_cpu_times(child);
     CHILD_USER_NS.fetch_add(user, std::sync::atomic::Ordering::Relaxed);
@@ -65110,9 +65121,11 @@ fn account_child(child: &std::process::Child) {
 /// Wait for a child, account for its CPU time, and return its exit status.
 ///
 /// The single place children are reaped, so the totals above cannot
-/// double-count one child or miss another.
+/// double-count one child or miss another. Elsewhere the accounting is the
+/// kernel's own and this is a plain `wait` — see [`CHILD_USER_NS`].
 fn reap_child(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
     let status = child.wait();
+    #[cfg(windows)]
     if status.is_ok() {
         account_child(child);
     }
@@ -65120,6 +65133,7 @@ fn reap_child(child: &mut std::process::Child) -> std::io::Result<std::process::
 }
 
 /// Reaped children's CPU totals, `(user, system)` in seconds.
+#[cfg(windows)]
 fn children_cpu_secs() -> (f64, f64) {
     let ns = |a: &std::sync::atomic::AtomicU64| {
         // Precision is not at issue: 2^53 ns is over three months of CPU.
@@ -65129,6 +65143,24 @@ fn children_cpu_secs() -> (f64, f64) {
         }
     };
     (ns(&CHILD_USER_NS), ns(&CHILD_SYS_NS))
+}
+
+/// Reaped children's CPU totals, `(user, system)` in seconds — the kernel's own
+/// running total, which is what `RUSAGE_CHILDREN` means.
+///
+/// It counts only children that have been *waited for*, which is exactly the
+/// set [`reap_child`] has reaped, so the figure means the same thing here as
+/// the hand-kept one does on Windows.
+#[cfg(target_os = "linux")]
+fn children_cpu_secs() -> (f64, f64) {
+    rusage_secs(RUSAGE_CHILDREN)
+}
+
+/// No CPU accounting on a host that is neither: report zero rather than fail to
+/// build. See TD-OILS10.
+#[cfg(not(any(windows, target_os = "linux")))]
+fn children_cpu_secs() -> (f64, f64) {
+    (0.0, 0.0)
 }
 
 /// A Windows `FILETIME` pair as nanoseconds. `FILETIME` counts 100 ns ticks, and
@@ -65216,19 +65248,95 @@ fn child_cpu_times(child: &std::process::Child) -> (u64, u64) {
     process_cpu_times(child.as_raw_handle().cast())
 }
 
-/// Unix / SlateOS shell CPU query. `getrusage(RUSAGE_SELF)` is the portable
-/// answer and osh does not link libc's `rusage` bindings yet, so this reports
-/// zero until the SlateOS process-accounting syscall it should use exists.
-/// See TD-OILS10.
-#[cfg(not(windows))]
-fn self_cpu_secs() -> (f64, f64) {
-    (0.0, 0.0)
+/// `struct timeval`, the unit `getrusage` reports CPU in — seconds and *micro*
+/// seconds, not nanoseconds, which is the one thing about it worth stating
+/// twice, since the sibling Windows path counts in 100 ns ticks.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Timeval {
+    sec: i64,
+    usec: i64,
 }
 
-/// Per-child CPU accounting on non-Windows hosts — see [`self_cpu_secs`].
-#[cfg(not(windows))]
-fn child_cpu_times(_child: &std::process::Child) -> (u64, u64) {
-    (0, 0)
+#[cfg(target_os = "linux")]
+impl Timeval {
+    fn secs(self) -> f64 {
+        // Precision is not at issue: a `f64` holds whole microseconds exactly
+        // up to 2^53 of them, which is over two centuries of CPU time.
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.sec as f64 + self.usec as f64 / 1e6
+        }
+    }
+}
+
+/// `struct rusage`, as much of it as osh reads.
+///
+/// The fourteen counters after the two times — `ru_maxrss` through
+/// `ru_nivcsw` — are named here only as a block, because nothing reads them;
+/// but they cannot be *omitted*, because the kernel writes the whole structure
+/// and a short one would be a buffer overrun. They are `long` on every
+/// LP64 system, which both targets here are.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Rusage {
+    utime: Timeval,
+    stime: Timeval,
+    counters: [i64; 14],
+}
+
+/// `getrusage`'s `who`: this process, all its threads together.
+#[cfg(target_os = "linux")]
+const RUSAGE_SELF: i32 = 0;
+/// `getrusage`'s `who`: every child that has already been waited for.
+#[cfg(target_os = "linux")]
+const RUSAGE_CHILDREN: i32 = -1;
+
+#[cfg(target_os = "linux")]
+// SAFETY: the standard POSIX signature. The call writes one `struct rusage`
+// through the pointer given and returns 0 or -1, touching nothing else.
+unsafe extern "C" {
+    fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+}
+
+/// `(user, system)` seconds for one `getrusage` class, or `(0.0, 0.0)` if the
+/// call fails — a missing figure is reported as zero rather than being allowed
+/// to fail a `time`, which is the same choice the Windows path makes.
+///
+/// On SlateOS itself this is `posix`'s own `getrusage`, which fills the two
+/// times for `RUSAGE_SELF` from the kernel's aggregate CPU counters and leaves
+/// `RUSAGE_CHILDREN` zeroed until per-child accounting exists there. So the
+/// shell asks the same question on both, and SlateOS's answer improves as the
+/// kernel's does, with nothing here to change.
+#[cfg(target_os = "linux")]
+fn rusage_secs(who: i32) -> (f64, f64) {
+    let mut usage = Rusage::default();
+    // SAFETY: `usage` is a live, correctly-typed local of exactly the size the
+    // call writes; the call only writes into it. A non-zero return means it may
+    // have written nothing, and the zero-initialised local is then the answer.
+    if unsafe { getrusage(who, &raw mut usage) } != 0 {
+        return (0.0, 0.0);
+    }
+    (usage.utime.secs(), usage.stime.secs())
+}
+
+/// The shell process's own CPU consumption, `(user, system)` in seconds.
+///
+/// `RUSAGE_SELF` is per *process* and sums every thread in it, which is what
+/// this has to be: osh's subshells and its pipeline stages are threads, so a
+/// per-thread figure would miss most of the work a `time` is asked about.
+#[cfg(target_os = "linux")]
+fn self_cpu_secs() -> (f64, f64) {
+    rusage_secs(RUSAGE_SELF)
+}
+
+/// No CPU accounting on a host that is neither Windows nor Linux-flavoured:
+/// report zero rather than fail to build. See TD-OILS10.
+#[cfg(not(any(windows, target_os = "linux")))]
+fn self_cpu_secs() -> (f64, f64) {
+    (0.0, 0.0)
 }
 
 /// An inputrc's `$include` names a file for the shell to find, so the shell is

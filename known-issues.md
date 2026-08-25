@@ -77983,3 +77983,60 @@ was wrong was the evidence for it.
 The swept corpus stands at **2952 tests, 2310 unproved -- 21.7 % proved, 0
 dangling, 184 single-prover**; the figures recorded above after module 86 were
 21.5 % and 204.
+
+### Follow-on: what lesson 42 looks like when it is mechanical
+
+Lesson 42 came out of one test that copied a production predicate. The obvious
+next question is whether that was a one-off or a class, so lane C went looking
+for other places where a test holds its own copy of something production owns.
+
+The search found two shapes, and they are worth keeping apart because only one
+of them can be automated.
+
+**The shape a machine can find** is a duplicated *list*. Three desktop test
+modules each declared `const OFFERED: [AccentColor; 14] = [...]`, byte for byte
+the body of `AccentColor::presets()`, and looped over the copy. Nothing made the
+copies follow the original; a fifteenth accent would have been offered by the
+settings panel and walked by no test. Worse, `test_accent_color_count` pins
+`presets().len() == 14` *next to the list*, which reads as the palette being
+guarded and is exactly why nobody noticed the four loops that were not. The fix
+was structural rather than another test: delete the three copies and walk
+`AccentColor::presets()` directly, so the divergence has nowhere to happen.
+
+The same shape in the general case is `const ALL: [Foo; N]` -- a declaration
+that claims to name every variant of an enum, which the language does not
+check. Add a variant and the array is still a valid array of N `Foo`s; it has
+simply stopped being all of them, and the loop that walks it silently stops
+asking about one case. `scripts/check-variant-lists.py` now audits every such
+list in lane C against its enum. Verdict today: **59 exhaustive lists, 0 out of
+step** -- so this is a hazard rather than a live bug, which is the result worth
+having but only because it was checked rather than assumed. The script carries
+a `--self-test` because a miscounting checker reports a clean tree exactly the
+way a clean tree does, and that is not hypothetical: its first version reported
+`CursorShape` as 12 of its 13 variants. `requests/c-a-wire-the-variant-list-gate-into-boot-test.md`
+asks lane A to ring it from `boot-test.sh`, where its six siblings live.
+
+Two notes that will save the next reader some work. First, the in-language fix
+does not exist yet: `const _: () = assert!(Foo::ALL.len() ==
+core::mem::variant_count::<Foo>())` is `E0658` on this tree's host toolchain
+(stable 1.95.0, checked directly rather than assumed), and no `gui/` or `apps/`
+crate carries a `#![feature]` gate. If it stabilises, the script should be
+deleted in favour of the assertion -- an error *at* the list beats a report
+*about* the list. Second, an exhaustive `match` elsewhere in the crate is not
+the guard it looks like: it does break the build when a variant is added, but
+it breaks it in `label()`, the author fixes it there, the compiler goes quiet,
+and the list is still the old length.
+
+**The shape a machine cannot find** is the original one: a copied *expression*.
+`show_desktop_does_not_ask_an_already_minimized_window_to_minimize` did not
+contain a literal copy -- it was `self.current_desktop` in production against
+`shell.current_desktop` in the test -- so grep was never going to find it, and
+a stricter grep would only have produced false positives to wade through. The
+detector for that shape is the sweep itself, which asks the only question that
+distinguishes a copy from a check: *does changing the production code change
+the test's answer?* No separate audit is warranted, because the audit already
+runs, module by module.
+
+That is the audit closed. One duplicated list removed, one class of duplicated
+list gated, and the remaining class handed back to the instrument that was
+already detecting it.

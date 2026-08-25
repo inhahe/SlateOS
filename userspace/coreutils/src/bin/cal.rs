@@ -5,10 +5,20 @@
 //!   Without arguments: show current month.
 //!   With YEAR only: show all 12 months.
 
+use coreutils::stdfd;
 use std::env;
+use std::process::ExitCode;
 use std::time::SystemTime;
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
 
     let (month, year, show_all) = if args.is_empty() {
@@ -40,6 +50,8 @@ fn main() {
     } else {
         print_month(month, year);
     }
+
+    ExitCode::SUCCESS
 }
 
 fn print_month(month: u32, year: u32) {

@@ -68,9 +68,11 @@
 //! pointed-at directory instead of replacing the link — a link in a place the
 //! user never named, with no message.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::quoteaf_os;
+use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -128,7 +130,15 @@ enum Request {
     Run(LnFlags, Vec<OsString>),
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         Ok(Request::Help) => {
@@ -140,7 +150,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Request::Run(flags, paths)) => {
-            let mut err = io::stderr().lock();
+            // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
+            // diagnostic that never arrived has to reach `close_stderr`'s flag.
+            let mut err = Stream::stderr();
             if link_all(&flags, &paths, &mut err) {
                 ExitCode::SUCCESS
             } else {
@@ -148,7 +160,7 @@ fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("ln: {e}");
+            diag!("ln: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }

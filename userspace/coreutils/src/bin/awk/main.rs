@@ -97,8 +97,10 @@ mod parse;
 mod types;
 mod value;
 
+use coreutils::diag;
+use coreutils::stdfd;
 use std::ffi::OsString;
-use std::process;
+use std::process::ExitCode;
 
 use value::Str;
 
@@ -118,12 +120,20 @@ struct Args {
     operands: Vec<Str>,
 }
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 2)
+}
+
+fn run_main() -> ExitCode {
     let raw: Vec<Str> = std::env::args_os().skip(1).map(|a| arg_bytes(&a)).collect();
     let args = match parse_args(&raw) {
         Ok(Some(a)) => a,
         // The help and version paths have already printed.
-        Ok(None) => return,
+        Ok(None) => return ExitCode::SUCCESS,
         Err(e) => die_usage(&e),
     };
 
@@ -163,7 +173,9 @@ fn main() {
     }
 
     match it.run() {
-        Ok(code) => process::exit(code),
+        // Only the low byte of an `exit` expression survives into the wait
+        // status, which is why `awk 'BEGIN{exit 300}'` leaves `$?` at 44.
+        Ok(code) => ExitCode::from(u8::try_from(code & 0xff).unwrap_or(0)),
         Err(e) => die(&e.0),
     }
 }
@@ -310,21 +322,21 @@ fn arg_bytes(a: &OsString) -> Str {
 /// A failure once the program is running, or before it because a file it named
 /// could not be opened.
 fn die(msg: &str) -> ! {
-    eprintln!("awk: {msg}");
-    process::exit(2)
+    diag!("awk: {msg}");
+    stdfd::exit_now(2, 2)
 }
 
 /// A program that will not compile.
 fn die_program(msg: &str) -> ! {
-    eprintln!("awk: {msg}");
-    process::exit(1)
+    diag!("awk: {msg}");
+    stdfd::exit_now(1, 2)
 }
 
 /// A command line that does not make sense.
 fn die_usage(msg: &str) -> ! {
-    eprintln!("awk: {msg}");
-    eprintln!("{USAGE}");
-    process::exit(1)
+    diag!("awk: {msg}");
+    diag!("{USAGE}");
+    stdfd::exit_now(1, 2)
 }
 
 #[cfg(test)]

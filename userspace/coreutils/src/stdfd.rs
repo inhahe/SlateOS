@@ -111,6 +111,23 @@
 //! in for the `atexit` registration, so no exit path can miss it.
 //! [`close_stdout`] consults the same flag on its way past.
 //!
+//! ## Descriptor 1's buffer is process-global, as stdio's is
+//!
+//! [`Stream::stdout`] hands back a *handle* onto one shared buffer rather than
+//! a buffer of its own, which is what makes [`diag!`] able to flush standard
+//! output before it writes — glibc's `error()` opens with `fflush (stdout)`,
+//! and without that
+//!
+//! ```text
+//! cat big missing > out 2>&1
+//! ```
+//!
+//! puts the complaint about `missing` at the *front* of the file, ahead of
+//! output that was written before it and is still sitting in a block buffer. A
+//! diagnostic is written from wherever the failure was noticed and has no way
+//! to reach the caller's local variable; the stream therefore has to be
+//! reachable from anywhere, exactly as `stdout` is.
+//!
 //! ## What this module deliberately does not do
 //!
 //! It does not restore `SIGPIPE`. Rust masks it, so `yes | head -1` yields
@@ -138,6 +155,7 @@
 use std::io::{self, Write};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use crate::errmsg::strerror;
 
@@ -275,6 +293,16 @@ mod imp {
         Ok(())
     }
 
+    /// The one place `io::stdout()`/`io::stderr()` are still used on purpose.
+    ///
+    /// Everywhere else in the crate they are a bug, because the runtime maps
+    /// `EBADF` on a standard descriptor to `Ok(buf.len())` and a diagnostic
+    /// that never arrived then looks delivered. Here there is no alternative:
+    /// this arm is the build without libc, so there is no `write(2)` to call
+    /// and no descriptor to call it on — only the runtime's own handles. The
+    /// lie is therefore still present on this target, which is the Windows host
+    /// build used to run the unit tests; the descriptor behaviour those tests
+    /// check lives on the Linux and x86_64-slateos arms above.
     pub fn write_all(fd: i32, bytes: &[u8]) -> io::Result<()> {
         match fd {
             1 => io::stdout().write_all(bytes),
@@ -411,6 +439,13 @@ pub fn diag_bytes(bytes: &[u8]) {
 /// [`diag_bytes`] with the descriptor spelled out, so that the failure path can
 /// be exercised on a descriptor that is not the test runner's own stderr.
 fn diag_to(fd: i32, bytes: &[u8]) {
+    // Standard output first, always: glibc's `error()` opens with
+    // `fflush (stdout)`, and without it a block-buffered `cat big missing
+    // >out 2>&1` puts the complaint at the *front* of the file, ahead of
+    // output that was written before it. See [`STDOUT`]. It is unconditional
+    // for the same reason it is in `error()` — a diagnostic never knows
+    // whether the two descriptors share a destination.
+    flush_stdout();
     if write_all(fd, bytes).is_err() {
         DIAGNOSTIC_LOST.store(true, Ordering::Relaxed);
     }
@@ -606,6 +641,45 @@ pub fn close_stderr(earned: ExitCode, failure: u8) -> ExitCode {
     }
 }
 
+/// [`close_stderr`] for a path that can never reach `main`.
+///
+/// The funnel above works because exactly one value leaves `main`. A diverging
+/// helper — `fn die(…) -> !`, the direct translation of upstream's
+/// `error (EXIT_FAILURE, …)` — leaves no value at all, so the funnel never sees
+/// it and the status it exits with is final. This takes the same decision the
+/// funnel would have, at the last moment it can be taken.
+///
+/// # Use it only where returning is not an option
+///
+/// Not as a shorthand for `process::exit` in ordinary code. The rule that
+/// [`close_stderr`] exists to enforce is *one* decision point per program;
+/// every extra call site is a place a future edit can add an exit path that
+/// forgets it. Exactly two shapes qualify:
+///
+/// 1. **A `-> !` helper** — `fn die(…) -> !`, upstream's
+///    `error (EXIT_FAILURE, …)`. It has no value to return, and restructuring
+///    would mean threading a `Result` through an entire interpreter to reach a
+///    conclusion the caller has already reached.
+/// 2. **A construct whose whole meaning is "terminate now", from a depth the
+///    return path cannot express** — the shell's `exit` builtin is the only
+///    one here. Real shells do not thread it either: dash's `exitcmd` raises
+///    `EXEXIT` through `longjmp`, and bash's is `EXITPROG`. Rust's honest
+///    equivalent is this function, *provided there is nothing to unwind* — the
+///    day `sh` grows a `trap … EXIT`, this becomes a genuine unwind and the
+///    call must move to wherever that unwinding ends.
+///
+/// Everything else — including a `process::exit` in `main` itself — should
+/// become `return ExitCode::from(n)` and go through the funnel.
+///
+/// `earned` is the status the helper meant to exit with; `failure` is
+/// upstream's `exit_failure`. They are often the same number, and the call is
+/// still worth making: `exit_failure` is a property of the program, `earned` a
+/// property of the path, and the two coincide only by accident.
+pub fn exit_now(earned: u8, failure: u8) -> ! {
+    let status = if diagnostic_lost() { failure } else { earned };
+    std::process::exit(i32::from(status))
+}
+
 /// How much a [`Stream`] holds before it goes to the descriptor.
 ///
 /// stdio picks this from the destination's `st_blksize`; 4096 is what that is
@@ -626,6 +700,169 @@ enum Buffering {
     Block,
 }
 
+/// One stream's state: what it is holding, how it holds it, and the first
+/// failure it met.
+///
+/// Split out from [`Stream`] because descriptor 1's copy is process-global and
+/// every other descriptor's is not — see [`STDOUT`].
+struct Inner {
+    buf: Vec<u8>,
+    mode: Buffering,
+    /// The first delivery failure. Sticky: a later success does not clear it,
+    /// because the bytes lost to the first one are still lost.
+    error: Option<io::Error>,
+}
+
+impl Inner {
+    const fn new(mode: Buffering) -> Self {
+        Self {
+            buf: Vec::new(),
+            mode,
+            error: None,
+        }
+    }
+
+    /// Keep the first failure, and tell the process about it if it was a
+    /// diagnostic.
+    ///
+    /// A `Stream` on descriptor 2 is another way of writing one — `nohup` and
+    /// `env` build their messages that way — so a failure here has to reach the
+    /// same flag [`diag!`] sets, or the status would depend on which of the two
+    /// spellings the utility happened to use.
+    fn record(&mut self, fd: i32, e: io::Error) {
+        if fd == 2 {
+            DIAGNOSTIC_LOST.store(true, Ordering::Relaxed);
+        }
+        if self.error.is_none() {
+            self.error = Some(e);
+        }
+    }
+
+    /// Push whatever is buffered at the descriptor, recording a failure.
+    fn drain(&mut self, fd: i32) {
+        if self.buf.is_empty() {
+            return;
+        }
+        before_diagnostic(fd);
+        let result = imp::write_all(fd, &self.buf);
+        self.buf.clear();
+        if let Err(e) = result {
+            self.record(fd, e);
+        }
+    }
+
+    /// One `write`, honouring the buffering mode. Never fails; see [`Stream`].
+    fn put(&mut self, fd: i32, bytes: &[u8]) {
+        before_diagnostic(fd);
+        match self.mode {
+            Buffering::None => {
+                if let Err(e) = imp::write_all(fd, bytes) {
+                    self.record(fd, e);
+                }
+            }
+            Buffering::Line => {
+                self.buf.extend_from_slice(bytes);
+                // Everything up to and including the last newline goes now;
+                // a partial line waits for the rest of itself.
+                if let Some(end) = self.buf.iter().rposition(|&b| b == b'\n') {
+                    let rest = self.buf.split_off(end.saturating_add(1));
+                    self.drain(fd);
+                    self.buf = rest;
+                }
+            }
+            Buffering::Block => {
+                self.buf.extend_from_slice(bytes);
+                if self.buf.len() >= BUFFER {
+                    self.drain(fd);
+                }
+            }
+        }
+    }
+}
+
+/// Descriptor 1's state, shared by every handle onto it — stdio's `stdout`.
+///
+/// It is global for the same reason `stdout` is: a diagnostic has to be able to
+/// flush the output it comes after, and it is written from somewhere that has
+/// no access to whatever local variable the output is being built in. glibc's
+/// `error()` opens with `fflush (stdout)` precisely so that
+///
+/// ```text
+/// cat big missing > out 2>&1
+/// ```
+///
+/// puts the complaint about `missing` *after* the contents of `big`, rather
+/// than at the front of the file where the still-unflushed block buffer has
+/// yet to reach. With a per-`Stream` buffer, [`diag_bytes`] could not reach the
+/// live stream to flush it, and the two orders diverged.
+///
+/// The mode and the error flag come along because they are one stream's state,
+/// not three: `ferror (stdout)` is likewise a property of the stream and not of
+/// whoever is holding it.
+static STDOUT: Mutex<Inner> = Mutex::new(Inner::new(Buffering::Block));
+
+/// Borrow descriptor 1's state.
+///
+/// A poisoned lock is entered anyway. The state behind it is a byte buffer and
+/// an error flag, both of which a panicking writer leaves perfectly consistent,
+/// and the alternative — refusing to flush — would lose the output for real.
+fn with_stdout<T>(f: impl FnOnce(&mut Inner) -> T) -> T {
+    let mut guard = STDOUT.lock().unwrap_or_else(PoisonError::into_inner);
+    f(&mut guard)
+}
+
+/// Push descriptor 1's buffer at the descriptor: `fflush (stdout)`.
+///
+/// Called before every diagnostic, which is where the ordering above comes
+/// from. A failure is recorded in the shared state and surfaces at
+/// [`Stream::finish`] like any other, so flushing early costs no verdict.
+fn flush_stdout() {
+    with_stdout(|inner| inner.drain(1));
+}
+
+/// Descriptor 2 is about to be written: deliver descriptor 1 first.
+///
+/// The rule [`diag_to`] applies, applied to the *other* way a diagnostic gets
+/// written — a [`Stream`] on descriptor 2, which `tsort`, `nohup`, `env` and
+/// `nice` use to assemble a message in pieces or out of bytes that are not
+/// text. Without it the two spellings disagree: `tsort cycle >log 2>&1` put the
+/// loop report at the top of the log, ahead of the vertices that had already
+/// been ordered, because its report went out through a `Stream` rather than
+/// through `diag!`.
+///
+/// # Wider than glibc, deliberately
+///
+/// In glibc it is `error()` that flushes, not `fputs (…, stderr)`, so this
+/// generalises: *any* write to descriptor 2 flushes descriptor 1 first, not
+/// only one that came from a diagnostic-shaped call. That is a superset of
+/// upstream's behaviour and the difference is unobservable here, because every
+/// one of these utilities reaches standard error through `error()` and nothing
+/// else — there is no call site in the family that wants an unflushed one.
+/// Making it a property of the descriptor rather than of the call is what stops
+/// the two spellings from drifting apart again, which is the same argument
+/// [`Inner::record`] makes about the lost-diagnostic flag.
+///
+/// It cannot deadlock. Descriptor 1's state is the only thing behind the lock,
+/// and this is reached only from a write to descriptor 2, whose state is always
+/// a [`Stream`]'s own — so the lock is never already held.
+fn before_diagnostic(fd: i32) {
+    if fd == 2 {
+        flush_stdout();
+    }
+}
+
+/// Copy an [`io::Error`], which is not [`Clone`].
+///
+/// The errno is what every caller goes on to render through
+/// [`strerror`](crate::errmsg::strerror), so it is preserved exactly; the
+/// synthetic errors (`WriteZero`) have no errno and keep their kind and text.
+fn clone_error(e: &io::Error) -> io::Error {
+    e.raw_os_error().map_or_else(
+        || io::Error::new(e.kind(), e.to_string()),
+        io::Error::from_raw_os_error,
+    )
+}
+
 /// A writer to a standard descriptor that says when the write did not happen.
 ///
 /// The replacement for `print!`/`println!` in a utility whose exit status
@@ -634,13 +871,23 @@ enum Buffering {
 /// printing path stays free of `?`, and the accumulated verdict is taken once
 /// at the end from [`Stream::finish`]. That is stdio's own arrangement
 /// (`ferror`), and it is the one the utilities were written against.
+///
+/// # A handle, not always an owner
+///
+/// A stream on descriptor 1 is a *handle* onto the process-global [`STDOUT`]
+/// state; on any other descriptor it owns its own. Two consequences, both of
+/// them stdio's:
+///
+/// - Two live `Stream::stdout()` handles share one buffer and one error flag,
+///   so neither can flush past the other's half-written line, and `finish` on
+///   either is the whole stream's verdict.
+/// - A diagnostic flushes descriptor 1 first, from anywhere, without needing to
+///   be handed the stream. That is the reason for the arrangement.
 pub struct Stream {
     fd: i32,
-    buf: Vec<u8>,
-    mode: Buffering,
-    /// The first delivery failure. Sticky: a later success does not clear it,
-    /// because the bytes lost to the first one are still lost.
-    error: Option<io::Error>,
+    /// This stream's own state, or `None` when the state is the process-global
+    /// one — descriptor 1.
+    own: Option<Inner>,
 }
 
 impl Stream {
@@ -672,11 +919,49 @@ impl Stream {
     }
 
     fn new(fd: i32, mode: Buffering) -> Self {
+        if fd == 1 {
+            // A handle onto the shared state. The mode is (re)applied because
+            // it is this call that knows whether descriptor 1 is a terminal;
+            // the buffer and the error flag are deliberately left alone, since
+            // an earlier handle's pending bytes and earlier handle's failure
+            // both still belong to the stream.
+            with_stdout(|inner| {
+                inner.mode = mode;
+                inner.buf.reserve(BUFFER.saturating_sub(inner.buf.len()));
+            });
+            return Self { fd, own: None };
+        }
+        let mut inner = Inner::new(mode);
+        if mode != Buffering::None {
+            inner.buf.reserve(BUFFER);
+        }
         Self {
             fd,
-            buf: Vec::with_capacity(if mode == Buffering::None { 0 } else { BUFFER }),
-            mode,
-            error: None,
+            own: Some(inner),
+        }
+    }
+
+    /// Borrow this stream's state mutably, wherever it lives.
+    ///
+    /// The descriptor comes through as the second argument so that the calls
+    /// read as the method calls they stand in for — `Inner::drain` and
+    /// `Inner::put` both take it, since [`Inner`] does not know its own.
+    fn with<T>(&mut self, f: impl FnOnce(&mut Inner, i32) -> T) -> T {
+        let fd = self.fd;
+        match self.own.as_mut() {
+            Some(inner) => f(inner, fd),
+            None => with_stdout(|inner| f(inner, fd)),
+        }
+    }
+
+    /// [`Stream::with`] for a question that does not change anything.
+    fn peek<T>(&self, f: impl FnOnce(&Inner) -> T) -> T {
+        match self.own.as_ref() {
+            Some(inner) => f(inner),
+            None => {
+                let guard = STDOUT.lock().unwrap_or_else(PoisonError::into_inner);
+                f(&guard)
+            }
         }
     }
 
@@ -691,7 +976,7 @@ impl Stream {
     /// buffered.
     #[must_use]
     pub fn errored(&self) -> bool {
-        self.error.is_some()
+        self.peek(|inner| inner.error.is_some())
     }
 
     /// The failure behind [`Stream::errored`], for a caller that must word it
@@ -703,37 +988,46 @@ impl Stream {
     /// remaining operands the moment a write fails, so `cat a b >/dev/full`
     /// prints one diagnostic and never opens `b`, and reproducing that needs
     /// the question asked between files rather than at the end.
-    #[must_use]
-    pub fn error(&self) -> Option<&io::Error> {
-        self.error.as_ref()
-    }
-
-    /// Keep the first failure, and tell the process about it if it was a
-    /// diagnostic.
     ///
-    /// A `Stream` on descriptor 2 is another way of writing one — `nohup` and
-    /// `env` build their messages that way — so a failure here has to reach the
-    /// same flag [`diag!`] sets, or the status would depend on which of the two
-    /// spellings the utility happened to use.
-    fn record(&mut self, e: io::Error) {
-        if self.fd == 2 {
-            DIAGNOSTIC_LOST.store(true, Ordering::Relaxed);
-        }
-        if self.error.is_none() {
-            self.error = Some(e);
-        }
+    /// A copy and not a borrow: descriptor 1's failure lives behind a lock that
+    /// a returned reference could outlive. The errno is preserved, which is all
+    /// any caller renders.
+    #[must_use]
+    pub fn error(&self) -> Option<io::Error> {
+        self.peek(|inner| inner.error.as_ref().map(clone_error))
     }
 
     /// Push whatever is buffered at the descriptor, recording a failure.
     fn drain(&mut self) {
-        if self.buf.is_empty() {
-            return;
-        }
-        let result = imp::write_all(self.fd, &self.buf);
-        self.buf.clear();
-        if let Err(e) = result {
-            self.record(e);
-        }
+        self.with(Inner::drain);
+    }
+
+    /// Give up on the stream: forget what is still buffered, and forget the
+    /// failure that stopped it.
+    ///
+    /// stdio's `clearerr`, plus the buffer discard glibc performs for free —
+    /// `new_do_write` resets the write pointers whether or not the `write(2)`
+    /// succeeded, so a flush that failed leaves nothing pending and the
+    /// `fclose` behind `close_stream` then succeeds.
+    ///
+    /// # Only for a utility that has already reported the failure itself
+    ///
+    /// `head` is the one. Upstream's `xwrite_stdout` reports a mid-run write
+    /// failure in its own words — `head: error writing 'standard output': …` —
+    /// and then calls `clearerr (stdout)` with the comment "to avoid redundant
+    /// close_stdout diagnostic". Without the discard, [`close_stdout`] would
+    /// re-drain the same bytes at the same full descriptor and say
+    /// `head: write error: …` underneath it. Measured, GNU head 9.4 prints one
+    /// line, not two.
+    ///
+    /// Calling this without having reported anything turns an undelivered
+    /// output into a silent success, which is the whole failure this module
+    /// exists to prevent.
+    pub fn abandon(&mut self) {
+        self.with(|inner, _| {
+            inner.buf.clear();
+            inner.error = None;
+        });
     }
 
     /// Flush, and hand back the first failure of the stream's whole life.
@@ -749,7 +1043,7 @@ impl Stream {
     /// earlier one.
     pub fn finish(mut self) -> io::Result<()> {
         self.drain();
-        self.error.take().map_or(Ok(()), Err)
+        self.with(|inner, _| inner.error.take()).map_or(Ok(()), Err)
     }
 }
 
@@ -757,29 +1051,7 @@ impl Write for Stream {
     /// Never fails. A failure is recorded and reported by [`Stream::finish`];
     /// see the type's docs.
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        match self.mode {
-            Buffering::None => {
-                if let Err(e) = imp::write_all(self.fd, bytes) {
-                    self.record(e);
-                }
-            }
-            Buffering::Line => {
-                self.buf.extend_from_slice(bytes);
-                // Everything up to and including the last newline goes now;
-                // a partial line waits for the rest of itself.
-                if let Some(end) = self.buf.iter().rposition(|&b| b == b'\n') {
-                    let rest = self.buf.split_off(end.saturating_add(1));
-                    self.drain();
-                    self.buf = rest;
-                }
-            }
-            Buffering::Block => {
-                self.buf.extend_from_slice(bytes);
-                if self.buf.len() >= BUFFER {
-                    self.drain();
-                }
-            }
-        }
+        self.with(|inner, fd| inner.put(fd, bytes));
         Ok(bytes.len())
     }
 
@@ -801,13 +1073,35 @@ impl Drop for Stream {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUFFER, Buffering, Stream};
+    use super::{BUFFER, Buffering, Inner, Stream};
     use std::io::Write;
+    use std::sync::{Mutex, PoisonError};
 
     /// A stream on a descriptor nothing can be written to, so that the error
     /// path is exercised without needing a real closed descriptor 1.
+    ///
+    /// Descriptor -1 also keeps the state *local* — only descriptor 1's is the
+    /// process-global one — so these tests can look inside it and can run
+    /// alongside each other.
     fn broken(mode: Buffering) -> Stream {
         Stream::new(-1, mode)
+    }
+
+    /// The state behind a [`broken`] stream, which owns its own.
+    fn inner(s: &Stream) -> &Inner {
+        s.own
+            .as_ref()
+            .expect("a stream off descriptor 1 owns its state")
+    }
+
+    /// Serialises the handful of tests that do touch descriptor 1's shared
+    /// state. `cargo test` runs the suite on several threads, and two of these
+    /// would otherwise flush each other's buffer out from under the assertion.
+    /// Everything else here works on descriptor -1 and needs no guard.
+    static SHARED: Mutex<()> = Mutex::new(());
+
+    fn shared() -> std::sync::MutexGuard<'static, ()> {
+        SHARED.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     #[test]
@@ -846,17 +1140,21 @@ mod tests {
     fn line_buffered_keeps_the_tail_after_the_last_newline() {
         let mut s = broken(Buffering::Line);
         let _ = s.write(b"a\nb");
-        assert_eq!(s.buf, b"b", "the tail is held back, not sent or dropped");
+        assert_eq!(
+            inner(&s).buf,
+            b"b",
+            "the tail is held back, not sent or dropped"
+        );
     }
 
     #[test]
     fn the_first_failure_is_the_one_reported() {
         let mut s = broken(Buffering::None);
         let _ = s.write(b"first");
-        let first = s.error.as_ref().map(std::io::Error::kind);
+        let first = s.error().as_ref().map(std::io::Error::kind);
         let _ = s.write(b"second");
         assert_eq!(
-            s.error.as_ref().map(std::io::Error::kind),
+            s.error().as_ref().map(std::io::Error::kind),
             first,
             "a later failure does not displace the first"
         );
@@ -888,6 +1186,7 @@ mod tests {
 
     #[test]
     fn stdout_and_stderr_pick_the_expected_descriptors() {
+        let _shared = shared();
         assert_eq!(Stream::stdout().fd(), 1);
         assert_eq!(Stream::stderr().fd(), 2);
         assert_eq!(Stream::on(7).fd(), 7);
@@ -895,7 +1194,81 @@ mod tests {
 
     #[test]
     fn stderr_is_unbuffered() {
-        assert_eq!(Stream::stderr().mode, Buffering::None);
+        assert_eq!(inner(&Stream::stderr()).mode, Buffering::None);
+    }
+
+    #[test]
+    fn only_descriptor_one_shares_its_state() {
+        let _shared = shared();
+        assert!(
+            Stream::stdout().own.is_none(),
+            "descriptor 1 is a handle onto the process-global stream"
+        );
+        assert!(
+            Stream::on(1).own.is_none(),
+            "however it is spelled -- two buffers on one descriptor would \
+             interleave each other's half-written lines"
+        );
+        assert!(Stream::stderr().own.is_some(), "descriptor 2 owns its own");
+        assert!(Stream::on(7).own.is_some(), "and so does anything else");
+    }
+
+    /// A diagnostic delivers the output it comes after before it says anything.
+    ///
+    /// glibc's `error()` opens with `fflush (stdout)`; this is that, and it is
+    /// the whole reason descriptor 1's buffer is process-global. The assertion
+    /// is on the buffer rather than on a captured file, because a test cannot
+    /// redirect the runner's own descriptor 1 without taking the rest of the
+    /// suite's output with it — the ordering follows from the buffer being
+    /// empty at the moment the diagnostic is written, which is what is checked.
+    #[test]
+    fn a_diagnostic_flushes_standard_output_first() {
+        let _shared = shared();
+        let mut out = Stream::stdout();
+        // No newline, so line buffering holds it too: this is pending under
+        // either mode the constructor may have picked.
+        let _ = out.write(b"pending");
+        assert!(
+            super::with_stdout(|inner| !inner.buf.is_empty()),
+            "the write should still be buffered"
+        );
+        super::diag_to(2, b"");
+        assert!(
+            super::with_stdout(|inner| inner.buf.is_empty()),
+            "the diagnostic should have flushed it first"
+        );
+    }
+
+    /// The same, for the other way a diagnostic is written.
+    ///
+    /// `tsort` assembles its loop report out of byte slices through a `Stream`
+    /// on descriptor 2 rather than through `diag!`, and got the ordering wrong
+    /// for exactly as long as the flush lived only in `diag_to`. Descriptor -1
+    /// stands in for 2 here so the test's own runner is not written to; the
+    /// rule is keyed on the descriptor, so the real one is checked by asserting
+    /// the -1 case does *not* flush.
+    #[test]
+    fn a_stream_on_standard_error_flushes_standard_output_too() {
+        let _shared = shared();
+        let mut out = Stream::stdout();
+        let _ = out.write(b"pending");
+        assert!(
+            super::with_stdout(|inner| !inner.buf.is_empty()),
+            "the write should still be buffered"
+        );
+
+        // Not descriptor 2: nothing should move.
+        let _ = broken(Buffering::None).write(b"elsewhere");
+        assert!(
+            super::with_stdout(|inner| !inner.buf.is_empty()),
+            "a write to some other descriptor is not a diagnostic"
+        );
+
+        let _ = Stream::stderr().write(b"");
+        assert!(
+            super::with_stdout(|inner| inner.buf.is_empty()),
+            "one to descriptor 2 is, however it was spelled"
+        );
     }
 
     #[test]

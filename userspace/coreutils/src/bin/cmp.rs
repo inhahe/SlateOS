@@ -102,6 +102,8 @@
 // tested; only the entry point is missing.
 #![cfg_attr(not(unix), allow(dead_code))]
 
+#[cfg(not(unix))]
+use coreutils::diag;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{quote_glibc, quotef};
 use std::ffi::OsString;
@@ -732,10 +734,23 @@ impl Compare {
 
 #[cfg(not(unix))]
 fn main() -> std::process::ExitCode {
-    eprintln!("cmp: unix-only utility; not supported on this platform");
+    diag!("cmp: unix-only utility; not supported on this platform");
     std::process::ExitCode::from(EXIT_TROUBLE)
 }
 
+/// No [`coreutils::stdfd::close_stderr`] funnel here, unlike almost every other
+/// binary in this crate — because `cmp` is diffutils, not coreutils, and
+/// diffutils does not register gnulib's `atexit (close_stdout)`. It checks its
+/// *output* with its own `check_stdout`, which is why a full stdout says
+/// `cmp: standard output: No space left on device` where a coreutils utility
+/// says `cmp: write error: …`; and it never looks at stderr at all.
+///
+/// Measured, GNU `cmp` 3.8: with `f` = `abcdef\n` and `g` = `abc`, the run
+/// `cmp f g` warns `cmp: EOF on g …` on stderr and exits **1** — and exits 1
+/// again with `2>/dev/full`, where a folding utility would have exited 2, its
+/// `exit_failure`. The same holds for `diff`, `diff3` and `sdiff`, which share
+/// the mechanism and the wording. Adding the funnel here would make us report 2
+/// where upstream reports 1.
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
     imp::main()
@@ -748,6 +763,7 @@ mod imp {
         diagnostic, differ_line, eof_message, hard_locale_messages, help_text, offset_width,
         parse_args,
     };
+    use coreutils::diag;
     use coreutils::errmsg::strerror;
     use coreutils::quote::{os_bytes, os_from_bytes, quotef};
     use std::fs::File;
@@ -870,7 +886,7 @@ mod imp {
             }
             Ok(Request::Run(settings)) => *settings,
             Err(e) => {
-                eprintln!("{}", diagnostic(&e));
+                diag!("{}", diagnostic(&e));
                 return ExitCode::from(u8::try_from(e.status).unwrap_or(EXIT_TROUBLE));
             }
         };
@@ -894,7 +910,7 @@ mod imp {
                     // exactly as `cmp -s nosuch a` does. The status is the
                     // whole answer, which is the point of the option.
                     if !settings.quiet {
-                        eprintln!("cmp: {}: {}", quotef(name), strerror(&e));
+                        diag!("cmp: {}: {}", quotef(name), strerror(&e));
                     }
                     return Err(EXIT_TROUBLE);
                 }
@@ -907,7 +923,7 @@ mod imp {
                 break;
             };
             if let Err(e) = skip(input, count) {
-                eprintln!("cmp: {}: {}", quotef(&input.name), strerror(&e));
+                diag!("cmp: {}: {}", quotef(&input.name), strerror(&e));
                 return Err(EXIT_TROUBLE);
             }
         }
@@ -987,7 +1003,7 @@ mod imp {
             Err(Trouble::Input(which, e)) => {
                 let name = if which == 0 { &name_a } else { &name_b };
                 let _ = out.flush();
-                eprintln!("cmp: {}: {}", quotef(name), strerror(&e));
+                diag!("cmp: {}: {}", quotef(name), strerror(&e));
                 return Err(EXIT_TROUBLE);
             }
             // The engine writes nothing but difference rows, so a failed write
@@ -998,7 +1014,7 @@ mod imp {
                 return Ok(EXIT_DIFFER);
             }
             Err(Trouble::Output(e)) => {
-                eprintln!("cmp: write error: {}", strerror(&e));
+                diag!("cmp: write error: {}", strerror(&e));
                 return Err(EXIT_TROUBLE);
             }
         };
@@ -1019,7 +1035,7 @@ mod imp {
                     if let Err(e) = writeln!(out, "{line}")
                         && e.kind() != io::ErrorKind::BrokenPipe
                     {
-                        eprintln!("cmp: write error: {}", strerror(&e));
+                        diag!("cmp: write error: {}", strerror(&e));
                         return Err(EXIT_TROUBLE);
                     }
                 }
@@ -1037,7 +1053,7 @@ mod imp {
                     // a file before the differences inside it.
                     let _ = out.flush();
                     let name = if which == 0 { &name_a } else { &name_b };
-                    eprintln!(
+                    diag!(
                         "{}",
                         eof_message(name, byte, newlines, at_line_start, settings.verbose)
                     );
@@ -1050,7 +1066,7 @@ mod imp {
             Ok(()) => Ok(status),
             Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(status),
             Err(e) => {
-                eprintln!("cmp: write error: {}", strerror(&e));
+                diag!("cmp: write error: {}", strerror(&e));
                 Err(EXIT_TROUBLE)
             }
         }

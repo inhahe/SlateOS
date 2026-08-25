@@ -148,10 +148,12 @@
 //! 0 on success, 1 on any failure — except under `--filter`, where a command
 //! that fails hands its own status back, so `--filter='exit 3'` exits 3.
 
+use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{os_bytes, quote, quoteaf, quoteaf_os, quotef_os};
 use coreutils::shell::shell;
+use coreutils::stdfd;
 use coreutils::xnum::{self, Status};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -336,12 +338,20 @@ fn os_from_bytes(b: &[u8]) -> OsString {
     OsString::from(String::from_utf8_lossy(b).into_owned())
 }
 
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("split: {}", e.message);
+            diag!("split: {}", e.message);
             return ExitCode::from(e.status);
         }
     };
@@ -357,7 +367,7 @@ fn main() -> ExitCode {
         Request::Run(options, file, prefix) => match run(&options, &file, &prefix) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("split: {}", e.message);
+                diag!("split: {}", e.message);
                 ExitCode::from(e.status)
             }
         },

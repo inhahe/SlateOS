@@ -33665,6 +33665,129 @@ its own event synthesis, focus rules and tests — all of which get deleted when
 the real device lands. That is exactly the band-aid accumulation `CLAUDE.md`
 names. This entry stays open and honest instead.
 
+**Update 2026-08-24 — both halves are built. Closed here; one dependency
+remains, and it is lane B's.**
+
+Lane A landed the kernel half on 2026-08-21
+(`requests/a-c-evdev-input-devices-exist-and-they-need-a-capability.md`): real
+`/dev/input/event0` and `event1`, 24-byte `input_event` records, `EV_KEY`/
+`EV_REL`/`EV_MSC`/`EV_SYN`, `SYN_DROPPED` with a per-fd cursor, the full
+`EVIOC*` interrogation sequence, and — more than was asked for — the set-1 →
+Linux-keycode translation done kernel-side, so the offer above to own that table
+in lane C was not taken up.
+
+Lane C has now landed the compositor half:
+
+* **`gui/compositor/src/present/evdev.rs`** and its `uapi`/`sys` submodules —
+  the client. Split three ways for the same reason `present/drm.rs` is: `uapi`
+  is the wire format and the keycode table with no fds and no `unsafe`, `sys` is
+  the four syscalls behind a trait, and the parent file holds every decision and
+  is generic over that trait. Every bug this module can have is a protocol or
+  policy bug, and none of them need a keyboard to find — but all of them would
+  be invisible if the module were behind `#[cfg(target_os = "linux")]`, because
+  the machine this tree is compiled on is not Linux.
+* **`present::Paired`** — the answer to the "alongside `DrmScanout` rather than
+  inside it" question this entry raised. `Paired<S, I>` is a `Present` made of a
+  screen and an `InputSource`: frames and monitors go to the screen, events come
+  from the source, and the screen alone decides when the session ends (a
+  keyboard being unplugged is not a reason to end it). It also keeps
+  `InputSource::set_bounds` current, which is how monitor hotplug reaches the
+  pointer. `Server::run_with` is unchanged.
+* **`main.rs`** pairs the two on the SlateOS target, and prints each node that
+  opened with its `EVIOCGNAME`.
+
+Three things the kernel deliberately does not do are done here, and are listed
+in the module docs so nobody later builds a second one: key repeat (synthesised
+from key-down/up timing at the user's own `input.yaml` delay/interval, capped
+per tick, modifiers excluded, and hardware autorepeat passed through in a way
+that pushes our timer out of the way rather than doubling with it); absolute
+pointer position (integration, the user's speed and acceleration profile,
+clamping, and the sub-pixel remainder without which a 0.25× speed setting is
+immovable); and `SYN_DROPPED` resync via `EVIOCGKEY`, reconciled *both* ways —
+releasing what is no longer held, which is the stuck-Shift bug, and pressing
+what is held and was missed, which is the Ctrl that stops making shortcuts.
+
+**Tested:** 66 tests across `evdev/tests.rs`, `uapi.rs` and `present.rs`, all
+driven by a fake device that scripts a real byte stream, so none of them need
+the capability. Proved non-vacuous by `scripts/reintro-evdev.py`, which puts 54
+one-line defects back one at a time — `REL_Y` counting upwards, the scroll axes
+crossed, `packet.scan` read instead of taken, the per-device check dropped from
+resync, `MSC_SCAN` consulted before the keycode table — and records the test
+that has to name each one.
+
+**The one dependency left is not lane C's and cannot be made so.**
+`open("/dev/input/event*")` returns `EACCES` until the compositor holds a
+`(ResourceType::InputDevice, 0, Rights::READ)` capability, which is obtainable
+only at spawn or by inheritance from an ancestor — init / the service manager,
+lane B's tree, filed as
+`requests/a-b-the-compositor-needs-an-inputdevice-capability-to-inherit.md`.
+`EvdevError::Denied` is its own variant so that this reports itself in those
+words rather than as a missing file, and the compositor prints the fix and the
+request filename on the way past, then carries on without local input. **Nothing
+here changes when that grant lands** — the code path is the one the tests
+exercise, with `sys::Devices` in place of the fake. Reply to lane A:
+`requests/c-a-the-compositor-now-reads-your-evdev-nodes-and-is-waiting-only-on-the-capability.md`.
+
+**Still open, and tracked separately:** a `ReloadInput` request reaches
+`Compositor::reload_input`, which adopts only `double_click_ms` — it has no way
+to reach `EvdevInput::set_settings`, so a pointer-speed change made in Settings
+does not take effect until the next login. See
+`TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER`.
+
+## TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER (lane C, 2026-08-24)
+
+**In short:** the Settings → Mouse page can change the pointer speed, the
+acceleration profile, the button mapping and the key-repeat rate, and the file
+it writes is read by the compositor — but only one setting out of that file is
+adopted while the desktop is running. The rest take effect at the next login. A
+user who drags the speed slider sees nothing happen.
+
+**What.** `Compositor::reload_input` (`gui/compositor/src/lib.rs`) is what a
+`ReloadInput` request lands in. It does:
+
+```rust
+let settings = inputsettings::InputFile::load().settings;
+self.set_double_click_ms(settings.mouse.double_click_ms);
+```
+
+Everything else in `InputSettings` — `mouse.speed`, `accel_profile`,
+`accel_gain`, `accel_threshold`, `natural_scroll`, `scroll_speed`,
+`button_mapping`, and the whole of `keyboard` — is used by
+`present::evdev::EvdevInput`, which has a `set_settings` for exactly this
+purpose and no caller. `reload_input` cannot reach it: the `EvdevInput` lives
+inside a `Paired` inside the `Present` that `Server::run_with` holds, and
+`Compositor` has no reference to its own display.
+
+**Why it was not fixed in the same change.** It is not a missing line; it is a
+missing direction. `Compositor` is deliberately display-agnostic — that is what
+lets the same compositor run headless, into a recording, onto a Win32 window and
+onto a DRM card — so "the compositor tells the display to reload" needs a route
+that does not put a display type into `Compositor`. The route that fits the
+existing shapes is for `Server::run_with` to notice the request instead: it
+already owns both the compositor and the `&mut dyn Present`, and it already
+drives the loop that would apply it.
+
+**The proper fix.** Add a `Present::reload_input(&mut self, settings:
+&InputSettings)` with an empty default body — the same pattern
+`Present::monitors` already uses for a capability only one implementor has —
+have `Paired` forward it to `InputSource`, add the matching
+`InputSource::reload_input` forwarding to `EvdevInput::set_settings`, and have
+`Server::run_with` call it when the tick reports that a `ReloadInput` was
+handled. `Compositor::reload_input` then returns the loaded `InputSettings`
+rather than swallowing them, so the file is read once rather than twice.
+
+**How to reproduce.** Not reproducible on the dev machine today, because the
+capability grant is not landed and there is no `EvdevInput` to reload. On
+hardware: set Settings → Mouse → pointer speed to its maximum, apply, and move
+the mouse. The double-click interval will have changed (that one setting works);
+the pointer speed will not, until the desktop is restarted.
+
+**Severity.** Medium. The setting is not lost — it is in `input.yaml` and is
+honoured at the next start — so this is a latency bug, not a data bug. But a
+slider that appears to do nothing is indistinguishable to a user from a slider
+that is broken, and it is the *second* time this exact shape has been found in
+this area (`TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING` was the first).
+
 ## TD-COMPOSITOR-COPIES-EVERY-FRAME-TWICE (lane C, 2026-08-21)
 
 **In short:** every frame the desktop draws is copied one extra time on its way
@@ -72305,11 +72428,100 @@ them:
   `mkdir`, `mkfifo`, `ls`, `mv`, `od`, `readlink`, `realpath`, `rm`, `rmdir`,
   `sed`, `sort`, `touch` and `awk` still do.
 
+### Done, 2026-08-24 — step 3, the rest of the bins
+
+**290 `eprintln!` sites in 55 files converted to `diag!`**, plus the four that
+were not mechanical, so **no `eprintln!` or `eprint!` remains in the crate
+outside comments**. No bin can abort on an unwritable stderr any more.
+
+The mechanical part was a regex over `src/bin/**`, skipping comment lines, plus
+a `use coreutils::diag;` per file. Six files keep their sites inside an inner
+`mod imp`/`mod net`, which needs its *own* import — a `use`d `#[macro_export]`
+macro is a name in that module, not in its children. In five of those
+(`chmod`, `chown`, `cmp`, `id`, `ls`) the only *top-level* site is the
+`#[cfg(not(unix))]` stub `main`, so the file-level import is now
+`#[cfg(not(unix))] use coreutils::diag;` — unused on the real target
+otherwise. Only the x86_64-slateos build compiles `#[cfg(unix)] mod imp` at
+all, so the Windows host build cannot find any of this; `cargo +nightly build
+--bins` is the one that can.
+
+The four hand edits, and why each is not a plain substitution:
+
+| site | was | now | why |
+|---|---|---|---|
+| `find.rs` | `eprintln!()` | `diag!("")` | `diag!` is `format!` underneath and `format!()` has no format string |
+| `time_cmd.rs` | `eprintln!()` | `diag!("")` | same |
+| `more.rs` ×2 | `eprint!` + `io::stderr().flush()` | `prompt()` → `stdfd::write_all(2, …)` | no trailing newline, **and it must not set the flag** |
+
+`more`'s `--More--` is the one deliberate exception to "everything on
+descriptor 2 goes through `diag`". It is a prompt, not a complaint — the
+pager's half of a conversation with the terminal — so losing it does not mean
+the file was paged wrongly and must not turn a clean run into a failing
+status. `stdfd::write_all` is the same `write(2)` without the flag. The flush
+went with it: unlike `io::stderr()` there is no buffer to flush.
+
+**Non-diagnostic stderr output *should* set the flag, though** — checked
+against the real binaries rather than assumed, because it looked like the same
+exception as `more`'s and is not:
+
+```
+dd if=/dev/zero of=/dev/null count=1 2>/dev/full → 1     (2>&- → 1)
+ls / 2>/dev/full → 0    wc … 2>/dev/full → 0    seq 3 2>/dev/full → 0
+```
+
+`dd`'s `N+0 records in` statistics are its *output*, not a complaint, and the
+copy itself succeeded — yet GNU still exits 1, because `close_stdout` is
+registered with `atexit` and does not care *what* the unflushable bytes were.
+The utilities that write nothing to stderr keep their earned 0. So `dd`'s
+statistics, `fetch`'s `-v` trace and `time`'s timing line are all correctly
+routed through `diag!` now; the distinction that matters is not
+diagnostic-vs-output but whether the bytes were *the program's* at all, and
+`more`'s prompt is echo to a terminal rather than output.
+
+### Done, 2026-08-24 — the `io::stderr()` substitutions
+
+All twenty of them, in `awk`, `cp`, `du`, `find` ×2, `ln`, `ls`, `mkdir`,
+`mkfifo`, `mv`, `od` ×2, `readlink`, `realpath`, `rm`, `rmdir`, `sed`, `sort`
+and `touch`. Three named `io::stderr()` sites remain in the crate and are all
+correct: two are `is_terminal` queries, which ask rather than write, and the
+third is `stdfd`'s own non-libc fallback, where there is no `write(2)` to call
+— now commented as the one deliberate use.
+
+They did not all want the same replacement, and which one they wanted turned on
+a question the code could not answer:
+
+| shape | replacement | why |
+|---|---|---|
+| `let mut err = io::stderr()`, threaded as `&mut impl Write` (15 sites) | `Stream::stderr()` | `Stream` implements `Write`, so the threading is untouched, and its `record` sets the flag |
+| a `/dev/stderr` **sink** the program writes its output to, returning `io::Result` (`awk`, `find -fprint`, `sed w`) | `stdfd::write_all(2, …)` | the caller already reports the error and maps it to a status; it only needed to *see* one |
+| a raw-byte diagnostic with a `let _ =` (`od` ×2) | `stdfd::diag_bytes` | nowhere left to report to, so record it and let `close_stderr` speak |
+
+**`find`'s `-ok` prompt was the interesting one**, because it looks exactly
+like `more`'s `--More--` and behaves oppositely. Both are prompts rather than
+complaints, and the standing comment in `find` said the write error was
+"dropped deliberately". Measured:
+
+```
+find q.txt -maxdepth 0 -ok true {} \; </dev/null 2>/dev/full → 1
+find q.txt -maxdepth 0 -ok true {} \; </dev/null 2>/dev/null → 0
+```
+
+So GNU does fold the lost prompt into the status — `close_stdout` runs from
+`atexit` and does not care that the unwritable bytes were a question. It goes
+through `diag_bytes`. `more` keeps `write_all` because it is not a GNU utility
+and registers nothing; that is the difference, not prompt-versus-diagnostic.
+
+Three sinks were also assembled into one buffer and written once, instead of
+two-to-five `write(2)` calls: `find`'s prompt, `sed`'s `w /dev/stderr` line and
+its newline, matching upstream's single `fprintf`. Separate calls let another
+process's output land in the middle of a line on a shared terminal.
+
 **Still open**, and re-scoped to the closed-descriptor sweep rather than to
-this entry: ~300 `eprintln!` sites across 59 files, plus step 2's hand-written
-tails in `env`, `ls` and `sort` (`tty`'s is done). Nothing there is a
-regression — those bins were never converted — but each is a 134 waiting for
-a caller who redirects stderr.
+this entry: the `close_stderr` funnel for the ~65 bins that still lack one, and
+step 2's hand-written tails in `env`, `ls` and `sort` (`tty`'s is done). Until a
+bin has the funnel its flag is set and never read, so the work so far converts a
+134 into the *old* status rather than into GNU's — an improvement with no
+regression, but not yet parity.
 
 **Found on the way, and not the same bug.** `wc >/dev/full` exits **0**
 silently — it never checks the write at all. `head >/dev/full` reports the
@@ -72793,6 +73005,338 @@ recurring shape is not "the wrong value was computed" but "no value was
 computed and the default was reported as if it were one." A default of
 success is a claim, and every early `return` past it is an unexamined
 assertion that the claim still holds.
+
+## TD-B-BC-QUIT-FIRES-AT-THE-WRONG-TIME-AND-HALT-DOES-NOT-EXIST (lane B, 2026-08-24) — ✅ **FIXED 2026-08-24**
+
+**In short:** `bc` is a calculator, and it has two ways to stop: `quit` and
+`halt`. Ours implements one of them, and implements it at the wrong moment.
+GNU `bc` stops as soon as it *reads* the word `quit`, before running anything
+on the same line; ours stops when it *reaches* it, having already run what came
+before. So a one-line script that GNU answers with nothing, ours answers with
+half its output. And `halt` — the one that really is meant to stop when
+reached — we do not recognise at all, so a script using it dies with a syntax
+error.
+
+**Where:** `userspace/coreutils/src/bin/bc.rs`. The keyword table at the `"quit"
+=> Token::Quit` arm; `Stmt::Quit`; `Interpreter::exec_stmt`'s `Stmt::Quit` arm;
+`Parser::parse_program`; and `eval_input`, which parses a whole file in one go
+where GNU compiles and runs it a line at a time.
+
+**Measured**, GNU `bc` 1.07.1 under WSL:
+
+| Input | GNU prints | Ours prints |
+|---|---|---|
+| `print "A"` / `quit` / `print "B"` on three lines | `A` | `A` |
+| `print "A"; quit; print "B"` on **one** line | *(nothing)* | `A` |
+| `print "A"` / `if (0) { quit }` / `print "B"` | `A` | `AB` |
+| `print "A"` / `if (0) { halt }` / `print "B"` | `AB` | syntax error |
+| `print "A"` / `halt` / `print "B"` | `A` | syntax error |
+| `define f() { quit }` then `print "before"` | *(nothing)* | `before` |
+
+The rule the table encodes is the one the GNU manual states outright: *"quit:
+when this statement is read, the bc processor is terminated, regardless of
+where the quit statement is found"*, versus *"halt: … an executed statement"*.
+The granularity of "read" is one input line — that is why the three-line case
+agrees and the one-line case does not, and why a `quit` buried in an
+`if (0)` or in a function body that is never called still ends the run.
+
+**The proper fix**, in three parts:
+
+1. Rename the existing statement to `Stmt::Halt` and add `"halt" =>
+   Token::Halt`. The execute-time machinery already exists and is already
+   correct for it — `StmtResult::Quit`/`LoopFlow::Quit`/`RuntimeError::Quit`
+   and `Session`, added in `abce71f46`, are exactly `halt`'s plumbing and
+   should be renamed with it.
+2. Make `quit` a *parse*-time event: `Parser::parse_program` truncates the
+   statement list at the `quit` token and reports that it saw one, and the
+   caller runs the truncated list and then stops. Nothing after the `quit` in
+   the same chunk runs, which is what the one-line and `define` rows above
+   require.
+3. Give `eval_input` the same line-at-a-time chunking `eval_stdin` already has,
+   or the file rows will still differ: GNU compiles and runs a file line by
+   line, so `print "A"` before a `quit` on the next line does print.
+
+**What is safe about the current state:** the exit *status* is right —
+`abce71f46` removed the `process::exit(0)` that bypassed the `close_stderr`
+funnel, so `quit` after an unwritable `print` now correctly exits 1. What is
+wrong is only *how much runs first*, and `halt` being missing.
+
+**Needs** a `bc-diff.sh` differential harness against GNU `bc` under WSL, like
+the ones for `cmp`/`tee`/`echo`/`tty`; there is none yet, which is why this
+went unnoticed.
+
+### How it was fixed
+
+`scripts/bc-diff.sh` was written first, and every row in the table above is now
+one of its cases. All 24 quit/halt comparisons agree with GNU.
+
+`halt` went in as planned: `Token::Halt`, `Stmt::Halt`, and the four existing
+`…::Quit` variants renamed to `…::Halt`, since that machinery was always
+`halt`'s and never `quit`'s.
+
+**`quit` did not go in as planned, and the plan's step 2 was wrong.** It said
+to *truncate* the statement list at the `quit`. Measurement says the whole unit
+is discarded — `print "A"; quit` prints nothing, not `A`. The model that fits
+is GNU's scanner: it calls `exit(0)` the instant it *scans* the token, and the
+statements the parser has compiled but not yet executed die unexecuted with it.
+So `Parser::saw_quit` asks the token stream, before a single statement is built,
+and a unit containing one is thrown away entire. The confirming case is
+`if (1)\nquit\n2`, which GNU answers with nothing: the `if` had a body, would
+have run, and did not, because the `quit` on line 2 is inside the same unit.
+
+### The part that was not in the plan at all: what a "unit" is
+
+Step 3 said to give `eval_input` "the same line-at-a-time chunking `eval_stdin`
+already has". Doing exactly that would have been a regression, because the
+chunking `eval_stdin` had was itself wrong. It split on brace depth, so
+`if (0)` on one line and its body on the next were two units and **the body ran
+unconditionally**. Measured: `printf 'if (0)\nprint "x"\n' | bc -q` prints
+nothing on GNU.
+
+Both routes now share one `Chunker`, whose test for "is there more of this to
+come?" is `Parser::truncated` — set when a parse hits `Eof` where a token was
+*required*. Three things were measured to draw its boundary, and only the first
+was guessable:
+
+| Input | GNU | Therefore |
+|---|---|---|
+| `if (0)` / `print "x"` | prints nothing | a missing **body** waits for the next line |
+| `x = 1 +` / `2` / `x` | `syntax error`, `2`, `0` | a missing **operand** does **not** — the newline ends the statement |
+| `/* one` / `two */ 2+2` | `4` | an unclosed **comment** waits |
+| `1 + \` / `2` | `3` | a trailing **continuation** waits |
+
+The last two are invisible to the parser: `/* one` yields no tokens and reads
+exactly like a blank line, and `1 + \` yields `1` and `+` and reads exactly
+like the missing-operand case the parser is right *not* to wait for. Only the
+scanner can tell them apart, so `Lexer::unfinished` reports them and
+`Parser::new` folds it into `truncated`.
+
+### Cost
+
+`open_brace_depth` is gone, and with it the last of the brace counting. Each
+line is re-lexed together with everything pending rather than on its own, which
+is required for correctness (a line that begins inside a comment means something
+else entirely) and costs a re-scan of at most a few lines.
+
+Commits: `4256da9b6` (host build), and the bc change below. Harness result went
+from 50 differences on its first run to 23, none of them quit/halt; the
+remainder are the separate entries filed immediately after this one.
+
+---
+
+## `B-COREUTILS-WRITE-ERROR-OMITS-THE-ERRNO-ON-A-PARTIAL-FLUSH` — an accepted divergence, not a bug to fix
+
+*(lane B, 2026-08-24 — measured against GNU coreutils 9.4 / glibc 2.39 in WSL)*
+
+**In short:** when a utility's output cannot be written because the disk is
+full, GNU sometimes prints `wc: write error` with no explanation attached, and
+we always print `wc: write error: No space left on device`. Ours says more.
+The reason GNU says less is an accident inside the C library it is built on,
+not something it chose, so we are not copying it. Nothing is broken either way
+— this is written down so that the next person to compare the two does not
+"fix" ours into being less informative.
+
+### What is actually different
+
+Every write failure carries a reason from the operating system (an *errno* —
+the number the kernel returns, rendered as a sentence like `No space left on
+device`). GNU prints it in most cases and drops it in some:
+
+| invocation | GNU 9.4 | ours |
+|---|---|---|
+| `wc f >&-` | `wc: write error: Bad file descriptor` | identical |
+| `head f >/dev/full` | `head: write error: No space left on device` | identical |
+| `wc f >/dev/full` | `wc: write error` | `wc: write error: No space left on device` |
+| `nl huge nosuch >/dev/full` | `nl: write error` | `nl: write error: No space left on device` |
+
+The exit status is the same in all four. Only the sentence differs, and only
+on `/dev/full`.
+
+### Why GNU drops it
+
+It is a two-step accident:
+
+1. glibc's `new_do_write` resets the stream's write pointers whether or not
+   the underlying `write(2)` succeeded. So a flush that failed still leaves the
+   buffer *empty*.
+2. gnulib's `close_stream` therefore finds nothing left to write, its `fclose`
+   succeeds, and it sets `errno = 0` before reporting — because `ferror` was
+   already set, so it knows the failure happened earlier and no longer has the
+   number that described it.
+
+Which is why the divergence tracks *whether a flush already failed*, not which
+utility is running: `head f >/dev/full` (short output, one flush, at exit)
+carries the errno and `head -n 200000 huge >/dev/full` (a flush mid-run) does
+not. The utilities that show it most often — `wc`, `du`, `md5sum`, `cksum`,
+`sum` — are simply the ones that flush per record.
+
+On a *closed* descriptor (`>&-`) GNU prints the errno every time, because
+nothing was ever written and so nothing was ever discarded. That is the case
+the whole closed-descriptor sweep is about, and there we match exactly.
+
+### Why we are not emulating it
+
+Emulating it means deliberately throwing away the one piece of information the
+message exists to convey, in exactly the situation where the user most needs it
+— they are looking at a failed write and want to know whether the disk is full,
+the file is on a dead NFS mount, or the descriptor was closed. Reproducing it
+would also mean reproducing glibc's buffer-discard rule inside
+`coreutils::stdfd::Stream`, i.e. carrying a bug-for-bug quirk of a C library
+this OS does not use, in the one module every utility depends on.
+
+### Where it is enforced
+
+`scripts/write-error-diff.sh` accepts "ours is GNU's message with a `: <errno>`
+suffix" as an expected difference **and nothing else** — a message that goes
+missing, changes shape, or comes with a different exit status is still a
+failure. The exemption is recognised by shape rather than kept as a list of
+cases, because the same utility diverges or not depending on the invocation.
+
+---
+
+## `B-COREUTILS-DIAG-DOES-NOT-FLUSH-STDOUT-FIRST` — a diagnostic can appear above output that was written before it — ✅ FIXED 2026-08-24 (lane B)
+
+*(lane B, 2026-08-24)*
+
+**In short:** when a utility both prints something and complains about
+something, the complaint can come out *before* the printed lines instead of
+after, if the two are sent to the same place. `nl a nosuch > log 2>&1` shows
+the complaint about `nosuch` first and the numbered lines from `a` second; GNU
+shows them the other way round, which is the order they actually happened in.
+Nothing is lost — every byte still arrives — but a log read top to bottom tells
+the story backwards.
+
+### Why
+
+glibc's `error()` — the function behind every GNU diagnostic — calls
+`fflush (stdout)` before it writes to stderr, precisely so that the two
+interleave in real order when they share a destination.
+
+Our `diag!` cannot do that. Standard output here is a `coreutils::stdfd::Stream`
+that lives as a local variable in `run_main`, so the macro has no way to reach
+it; it writes to descriptor 2 while the pending output is still sitting in a
+buffer that will not be drained until `close_stdout` at exit.
+
+### The fix, which is structural
+
+Make descriptor 1's buffer process-global — stdio's own model: a `Mutex`-guarded
+shared buffer, error flag and buffering mode, with `Stream::stdout()` becoming a
+handle onto it rather than an owner of it. `diag_line`/`diag_bytes` can then
+flush it before writing, exactly as `error()` does.
+
+The one API consequence: `Stream::error()` currently returns
+`Option<&io::Error>`, which cannot outlive a lock guard, so it has to return an
+owned snapshot instead. Call sites: `src/bin/cat.rs`, `src/bin/head.rs`.
+
+### Reproducing it
+
+```
+$ nl f nosuch > log 2>&1     # ours: the complaint is line 1
+$ /usr/bin/nl f nosuch > log 2>&1   # GNU: the complaint is last
+```
+
+Verified against our own build, not from recall. Affects every utility that can
+write output and a diagnostic in the same run — `nl`, `cat`, `head`, `wc`,
+`md5sum`, `sort`, and so on.
+
+### How it was fixed
+
+Structurally, as prescribed above: `Inner` — buffer, buffering mode and sticky
+error — was split out of `Stream`, and descriptor 1's copy became the
+process-global `static STDOUT: Mutex<Inner>`. `Stream::stdout()` is now a
+*handle* onto it (`own: None`) rather than an owner; every other descriptor
+still owns its own `Inner`. `Stream::error()` returns `Option<io::Error>`, an
+owned snapshot, since a borrow could not outlive the lock guard.
+
+**Two things the diagnosis above did not anticipate:**
+
+1. **`diag!` was not the only way to reach descriptor 2.** `tsort` reports its
+   loop through a `Stream::stderr()` handed around as `&mut dyn Write`, not
+   through `diag!` — so a flush installed only in `diag_to` left
+   `tsort cycle >log 2>&1` still printing the loop report above the vertices it
+   had already ordered. `nohup`, `env` and `nice` build their messages the same
+   way. The rule was therefore attached to the **descriptor** rather than to the
+   call: `Inner::put` and `Inner::drain` both begin with `before_diagnostic(fd)`,
+   which flushes descriptor 1 whenever `fd == 2`. This is wider than glibc, which
+   flushes only inside `error()` — see `design-decisions.md` §378.
+
+2. **`cat` passed the whole time, and that was misleading.** It flushes
+   explicitly after each operand for reasons predating this bug, so it was the
+   one utility that looked correct while the shared machinery was still broken.
+   A harness that had only covered `cat` would have reported green.
+
+### Where it is enforced
+
+`scripts/interleave-diff.sh` — a new cross-utility harness, and deliberately
+cross-utility: the per-utility harnesses capture standard output and standard
+error into *separate* files, which is the one arrangement in which an ordering
+bug cannot be seen. It runs each case twice per side, `>out 2>err` to establish
+that the content agrees at all (if it does not, the case is `n/a` — content is
+the per-utility harnesses' business) and then `>log 2>&1`, compared byte for
+byte. 21 cases over 13 utilities; no accepted divergences.
+
+It was checked for discrimination, not just for green: with the flush disabled
+it reports **5 passed / 16 differed**, with it restored **21 / 0**.
+
+As bins convert onto `Stream` they must be added to its `DIFF_BINS`. Everything
+still on `std::io::Stdout` is line-buffered unconditionally — even to a file,
+where stdio would block-buffer — so it interleaves correctly by accident and has
+no ordering to regress.
+
+---
+
+## `B-DIFF-FRESHNESS-CHECK-CERTIFIED-A-CACHED-LIBRARY` — the harnesses' anti-stale-build guard passed a build three commits old — ✅ FIXED 2026-08-24 (lane B)
+
+*(lane B, 2026-08-24)*
+
+**In short:** every diff harness begins by checking that the binaries it is
+about to compare were actually built from the source now in the tree — the
+check exists because comparing against a stale build produces a *false green*,
+the worst outcome a test can have. On 2026-08-24 the check passed against a
+build whose library half was three commits out of date, and a harness reported
+sixteen failures for a bug that had already been fixed. The check was looking
+at the wrong file.
+
+### Why it passed
+
+The check asked "is any `.rs` file newer than the binaries?" Cargo had relinked
+every binary — so every binary's mtime was newer than every source file, and the
+check was satisfied — while replaying the `coreutils` **library** unit from
+cache. The binaries were new; the code inside them was not.
+
+### How it was noticed
+
+Not by the check, and not by the harness. `interleave-diff.sh` reported 16
+differences against a fix that was demonstrably present in the tree, and the
+one utility that passed was `cat` — which flushes explicitly and would pass
+either way. The decisive evidence was in the build log: a replayed
+`warning: coreutils (lib) generated 1 warning` for a `dead_code` function that
+had been unused **only in the previous edit of the file**. A cached lib unit
+announcing itself. `cargo clean -p coreutils` was the entire cure, and the same
+harness then passed 21 for 21.
+
+A separate controlled experiment confirmed cargo *does* rebuild after
+`touch userspace/coreutils/src/stdfd.rs`, so this is not simply "cargo is
+broken" — the cache had been damaged earlier, exactly as in the
+`cannot find function close_stdout` incident recorded further up this file.
+
+### The fix
+
+`diff_first_stale` in `scripts/diff-wsl.sh` now checks the package's library
+artifact — the newest `deps/lib<pkg>-*.rlib` — **before** the binaries, and
+`diff_lib_artifact` was added to find it. A stale lib is reported and cured by
+the existing `cargo clean -p` + rebuild + recheck path. Verified afterwards
+that neither harness false-positives: two consecutive runs of
+`interleave-diff.sh` and one of `write-error-diff.sh` cleaned nothing.
+
+### The general lesson, which outlives this bug
+
+**A freshness check must look at the artifact that holds the code, not at the
+artifact that gets rewritten.** Link steps are cheap and run often; they touch
+the file a naive mtime check watches while leaving the compiled code beneath it
+untouched. Any future check of this shape — for another package, another
+language, another build system — should be pointed at the compilation unit, not
+at the final product.
 
 ## A-KSHELL-2334-COMMANDS-PRINTED-PAST-THE-CAPTURE — ✅ FIXED 2026-08-24 (lane A)
 
@@ -73294,7 +73838,35 @@ converted only 11 of 15 sites — the rewriter matched `&out`, and four captures
 are bound to other names (`0ddfaa5bc`). A mechanical sweep's own coverage is
 worth re-deriving from the source rather than from the count the sweep reported.
 
-## TD-C-TWO-TOOLKIT-TEXT-FIELDS-DRAW-NO-CARET-AT-ALL (lane C, 2026-08-24) — **open**
+## TD-C-TWO-TOOLKIT-TEXT-FIELDS-DRAW-NO-CARET-AT-ALL — RESOLVED 2026-08-24
+
+**Both fields are done.** `WidgetKind::TextInput` and `InputDialog` now share one
+implementation of a single-line field's caret, selection and scrolling —
+`gui/toolkit/src/textedit.rs`, written for this fix precisely so that the five
+text fields in the tree stop each having their own answer. `InputDialog`
+converts its offsets through `drawn_offset` first, so a password field's caret
+and selection are measured in mask characters and never leak the secret's byte
+length. Reasoning in `design-decisions.md` §546.
+
+**One piece was deliberately not done at the time: clicking in an `InputDialog`
+did not move its caret.** It could not, and the reason was a separate defect —
+`TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED` below. The widget
+text field did support click-to-place, because a `Widget` has a layout box.
+*(Closed later the same day: that entry is now fixed, and `InputDialog` places
+its caret from a click like any other field. The shared arithmetic lives in
+`textedit::cursor_at_click`, which both call.)*
+
+The original report follows.
+
+---
+
+**`WidgetKind::TextInput` was done first**: it now has a focus, a caret gated on it, a
+selection anchor with Shift+Arrow and painted selection boxes, click-to-place-
+caret, and a horizontal scroll offset that keeps the caret inside the box. See
+`design-decisions.md` §546, and the twenty tests from
+`a_focused_field_draws_a_caret_and_an_unfocused_one_does_not` onwards in
+`gui/toolkit/src/widget.rs`. **`InputDialog` in `gui/toolkit/src/modal.rs` is
+still untreated** — the rest of this entry is about it.
 
 `WidgetKind::TextInput` (`gui/toolkit/src/widget.rs`, render arm at ~line 618)
 and `InputDialog` (`gui/toolkit/src/modal.rs`, ~line 1376) both **track** a
@@ -73350,6 +73922,347 @@ caret/selection/scrolling implementation into the change that moved five
 fields' arrows would have made a reviewable diff unreviewable. Nothing depends
 on it: `pathbar` is the toolkit field the shell actually uses for typing.
 
+## TD-C-THE-LOCK-SCREEN-THROWS-AWAY-THE-ANSWER-TO-THE-ONLY-QUESTION-IT-ASKS — RESOLVED 2026-08-24
+
+**Lane C, found 2026-08-24 while planning the `authlib` rework.**
+
+**RESOLVED 2026-08-24.** Fixed exactly as the plan at the bottom of this
+entry describes, and the plan is left in place because it is the record of
+what was done. `submit_password` returns `AuthOutcome`; `unlock_requested`
+is a real field collected by `take_unlock_request()`; `PasswordAuthority`
+is the trait the verdict arrives through and `PasswordValidator` is now
+one interim implementor of it rather than the only way to get an answer.
+Eight tests drive `handle_event` and the mouse path instead of calling
+`submit_password` directly, including one that presses Enter with the
+right password and asserts an unlock was authorised — which is the
+assertion whose absence let this ship.
+
+Two things deliberately *not* done here, both recorded rather than
+silently decided:
+
+- **The `NoPassword` policy is unchanged**, so a passwordless account's
+  screen still opens on Enter as it always has. Refusing is the secure
+  answer and also locks the real user out forever; it is now one function
+  (`LockScreen::unlocks_for`) and one question in `open-questions.md`.
+  Changing who can unlock a machine is not something to slip into a
+  commit about interface shape.
+- **`PasswordValidator` is still here**, because `logind` answers
+  `system.logind.Error.UnknownCaller` to everyone until lane A can tell a
+  service who is calling it
+  (`requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`). Its
+  `PasswordAuthority` impl carries the note; when that lands the impl is
+  deleted and a bus connection is constructed in its place, and nothing
+  else in the file moves.
+
+`apps/lockscreen/src/main.rs` — `LockScreen::submit_password` returns `bool`,
+and **both of its call sites discard it**:
+
+```rust
+Key::Enter => {
+    let _ = self.submit_password();      // :1025
+    EventResult::Consumed
+}
+// and on the submit button, :1064
+```
+
+So typing the correct password and pressing Enter runs the key derivation,
+clears the buffer, resets the failure count — and reports nothing to anybody.
+There is no path by which the screen can unlock.
+
+**What makes this worse than a missing line is the comment above it.**
+`handle_event`'s doc says:
+
+> Special return: if the screen should unlock, this is signaled by the
+> `unlock_requested` flag on the struct (checked separately).
+
+There is no `unlock_requested` field. `grep -rn unlock_requested apps/` matches
+that sentence and nothing else. The comment does not describe a mechanism that
+broke; it describes one that was never written, and it is the only
+documentation the first caller of `handle_event` will read. That caller will
+look for the flag, not find it, and have to reverse-engineer the fact that the
+verdict is unreachable — which is the `days_in_month` failure shape again: a
+second answer justified by a false statement about the first.
+
+### Why the tests are all green
+
+Every test calls `submit_password()` **directly** and asserts on its return
+(`assert!(ls.submit_password())`, `:1887`). Not one of them goes in through
+`handle_event`, which is the only path a user has. The unit under test is
+correct; the wiring between it and the world is absent, and nothing looks at
+the wiring.
+
+### Why it has not bitten yet
+
+`apps/lockscreen` has `fn main() {}` — it is a library wearing a binary's
+clothes, with no compositor session driving it. So this is not a live
+"correct password rejected" bug today; it is a trap set for whoever writes the
+first driver. That is exactly when it is cheapest to fix.
+
+### The proper fix — and it lands with the `authlib` rework, not before
+
+The return type is changing anyway. `requests/b-c-desktop-password-checks-go-through-a-privileged-verifier.md`
+asks for the verdict to arrive from *outside* the screen as a four-way outcome
+rather than a `bool` computed in-process, so both changes touch the same
+signature and splitting them would mean editing every call site twice:
+
+- `AuthOutcome` mirroring `authlib::Outcome` and logind's `OUTCOME_*` wire
+  codes — `Accepted` / `Rejected` / `Locked` / `NoPassword` / `Unusable` /
+  `RateLimited { retry_after_secs }`. Lane B's point that this is not a `bool`
+  is the same point as this entry: `Unusable` means the *system* is broken and
+  must reach an administrator rather than be counted as a typo.
+- A `PasswordAuthority` trait with `authenticate(&mut self, username, password)
+  -> AuthOutcome`. `PasswordValidator` implements it as the interim local path
+  and is deleted when logind can identify its callers (blocked on
+  `requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`, which is lane
+  A's — until it lands, a real bus call gets a refusal rather than a verdict).
+- `submit_password() -> AuthOutcome`, and a real `unlock_requested` flag with a
+  `take_unlock_request()` accessor, so the comment above becomes true by
+  construction rather than aspirationally.
+- **A test that drives `handle_event` rather than `submit_password`** — typing
+  the password a character at a time and pressing Enter. Without it the new
+  wiring is exactly as untested as the old, and the whole entry recurs.
+
+---
+
+---
+
+## TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED (lane B, 2026-08-24) — **open**
+
+**In short:** feed our `bc` a program with a mistake in it — a stray `)`, a
+character that is not part of the language, a quote that is never closed — and
+it says nothing at all, computes something, and exits 0. GNU `bc` names the
+file and the line and says `syntax error`. So a script with a typo in it
+silently produces a *wrong answer* on ours, and a shell pipeline that checks
+`bc`'s exit status is told everything went fine. This is the most damaging of
+the differences the new differential harness found, because every other one is
+a wrong *message* where this one is a wrong *number* with no message.
+
+**Where:** `userspace/coreutils/src/bin/bc.rs`. Four places conspire, and all
+four are the same decision — *recover silently and keep going* — taken without
+anywhere to record that recovery happened:
+
+| Site | What it does now |
+|---|---|
+| `Parser::parse_primary`, the `_` arm | returns `Expr::Number("0")` for any token that cannot start an expression, without advancing |
+| `Parser::parse_stmt`, the `_` arm | advances past an unexpected token and returns `None` |
+| `Parser::expect` | returns `false` and carries on when the required token is absent |
+| `Lexer::next_token` | has no "illegal character" token; unknown bytes are skipped |
+
+**Measured**, GNU `bc` 1.07.1 under WSL, every case both as a file operand and
+on standard input (`scripts/bc-diff.sh`, marked `known_bug` with this key):
+
+| Input | GNU stderr | GNU stdout | Ours |
+|---|---|---|---|
+| `print )` | `prog.bc 1: syntax error` | *(none)* | *(nothing at all, exit 0)* |
+| `1 $ 2` | `illegal character: $` then `syntax error` | *(none)* | `1` and `2`, exit 0 |
+| `print "abc` *(unterminated)* | `illegal character: "` | *(none)* | `abc`, exit 0 |
+| `if (1) {` / `print "A"` *(unclosed)* | `syntax error` | *(none)* | `A`, exit 0 |
+| `print )` then `print "after\n"` | `syntax error` | `after` | `after`, no diagnostic |
+| `print "A"` with **no trailing newline** | `syntax error` | *(none)* | `A`, exit 0 |
+
+Note the last row: GNU requires the final newline and treats its absence as a
+syntax error, which is worth knowing before "fixing" it in the obvious
+direction.
+
+Note also that GNU **keeps going** after an error — row 5 still prints `after`
+— so this is not "stop at the first problem"; it is "say so, then continue".
+
+**The proper fix.** The parser needs an error channel, which it has never had.
+Concretely:
+
+1. `Lexer` gains a `Token::Illegal(u8)` for a byte that starts no token, and
+   reports an unterminated string the same way rather than running to end of
+   input. GNU's wording is `illegal character: X`.
+2. `Parser` accumulates a `Vec<SyntaxError>` carrying a line number, rather
+   than silently recovering. `parse_primary`'s zero, `parse_stmt`'s skip and
+   `expect`'s `false` each record one first.
+3. The chunk runner writes them, prefixed as GNU prefixes them — the **file
+   name** for a file operand (`prog.bc 1: syntax error`) and the literal
+   `(standard_in)` for the session on stdin — and then runs the chunk anyway,
+   because that is what GNU does.
+4. The line number counts within the *whole input*, not within the chunk, so
+   `Chunker` has to carry a running line count.
+
+The exit status stays 0: GNU exits 0 after a syntax error, which was measured
+and is the one part of the current behaviour that is already right.
+
+**Blast radius:** the six harness rows above, plus every `parse_primary`
+fallback taken in a program that is actually valid — of which there should be
+none. So an implementation that is too eager shows up immediately as some
+other, currently-green harness row turning red.
+
+---
+
+## TD-B-BC-RUNTIME-ERROR-WORDING-DIFFERS-FROM-GNU (lane B, 2026-08-24) — **open**
+
+**In short:** when a calculation goes wrong — dividing by zero, taking the
+square root of a negative number, calling a function that was never defined —
+both `bc`s complain and both keep going. They word it differently, and ours
+leaves out the two facts GNU includes: *which function* the fault was in, and
+*where inside it*. A script that greps `bc`'s stderr, or a user diffing against
+a reference output, sees a difference.
+
+**Where:** `userspace/coreutils/src/bin/bc.rs`, `impl Display for RuntimeError`
+and the `Runtime error: ` prefix at its call site.
+
+**Measured**, GNU `bc` 1.07.1:
+
+| Input | GNU | Ours |
+|---|---|---|
+| `1/0` | `Runtime error (func=(main), adr=3): Divide by zero` | `Runtime error: divide by zero` |
+| `sqrt(-1)` | `Runtime error (func=(main), adr=4): Square root of a negative number` | `Runtime error: square root of a negative number` |
+| `f(1)`, `f` undefined | `Runtime error (func=(main), adr=3): Function f not defined.` | `Runtime error: undefined function f` |
+
+Three separate differences: the missing `(func=…, adr=…)` parenthesis, the
+sentence case (GNU capitalises the first word), and the phrasing of the
+undefined-function case, which in GNU is a sentence ending in a full stop.
+
+**The proper fix**, and the reason it is not a one-liner: `adr=` is the *byte
+offset into GNU's compiled dc program*, and we do not compile to dc — we walk a
+tree. There is no honest value to put there. Two ways out:
+
+* **(a) Emit the prefix with a counter of our own** — statements executed within
+  the current function, say.
+  *What changes:* the shape matches GNU and the number does not; it would be a
+  number that looks meaningful and is not.
+* **(b) Emit `func=` and drop `adr=`.**
+  *What changes:* `Runtime error (func=(main)): Divide by zero` — honest, still
+  a divergence, and the divergence is one field rather than a fake value.
+
+Recommendation: **(b)**, plus fixing the capitalisation and the
+undefined-function sentence, which are unambiguous. `func=` we can produce
+truthfully — the interpreter always knows which function body it is in, or
+`(main)`. Then record the missing `adr=` as a deliberate divergence and move
+these three harness rows from `known_bug` to `xfail` with that reason.
+
+Do this **after** `TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED`, which builds the
+diagnostic plumbing (file name vs `(standard_in)`, line numbers) that this
+should reuse rather than duplicate.
+
+---
+
+## TD-B-BC-MATHLIB-ARCTANGENT-IS-INACCURATE (lane B, 2026-08-24) — **open**
+
+**In short:** `bc -l` provides a small library of maths functions. Ours gets
+the arctangent wrong — not by a rounding error in the last digit, but in the
+**third** one. `a(1)` is π/4, a number every reference agrees on; GNU prints
+`.7853981633` and we print `.7828982258`. Anything computing an angle with our
+`bc` gets an answer wrong by about 0.03%.
+
+**Where:** `userspace/coreutils/src/bin/bc.rs`, the `a(x)` builtin.
+
+**Measured**, `scale=10`, `bc -l`:
+
+| Call | GNU | Ours | True value |
+|---|---|---|---|
+| `a(1)` | `.7853981633` | `.7828982258` | 0.78539816339… |
+| `j(0,1)` | `.7651976865` | `.7651976865` | agrees |
+| `s(0)`, `c(0)`, `e(1)`, `l(1)` | — | — | all agree |
+
+So it is `a` alone; the Bessel function beside it in the same harness row is
+correct, as are sine, cosine, exp and log.
+
+**Diagnosis, not yet confirmed against the code:** the error is far too large
+for accumulated rounding and far too small for a wrong formula, which is the
+signature of a **truncated series**. The Maclaurin series for arctangent
+converges famously slowly at `x = 1` — it is the alternating harmonic series
+there — so an implementation that sums a fixed number of terms rather than
+iterating until the term falls below the current `scale` lands close to the
+answer and stops. `.7828982258` being *below* the true value is consistent with
+stopping just after a negative term.
+
+**The proper fix:** the standard one, which is also GNU's. Range-reduce with
+`atan(x) = 2·atan(x / (1 + sqrt(1 + x²)))` until `|x|` is small enough that the
+series converges quickly, then sum **until the term is smaller than the working
+precision**, with the working scale set a few digits above the requested
+`scale` so the last requested digit is not itself the rounding error. Then
+extend the harness row to `a(0)`, `a(0.5)`, `a(1)`, `a(2)`, `a(-1)` and a large
+`scale` — a fixed-term series can be right at one argument and wrong at the
+next, which is exactly why one call was enough to miss this.
+
+---
+
+## TD-B-BC-MATHLIB-LOG-ERRORS-WHERE-GNU-SATURATES (lane B, 2026-08-24) — **open**
+
+**In short:** `l(0)` — the natural logarithm of zero — has no answer as a real
+number. GNU `bc` returns a very large negative number rather than complaining;
+ours prints `Runtime error: log of non-positive number` and computes nothing.
+A script that takes the log of a value which happens to be zero gets a number
+from GNU and a diagnostic from us.
+
+**Where:** `userspace/coreutils/src/bin/bc.rs`, `RuntimeError::LogOfNonPositive`
+and the `l(x)` builtin that raises it.
+
+**Measured**, `scale=10`, `bc -l`:
+
+| Call | GNU stdout | GNU stderr | Ours |
+|---|---|---|---|
+| `l(0)` | `-9999999999.0000000000` | *(none)* | *(none)*, plus `Runtime error: log of non-positive number` |
+
+`-9999999999` is ten nines — one per digit of `scale`, which is 10 here. That
+is probably not a coincidence, and it is the thing to check before implementing:
+GNU's `l` looks like it saturates at a magnitude tied to the current scale
+rather than returning a fixed constant. **Measure `l(0)` at `scale=5`,
+`scale=20` and `scale=50` before writing the fix.** A hard-coded
+`-9999999999` that happens to match at `scale=10` would be a new bug wearing
+the old one's clothes.
+
+**Not yet measured, and needed:** `l(-1)`. Negative arguments may or may not
+saturate the same way; the row above establishes only zero.
+
+**The proper fix:** whatever the scale sweep shows, applied in `l(x)`'s
+zero/negative path in place of the `RuntimeError::LogOfNonPositive` return. If
+it turns out GNU does error for negatives and only saturates at zero, then
+`LogOfNonPositive` stays and only its zero case changes — in which case its
+wording also falls under `TD-B-BC-RUNTIME-ERROR-WORDING-DIFFERS-FROM-GNU`.
+
+---
+
+## TD-B-BC-UNAVAILABLE-FILE-NAME-IS-QUOTED-GNU-LEAVES-IT-BARE (lane B, 2026-08-24) — **open; a decision more than a bug**
+
+**In short:** ask `bc` to run a file that does not exist and both programs
+complain and exit 1. GNU writes `File nosuch.bc is unavailable.`; we write
+`File 'nosuch.bc' is unavailable.` — the same sentence with the name in quotes.
+The quotes are there on purpose, and the question is whether that purpose
+outranks matching GNU exactly.
+
+**Where:** `userspace/coreutils/src/bin/bc.rs`, `Trouble::report`, the
+`Self::Unavailable` arm, which calls `quoteaf_os` (the always-quote form).
+
+**The case for the quotes** is the one the whole tree already accepts for every
+coreutils diagnostic: a file name may contain spaces, newlines or control
+characters, and an unquoted one in the middle of a sentence is then unreadable
+or actively misleading. `quoteaf_os` was chosen here specifically because the
+name sits mid-sentence, where an elided quote would blur into the words either
+side of it.
+
+**The case against** is that `bc` is not coreutils. It is a different upstream
+with a different convention, and this tree's diagnostic policy was adopted to
+match *GNU coreutils*, not to be applied to every program regardless of which
+program it is imitating. Matching GNU `bc` is the stated goal of
+`scripts/bc-diff.sh`.
+
+**Options:**
+
+* **(a) Match GNU bc: print the name bare.**
+  *What changes:* the message reads `File nosuch.bc is unavailable.`, and a
+  name containing a space or a newline goes into the sentence as-is.
+* **(b) Keep the quotes.**
+  *What changes:* nothing; the harness row becomes a permanent divergence and
+  should move from `known_bug` to `xfail` with this reason attached.
+* **(c) Quote only when the name needs it** (`quotef_os`, the eliding form).
+  *What changes:* a clean name prints bare and matches GNU byte-for-byte; a
+  name with a space or a control character is quoted and does not. GNU
+  coreutils' own `quotearg` behaves this way.
+
+**If it is never decided:** nothing gets worse and nothing is blocked; one
+harness row stays yellow. Recommendation: **(c)** — it makes the common case
+match GNU exactly and keeps the protection for the case that motivated the
+policy. It is a user-visible message, so it is written down here rather than
+quietly changed.
+
+---
+
 ## TD-A-BOOT-HISTORY-IS-A-TRACKED-FILE-EVERY-BOOT-DIRTIES (lane A, 2026-08-24) — **open**
 
 `bench/boot-history.jsonl` is committed to git *and* appended to by every run of
@@ -73388,6 +74301,161 @@ Either of these removes the hazard; the first is smaller and probably right:
 Never run `git checkout --`, `git restore`, or `git stash` against
 `bench/boot-history.jsonl`. If it is dirty before a merge, **commit it**, do not
 clear it.
+
+## TD-C-EVERY-KEYSTROKE-WENT-TO-THE-LAST-TEXT-FIELD-IN-THE-WINDOW — RESOLVED 2026-08-24
+
+**Lane C, found 2026-08-24 while adding a caret to `WidgetKind::TextInput`.**
+
+The toolkit had no concept of keyboard focus. `Widget::handle_event`
+(`gui/toolkit/src/widget.rs`) walked its children back to front and gave the
+event to the first one that consumed it — and it did that for **key** events as
+well as for mouse events, where the back-to-front walk is correct because it
+means "topmost under the pointer". A key event has no pointer, so "the first
+child that takes it, searched back to front" resolves to *the last text field in
+the tree*, unconditionally.
+
+So on any form with two text fields, everything the user typed went into the
+second one, whatever they had clicked. The click itself was delivered correctly
+— to the field under the pointer — which made the symptom look like a rendering
+fault rather than a routing one.
+
+### Why no test caught it
+
+Every text-input test in the file built a tree with exactly *one* text field, so
+"the field the user clicked" and "the last field in the tree" were the same
+widget and no test could tell them apart. The regression test that does is
+`typing_goes_to_the_field_that_was_clicked_and_not_the_last_one_in_the_tree`,
+which uses two fields and clicks the first.
+
+### The fix
+
+A focus, introduced properly rather than as a flag on the key path — see
+`design-decisions.md` §546 for the four choices it involved. The line that
+closes the bug is the guard in `Widget::handle_event`:
+
+```rust
+Event::Key(key) if self.focused => self.handle_key(key),
+```
+
+with `WidgetTree::handle_event` moving the focus on a mouse press (by hit-test,
+before the click is dispatched) and consuming Tab / Shift+Tab to step it.
+
+### What it means for callers
+
+`WidgetTree` now swallows typing until something is focused, where before it
+delivered it to an arbitrary widget. A window that wants a field ready to type
+into on open must say so with `WidgetTree::focus_first()`. That is a behaviour
+change, but not one that breaks any current caller: no app in the tree routes
+events through `WidgetTree::handle_event` today — they were all doing their own
+key handling, which is itself a sign that this path was not usable.
+
+## TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED (lane C, 2026-08-24) — **fixed 2026-08-24**
+
+`ModalOverlay` has a `content_rect` — the dialog's own rectangle, which
+`handle_mouse` tests a click against to decide whether it landed outside the
+dialog and should dismiss it. **Nothing ever sets it.** The only callers of
+`set_content_rect` in the tree are two unit tests (`gui/toolkit/src/modal.rs`);
+no dialog calls it, so every live dialog carries `(0.0, 0.0, 0.0, 0.0)` and
+`point_in_content` answers `false` for every point on the screen.
+
+### What breaks
+
+- **`dismiss_on_click_outside` dismisses on a click *anywhere*, including on the
+  dialog's own buttons.** `ModalOverlay::new()` turns it on by default, so this
+  is the behaviour of any dialog that does not turn it off. `InputDialog` and
+  `ProgressDialog` set it to `false` in their constructors and are unaffected;
+  `AlertDialog` and `NonModalDialog` need checking, and the default itself is
+  the trap for whatever is written next.
+- **No dialog can hit-test anything inside itself.** That is why `InputDialog`
+  has a caret it can place with the arrows but not with the mouse: the geometry
+  it would need is computed inside `render(&self, parent_width, parent_height,
+  …)` from the parent's size, discarded when that call returns, and unavailable
+  to `handle_mouse`, which is not told the parent's size at all.
+
+### Why it is a design fault and not a missing call
+
+Adding `self.overlay.set_content_rect(...)` inside `render` is impossible as
+written — `render` takes `&self`. Threading the parent size into `handle_mouse`
+instead would give two independent copies of the layout arithmetic, in two
+methods, that have to agree exactly or the click lands in the wrong place; that
+is the bug it is trying to fix, moved.
+
+### The proper fix
+
+Give the dialogs a **layout step**, as `Widget`/`WidgetTree` already have: a
+`fn layout(&mut self, parent_width: f32, parent_height: f32)` that computes the
+rectangles once, stores them (dialog rect, input-field rect, button rects), and
+is called before `render` and consulted by `handle_mouse`. `render` then draws
+from the stored boxes rather than recomputing them, and `handle_mouse` hit-tests
+against the same numbers that were drawn — which is the property that makes a
+click land where the user aimed it.
+
+Once that exists, `InputDialog` gains click-to-place-caret in a few lines, using
+`text::cursor_at` against the stored field rect exactly as
+`WidgetKind::TextInput` does today, and `dismiss_on_click_outside` starts
+meaning what it says.
+
+### 2026-08-24, later — the survey before the fix found three more, and they are all the same fault
+
+Reading every `handle_mouse` in the file before starting the layout step turned
+up that the missing geometry is not one dialog's problem. It is the file's:
+
+- **`InputDialog::handle_mouse` hit-tests nothing at all.** Its whole body is
+  the overlay-dismiss check. So its OK and Cancel buttons — which it draws,
+  and highlights, and moves a focus ring between — **cannot be clicked**. The
+  dialog is keyboard-only, and nothing says so.
+- **`ProgressDialog` has no `handle_mouse` at all**, and its `handle_event`
+  has no `Event::Mouse` arm. A `.cancelable()` progress dialog draws a Cancel
+  button that can only be worked with Escape.
+- **`AlertDialog::handle_mouse` hit-tests against `compute_layout(800.0,
+  600.0)`** — a hardcoded parent size, because `handle_mouse` is not told the
+  real one. Its buttons therefore land correctly only on an 800×600 parent and
+  are offset by half the difference on any other; on a 1920×1080 desktop the
+  hit areas sit 560 px left and 240 px above the buttons the user can see.
+  This is the same bug as the other two wearing a plausible number.
+
+That last one is the reason the fix is a stored layout and not a parameter.
+`AlertDialog` already has the shared `compute_layout` the entry above asks for,
+and it *still* clicks in the wrong place — because the input the layout needs
+is not available where the click is handled. Threading it in would not have
+been "two copies of the arithmetic"; it would have been one copy fed a guess.
+
+### 2026-08-24 — fixed, with one change to the plan above and a fourth bug found on the way
+
+The layout step landed, but **not as the separate `fn layout(&mut self, …)` the
+plan asked for.** A separate call is a call that can be forgotten, and a
+forgotten one reproduces this entry exactly: hit areas that do not match what is
+on screen, compiling and rendering perfectly and failing only under the mouse.
+The tree already had the evidence — `ModalOverlay::set_content_rect` *was* that
+separate call, and in the whole repository only two unit tests ever made it.
+So instead `render` itself took `&mut self` and records where it put things as a
+side effect of drawing them; `handle_mouse` can consult nothing else. The
+reasoning, and the cost of `&mut self` on a draw method, are `design-decisions.md`
+§547.
+
+**The fourth bug, found while fixing the other three:** `content_rect` was a
+plain tuple starting at all zeroes, so before the first frame *every* point on
+screen is "outside the dialog". A dialog with `dismiss_on_click_outside` on —
+which is `ModalOverlay::new()`'s default — therefore dismissed itself if a click
+arrived between `show()` and its first frame, before the user had seen it. It is
+now `Option`, so "I do not know where I am" classifies no clicks rather than all
+of them.
+
+What is fixed:
+
+- `AlertDialog` hit-tests the rectangles it drew, at any parent size, and
+  `render_buttons` draws *from* those rectangles rather than re-deriving them.
+- `InputDialog` has working OK, Cancel and click-to-place-caret, the last of
+  those correct through a horizontal scroll (shared with `WidgetKind::TextInput`
+  via the new `textedit::cursor_at_click`) and through password masking (the
+  click is resolved against the row of marks and mapped back to a byte offset in
+  the secret, so it can never land inside a character).
+- `ProgressDialog` has an `Event::Mouse` arm and a clickable Cancel button.
+- `dismiss_on_click_outside` means what it says, and means nothing before the
+  first frame.
+
+Proved by `scripts/reintro-modal-geometry.py` — nineteen one-line defects, each
+of which compiles.
 
 ---
 

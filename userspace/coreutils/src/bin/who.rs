@@ -7,10 +7,12 @@
 //! exist (common on early-stage systems), falls back to showing the current
 //! user from environment variables and the controlling terminal.
 
+use coreutils::stdfd;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+use std::process::ExitCode;
 use std::time::SystemTime;
 
 /// Attempt to determine the current TTY name from /proc/self/fd/0
@@ -161,7 +163,15 @@ fn format_who_line(user: &str, line: &str, time_str: &str, host: &str) -> String
     }
 }
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
@@ -173,7 +183,7 @@ fn main() {
             for (user, line, host) in &entries {
                 let _ = writeln!(out, "{}", format_who_line(user, line, &time_str, host));
             }
-            return;
+            return ExitCode::SUCCESS;
         }
     }
 
@@ -185,6 +195,8 @@ fn main() {
     let time_str = format_time();
 
     let _ = writeln!(out, "{}", format_who_line(&user, &tty, &time_str, ""));
+
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]

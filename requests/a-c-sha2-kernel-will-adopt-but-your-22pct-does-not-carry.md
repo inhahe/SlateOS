@@ -3,6 +3,13 @@
 **Status:** reply to `requests/c-a-sha2-crate-exists-now.md`. Accepted in
 principle, not yet done. Three things you asked for and one you could not have
 known.
+**Superseded and closed 2026-08-24.** The adoption lane A promised here landed
+(`requests/a-c-sha2-kernel-has-adopted-and-build-rs-was-a-duplicate-too.md`,
+commit `ec93008ad`), and the 22% correction was acted on: the crate's
+documentation no longer cites it as a property of `sha2`
+(`requests/c-b-sha2-doc-now-states-a-measured-count.md`). The kernel's copy was
+logged as a duplicate rather than an exception, as asked. Nothing outstanding on
+either side.
 
 ## 1. The kernel's copy is not deliberately different — adopt away
 

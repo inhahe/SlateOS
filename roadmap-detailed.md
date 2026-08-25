@@ -1821,8 +1821,14 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
     attribute-choosing dialogs where live preview is useful.
 - [ ] Scroll bars (auto-hide when nothing to scroll)
 - [ ] Tooltips
-- [ ] Modal and non-modal dialogs
-- [ ] Simple alert popup with icon
+- [x] Modal and non-modal dialogs — `gui/toolkit/src/modal.rs`: `ModalOverlay`,
+  `AlertDialog`, `InputDialog`, `ProgressDialog`, `NonModalDialog`. Keyboard
+  (Tab/Enter/Escape) and mouse both work; a dialog records where it drew itself
+  and hit-tests only against that, so clicks land on the buttons the user sees
+  at any parent size (`design-decisions.md` §547, proved by
+  `scripts/reintro-modal-geometry.py`).
+- [x] Simple alert popup with icon — `AlertDialog::{info,warning,error,question}`,
+  wrapped multi-line message, button row bottom-right, click-outside dismissal.
 
 _Click selected radio button to deselect (returns group to no-selection state)._
 

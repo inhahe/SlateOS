@@ -1602,6 +1602,88 @@ inconsistency that *was* dangerous — the piped half printing `1: alpha` while
 the file half printed `1:alpha` — is already fixed (`afe5b0ae2`); what remains
 here is only the choice of default.
 
+## An account with no password: should the lock screen let it through, or refuse forever? (lane C, 2026-08-24)
+
+**In short:** Some accounts have no password set at all. Today, if such an
+account's screen locks, pressing Enter dismisses it — no password is asked for,
+because there is none to ask for. That means anyone who walks up to that
+machine while it is locked gets straight into the session. The obvious fix is to
+refuse: a lock screen with nothing to check should let nobody in. But then the
+*real* user is locked out too, permanently, with no way back to their own
+desktop short of a reboot. I need you to pick which of those two you would
+rather ship.
+
+### Where it bites
+
+`apps/lockscreen/src/main.rs`, `LockScreen::unlocks_for` — one function, written
+specifically so that this is a one-line change once you decide. It is called by
+`submit_password` on every attempt.
+
+The verdict now comes back as one of six values borrowed from lane B's
+`userspace/authlib` (`Accepted`, `Rejected`, `Locked`, `NoPassword`, `Unusable`,
+`RateLimited`). Five of them decide themselves. `NoPassword` — meaning "the
+stored entry for this account is empty" — deliberately does not, because lane B
+made it the *caller's* policy: a console login may reasonably let an empty entry
+through, and a lock screen may not. So each caller must state its own rule, and
+this is ours to state.
+
+### Why it is not obvious
+
+The security argument is clean and lane B makes it: an empty-password account
+means anyone who closes the lid owns the machine.
+
+The counter-argument is that the hole was already open. If the account has no
+password, an attacker standing at that machine can log in as that user from the
+*login* screen without typing anything. Refusing at the lock screen protects an
+already-running session and nothing else — while creating a failure mode that
+is arguably worse than the hole: a desktop that cannot be got back into by the
+person it belongs to.
+
+### Options
+
+**A — accept it (what it does today).**
+*What changes:* nothing. A passwordless account's lock screen is dismissed by
+pressing Enter, as now.
+
+**B — refuse it.**
+*What changes:* a passwordless account that locks can never be unlocked. The
+screen says "This account has no password" and stays up until the machine is
+restarted.
+
+**C — never lock a passwordless account in the first place.**
+*What changes:* auto-lock is suppressed and the manual lock command is refused
+for an account with no password, so the trap in B cannot be entered. If the
+screen is somehow reached anyway it dismisses on any key, as in A. Costs a
+little more code: the suppression has to live wherever locking is triggered,
+not only in the screen.
+
+**D — accept it, but require the account to have been passwordless *before* the
+session started**, so that clearing a password while locked cannot open the
+screen.
+*What changes:* nothing a user would notice; closes a narrow race that only
+matters once `passwd` can be run by something other than the session owner.
+
+### My recommendation
+
+**C.** It is the only one of the four that is neither a hole nor a trap: it
+declines to offer a security boundary that does not exist, rather than
+pretending to enforce one (B) or pretending to have enforced one (A). B's
+failure mode is the one I would least like to explain to a user, because it
+takes a working desktop and makes it unusable through no action of theirs.
+
+If C is more machinery than you want here, **A** — the status quo — is the safer
+of the two remaining, for the reason above: it does not create a new way to lose
+a session, and the exposure it leaves is one the login screen already has.
+
+### If this is never answered
+
+Safe, and it does not get worse. The screen keeps behaving as it always has
+(option A) and the policy is isolated in one function, so answering later costs
+one line plus a test. Nothing is blocked on it. The reason it is worth asking at
+all is that the *refactor that surfaced it* deliberately did not change it —
+altering who can unlock a machine is not something to slip into a commit about
+interface shape.
+
 ---
 
 ## Should `oci run` refuse to start when an option cannot be applied? (lane A)

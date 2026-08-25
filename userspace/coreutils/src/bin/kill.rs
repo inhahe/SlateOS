@@ -46,10 +46,12 @@
 //! `USR1` and `USR2` — which after `TERM`, `HUP` and `KILL` are the signals
 //! scripts send most.
 
+use coreutils::diag;
+use coreutils::stdfd;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, ErrorKind, Write};
-use std::process;
+use std::process::ExitCode;
 
 use coreutils::errmsg::strerror;
 use coreutils::quote::{os_bytes, quote};
@@ -363,28 +365,36 @@ fn errno_text(raw: Option<i32>, err: &io::Error) -> String {
 /// diagnostic — but every *other* one must, which is why this is not a bare
 /// `print!`. `print!` panics on a write error, so the old code turned a full
 /// disk into a panic message and a closed pipe into one too.
-fn write_out(text: &str) -> i32 {
+fn write_out(text: &str) -> u8 {
     let mut out = io::stdout().lock();
     let write = out.write_all(text.as_bytes()).and_then(|()| out.flush());
     match write {
         Ok(()) => 0,
         Err(e) if e.kind() == ErrorKind::BrokenPipe => 0,
         Err(e) => {
-            eprintln!("kill: write error: {}", strerror(&e));
+            diag!("kill: write error: {}", strerror(&e));
             1
         }
     }
 }
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let action = match parse_args(&args) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("kill: {e}");
-            eprintln!("Usage: kill [-s SIGNAL | -SIGNAL] PID...");
-            eprintln!("       kill -l [EXIT_STATUS...]");
-            process::exit(1);
+            diag!("kill: {e}");
+            diag!("Usage: kill [-s SIGNAL | -SIGNAL] PID...");
+            diag!("       kill -l [EXIT_STATUS...]");
+            return ExitCode::from(1);
         }
     };
 
@@ -406,7 +416,7 @@ fn main() {
                         lines.push('\n');
                     }
                     Err(e) => {
-                        eprintln!("kill: {e}");
+                        diag!("kill: {e}");
                         status = 1;
                     }
                 }
@@ -415,7 +425,7 @@ fn main() {
         }
         KillAction::Send { signal, pids } => send_all(signal, &pids),
     };
-    process::exit(status);
+    ExitCode::from(status)
 }
 
 /// Send `signal` to every PID, reporting each failure and continuing.
@@ -423,16 +433,16 @@ fn main() {
 /// Continuing matters: `kill -9 111 222` must still try 222 after 111 turns
 /// out to be gone. The exit status is 1 if *any* target failed, which is what
 /// a caller testing `if kill …` is asking about.
-fn send_all(signal: i32, pids: &[OsString]) -> i32 {
+fn send_all(signal: i32, pids: &[OsString]) -> u8 {
     let mut status = 0;
     for pid_str in pids {
         let Some(pid) = text(pid_str).and_then(|t| t.parse::<i32>().ok()) else {
-            eprintln!("kill: {}: invalid process id", quote(&os_bytes(pid_str)));
+            diag!("kill: {}: invalid process id", quote(&os_bytes(pid_str)));
             status = 1;
             continue;
         };
         if let Err(err) = send_one(pid, signal) {
-            eprintln!(
+            diag!(
                 "kill: {}: {}",
                 quote(&os_bytes(pid_str)),
                 errno_text(err.raw_os_error(), &err)

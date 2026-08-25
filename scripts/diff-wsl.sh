@@ -196,10 +196,44 @@ diff_newer_than() {
        -name '*.rs' -newer "$1" -print -quit 2>/dev/null
 }
 
-# `BINARY|NEWER-FILE` for the first stale binary among `$DIFF_BINS`, or nothing.
-# A binary the build did not produce at all counts as stale.
+# The package's library artifact, or nothing if it has none.
+#
+# `deps/` holds one per build hash; the newest is the one the binaries above
+# were just linked against.
+diff_lib_artifact() {
+  ls -t "$target_dir/x86_64-unknown-linux-gnu/debug/deps/lib${DIFF_PKG}-"*.rlib \
+    2>/dev/null | head -1
+}
+
+# `BINARY|NEWER-FILE` for the first stale artifact, or nothing.
+# An artifact the build did not produce at all counts as stale.
+#
+# ## The library is checked first, and that is the point
+#
+# The obvious check -- "is any source newer than the binaries" -- passed on
+# 2026-08-24 against a build whose *library* was three commits stale. Cargo had
+# relinked every binary, so each one's mtime was newer than every source file
+# and the check was satisfied, while the `coreutils` lib unit was replayed from
+# cache: `stdfd`'s new `fflush (stdout)` before a diagnostic was simply not in
+# them, and `interleave-diff.sh` reported sixteen differences against a fix
+# that was in the tree and correct. `cargo clean -p coreutils` was the whole
+# cure, and afterwards the same harness passed twenty-one for twenty-one.
+#
+# The tell was a replayed `dead_code` warning naming a function that had been
+# unused only in the *previous* edit of the file -- a cached lib announcing
+# itself. A per-binary mtime check cannot see that, because a binary's mtime
+# says when it was linked and nothing about how old the code inside it is. So
+# the artifact that actually holds the shared code is checked on its own.
 diff_first_stale() {
-  local diff_b diff_bin diff_late
+  local diff_b diff_bin diff_late diff_lib
+  diff_lib=$(diff_lib_artifact)
+  if [ -n "$diff_lib" ]; then
+    diff_late=$(diff_newer_than "$diff_lib")
+    if [ -n "$diff_late" ]; then
+      printf '%s|%s\n' "$diff_lib" "$diff_late"
+      return 0
+    fi
+  fi
   for diff_b in $DIFF_BINS; do
     diff_bin=$(diff_ours "$diff_b")
     if [ ! -f "$diff_bin" ]; then

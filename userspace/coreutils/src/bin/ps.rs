@@ -7,9 +7,11 @@
 //! Reads from /proc filesystem. Each directory under /proc/<pid>/
 //! contains process information files: stat, cmdline, status.
 
+use coreutils::stdfd;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use std::process::ExitCode;
 
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -48,7 +50,15 @@ struct ProcInfo {
     time_str: String,
 }
 
-fn main() {
+/// The funnel. A diagnostic that could not be written turns the earned
+/// status into `exit_failure`, which is what upstream's `atexit
+/// (close_stdout)` does on every exit path at once. See
+/// [`stdfd::close_stderr`].
+fn main() -> ExitCode {
+    stdfd::close_stderr(run_main(), 1)
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let parsed = parse_args(&args);
 
@@ -69,7 +79,7 @@ fn main() {
         Ok(d) => d,
         Err(_) => {
             // No /proc — nothing to show
-            return;
+            return ExitCode::SUCCESS;
         }
     };
 
@@ -127,6 +137,8 @@ fn main() {
             let _ = writeln!(out, "{:>5} {:<8} {}", pid, info.tty, info.comm);
         }
     }
+
+    ExitCode::SUCCESS
 }
 
 /// Parse the contents of `/proc/<pid>/stat`.  The format is:

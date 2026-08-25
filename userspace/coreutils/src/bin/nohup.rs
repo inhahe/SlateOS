@@ -91,8 +91,9 @@
 
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::quoteaf_os;
-use coreutils::stdfd;
+use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;
+use std::io::Write;
 use std::process::ExitCode;
 
 /// `nohup`'s own failures are 125 — distinct from the child's statuses and from
@@ -153,24 +154,50 @@ fn main() -> ExitCode {
 /// Everything the utility does, so that [`main`] is only the exit path --
 /// upstream's `main` minus the `atexit` handler it registers.
 fn run_main() -> ExitCode {
+    // First, before anything reads or writes a standard descriptor: this is
+    // what makes a closed one look closed rather than like the `/dev/null` the
+    // runtime substituted. `--help >&-` needs it as much as the exec path does.
+    stdfd::restore();
+
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match parse_args(&args) {
-        Ok(Request::Help) => {
-            print!("{}", help_text());
-            ExitCode::SUCCESS
-        }
-        Ok(Request::Version) => {
-            println!("nohup (SlateOS coreutils) 0.1.0");
-            ExitCode::SUCCESS
-        }
-        Ok(Request::Run(argv)) => run(&argv),
+    let request = match parse_args(&args) {
+        Ok(request) => request,
         // `report` prints the sentence *and* the `Try 'nohup --help'` referral,
         // which `Error` carries as its own field — see `getopt::Error`.
+        //
+        // Decided before the stream exists, because upstream's
+        // `usage (EXIT_CANCELED)` reaches `atexit (close_stdout)` with nothing
+        // buffered: measured, `nohup >/dev/full` prints the missing-operand
+        // pair and no write error after it.
         Err(e) => {
             NOHUP.report(&e);
-            ExitCode::from(u8::try_from(e.status).unwrap_or(1))
+            return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
-    }
+    };
+
+    // `run` is the exec path: it either replaces this process or reports why it
+    // could not, and either way nothing of ours is buffered on descriptor 1 by
+    // then. Only `--help` and `--version` write, and they fail like any other
+    // write: measured, `nohup --help >&-` is `nohup: write error: Bad file
+    // descriptor` and exits 125 — `nohup`'s `exit_failure`, not 1.
+    let mut out = Stream::stdout();
+    let earned = match request {
+        Request::Help => {
+            let _ = out.write_all(help_text().as_bytes());
+            ExitCode::SUCCESS
+        }
+        Request::Version => {
+            let _ = out.write_all(b"nohup (SlateOS coreutils) 0.1.0\n");
+            ExitCode::SUCCESS
+        }
+        Request::Run(argv) => return run(&argv),
+    };
+    stdfd::close_stdout_with(
+        "nohup",
+        out,
+        earned,
+        u8::try_from(NOHUP_FAILURE).unwrap_or(1),
+    )
 }
 
 /// Read the command line.
@@ -544,10 +571,10 @@ mod imp {
     }
 
     pub fn run(argv: &[OsString]) -> ExitCode {
-        // Before `Diagnostics::save`, so that a stderr the caller closed is
-        // seen as closed rather than as the runtime's `/dev/null`.
-        stdfd::restore();
-
+        // `stdfd::restore` has already run, at the top of `run_main` — which is
+        // before `Diagnostics::save` below, so a stderr the caller closed is
+        // seen as closed rather than as the runtime's `/dev/null`, and before
+        // `tty_or_closed(1)`, which is asked the same question about output.
         let mut diag = Diagnostics::save();
 
         let ignoring_input = is_tty(0);

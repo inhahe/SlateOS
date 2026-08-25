@@ -6,6 +6,7 @@
 //!
 //! Uses a simple longest-common-subsequence algorithm.
 
+use coreutils::diag;
 use coreutils::quote::quotef_os;
 use std::env;
 use std::fs;
@@ -39,7 +40,7 @@ fn main() {
     let parsed = parse_args(&args);
 
     if parsed.files.len() != 2 {
-        eprintln!("diff: requires exactly two files");
+        diag!("diff: requires exactly two files");
         process::exit(2);
     }
     let unified = parsed.unified;
@@ -49,7 +50,7 @@ fn main() {
     let content1 = match fs::read_to_string(files[0]) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("diff: {}: {e}", quotef_os(files[0]));
+            diag!("diff: {}: {e}", quotef_os(files[0]));
             process::exit(2);
         }
     };
@@ -57,7 +58,7 @@ fn main() {
     let content2 = match fs::read_to_string(files[1]) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("diff: {}: {e}", quotef_os(files[1]));
+            diag!("diff: {}: {e}", quotef_os(files[1]));
             process::exit(2);
         }
     };

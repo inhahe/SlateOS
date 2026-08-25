@@ -275,15 +275,17 @@ impl PlayerId {
         }
     }
 
-    fn position_label(self) -> &'static str {
-        match self.0 {
-            0 => "South",
-            1 => "East",
-            2 => "North",
-            3 => "West",
-            _ => "?",
-        }
-    }
+    // There was a `position_label` here, identical to `name` except that it
+    // spelled seat 0 "South" instead of "You".  Nothing called it: the seat
+    // panel draws `name()` with a " (NS)"/" (EW)" team marker, and the four
+    // seats are already laid out on screen in their compass positions, so a
+    // second textual spelling of the same seat had nowhere to go.  See
+    // known-issues.md lesson 45 -- it had a test, which is what made it look
+    // alive.
+    //
+    // If a screen ever does need the compass name of the human's seat (a
+    // rules help page, say), add it back next to that screen and give it a
+    // caller in the same change.
 
     /// Team number (0 = NS team, 1 = EW team).
     fn team(self) -> usize {
@@ -380,10 +382,18 @@ impl Trick {
         Some(best_player)
     }
 
-    /// Whether any card played is a spade.
-    fn contains_spade(&self) -> bool {
-        self.cards.iter().any(|(_, c)| c.suit == Suit::Spades)
-    }
+    // There was a `contains_spade` here -- "did any card in this trick have
+    // the spade suit" -- with a test and no caller.  It is deleted rather
+    // than wired in, because the rule it looks like it serves is already
+    // implemented, and implemented *better*, one level up: `play_card` sets
+    // `spades_broken` the instant a spade hits the table.
+    //
+    // That distinction is the actual rule, not a detail.  Spades break the
+    // moment one is played, so the third player of a trick may already lead
+    // them next trick; asking the finished trick whether it "contained" a
+    // spade would break them one trick late.  Reviving this as a shortcut
+    // would be reintroducing a subtly wrong second answer to a question
+    // that already has a right one.  See known-issues.md lesson 45.
 }
 
 // ── Sort order toggle ───────────────────────────────────────────────
@@ -2206,14 +2216,10 @@ mod tests {
         assert_eq!(trick.winner(), Some(PlayerId::WEST));
     }
 
-    #[test]
-    fn test_trick_contains_spade() {
-        let mut trick = Trick::new(PlayerId::SOUTH);
-        trick.add(PlayerId::SOUTH, Card::new(Suit::Hearts, Rank::ACE));
-        assert!(!trick.contains_spade());
-        trick.add(PlayerId::EAST, Card::new(Suit::Spades, Rank::TWO));
-        assert!(trick.contains_spade());
-    }
+    // `test_trick_contains_spade` went with the method it exercised.  What
+    // it was really asking -- "does playing a spade break spades" -- is
+    // covered by `test_play_spade_breaks_spades`, against the field the game
+    // actually consults.
 
     #[test]
     fn test_trick_winner_empty() {
@@ -2912,13 +2918,10 @@ mod tests {
         assert_eq!(PlayerId::WEST.name(), "West");
     }
 
-    #[test]
-    fn test_player_position_labels() {
-        assert_eq!(PlayerId::SOUTH.position_label(), "South");
-        assert_eq!(PlayerId::EAST.position_label(), "East");
-        assert_eq!(PlayerId::NORTH.position_label(), "North");
-        assert_eq!(PlayerId::WEST.position_label(), "West");
-    }
+    // `test_player_position_labels` went with `position_label`.  The three
+    // seats it named the same way as `name()` are still covered by
+    // `test_player_names` just above; the fourth, seat 0, is "You" there on
+    // purpose.
 
     // ── Card face rendering tests ───────────────────────────────────
 

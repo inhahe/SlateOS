@@ -6,18 +6,28 @@
 # (see `number_width` in wc.rs), and a comparison that trimmed whitespace would
 # be blind to precisely the thing that was hardest to get right.
 #
-# ## Why the reference is glibc, and only glibc
+# ## Why both sides run inside WSL
 #
-# The other `*-diff.sh` harnesses default to the host's `wc`, which on this
-# machine is MSYS2's. That is a Cygwin derivative: it links `msys-2.0.dll`
-# rather than glibc, so its `getopt`, its `iswprint` and its `wcwidth` are all
-# its own. For `cat` that only mattered in the option-diagnostics section and
-# the fix was to reference glibc there (see `cat-diff.sh`). For `wc` it matters
-# *everywhere*: `-m` asks which bytes decode, `-w` asks which characters are
-# blank and `-L` asks how many columns each one occupies, and all three are
-# locale-and-libc questions. Referencing MSYS2 here would certify answers no
-# GNU/Linux system gives, so this harness reaches for glibc through WSL for
-# every case and skips loudly if it is not there.
+# `scripts/diff-wsl.sh` gives the reasons. The reference has to be glibc's, and
+# for `wc` that matters *everywhere* rather than only in the diagnostics: the
+# host's `wc` is MSYS2's, a Cygwin derivative linking `msys-2.0.dll` rather than
+# glibc, so its `getopt`, its `iswprint` and its `wcwidth` are all its own —
+# and `-m` asks which bytes decode, `-w` asks which characters are blank and
+# `-L` asks how many columns each one occupies. All three are
+# locale-and-libc questions, so referencing MSYS2 would certify answers no
+# GNU/Linux system gives. This file already avoided that by reaching for `wsl
+# -e env LC_ALL=C.UTF-8 wc`, at the cost of a WSL process per case and a probe
+# to check that `wsl`'s inherited Windows cwd landed on the same bytes under
+# `/mnt/...`.
+#
+# The subject moves with it now, which is what the preamble adds. Nothing here
+# was an expected difference only because of the host — in fact nothing here is
+# an expected difference at all — so the tally is unchanged by the move.
+#
+# That last fact makes the `OURS=/usr/bin/wc` control the other harnesses use
+# inert here: with no expected difference to flip into an XPASS, pointing
+# `OURS` at GNU only compares GNU with itself. Should this file ever record an
+# xfail, that control becomes worth running again.
 #
 # The locale is `C.UTF-8`, which is settled policy rather than a convenience:
 # the SlateOS target has no non-UTF-8 locale (design-decisions.md, "osh's
@@ -25,40 +35,24 @@
 # configuration this OS cannot be in.
 set -u
 
-# Our wc is a native Windows binary, so MSYS would rewrite an argument that
-# looks like a path.
-export MSYS2_ARG_CONV_EXCL='*'
-
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils wc "${OURS:-}") || exit 1
-GNU=${GNU:-"wsl -e env LC_ALL=C.UTF-8 wc"}
-export LC_ALL=${LC_ALL:-C.UTF-8}
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `wc` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+DIFF_PROG=wc
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d)
-trap 'rm -rf "$fixtures"' EXIT
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
 cd "$fixtures" >/dev/null || exit 1
-OURS_ABS=$OURS
-case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$OLDPWD/$OURS" ;; esac
 
-# WSL is invoked with the Windows cwd, which for an MSYS temp directory lands
-# on the same bytes under `/mnt/c/...`. Verified rather than assumed, because a
-# reference that silently ran somewhere else would report every file operand as
-# missing and still "agree" on the ones fed through stdin.
-if [ "$($GNU </dev/null 2>/dev/null | tr -d ' ')" = "000" ] && \
-   printf 'probe\n' > .probe && \
-   [ "$($GNU .probe 2>/dev/null | awk '{print $1, $2, $3}')" = "1 1 6" ]; then
-  HAVE_GNU=yes
-else
-  HAVE_GNU=no
-  echo "wc-diff: glibc wc not reachable in this directory (tried: $GNU); skipping"
-fi
-rm -f .probe
+# One invocation of one side. `$1` is `ours` or `gnu`; each is reached through
+# a symlink named `wc` in a directory that is the whole of `PATH` for that one
+# invocation, so `argv[0]` is the bare word on both sides. This replaced a
+# reference held as a *string* and word-split at every call site, which is why
+# the calls below have gained a quoted argument where they used to have none.
+run_side() { local side=$1; shift; env PATH="$bindir/$side" wc "$@"; }
 
 printf 'alpha beta\ngamma\n'                    > plain.txt      # 2 12 17
 printf 'one two three'                          > unterminated.txt
@@ -86,11 +80,11 @@ compare() {
   # be read. See the same note in cat-diff.sh.
   local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
   if [ "$stdin" = "-" ]; then
-    "$OURS_ABS" "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    $GNU "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    run_side ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    run_side gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   else
-    printf '%b' "$stdin" | "$OURS_ABS" "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
-    printf '%b' "$stdin" | $GNU "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
+    printf '%b' "$stdin" | run_side ours "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
+    printf '%b' "$stdin" | run_side gnu  "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
   fi
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   rm -f "$o_bin" "$g_bin"
@@ -130,16 +124,14 @@ report() {
   return 0
 }
 
-run_case() { [ "$HAVE_GNU" = yes ] || return 0; compare - "$@"; report "wc $*"; }
+run_case() { compare - "$@"; report "wc $*"; }
 run_stdin() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
   compare "$input" "$@"
   report "printf '$input' | wc $*"
 }
 
 xfail_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local reason="$1"; shift
   compare - "$@"
   if [ "$AGREED" = no ]; then
@@ -300,8 +292,8 @@ run_case -- -l
 getopt_compare() {
   local o_err g_err o_out g_out o_rc g_rc
   o_err=$(mktemp); g_err=$(mktemp)
-  o_out=$("$OURS_ABS" "$@" </dev/null 2>"$o_err"); o_rc=$?
-  g_out=$($GNU "$@" </dev/null 2>"$g_err"); g_rc=$?
+  o_out=$(run_side ours "$@" </dev/null 2>"$o_err"); o_rc=$?
+  g_out=$(run_side gnu  "$@" </dev/null 2>"$g_err"); g_rc=$?
   local o_msg g_msg
   o_msg=$(tr '\n' '|' <"$o_err"); g_msg=$(tr '\n' '|' <"$g_err")
   rm -f "$o_err" "$g_err"
@@ -314,7 +306,6 @@ getopt_compare() {
 }
 
 run_getopt() {
-  [ "$HAVE_GNU" = yes ] || return 0
   getopt_compare "$@"
   if [ "$AGREED" = yes ]; then
     pass=$((pass+1))
@@ -334,7 +325,6 @@ run_getopt() {
 # sit here being asserted forever. The next genuine one wants this, and
 # rewriting it under deadline is how a harness ends up without the XPASS half.
 xfail_getopt() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local reason="$1"; shift
   getopt_compare "$@"
   if [ "$AGREED" = no ]; then

@@ -1,3 +1,6 @@
+# shellcheck shell=sh
+# shellcheck disable=SC3043  # `local`; see "Which dialect" below.
+#
 # Shared preamble for a differential harness that runs both sides inside WSL.
 #
 # Sourced, not run. It does the six things every such harness was doing for
@@ -30,6 +33,29 @@
 # The build lands in `$HOME/.cache/slateos-diff-target` inside WSL, shared
 # between harnesses and kept out of the repository's `target/` so the Linux and
 # Windows builds do not invalidate each other (design-decisions.md §374).
+#
+# ## Which dialect
+#
+# `sh`, not `bash`. A sourced file has no shebang of its own, so shellcheck
+# cannot infer one and checks nothing at all until told -- and what it should
+# be told is the *most restrictive* shell that sources this, not the most
+# common one. 45 of the 46 harnesses are bash; `osh-diff.sh` is `#!/bin/sh`,
+# and declaring bash here would pass a bashism that breaks it, which is the
+# failure a dialect declaration exists to prevent.
+#
+# One harness got that wrong in the other direction and the check found it:
+# `ls-diff.sh` said `#!/bin/sh` while using process substitution, so `dash -n`
+# rejected the whole file -- it could not have run under the shell it named.
+# Its shebang now says bash, which is what it always was.
+#
+# The one POSIX rule this then breaks on purpose is `local`, which is not in
+# the standard. `/bin/sh` in the WSL images these harnesses run under is dash,
+# which implements it, as does bash. The alternative is to drop the three uses
+# and let those variables leak into whichever harness sourced the file: the
+# `diff_` prefix they carry makes a collision unlikely, but "unlikely" is a
+# weaker guarantee than a scope, and this file is read by every harness that
+# sources it. So the extension is kept and SC3043 is disabled at the top,
+# rather than the scoping being given up to satisfy a shell nobody runs.
 #
 # ## Why the subject is built, every run
 #

@@ -122,6 +122,7 @@ WP = "gui/desktop/src/wallpaper.rs"
 AX = "gui/desktop/src/a11y.rs"
 SWITCH = "gui/desktop/src/switch.rs"
 SLIDER = "gui/desktop/src/slider.rs"
+MM = "gui/desktop/src/multimon.rs"
 # The toolkit, one crate *below* `appearance`. 537 moved the WCAG arithmetic
 # down here so there would be one copy of it; a defect patched into this file
 # is therefore visible to `appearance` and `desktop` as well as to `guitk`.
@@ -23854,6 +23855,712 @@ DEFECTS = [
             'a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focused_one',
             'a_taskbar_button_is_clickable_where_it_is_drawn',
             'a_window_list_arriving_with_a_click_is_folded_in_after_it',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a coordinate past the edge of the space wraps to the other edge",
+        MM,
+        [
+            ('    i32::try_from(v).unwrap_or(if v.is_negative() { i32::MIN } else { i32::MAX })\n',
+             '    i32::try_from(v).unwrap_or(if v.is_negative() { i32::MAX } else { i32::MIN })\n'),
+        ],
+        ["desktop"],
+        [
+            # Clamping the wrong way is the wrap the i64 widening exists to
+            # prevent: a monitor pushed off one edge reappears on the other.
+            'a_coordinate_past_the_edge_of_the_space_stops_there_rather_than_wrapping',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a rectangle built from reversed corners is enormous, not empty",
+        MM,
+        [
+            ('        let w = u32::try_from(right.saturating_sub(left).max(0)).unwrap_or(u32::MAX);\n',
+             '        let w = u32::try_from(right.saturating_sub(left)).unwrap_or(u32::MAX);\n'),
+        ],
+        ["desktop"],
+        [
+            # `try_from` on a negative width fails, and the `unwrap_or` then
+            # hands back `u32::MAX` -- the widest rectangle there is, from a
+            # pair of corners that describe no rectangle at all.
+            'a_rectangle_built_from_reversed_corners_is_empty_not_enormous',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the right and bottom edges of a rectangle belong to it",
+        MM,
+        [
+            ('        px >= self.left() && py >= self.top() && px < self.right() && py < self.bottom()\n',
+             '        px >= self.left() && py >= self.top() && px <= self.right() && py <= self.bottom()\n'),
+        ],
+        ["desktop"],
+        [
+            # Half-open is what lets two monitors sit edge to edge without
+            # either a seam or an overlap. Closed on the far side, the column
+            # at x = 1920 belongs to both of them, and `monitor_at` answers
+            # with whichever was registered first.
+            'a_rectangles_edges_are_half_open',
+            'monitor_contains_point',
+            'rotated_monitor_contains',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the desktop's bounding box skips a monitor showing nothing",
+        MM,
+        [
+            ('    pub fn union(self, other: Self) -> Self {\n        Self::from_corners(\n',
+             '    pub fn union(self, other: Self) -> Self {\n        if other.is_empty() {\n            return self;\n        }\n        Self::from_corners(\n'),
+        ],
+        ["desktop"],
+        [
+            # A monitor stuck in a zero-sized mode still has a position, and
+            # the pointer can still be driven onto it -- so leaving it out of
+            # the bounding box puts a reachable place outside the desktop.
+            'the_union_reaches_a_monitor_even_if_that_monitor_shows_nothing',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a rectangle is empty only when both of its sides are zero",
+        MM,
+        [
+            ('        self.w == 0 || self.h == 0\n',
+             '        self.w == 0 && self.h == 0\n'),
+        ],
+        ["desktop"],
+        [
+            # A 1920x0 strip covers no pixels, and callers guard a division by
+            # the desktop's size on exactly this answer.
+            'a_rectangle_with_one_zero_side_covers_nothing_and_says_so',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: a rotated panel keeps its landscape dimensions",
+        MM,
+        [
+            ('            Self::Left | Self::Right => (native_h, native_w),\n',
+             '            Self::Left | Self::Right => (native_w, native_h),\n'),
+        ],
+        ["desktop"],
+        [
+            # Every question about where a monitor is goes through
+            # `effective_resolution`, so a portrait panel that reports itself
+            # landscape is 1920 wide in the layout and 1080 wide on the glass.
+            'rotated_monitor_bounds',
+            'rotated_monitor_contains',
+            'rotation_left_swaps_dimensions',
+            'rotation_right_swaps_dimensions',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: DPI is computed from millimetres multiplied by 25.4, not divided",
+        MM,
+        [
+            ('        let inches = self.physical_size_mm.0 as f32 / 25.4;\n',
+             '        let inches = self.physical_size_mm.0 as f32 * 25.4;\n'),
+        ],
+        ["desktop"],
+        [
+            'monitor_calculated_dpi',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the config word "left" is read as a right rotation',
+        MM,
+        [
+            ('            "left" => Some(Self::Left),\n',
+             '            "left" => Some(Self::Right),\n'),
+        ],
+        ["desktop"],
+        [
+            # The save side and the load side have to agree on the word or the
+            # layout comes back from disk turned the wrong way; the round-trip
+            # is the only place the two halves meet.
+            'config_save_load_roundtrip',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: a monitor that does not report its physical size divides by zero",
+        MM,
+        [
+            ('        if self.physical_size_mm.0 == 0 {\n            return None;\n        }\n        let inches',
+             '        let inches'),
+        ],
+        ["desktop"],
+        [
+            # Not a panic -- `f32` division by zero is infinity, so the shell
+            # gets `Some(inf)` and scales the UI by it.
+            'monitor_dpi_zero_physical_size',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the desktop's bounding box includes monitors the user turned off",
+        MM,
+        [
+            ('            .filter(|m| m.enabled)\n            .map(MonitorInfo::bounds)\n            .reduce(VirtualRect::union)\n',
+             '            .map(MonitorInfo::bounds)\n            .reduce(VirtualRect::union)\n'),
+        ],
+        ["desktop"],
+        [
+            # The bounding box is what window clamping is measured against, so
+            # a disabled monitor inside it is a region a window can be dragged
+            # to and never come back from.
+            'clamp_no_enabled_monitors',
+            'virtual_bounds_all_disabled',
+            'virtual_bounds_ignores_disabled',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a monitor the user turned off can still be the primary one",
+        MM,
+        [
+            ('        self.monitors.iter().find(|m| m.primary && m.enabled)\n',
+             '        self.monitors.iter().find(|m| m.primary)\n'),
+        ],
+        ["desktop"],
+        [
+            # `suggest_default_monitor` takes the primary before it considers
+            # area, so a disabled primary puts every new window on a dark screen.
+            'a_monitor_the_user_turned_off_is_not_offered_as_the_primary_one',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the pointer finds monitors the user turned off",
+        MM,
+        [
+            ('        self.monitors.iter().find(|m| m.enabled && m.contains(x, y))\n',
+             '        self.monitors.iter().find(|m| m.contains(x, y))\n'),
+        ],
+        ["desktop"],
+        [
+            'monitor_at_disabled_ignored',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: dragging a monitor that is not in the layout sends it to the origin",
+        MM,
+        [
+            ('        let Some(target) = self.monitors.iter().find(|m| m.id == id) else {\n            return (x, y);\n        };\n',
+             '        let Some(target) = self.monitors.iter().find(|m| m.id == id) else {\n            return (0, 0);\n        };\n'),
+        ],
+        ["desktop"],
+        [
+            'snap_unknown_monitor_returns_original',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: an edge exactly at the snap threshold does not snap",
+        MM,
+        [
+            ('            distance: (SNAP_THRESHOLD as u64).saturating_add(1),\n',
+             '            distance: SNAP_THRESHOLD as u64,\n'),
+        ],
+        ["desktop"],
+        [
+            # The seed is what makes "nothing offered" and "nothing offered
+            # was close enough" the same state. Seeded at the threshold rather
+            # than one past it, the threshold becomes exclusive and the
+            # constant means one less than it says.
+            'a_snap_exactly_at_the_threshold_still_snaps_and_one_past_it_does_not',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a snap candidate no better than the running best displaces it",
+        MM,
+        [
+            ('        if distance < self.distance {\n',
+             '        if distance <= self.distance {\n'),
+        ],
+        ["desktop"],
+        [
+            # Two failures in one character: among equally good candidates the
+            # last now wins rather than the first, and a candidate exactly one
+            # past the threshold ties with the seed and snaps.
+            'a_snap_exactly_at_the_threshold_still_snaps_and_one_past_it_does_not',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: monitors can be snapped end to end but not lined up",
+        MM,
+        [
+            ('            snap_x.offer(x, moving.left(), b.left());\n            snap_x.offer(x, moving.right(), b.right());\n\n            snap_y.offer(y, moving.top(), b.bottom());\n            snap_y.offer(y, moving.bottom(), b.top());\n            snap_y.offer(y, moving.top(), b.top());\n            snap_y.offer(y, moving.bottom(), b.bottom());\n',
+             '\n            snap_y.offer(y, moving.top(), b.bottom());\n            snap_y.offer(y, moving.bottom(), b.top());\n'),
+        ],
+        ["desktop"],
+        [
+            # Four offers per neighbour per axis: two abut, two align. Dropping
+            # the aligning pair leaves a side-by-side pair of monitors unable
+            # to have their tops brought level, which is the commonest thing
+            # anyone does in a display arrangement panel.
+            'every_snap_case_moves_the_edge_it_names_onto_the_edge_it_names',
+            'snap_aligns_edges',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a snap moves the monitor to the target edge rather than by the gap",
+        MM,
+        [
+            ('            self.position = narrow(i64::from(origin).saturating_add(target.saturating_sub(edge)));\n',
+             '            self.position = narrow(target);\n'),
+        ],
+        ["desktop"],
+        [
+            # Right for the case where the edge being moved is the monitor's
+            # own left one, and wrong for the other three -- which is exactly
+            # the mistake the shared `offer` was written to make impossible,
+            # so it is the one worth checking still is.
+            'every_snap_case_moves_the_edge_it_names_onto_the_edge_it_names',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a monitor the user turned off still attracts a drag",
+        MM,
+        [
+            ('            if other.id == id || !other.enabled {\n',
+             '            if other.id == id {\n'),
+        ],
+        ["desktop"],
+        [
+            # A disabled monitor is not on the desktop, so it has no edge to
+            # align with; snapping to one drags the monitor being moved
+            # somewhere the user cannot see a reason for.
+            'a_disabled_neighbour_offers_nothing_to_snap_to',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: gaps are only looked for once three monitors are attached",
+        MM,
+        [
+            ('        if enabled.len() < 2 {\n',
+             '        if enabled.len() < 3 {\n'),
+        ],
+        ["desktop"],
+        [
+            # Two monitors is the setup that has gaps: one is a rectangle and
+            # cannot, three is rare. Raising the floor by one makes the whole
+            # feature silently do nothing for almost everybody.
+            'detect_gap_between_monitors',
+            'detect_gaps_stacked_with_offset',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the covered regions are reported as the gaps",
+        MM,
+        [
+            ('                if !enabled.iter().any(|b| b.contains(mid_x, mid_y)) {\n',
+             '                if enabled.iter().any(|b| b.contains(mid_x, mid_y)) {\n'),
+        ],
+        ["desktop"],
+        [
+            'detect_gap_between_monitors',
+            'detect_gaps_stacked_with_offset',
+            'no_gaps_when_adjacent',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: a horizontal arrangement advances by each monitor's height",
+        MM,
+        [
+            ('                    let (ew, _) = m.effective_resolution();\n',
+             '                    let (_, ew) = m.effective_resolution();\n'),
+        ],
+        ["desktop"],
+        [
+            # Landscape monitors are wider than they are tall, so this leaves
+            # every monitor overlapping the one before it by the difference --
+            # a mirrored strip down the left of each screen.
+            'auto_arrange_horizontal',
+            'auto_arrange_skips_disabled',
+            'manager_auto_arrange_delegates',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a horizontal arrangement moves the monitors the user turned off",
+        MM,
+        [
+            ('            ArrangeMode::Horizontal => {\n                let mut x: i32 = 0;\n                for m in &mut self.monitors {\n                    if !m.enabled {\n                        continue;\n                    }\n',
+             '            ArrangeMode::Horizontal => {\n                let mut x: i32 = 0;\n                for m in &mut self.monitors {\n'),
+        ],
+        ["desktop"],
+        [
+            # A disabled monitor is not on the desktop, so giving it a slot in
+            # the row spends desktop width on nothing and pushes every monitor
+            # after it sideways by a screen.
+            'auto_arrange_skips_disabled',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: mirrored monitors are stacked one pixel apart instead of overlapping",
+        MM,
+        [
+            ('            ArrangeMode::Mirror => {\n                for m in &mut self.monitors {\n                    if !m.enabled {\n                        continue;\n                    }\n                    m.position = (0, 0);\n                }\n            }\n',
+             '            ArrangeMode::Mirror => {\n                let mut y: i32 = 0;\n                for m in &mut self.monitors {\n                    if !m.enabled {\n                        continue;\n                    }\n                    m.position = (0, y);\n                    y = y.saturating_add(1);\n                }\n            }\n'),
+        ],
+        ["desktop"],
+        [
+            # Mirroring is the one mode defined by the positions being equal.
+            # One pixel of offset is enough to break it and small enough that
+            # nothing else in the layout notices.
+            'auto_arrange_mirror',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: primary-only mode leaves every other monitor on",
+        MM,
+        [
+            ('                    } else {\n                        m.enabled = false;\n                    }\n',
+             '                    } else {\n                        m.enabled = true;\n                    }\n'),
+        ],
+        ["desktop"],
+        [
+            # It also turns *on* monitors the user had disabled, because the
+            # arm runs over every monitor and not only the enabled ones.
+            'auto_arrange_primary_disables_others',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: plugging in a monitor that is already attached adds it twice",
+        MM,
+        [
+            ('        if self.layout.monitors.iter().any(|m| m.id == info.id) {\n            return;\n        }\n',
+             ''),
+        ],
+        ["desktop"],
+        [
+            # Every lookup in this module is `find(|m| m.id == id)`, so the
+            # second copy is unreachable by id -- it exists only to be drawn,
+            # to be arranged, and to widen the bounding box.
+            'manager_duplicate_add_ignored',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: unplugging the primary monitor leaves the desktop with none",
+        MM,
+        [
+            ('        if was_primary {\n            // Promote the first enabled monitor.\n            if let Some(first) = self.layout.monitors.iter_mut().find(|m| m.enabled) {\n                first.primary = true;\n            }\n        }\n',
+             '        let _ = was_primary;\n'),
+        ],
+        ["desktop"],
+        [
+            # `primary()` then answers `None` for a machine that still has
+            # monitors, and every new window is placed by the largest-area
+            # fallback instead of where the user said.
+            'manager_remove_primary_promotes',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the config file spells an inverted panel \'normal\'",
+        MM,
+        [
+            ('            Self::Inverted => "inverted",\n',
+             '            Self::Inverted => "normal",\n'),
+        ],
+        ["desktop"],
+        [
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the config file spells a left rotation \'right\'",
+        MM,
+        [
+            ('            Self::Left => "left",\n',
+             '            Self::Left => "right",\n'),
+        ],
+        ["desktop"],
+        [
+            # The save half and the load half have to agree on the word, and
+            # the round-trip is the only place the two of them meet.
+            'config_save_load_roundtrip',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a monitor the user switched off is written out as switched on",
+        MM,
+        [
+            ('            out.push_str(&format!("enabled={}\\n", cfg.enabled));\n',
+             '            out.push_str("enabled=true\\n");\n'),
+        ],
+        ["desktop"],
+        [
+            # `enabled` defaults to true when the key is absent, so writing a
+            # constant true is indistinguishable from writing nothing -- and
+            # both mean a monitor the user disabled comes back after a reboot.
+            'config_save_load_roundtrip',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the saved resolution is separated by a comma, like a position",
+        MM,
+        [
+            ('                "resolution={}x{}\\n",\n',
+             '                "resolution={},{}\\n",\n'),
+        ],
+        ["desktop"],
+        [
+            # The loader splits the resolution on `x` and errors when it is
+            # absent, so this makes every file this build writes unreadable by
+            # every build including itself.
+            'config_save_load_roundtrip',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a line that is only an open bracket starts a section",
+        MM,
+        [
+            ("            if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {\n",
+             "            if let Some(name) = line.strip_prefix('[').map(|l| l.trim_end_matches(']')) {\n"),
+        ],
+        ["desktop"],
+        [
+            # `[` alone then opens a section with no keys in it, and the next
+            # real header flushes that section -- which fails for a missing
+            # resolution, so one stray character turns the whole file into a
+            # parse error.
+            'a_line_that_is_only_an_open_bracket_is_not_a_section_header',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the last section of the config file is dropped",
+        MM,
+        [
+            ('        // Flush last section.\n        flush(\n            &current_connector,\n            &current_res,\n            &current_pos,\n            &current_rot,\n            &current_scale,\n            &current_enabled,\n            &mut configs,\n        )?;\n\n        Ok(Self { configs })\n',
+             '        Ok(Self { configs })\n'),
+        ],
+        ["desktop"],
+        [
+            # Sections are written into the map when the *next* header is
+            # seen, so without the final flush a single-monitor file loads as
+            # an empty one -- and a missing key in the last section stops
+            # being an error at all.
+            'a_line_that_is_only_an_open_bracket_is_not_a_section_header',
+            'an_empty_section_name_round_trips_rather_than_slicing_off_a_bracket',
+            'config_load_missing_key',
+            'config_save_load_roundtrip',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a section with no resolution loads as a zero-sized monitor",
+        MM,
+        [
+            ('                let r = res.ok_or_else(|| ConfigError::MissingKey("resolution".into()))?;\n',
+             '                let r = res.unwrap_or((0, 0));\n'),
+        ],
+        ["desktop"],
+        [
+            'config_load_missing_key',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a position is split on \'x\', like a resolution",
+        MM,
+        [
+            ("                    let Some((xs, yst)) = val.split_once(',') else {\n",
+             "                    let Some((xs, yst)) = val.split_once('x') else {\n"),
+        ],
+        ["desktop"],
+        [
+            # Every `position=` line in every file this build has ever written
+            # then fails to parse, and the error is `InvalidValue`, so the
+            # whole config is refused rather than one monitor defaulted.
+            'a_line_that_is_only_an_open_bracket_is_not_a_section_header',
+            'an_empty_section_name_round_trips_rather_than_slicing_off_a_bracket',
+            'config_load_missing_key',
+            'config_save_load_roundtrip',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: a resolution with no \'x\' in it loads as a zero-sized monitor",
+        MM,
+        [
+            ("                    let Some((ws, hs)) = val.split_once('x') else {\n                        return Err(ConfigError::InvalidValue(format!(\"resolution: {val}\")));\n                    };\n",
+             "                    let (ws, hs) = val.split_once('x').unwrap_or((\"0\", \"0\"));\n"),
+        ],
+        ["desktop"],
+        [
+            # A corrupt config file should be reported, not silently rounded
+            # to a monitor with no pixels on it. This is also the only branch
+            # of the resolution parser any test reaches: `resolution=abc` has
+            # no `x`, so it never gets as far as the two `parse` calls.
+            'config_load_invalid_resolution',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a window is placed at the monitor's top-left rather than its middle",
+        MM,
+        [
+            ('        let slack_x = i64::from(m.w).saturating_sub(i64::from(window.w)) / 2;\n        let slack_y = i64::from(m.h).saturating_sub(i64::from(window.h)) / 2;\n',
+             '        let slack_x = 0i64;\n        let slack_y = 0i64;\n'),
+        ],
+        ["desktop"],
+        [
+            'place_on_monitor_centers',
+            'place_on_monitor_offset_position',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a window is centred on the first monitor whichever one was asked for",
+        MM,
+        [
+            ('        VirtualRect::new(\n            narrow(m.left().saturating_add(slack_x)),\n            narrow(m.top().saturating_add(slack_y)),\n            window.w,\n            window.h,\n        )\n',
+             '        VirtualRect::new(narrow(slack_x), narrow(slack_y), window.w, window.h)\n'),
+        ],
+        ["desktop"],
+        [
+            # The monitor's size is still respected, so the window is the
+            # right size in the right place on the wrong screen -- which on a
+            # single-monitor machine is invisible.
+            'place_on_monitor_offset_position',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a window moved between monitors takes its vertical fraction from the width",
+        MM,
+        [
+            ('        let rel_y = fraction(window.top().saturating_sub(f.top()), f.h);\n',
+             '        let rel_y = fraction(window.top().saturating_sub(f.top()), f.w);\n'),
+        ],
+        ["desktop"],
+        [
+            # Landscape monitors are wider than they are tall, so the window
+            # creeps towards the top of the target screen every time it is
+            # moved -- and off it, if the source monitor is portrait.
+            'move_to_monitor_proportional',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: clamping a window to a desktop smaller than the visible minimum panics",
+        MM,
+        [
+            ('            narrow(rect.left().min(far_x).max(near_x)),\n            narrow(rect.top().min(far_y).max(near_y)),\n',
+             '            narrow(rect.left().clamp(near_x, far_x)),\n            narrow(rect.top().clamp(near_y, far_y)),\n'),
+        ],
+        ["desktop"],
+        [
+            # `MIN_VISIBLE` is 48, so a desktop narrower than that puts `near`
+            # past `far`, and `clamp` on an inverted range is a panic -- in
+            # the shell, reachable from any config file naming a tiny mode.
+            'a_desktop_smaller_than_the_visible_minimum_does_not_panic',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: a window smaller than the visible minimum is clamped as if it were larger",
+        MM,
+        [
+            ('        let keep_x = i64::from(Self::MIN_VISIBLE.min(rect.w));\n        let keep_y = i64::from(Self::MIN_VISIBLE.min(rect.h));\n',
+             '        let keep_x = i64::from(Self::MIN_VISIBLE);\n        let keep_y = i64::from(Self::MIN_VISIBLE);\n'),
+        ],
+        ["desktop"],
+        [
+            # A 10px window is then allowed to sit 38px past the edge, which
+            # is 28px further than it is wide: entirely off the desktop, by
+            # the rule whose whole job is to keep it on.
+            'a_window_smaller_than_the_visible_minimum_is_kept_whole_on_screen',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: clamping against a desktop with no monitors moves the window to the origin",
+        MM,
+        [
+            ('        if bounds.is_empty() {\n            // No enabled monitors — there is nowhere to be visible.\n            return rect;\n        }\n',
+             ''),
+        ],
+        ["desktop"],
+        [
+            # With every monitor disabled the bounding box is the empty
+            # rectangle at the origin, so every window on the machine is
+            # herded into a single point and stays there when a monitor
+            # comes back.
+            'clamp_no_enabled_monitors',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: no part of a window has to stay on the desktop",
+        MM,
+        [
+            ('    pub const MIN_VISIBLE: u32 = 48;\n',
+             '    pub const MIN_VISIBLE: u32 = 0;\n'),
+        ],
+        ["desktop"],
+        [
+            # Zero is the value that makes the clamp a no-op in the direction
+            # that matters: a window may sit exactly one pixel past the edge,
+            # with nothing left to grab it by.
+            'a_desktop_smaller_than_the_visible_minimum_does_not_panic',
+            'a_window_smaller_than_the_visible_minimum_is_kept_whole_on_screen',
+            'clamp_to_visible_off_left',
+            'clamp_to_visible_off_right',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a new window ignores the primary monitor and goes to the biggest",
+        MM,
+        [
+            ('        if let Some(p) = layout.primary() {\n            return Some(p.id);\n        }\n',
+             ''),
+        ],
+        ["desktop"],
+        [
+            # Choosing the primary is the whole point; the largest-area scan
+            # is the fallback for when there is not one.
+            'suggest_default_monitor_primary',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: with no primary monitor a new window goes to the smallest screen",
+        MM,
+        [
+            ('            .max_by_key(|m| m.bounds().area())\n',
+             '            .min_by_key(|m| m.bounds().area())\n'),
+        ],
+        ["desktop"],
+        [
+            'suggest_default_monitor_largest_when_no_primary',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: making a monitor primary does not demote the old one",
+        MM,
+        [
+            ('        for m in &mut self.layout.monitors {\n            m.primary = m.id == id;\n        }\n',
+             '        for m in &mut self.layout.monitors {\n            if m.id == id {\n                m.primary = true;\n            }\n        }\n'),
+        ],
+        ["desktop"],
+        [
+            # `primary()` is a `find`, so two primaries means the first in
+            # registration order wins and the user's choice is ignored --
+            # silently, and only on machines that had a primary already.
+            'manager_set_primary',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the DPI scale factor is taken as given, however absurd",
+        MM,
+        [
+            ('            m.scale_factor = scale.clamp(0.25, 8.0);\n',
+             '            m.scale_factor = scale;\n'),
+        ],
+        ["desktop"],
+        [
+            'manager_scale_clamped',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: unplugging a monitor leaves it in the layout",
+        MM,
+        [
+            ('        self.layout.monitors.retain(|m| m.id != id);\n',
+             '        self.layout.monitors.retain(|m| m.id != id || m.primary);\n'),
+        ],
+        ["desktop"],
+        [
+            # Only the primary survives, which is the monitor most likely to
+            # be the one that was unplugged -- and it keeps widening the
+            # bounding box from a place with no screen in it.
+            #
+            # `manager_remove_primary_promotes` does *not* catch it: the
+            # monitor that failed to leave is still enabled and still first,
+            # so the promotion scan re-promotes the monitor that was
+            # unplugged and the assertion passes.
+            'manager_add_and_remove',
         ],
     ),
 ]
